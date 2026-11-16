@@ -440,6 +440,12 @@ _CONCEPTS = [
     # standard-deviation form, and filing RMSSD under it is the same defect
     # class as the pre-#413 walking_speed → BMI mapping. See #438.
     _hk(4, 'R-R interval RMSSD (heart rate variability)', 'Measurement', 'Clinical Observation', 'HK-WEAR-HRV-RMSSD'),
+    # Vendor scores OpenWearables reports, with no LOINC or SNOMED equivalent
+    # and not comparable across vendors (#2595). Only the OpenWearables seed
+    # names them; no runtime metric does. Duplicated in migration 0343, which
+    # is what installs them on a deployment.
+    _hk(5, 'Workout effort score (vendor-specific)',        'Observation', 'Clinical Observation', 'HK-WEAR-OW-WORKOUT-EFFORT'),
+    _hk(6, 'Cardiovascular age estimate (vendor-specific)', 'Measurement', 'Clinical Observation', 'HK-WEAR-OW-CARDIO-AGE'),
 
     # Clinical assertions with no Athena code (#785). Duplicated from migration
     # 0180 so a test database has them; omop_core/tests.py asserts the two do

@@ -7,6 +7,7 @@ TEST-03: Signal integration tests at omop_core level
 TEST-04: FLBundleGenerator unit tests
 """
 
+import io
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -2854,6 +2855,48 @@ class WearableConceptMappingTest(TestCase):
                     row[field], seeded[field],
                     f'{key} {field} differs between migration 0143 and seed_omop_concepts')
             self.assertEqual(row.get('source'), seeded.get('source'), f'{key} source differs')
+
+    def test_openwearables_migration_matches_seed_definitions(self):
+        """Migration 0343 duplicates its two concepts; the copies must not drift (#2595)."""
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0343_mint_openwearables_local_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+        for row in mig._HK_WEARABLE_CONCEPTS:
+            seeded = seed_by_key.get((mig.VOCABULARY_ID, row['concept_code']))
+            self.assertIsNotNone(
+                seeded, f"migration 0343 mints {row['concept_code']}, which the fixture does not")
+            for field in ('concept_id', 'concept_name', 'domain_id'):
+                self.assertEqual(
+                    row[field], seeded[field],
+                    f"{row['concept_code']} {field} differs between migration 0343 and the fixture")
+            self.assertEqual(seeded['concept_class_id'], mig.CONCEPT_CLASS_ID)
+            self.assertEqual(seeded['source'], 'HealthKey')
+
+    def test_openwearables_seed_local_targets_are_installed_by_migration(self):
+        """A local code the OpenWearables seed names must be minted by a migration.
+
+        No vocabulary load supplies an HK-Wearable concept, so a seed row naming
+        one that no migration installs resolves to nothing on every deployment.
+        """
+        from importlib import import_module
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRICS,
+        )
+
+        installed = set()
+        for name in ('0143_seed_wearable_runtime_concepts',
+                     '0343_mint_openwearables_local_concepts'):
+            mig = import_module(f'omop_core.migrations.{name}')
+            installed |= {r['concept_code'] for r in mig._HK_WEARABLE_CONCEPTS}
+        named = {
+            t_code for _code, _name, _unit, _domain, t_vocab, t_code in OPENWEARABLES_METRICS
+            if t_vocab == 'HK-Wearable'
+        }
+        self.assertEqual(named - installed, set())
 
     def test_locally_minted_wearable_concepts_are_installed_by_migration(self):
         """Athena can never supply a local mint, so a migration must.
@@ -6871,6 +6914,43 @@ class SeedOpenWearablesMappingsTest(TestCase):
         seed_test_concepts()
         cls.hr_concept = Concept.objects.get(concept_id=3027018)
 
+        # The three targets the HL7 PHR code list replaced (#2595), each beside
+        # the code the seed carried before, under their Athena ids.
+        def loinc(concept_id, code, name):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name, domain_id='Measurement',
+                vocabulary_id='LOINC', concept_class_id='Clinical Observation',
+                standard_concept='S', concept_code=code,
+                valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+            )
+        cls.lean_mass = loinc(37020574, '91557-9', 'Lean body weight')
+        cls.lean_mass_old = loinc(36305481, '88334-8', 'Lean body weight Calculated')
+        cls.fvc = loinc(3020158, '19870-5', 'Forced vital capacity [Volume] Respiratory system')
+        cls.pefr = loinc(
+            3043729, '33452-4', 'Maximum expiratory gas flow Respiratory system airway')
+
+    def _row(self, source_code):
+        return SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='OpenWearables', source_code=source_code)
+
+    def _seed_then_hold(self, source_code, **fields):
+        """Seed, then put *source_code*'s row in the state an earlier run left."""
+        call_command('seed_openwearables_mappings', verbosity=0)
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables', source_code=source_code,
+        ).update(**fields)
+        return self._row(source_code)
+
+    def _snapshot(self):
+        return list(
+            SourceCodeConceptMapping.objects
+            .filter(source_vocabulary_id='OpenWearables')
+            .order_by('source_code')
+            .values_list(
+                'source_code', 'target_concept_id', 'destination_vocabulary_id',
+                'status', 'origin_system', 'updated_at')
+        )
+
     def test_dry_run_creates_nothing(self):
         call_command('seed_openwearables_mappings', '--dry-run', verbosity=0)
         self.assertEqual(
@@ -6920,6 +7000,196 @@ class SeedOpenWearablesMappingsTest(TestCase):
             source_vocabulary_id='OpenWearables',
         ).count()
         self.assertEqual(count1, count2)
+
+    # -- wearable mapping v4 / HL7 PHR (#2595) -----------------------------
+
+    def test_hl7_phr_codes_are_seeded(self):
+        """Where the proposal and the HL7 PHR list disagreed, the HL7 code wins."""
+        call_command('seed_openwearables_mappings', verbosity=0)
+        for source_code, concept in (
+            ('lean_body_mass', self.lean_mass),
+            ('forced_vital_capacity', self.fvc),
+            ('peak_expiratory_flow_rate', self.pefr),
+        ):
+            row = self._row(source_code)
+            self.assertEqual(row.target_concept_id, concept.concept_id, source_code)
+            self.assertEqual(row.destination_vocabulary_id, 'LOINC', source_code)
+
+    def test_local_wearable_targets_are_seeded(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        for source_code, concept_code in (
+            ('walking_step_length', 'HK-WEAR-STEP-LENGTH'),
+            ('walking_double_support_percentage', 'HK-WEAR-DBL-SUPPORT'),
+            ('walking_heart_rate_average', 'HK-WEAR-WALK-HR'),
+            ('heart_rate_variability_rmssd', 'HK-WEAR-HRV-RMSSD'),
+            ('estimated_workout_effort_score', 'HK-WEAR-OW-WORKOUT-EFFORT'),
+            ('cardiovascular_age', 'HK-WEAR-OW-CARDIO-AGE'),
+        ):
+            row = self._row(source_code)
+            self.assertIsNotNone(row.target_concept, source_code)
+            self.assertEqual(row.target_concept.concept_code, concept_code)
+            self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+
+    def test_flights_climbed_mapped_to_loinc(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = self._row('flights_climbed')
+        self.assertEqual(row.target_concept.concept_code, '100304-5')
+        self.assertEqual(row.omop_table, 'observation')
+
+    def test_average_met_stays_unmapped(self):
+        """SNOMED 16821004 is unverified, so the seed proposes nothing for it."""
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertIsNone(self._row('average_met').target_concept)
+
+    def test_rerun_without_flag_changes_nothing(self):
+        """A plain re-run leaves a row at an older target exactly as it is."""
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = self._snapshot()
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(
+            self._row('lean_body_mass').target_concept_id, self.lean_mass_old.concept_id)
+
+    def test_update_seeded_repoints_an_untouched_row(self):
+        held = self._seed_then_hold(
+            'lean_body_mass', target_concept=self.lean_mass_old, suggestion_confidence=0.4)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('lean_body_mass')
+        self.assertEqual(row.target_concept_id, self.lean_mass.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertIsNone(row.suggestion_confidence)
+        self.assertEqual(row.status, 'proposed')
+        self.assertEqual(row.origin_system, 'open-wearables-seed')
+        self.assertEqual(row.decision_surface, '')
+        self.assertGreater(row.updated_at, held.updated_at)
+
+    def test_update_seeded_fills_an_untouched_row_with_no_destination(self):
+        self._seed_then_hold(
+            'walking_step_length', target_concept=None, destination_vocabulary_id='')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('walking_step_length')
+        self.assertEqual(row.target_concept.concept_code, 'HK-WEAR-STEP-LENGTH')
+        self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+
+    def test_update_seeded_touches_only_rows_that_differ(self):
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = {r[0]: r for r in self._snapshot()}
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        changed = [r[0] for r in self._snapshot() if before[r[0]] != r]
+        self.assertEqual(changed, ['lean_body_mass'])
+
+    def test_update_seeded_skips_rows_it_does_not_own(self):
+        """Approved, rejected, Suggest-answered and curator-saved rows are left alone."""
+        curator = Identity.objects.create_user(email='curator-2595@test.com', password='x')
+        for label, fields in (
+            ('approved', {'status': 'approved'}),
+            ('rejected', {'status': 'rejected'}),
+            ('suggest answered', {'origin_system': 'suggest v0.4'}),
+            ('another importer', {'origin': 'user'}),
+            ('curator decision', {'decision_surface': 'code2concept'}),
+            ('curator save before decision_surface', {'updated_by': curator}),
+        ):
+            with self.subTest(label):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                self._seed_then_hold(
+                    'lean_body_mass', target_concept=self.lean_mass_old, **fields)
+                before = self._snapshot()
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                self.assertEqual(self._snapshot(), before)
+                self.assertIn('[LEFT ALONE] lean_body_mass', out.getvalue())
+                self.assertIn('0 re-pointed, 1 differing', out.getvalue())
+
+    def test_update_seeded_never_clears_a_destination(self):
+        """The seed names no target for average_met; a destination there stays."""
+        self._seed_then_hold(
+            'average_met', target_concept=self.hr_concept, destination_vocabulary_id='LOINC')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('average_met').target_concept_id, self.hr_concept.concept_id)
+
+    def test_update_seeded_keeps_a_destination_when_the_target_is_not_loaded(self):
+        """SNOMED 250825003 is not in this database: the row keeps what it has."""
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='SNOMED', concept_code='250825003').exists())
+        self._seed_then_hold(
+            'air_temperature', target_concept=self.hr_concept, destination_vocabulary_id='LOINC')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('air_temperature').target_concept_id, self.hr_concept.concept_id)
+
+    def test_update_seeded_dry_run_writes_nothing(self):
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command(
+            'seed_openwearables_mappings', '--update-seeded', '--dry-run', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        self.assertIn('[RE-POINT] lean_body_mass: LOINC:88334-8 -> LOINC:91557-9', out.getvalue())
+        self.assertIn('1 re-pointed', out.getvalue())
+
+
+class MintOpenWearablesLocalConceptsMigrationTest(TestCase):
+    """Migration 0343 against the states a deployment can be in (#2595)."""
+
+    CODES = ('HK-WEAR-OW-WORKOUT-EFFORT', 'HK-WEAR-OW-CARDIO-AGE')
+
+    def _run(self):
+        from importlib import import_module
+        from django.apps import apps as live_apps
+
+        mig = import_module(
+            'omop_core.migrations.0343_mint_openwearables_local_concepts')
+        mig.mint_openwearables_local_concepts(live_apps, None)
+
+    def _concepts(self):
+        return Concept.objects.filter(
+            vocabulary_id='HK-Wearable', concept_code__in=self.CODES)
+
+    def test_migration_installed_both_concepts(self):
+        """The test database is built by migrating, so they are already here."""
+        rows = {c.concept_code: c for c in self._concepts()}
+        self.assertEqual(set(rows), set(self.CODES))
+        self.assertEqual(rows['HK-WEAR-OW-WORKOUT-EFFORT'].concept_id, 2029606355)
+        self.assertEqual(rows['HK-WEAR-OW-WORKOUT-EFFORT'].domain_id, 'Observation')
+        self.assertEqual(rows['HK-WEAR-OW-CARDIO-AGE'].concept_id, 2029606356)
+        self.assertEqual(rows['HK-WEAR-OW-CARDIO-AGE'].domain_id, 'Measurement')
+        for concept in rows.values():
+            self.assertEqual(concept.source, 'HealthKey')
+            self.assertIsNone(concept.standard_concept)
+
+    def test_replay_changes_nothing(self):
+        before = list(self._concepts().order_by('concept_id').values())
+        self._run()
+        self.assertEqual(list(self._concepts().order_by('concept_id').values()), before)
+
+    def test_hand_made_concept_gets_its_source_and_keeps_the_rest(self):
+        """Staging's rows were inserted with no source and their own names."""
+        self._concepts().update(source=None, concept_name='Entered by hand')
+        self._run()
+        for concept in self._concepts():
+            self.assertEqual(concept.source, 'HealthKey')
+            self.assertEqual(concept.concept_name, 'Entered by hand')
+        self.assertEqual(self._concepts().count(), 2)
+
+    def test_taken_id_mints_at_the_next_free_local_id(self):
+        """An id another concept holds must not fail the deploy or be overwritten."""
+        self._concepts().filter(concept_code='HK-WEAR-OW-CARDIO-AGE').delete()
+        squatter = Concept.objects.create(
+            concept_id=2029606356, concept_name='Somebody else', domain_id='Measurement',
+            vocabulary_id='HK-Wearable', concept_class_id='Clinical Observation',
+            concept_code='HK-SOMETHING-ELSE', source='HealthKey',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        highest = Concept.objects.order_by('-concept_id').first().concept_id
+        self._run()
+        minted = Concept.objects.get(
+            vocabulary_id='HK-Wearable', concept_code='HK-WEAR-OW-CARDIO-AGE')
+        self.assertEqual(minted.concept_id, highest + 1)
+        self.assertGreaterEqual(minted.concept_id, 2_000_000_000)
+        squatter.refresh_from_db()
+        self.assertEqual(squatter.concept_code, 'HK-SOMETHING-ELSE')
 
 
 class WearableDeviceVocabularyTest(TestCase):

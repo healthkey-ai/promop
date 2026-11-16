@@ -58,7 +58,7 @@ vocabularies.
 | `respiratory_rate` | 9279-1 | LOINC | 3024171 | measurement | `/min` | mean | `HKQuantityTypeIdentifierRespiratoryRate` | `respiration_rate.respiration_rate`; fallback `session.avg_respiration_rate` |
 | `sleep_duration` | 93832-4 | LOINC | 1002368 | **observation** | `h` | sum | `HKCategoryTypeIdentifierSleepAnalysis` (asleep spans only) | `sleep_level` timestamp spans; fallback `sleep_data.total_timer_time` ÷ 3600 |
 | `vo2_max` | 94122-9 | LOINC | 1002246 | measurement | `mL/kg/min` | mean | `HKQuantityTypeIdentifierVO2Max` | `session.enhanced_max_oxygen_consumption` → `vo2_max` |
-| `distance` | 41953-1 | LOINC | 3031111 | measurement | `km` | sum | `HKQuantityTypeIdentifierDistanceWalkingRunning` | `monitoring.distance` ÷ 1000; `session.total_distance` ÷ 1000 |
+| `distance` | 112427-0 | LOINC | 648874 | measurement | `km` | sum | `HKQuantityTypeIdentifierDistanceWalkingRunning` | `monitoring.distance` ÷ 1000; `session.total_distance` ÷ 1000 |
 | `walking_speed` | 41957-2 | LOINC | 3032289 | measurement | `km/hr` | mean | `HKQuantityTypeIdentifierWalkingSpeed` | *(no source — see Gap A)* |
 | `walking_step_length` | HK-WEAR-STEP-LENGTH | **HK-Wearable** | 2029606350 | measurement | `cm` | mean | `HKQuantityTypeIdentifierWalkingStepLength` | *(no source)* |
 | `walking_double_support_pct` | HK-WEAR-DBL-SUPPORT | **HK-Wearable** | 2029606351 | measurement | `%` | mean | `HKQuantityTypeIdentifierWalkingDoubleSupportPercentage` | *(no source)* |
@@ -106,17 +106,33 @@ domain routed it to.
 ## Local concept minting rules
 
 Where a metric has no LOINC, the local mint **must** follow the project's quarantine convention
-(`omop_core/models.py:566`) — and all five wearable mints do:
+(`omop_core/models.py:566`) — and all seven wearable mints do:
 
-- `vocabulary_id='HK-Wearable'` (declared in `concept_fixtures._VOCABULARIES`, and by migration 0143 for real deployments)
+- `vocabulary_id='HK-Wearable'` (declared in `concept_fixtures._VOCABULARIES`, and by migrations 0143 and 0343 for real deployments)
 - `source='HealthKey'`
 - an `HK-*`-shaped `concept_code`
 - `concept_id >= 2,000,000,000` — OHDSI reserves that range for locally-authored concepts, and
   Athena never allocates there
 
-The four ids are allocated contiguously from `_HK_WEARABLE_ID_BASE = 2_029_606_350`
+The ids are allocated contiguously from `_HK_WEARABLE_ID_BASE = 2_029_606_350`
 (`omop_core/concept_fixtures.py`), continuing the existing `HK-Labs` block. New wearable mints should
 continue upward from there.
+
+| concept_id | Code | Domain | Minted by | Used by |
+|---|---|---|---|---|
+| 2029606350 | HK-WEAR-STEP-LENGTH | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606351 | HK-WEAR-DBL-SUPPORT | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606352 | HK-WEAR-WALK-HR | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606353 | HK-WEAR-BASAL-ENERGY | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606354 | HK-WEAR-HRV-RMSSD | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606355 | HK-WEAR-OW-WORKOUT-EFFORT | Observation | 0343 | OpenWearables seed only |
+| 2029606356 | HK-WEAR-OW-CARDIO-AGE | Measurement | 0343 | OpenWearables seed only |
+
+The last two are vendor scores (an estimated workout effort and a cardiovascular age) that are not
+comparable across vendors, so they get a local concept rather than a generic LOINC or SNOMED one.
+No runtime metric uses them. A migration mints by `(vocabulary_id, concept_code)`, not by id: a
+HealthKey-minted id is not guaranteed to agree across instances, so 0343 keeps a concept that is
+already present at whatever id it has and only fills in a missing `source`.
 
 **Never mint a real LOINC code under `vocabulary_id='LOINC'`.** Doing so creates a duplicate
 `(vocabulary_id, concept_code)` pair, and `concept_by_vocab` resolves duplicates arbitrarily
@@ -156,6 +172,67 @@ It deliberately does **not** match `body_mass` (29463-7) or `spo2` (59408-5) by 
 were always correct, and both are also written by the vitals and FHIR ingestion paths, so matching
 them would delete non-wearable clinical data. Rows for those two metrics are removed only when
 they sit on a retired mint, which is unambiguous.
+
+---
+
+## OpenWearables: proposed code mappings
+
+OpenWearables metrics do not go through the registry above. Each OpenWearables series type is a
+source code on the Code Mapping page (source vocabulary `OpenWearables`, shown on the Wearables
+tab), and `manage.py seed_openwearables_mappings` creates one **proposed**
+`SourceCodeConceptMapping` per metric (`OPENWEARABLES_METRICS`, 94 of them). A curator approves
+or changes each one; nothing here approves a mapping.
+
+The targets follow the wearable mapping proposal ("wearable_metrics_mapping v4"), which was
+reconciled with the HL7 PHR code list on 15 Nov 2026. Where the two disagreed, the HL7 PHR code is
+the one seeded (#2595):
+
+| OpenWearables code | Target | Was |
+|---|---|---|
+| `lean_body_mass` | LOINC 91557-9 Lean body weight | LOINC 88334-8 (Calculated) |
+| `forced_vital_capacity` | LOINC 19870-5 Forced vital capacity | LOINC 19868-9 (by Spirometry) |
+| `peak_expiratory_flow_rate` | LOINC 33452-4 Maximum expiratory gas flow | LOINC 19935-6 (by Peak flow meter) |
+| `flights_climbed` | LOINC 100304-5 | none |
+| `walking_step_length` | HK-WEAR-STEP-LENGTH | none |
+| `walking_double_support_percentage` | HK-WEAR-DBL-SUPPORT | none |
+| `walking_heart_rate_average` | HK-WEAR-WALK-HR | none |
+| `heart_rate_variability_rmssd` | HK-WEAR-HRV-RMSSD | none |
+| `air_temperature` | SNOMED 250825003 Ambient temperature | none |
+| `blood_alcohol_content` | SNOMED 54791000237107 Ethanol mass concentration in blood | none |
+
+The five gait and HRV rows now name the same concept as the Apple and Garmin source codes for the
+same quantity, so one metric is one concept whichever source sent it.
+
+A metric the proposal has no verified code for is seeded with no destination and waits on the
+Wearables tab for Suggest or a curator. `average_met` is one of them on purpose: SNOMED 16821004
+"Metabolic requirement" may not mean an average MET over an interval, and it stays unmapped until
+an expert has reviewed it.
+
+### Re-running the seed
+
+The command is `get_or_create` on the source code, so a plain re-run creates what is missing and
+changes nothing else. A target that changes in `OPENWEARABLES_METRICS` therefore never reaches an
+instance that was seeded earlier unless it is asked for:
+
+```bash
+python manage.py seed_openwearables_mappings --dry-run
+python manage.py seed_openwearables_mappings
+python manage.py seed_openwearables_mappings --update-seeded --dry-run
+python manage.py seed_openwearables_mappings --update-seeded
+```
+
+`--update-seeded` re-points an existing row to the seed's target only while nothing but the seed
+has written it:
+
+- `status` is `proposed` (never an approved or rejected row),
+- `origin` is `import` and `origin_system` is `open-wearables-seed` (Suggest stamps its own
+  `origin_system` when it proposes a destination, which takes the row out),
+- no curator has saved it (`decision_surface` is blank and `updated_by` is empty).
+
+It never clears a destination: a row the seed names no target for, or whose target concept is not
+loaded on the instance, keeps what it has. Every row that differs from the seed and is not moved
+is listed as `[LEFT ALONE]` with the reason, and a target with no concept is reported as
+`Concept not found`.
 
 ---
 
@@ -365,7 +442,9 @@ full set, so it cannot pass vacuously.
 ### Gap F — daily-total units are dimensionally loose (#443)
 
 `distance` is stored as `km` and `steps` as `/d`, but both values are daily totals. `distance`
-should arguably be `km/d` to match. This affects nothing today because every consumer reads
+should arguably be `km/d` to match. The wearable mapping proposal lists 112427-0 in metres
+("normalise km to m at ingest"), and the OpenWearables seed describes its distances in `m`; the
+Apple and Garmin write path still stores kilometres. This affects nothing today because every consumer reads
 `WEARABLE_CONCEPT_CODE` and knows the semantics, but it will confuse any external OMOP consumer.
 
 ### Gap G — HRV conflated SDNN with RMSSD — **fixed** (#438)
