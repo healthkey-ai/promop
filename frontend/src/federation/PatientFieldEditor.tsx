@@ -41,7 +41,6 @@ function todayIso() {
   return local.toISOString().slice(0, 10);
 }
 
-
 /** Unit labels accept the same micro spellings as the server's pair reader. */
 function normaliseUnitLabel(value: string): string {
   return value.trim().toLowerCase()
@@ -306,10 +305,12 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // label's parenthetical goes rather than the fact (#2610 review).
   const storedDiffersFromDescriptor = Boolean(storedUnit) && Boolean(descriptorUnit)
     && normaliseUnitLabel(storedUnit) !== normaliseUnitLabel(String(descriptorUnit));
-  const shownLabel = !labelIncludesUnit && labelNamesUnit(label, descriptorUnit)
-    && (showUnitPicker || storedDiffersFromDescriptor)
-    ? (label.replace(/\s*\([^)]*\)\s*$/, '').trim() || label)
-    : label;
+  const trailingParen = label.match(/^(.*?)\s*\(([^)]*)\)\s*$/);
+  const unitParen = trailingParen && labelNamesUnit(trailingParen[2], descriptorUnit)
+    ? trailingParen[1].trim() : '';
+  const stripUnitParen = !labelIncludesUnit && Boolean(unitParen)
+    && (showUnitPicker || storedDiffersFromDescriptor);
+  const shownLabel = stripUnitParen ? (unitParen || label) : label;
   const pairError = state.errors[canonical]
     ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
   const pairPending = canonical in state.pending

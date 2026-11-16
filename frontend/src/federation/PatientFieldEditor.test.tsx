@@ -1406,6 +1406,36 @@ describe('unit presentation (#2610)', () => {
     expect(screen.queryByText('h')).not.toBeInTheDocument();
   });
 
+  it('prints a mapped unit when the label does not name one (#2610 review)', async () => {
+    const { store } = await setup({
+      systolic_blood_pressure: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Systolic', unit: 'mm[Hg]',
+        unit_options: [{ value: 'mm[Hg]', label: 'mm[Hg]' }],
+      },
+    }, { systolic_blood_pressure: 120 });
+    render(<PatientFieldEditor store={store} name="systolic_blood_pressure"
+      label="Systolic Blood Pressure" />);
+
+    expect(screen.getByText('mmHg')).toBeVisible();
+    expect(screen.queryByText('mm[Hg]')).toBeNull();
+  });
+
+  it('strips only a parenthetical that carries the unit (#2610 review)', async () => {
+    const { store } = await setup({
+      sleep_hours_per_night: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Sleep hours', unit: 'h',
+        unit_options: [{ value: 'h', label: 'h' }],
+      },
+    }, { sleep_hours_per_night: 7 });
+    render(<PatientFieldEditor store={store} name="sleep_hours_per_night"
+      label="Average Sleep Hours per Night (self-reported)" />);
+
+    expect(screen.getByText(/Average Sleep Hours per Night \(self-reported\)/)).toBeVisible();
+    expect(screen.queryByText('h')).toBeNull();
+  });
+
   it('shows the stored unit when the reviewed label names another (#2610 review)', async () => {
     const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
     const { store } = await setup({

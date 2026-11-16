@@ -16,6 +16,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { Button } from "@/components/ui-labs/button";
 import { Card, CardContent } from "@/components/ui-labs/card";
 import { useLocalPagination, type PageSize } from "@/lib/pagination";
+import { displayUnitLabel } from './unitPresentation';
 
 function ResultDetail({
   conceptCode,
@@ -93,7 +94,7 @@ function ResultDetail({
             Latest:{" "}
             <span className="font-mono text-foreground">
               {formatValue(latest)}
-              {unit && ` ${unit}`}
+              {displayUnitLabel(unit) && ` ${displayUnitLabel(unit)}`}
             </span>
             {latest.measured_at && (
               <span className="ml-2 text-xs">· {formatShortDate(latest.measured_at)}</span>
@@ -105,7 +106,7 @@ function ResultDetail({
       {!isQualitative && values.length > 0 && (
         <Card>
           <CardContent className="p-4">
-            <LabTrendChart values={values} unit={unit} />
+            <LabTrendChart values={values} unit={displayUnitLabel(unit) ?? ''} />
           </CardContent>
         </Card>
       )}
@@ -125,13 +126,13 @@ function ResultDetail({
                 <li key={r.measurement_id} className="flex items-center gap-3 px-4 py-3">
                   {r.normalized?.error && <span role="status" className="text-xs text-amber-700">Unit conversion unavailable: {r.normalized.error}</span>}
                   <div className="min-w-0 flex-1">
-                    {r.original && <p className="text-xs text-muted-foreground">Original: {formatValue(r.original)} {r.original.unit || "(unit missing)"}</p>}
+                    {r.original && <p className="text-xs text-muted-foreground">Original: {formatValue(r.original)} {displayUnitLabel(r.original.unit) || "(unit missing)"}</p>}
                     <div className="flex items-baseline gap-2">
                       <span className="font-mono text-sm text-foreground">
                         {formatValue(r)}
                       </span>
-                      {r.unit && (
-                        <span className="text-xs text-muted-foreground">{r.unit}</span>
+                      {displayUnitLabel(r.unit) && (
+                        <span className="text-xs text-muted-foreground">{displayUnitLabel(r.unit)}</span>
                       )}
                       <StatusDot status={r.status} />
                     </div>
