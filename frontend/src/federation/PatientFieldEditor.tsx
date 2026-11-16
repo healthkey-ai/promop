@@ -201,7 +201,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   if (ancestors.includes(canonical)) return <p role="alert">Circular field dependency; editing is unavailable.</p>;
   // A field's caller owns its patient-facing wording. PROMOP descriptors provide
   // a generated label as a fallback; when a tab supplies a reviewed label, don't
-  // let that generated value replace it (for example "Hiv status" vs "HIV Positive").
+  // let that generated value replace it. Neither label may repeat one of the
+  // row's answers: the row asks the question, the answers name the fact (#2608).
   const label = (callerLabel ?? '').trim() || field.label || canonical;
   // A negated descriptor asks the trial's question over a record that stores the
   // positive answer ("No HIV" over `hiv_status`). The edit lands on the positive

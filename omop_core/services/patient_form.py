@@ -298,9 +298,9 @@ FORM_LABELS = {
     'mipi_risk': ('MIPI Risk', None),
     'mipi_c_risk': ('MIPI-C Risk', None),
     'date_of_birth': ('Date of birth', None),
-    'hiv_status': ('HIV Positive', None),
-    'hepatitis_b_status': ('Hepatitis B Positive', None),
-    'hepatitis_c_status': ('Hepatitis C Positive', None),
+    'hiv_status': ('HIV status', None),
+    'hepatitis_b_status': ('Hepatitis B status', None),
+    'hepatitis_c_status': ('Hepatitis C status', None),
 }
 
 

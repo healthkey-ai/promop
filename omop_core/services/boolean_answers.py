@@ -36,3 +36,4 @@ BOOLEAN_ANSWERS = {
     # Leukemia"; the answer labels keep the fact's own polarity visible.
     'plasma_cell_leukemia': ('Present', 'Not present'),
 }
+

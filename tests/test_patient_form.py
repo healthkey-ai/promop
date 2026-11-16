@@ -207,13 +207,15 @@ def test_infection_status_rows_offer_the_reviewed_answer_words():
     })
 
     expected = {
-        'hiv_status': ('HIV Positive', 'No HIV'),
-        'hepatitis_b_status': ('Hepatitis B Positive', 'No Hepatitis B'),
-        'hepatitis_c_status': ('Hepatitis C Positive', 'No Hepatitis C'),
+        'hiv_status': ('HIV Positive', 'No HIV', 'HIV status'),
+        'hepatitis_b_status': ('Hepatitis B Positive', 'No Hepatitis B', 'Hepatitis B status'),
+        'hepatitis_c_status': ('Hepatitis C Positive', 'No Hepatitis C', 'Hepatitis C status'),
     }
-    for name, (positive, negative) in expected.items():
+    for name, (positive, negative, question) in expected.items():
         entry = descriptors[name]
-        assert entry['label'] == positive
+        # The row asks the question; the answers name the fact (#2608).
+        assert entry['label'] == question
+        assert entry['label'] not in (positive, negative)
         assert entry['answer_labels'] == {'true': positive, 'false': negative}
         assert entry['control'] == 'boolean'
         # The reviewed wording does not introduce a second field: only the
@@ -245,3 +247,22 @@ def test_reviewed_answer_words_name_boolean_columns_only():
         field = model_fields[name]
         assert field.get_internal_type() == 'BooleanField', name
         assert positive and negative and positive != negative, name
+
+
+def test_no_reviewed_boolean_repeats_one_of_its_own_answers():
+    """#2608: the row asks the question; the answers name the fact.
+
+    The rule for the three viral-status rows is a table entry, so this catches
+    the next reviewed boolean whose label is one of its own answers (a row that
+    would read "HIV Positive: HIV Positive").
+    """
+    from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
+
+    writable = {'kind': 'direct', 'writable': True, 'target': 'patient_record'}
+    descriptors = patient_form_descriptors({
+        name: dict(writable) for name in BOOLEAN_ANSWERS
+    })
+
+    for name, (positive, negative) in BOOLEAN_ANSWERS.items():
+        label = descriptors[name]['label']
+        assert label not in (positive, negative), name

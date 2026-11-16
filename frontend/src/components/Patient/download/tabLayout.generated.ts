@@ -130,15 +130,15 @@ export const TAB_LAYOUT: TabLayout = {
       "component": "GeneralTab",
       "fields": [
         [
-          "HIV Positive",
+          "HIV status",
           "hiv_status"
         ],
         [
-          "Hepatitis B Positive",
+          "Hepatitis B status",
           "hepatitis_b_status"
         ],
         [
-          "Hepatitis C Positive",
+          "Hepatitis C status",
           "hepatitis_c_status"
         ]
       ]
