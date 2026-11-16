@@ -117,18 +117,18 @@ def test_every_seeded_field_is_written_by_a_migration():
 
 
 def test_the_seed_migration_writes_the_rows_once_and_skips_a_missing_category():
-    # The function 0345 runs on a deployed instance, not the service's copy.
+    # The function 0346 runs on a deployed instance, not the service's copy.
     FieldDiseaseMembership.objects.all().delete()
     for code in ('BC', 'CLL', 'FL', 'MM', 'Other'):
         DiseaseCategoryChoice.objects.create(code=code, label=code)
     FieldDiseaseMembership.objects.create(field_name='stage', disease='MM', provenance='curator')
 
-    run_data_migration('0345_seed_field_disease_membership', 'seed')
+    run_data_migration('0346_seed_field_disease_membership', 'seed')
     assert sizes() == {'BC': 27, 'CLL': 21, 'MM': 19, 'FL': 13}
     assert FieldDiseaseMembership.objects.get(field_name='stage', disease='MM').provenance == 'curator'
     assert FieldDiseaseMembership.objects.filter(provenance=disease_profiles.SEED_PROVENANCE).count() == 79
 
-    run_data_migration('0345_seed_field_disease_membership', 'seed')
+    run_data_migration('0346_seed_field_disease_membership', 'seed')
     assert FieldDiseaseMembership.objects.count() == 80
 
 

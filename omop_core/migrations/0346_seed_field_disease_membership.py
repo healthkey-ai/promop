@@ -74,11 +74,11 @@ def seed(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0344_field_disease_membership'),
+        ('omop_core', '0345_field_disease_membership'),
     ]
 
     operations = [
-        # Rolling back drops the table with 0344, so there is nothing to undo
+        # Rolling back drops the table with 0345, so there is nothing to undo
         # here. Re-applying after a partial rollback would re-add a row a
         # curator removed; the seed is meant to run once.
         migrations.RunPython(seed, migrations.RunPython.noop),
