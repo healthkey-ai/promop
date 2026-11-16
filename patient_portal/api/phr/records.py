@@ -99,6 +99,18 @@ def _statements(person, subject: str) -> dict[str, PatientStatement]:
 ASK_WITHIN = timedelta(days=365)
 
 
+# Key in a medication statement's ``details``: the newest prescription row of
+# the drug when the patient answered.
+THROUGH_ROW = 'through_row'
+
+
+def newest_row_id(person, key: str) -> int | None:
+    """The id of the newest row of a medication group, the anchor a statement
+    is stored with."""
+    rows = _medication_groups(person)[0].get(key)
+    return max(r.pk for r in rows) if rows else None
+
+
 def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
              statement: PatientStatement | None = None, with_statements: bool = True,
              note: PatientStatement | None = None) -> dict[str, Any]:
@@ -122,6 +134,18 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
     if (statement is not None and statement.status in (PatientStatement.TOOK, PatientStatement.NOT_TAKEN)
             and current and not may_still_take):
         statement = None
+    # An answer that ends the question or records a stop describes the newest
+    # prescription at the time (``through_row``). A row added since is a later
+    # course it was not given for, even once that course has ended again, or
+    # when it starts before the stop: ids, not dates, say which came later,
+    # because a renewal can be ingested after the answer with an earlier start
+    # date (#2562). Answers stored before this have no anchor and keep to the
+    # rule above.
+    if statement is not None and statement.status in (
+            PatientStatement.TOOK, PatientStatement.NOT_TAKEN, PatientStatement.STOPPED):
+        through = (statement.details or {}).get(THROUGH_ROW)
+        if isinstance(through, int) and max(r.pk for r in rows) > through:
+            statement = None
     confirmation = None
     if with_statements and statement is not None:
         confirmation = {k: v for k, v in {

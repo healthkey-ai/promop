@@ -1130,6 +1130,64 @@ def test_a_past_answer_does_not_outlive_the_prescription_it_was_given_for():
     assert med(client, keys[0])['confirmation'] == {'status': 'taking'}
 
 
+def test_an_answer_does_not_return_when_the_renewal_it_was_not_given_for_ends():
+    """#2562: a "took" for an old prescription is stale once the drug was
+    renewed, and stays stale after the renewal ends: the renewal is asked about."""
+    record = PatientRecordFactory(disease='')
+    client = signed_in(record)
+    today = timezone.localdate()
+
+    def days(n):
+        return (today + timedelta(days=n)).isoformat()
+
+    concept = ConceptFactory(concept_name='Levothyroxine', concept_code='RX-LEVO2')
+    key = str(concept.concept_id)
+    drug(record, concept, days(-300), days(-290))
+    assert say(client, key, status='took').status_code == 200
+    drug(record, concept, days(-20), days(-10))  # the renewal, already over
+    item = med(client, key)
+    assert item['status'] == 'past' and item['pending'] is True
+    assert 'confirmation' not in item
+
+
+def test_a_stop_does_not_outlive_a_renewal_even_one_with_an_earlier_start():
+    """#2562: stopped in 2025, prescribed again later: the renewal is current and
+    asked about. A renewal ingested after the stop with an earlier start date
+    counts too: row ids say which came later, not dates."""
+    record = PatientRecordFactory(disease='')
+    client = signed_in(record)
+    today = timezone.localdate()
+
+    def days(n):
+        return (today + timedelta(days=n)).isoformat()
+
+    concept = ConceptFactory(concept_name='Prednisone', concept_code='RX-PRED2')
+    key = str(concept.concept_id)
+    drug(record, concept, days(-100), None)
+    assert say(client, key, status='taking').status_code == 200
+    stopped = say(client, key, status='stopped', stopped_on=days(-50))
+    assert stopped.status_code == 200 and stopped.data['status'] == 'past'
+
+    drug(record, concept, days(-80), None)  # ingested later, starts before the stop
+    item = med(client, key)
+    assert item['status'] == 'current' and item['pending'] is True
+    assert 'confirmation' not in item and 'ended' not in item
+    assert say(client, key, status='taking').status_code == 200
+
+
+def test_an_answer_stays_while_no_newer_row_arrives():
+    """#2562: the anchor does not drop an answer for a prescription nothing has replaced."""
+    record = PatientRecordFactory(disease='')
+    client = signed_in(record)
+    today = timezone.localdate()
+    concept = ConceptFactory(concept_name='Warfarin', concept_code='RX-WARF2')
+    key = str(concept.concept_id)
+    drug(record, concept, (today - timedelta(days=60)).isoformat(), None)
+    assert say(client, key, status='taking').status_code == 200
+    assert say(client, key, status='stopped', stopped_on=(today - timedelta(days=5)).isoformat()).status_code == 200
+    assert med(client, key)['confirmation']['status'] == 'stopped'
+
+
 def test_answers_must_fit_whether_the_prescription_is_current(meds_patient):
     _, client, ids = meds_patient
     assert say(client, ids['current'], status='took').status_code == 400
