@@ -1709,6 +1709,12 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."
                 })
+        if attrs.get('diseases'):
+            from omop_core.services import disease_profiles
+            if field_name not in disease_profiles.field_names():
+                raise serializers.ValidationError({
+                    'diseases': f"'{field_name}' is not a field that can have a scope."
+                })
         status_value = attrs.get('status', getattr(self.instance, 'status', None))
         omop_table = attrs.get('omop_table', getattr(self.instance, 'omop_table', ''))
         source_value = attrs.get('source_value', getattr(self.instance, 'source_value', ''))
@@ -1781,14 +1787,18 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         # recipe, so setting it neither signs the mapping off nor re-attributes it.
         diseases = validated_data.pop('diseases', None)
         with transaction.atomic():
-            instance = super().update(instance, validated_data)
-            # A custom field carries its own tab for the custom-field list and its
-            # ordering; the mapping's placement is the one readers resolve, so a
-            # change here follows through (#2328).
-            custom = getattr(instance, 'custom_patient_field', None)
-            if 'tab' in validated_data and custom is not None:
-                custom.tab = instance.tab or UNPLACED_TAB
-                custom.save(update_fields=['tab', 'updated_at'])
+            # A save that carries only a scope does not touch the mapping row:
+            # saving it would re-run the field's OMOP projection over every
+            # patient record for an edit that changes no fact.
+            if validated_data:
+                instance = super().update(instance, validated_data)
+                # A custom field carries its own tab for the custom-field list and its
+                # ordering; the mapping's placement is the one readers resolve, so a
+                # change here follows through (#2328).
+                custom = getattr(instance, 'custom_patient_field', None)
+                if 'tab' in validated_data and custom is not None:
+                    custom.tab = instance.tab or UNPLACED_TAB
+                    custom.save(update_fields=['tab', 'updated_at'])
             self._set_diseases(instance.field_name, diseases)
         return instance
 

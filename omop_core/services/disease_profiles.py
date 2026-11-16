@@ -23,13 +23,17 @@ from collections.abc import Callable, Iterable
 
 from django.db import connection, transaction
 
-logger = logging.getLogger(__name__)
+# A configured logger: the module's own would drop INFO under gunicorn.
+logger = logging.getLogger('omop.ops')
 
 SCOPE_BASE = 'base'
 SCOPE_DISEASE = 'disease'
 # The category every unrecognised disease falls into. It has no extension.
 OTHER = 'Other'
 SEED_PROVENANCE = 'disease-tab-seed v1'
+# The fields that say which disease a record has decide its profile, so they
+# cannot themselves be in an extension.
+_PROFILE_KEYS = frozenset({'disease', 'disease_slug', 'disease_slugs'})
 
 # The fields DiseaseTab.tsx renders for each disease, section by section: the
 # extensions MM, BC, FL, MCL and CLL start with. Two tests hold it in place:
@@ -83,7 +87,7 @@ class ScopeError(ValueError):
     """A scope a field cannot be given: an unknown category, or ``Other``."""
 
 
-def category_codes() -> set[str]:
+def category_codes(using: str = 'default') -> set[str]:
     """Every Disease Category code, from the managed table.
 
     The enum is the fallback for a database whose table is empty (a test
@@ -91,7 +95,7 @@ def category_codes() -> set[str]:
     """
     from omop_core.models import DiseaseCategory, DiseaseCategoryChoice
 
-    codes = set(DiseaseCategoryChoice.objects.values_list('code', flat=True))
+    codes = set(DiseaseCategoryChoice.objects.using(using).values_list('code', flat=True))
     return codes or {choice.value for choice in DiseaseCategory}
 
 
@@ -135,41 +139,58 @@ def in_profile(field_diseases: Iterable[str], profile: Iterable[str]) -> bool:
     return not field_diseases or bool(field_diseases & set(profile))
 
 
-def field_names() -> set[str]:
-    """Every name a membership may be keyed by: a column, a genomics component, a created field."""
+def field_names(using: str = 'default') -> set[str]:
+    """Every field that can have a scope: what the field descriptors list.
+
+    A clinical column, a genomics component or a created field. Not an
+    internal or unit-companion column, which no descriptor shows, and not the
+    fields that name the record's disease.
+    """
     from omop_core.models import CustomPatientField, PatientRecord
+    from omop_core.services.field_descriptor import _classify_field
     from omop_core.services.genomics_components import components
 
-    names = {field.name for field in PatientRecord._meta.get_fields() if getattr(field, 'concrete', False)}
+    names = {
+        field.name for field in PatientRecord._meta.get_fields()
+        if getattr(field, 'concrete', False) and field.name not in _PROFILE_KEYS
+        and _classify_field(field.name) not in ('internal', 'unit')
+    }
     names |= {'genetic_mutations.' + attribute['key'] for attribute in components()}
-    return names | set(CustomPatientField.objects.values_list('field_name', flat=True))
+    return names | set(CustomPatientField.objects.using(using).values_list('field_name', flat=True))
 
 
 def resolver() -> Callable[[object], str | None]:
     """A function from a code or a disease name to its Disease Category code.
 
-    The categories are read once, so resolving a batch costs no query per
-    value for a code. A code matches in any case; a name resolves through
-    ``disease_code`` and then ``DiseaseCategoryMapping``, ``Other`` included.
-    Anything else is ``None``.
+    The categories are read once and each answer is remembered, so resolving
+    a batch costs no query for a code and one lookup per distinct name. In
+    order: a category code exactly as stored; a category code in another
+    case; a name ``disease_code`` resolves; a name ``DiseaseCategoryMapping``
+    maps to ``Other``. Anything else is ``None``.
     """
     from omop_core.models import DiseaseCategoryMapping
     from omop_core.services.genomics_catalog import disease_code
 
-    by_lower = {code.lower(): code for code in category_codes()}
-    known = set(by_lower.values())
+    known = category_codes()
+    # Sorted, so two codes that differ only in case always fold the same way.
+    by_lower = {code.lower(): code for code in sorted(known, reverse=True)}
+    answers: dict[str, str | None] = {}
 
     def resolve(value) -> str | None:
         text = str(value or '').strip()
         if not text:
             return None
-        code = by_lower.get(text.lower()) or disease_code(text)
-        if code is None:
-            # disease_code leaves a name mapped to Other unresolved; its
-            # profile is the base record, which is an answer, not an error.
-            code = (DiseaseCategoryMapping.objects.filter(disease_name__iexact=text)
-                    .values_list('category', flat=True).first())
-        return code if code in known else None
+        if text in known:
+            return text
+        if text not in answers:
+            code = by_lower.get(text.lower()) or disease_code(text)
+            if code is None:
+                # disease_code leaves a name mapped to Other unresolved; its
+                # profile is the base record, which is an answer, not an error.
+                code = (DiseaseCategoryMapping.objects.filter(disease_name__iexact=text)
+                        .values_list('category', flat=True).first())
+            answers[text] = code if code in known else None
+        return answers[text]
 
     return resolve
 
@@ -181,7 +202,10 @@ def clean_codes(codes: Iterable[str]) -> list[str]:
     ``Other``: a field every other patient has is a base field, not a member
     of an "Other" extension.
     """
-    wanted = sorted({str(code).strip() for code in codes if str(code).strip()})
+    codes = [str(code).strip() for code in codes]
+    if '' in codes:
+        raise ScopeError('A disease code cannot be blank. Send no diseases for the base record.')
+    wanted = sorted(set(codes))
     known = category_codes()
     unknown = [code for code in wanted if code not in known]
     if unknown:
@@ -202,8 +226,11 @@ def set_field_diseases(field_name: str, codes: Iterable[str], *, user=None,
     A membership edit and nothing else: no mapping, placement or stored value
     changes, a created field's key in ``custom_fields`` included. Rows the new
     scope keeps are left as they are, so their provenance still names whoever
-    added them. A removed row is gone, so the change itself is logged with
-    the scope before and after and who made it.
+    added them. A removed row is gone, so the change itself is logged, once
+    it commits, with the scope before and after and who made it.
+
+    Only a field the descriptors list can be given a scope; any name can be
+    made base, which is how rows left behind by a removed field are cleared.
 
     Edits to one field are serialised: two saves read-then-write the same
     rows, and without the lock they would leave the union of both scopes.
@@ -212,6 +239,8 @@ def set_field_diseases(field_name: str, codes: Iterable[str], *, user=None,
     from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, user_provenance
 
     wanted = clean_codes(codes)
+    if wanted and field_name not in field_names():
+        raise ScopeError(f'{field_name!r} is not a PatientRecord field that can have a scope.')
     label = provenance or (user_provenance(user) if user is not None else CURATOR_PROVENANCE)
     with transaction.atomic():
         if connection.vendor == 'postgresql':
@@ -228,8 +257,11 @@ def set_field_diseases(field_name: str, codes: Iterable[str], *, user=None,
                                    created_by=user if getattr(user, 'pk', None) else None)
             for code in wanted if code not in before
         ])
-    logger.info('Field scope changed: field=%s before=%s after=%s by=%s',
-                field_name, before, wanted, getattr(user, 'pk', None) or label)
+        # After the commit, so a change an outer transaction rolls back is
+        # not reported as made.
+        who = getattr(user, 'pk', None) or label
+        transaction.on_commit(lambda: logger.info(
+            'Field scope changed: field=%s before=%s after=%s by=%s', field_name, before, wanted, who))
     return wanted
 
 

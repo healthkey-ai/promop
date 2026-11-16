@@ -10966,15 +10966,20 @@ def disease_category_detail(request, code):
         )
     # Nor one whose extension still has fields: they would be scoped to a
     # disease that no longer exists (#2331). Make them base, or move them.
+    from omop_core.models import FieldDiseaseMembership
     from omop_core.services import disease_profiles
-    members = sorted(disease_profiles.extension_fields(code))
+    members = sorted(disease_profiles.extension_fields(code) & disease_profiles.field_names())
     if members:
         named = ', '.join(members[:5]) + (', …' if len(members) > 5 else '')
         return Response(
             {'detail': f'Cannot delete: {len(members)} field(s) belong to this disease ({named})'},
             status=status.HTTP_409_CONFLICT,
         )
-    obj.delete()
+    with transaction.atomic():
+        # Rows left under the name of a field that no longer exists go with
+        # the category: nothing can clear them, and they scope nothing.
+        FieldDiseaseMembership.objects.filter(disease=code).delete()
+        obj.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -15807,7 +15812,10 @@ def field_scope(request, field_name):
     from omop_core.models import FieldDiseaseMembership
     from omop_core.services import disease_profiles
 
-    if field_name not in disease_profiles.field_names():
+    # A name with rows but no field (the field was removed) is still
+    # reachable, so its rows can be read and cleared.
+    held = FieldDiseaseMembership.objects.filter(field_name=field_name)
+    if field_name not in disease_profiles.field_names() and not held.exists():
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PUT':
         diseases = request.data.get('diseases') if isinstance(request.data, dict) else None
@@ -15818,8 +15826,7 @@ def field_scope(request, field_name):
             disease_profiles.set_field_diseases(field_name, diseases, user=request.user)
         except disease_profiles.ScopeError as error:
             return Response({'diseases': str(error)}, status=status.HTTP_400_BAD_REQUEST)
-    diseases = sorted(FieldDiseaseMembership.objects.filter(field_name=field_name)
-                      .values_list('disease', flat=True))
+    diseases = sorted(held.values_list('disease', flat=True))
     return Response({'field_name': field_name, 'scope': disease_profiles.scope_of(diseases),
                      'diseases': diseases})
 

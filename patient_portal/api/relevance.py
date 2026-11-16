@@ -238,8 +238,10 @@ def relevance_signals(request):
     if wanted != 'all':
         queryset = queryset.filter(status=wanted)
     if request.query_params.get('disease'):
-        queryset = queryset.filter(disease=disease_relevance.resolver()(request.query_params['disease'])
-                                   or request.query_params['disease'].upper())
+        named = request.query_params['disease']
+        code = disease_relevance.resolver()(named)
+        # A signal may name a category since removed; match it as stored.
+        queryset = queryset.filter(disease=code) if code else queryset.filter(disease__iexact=named.strip())
     signals = list(queryset[:500])
     names = dict(Concept.objects.filter(concept_id__in={s.concept_id for s in signals})
                  .values_list('concept_id', 'concept_name'))

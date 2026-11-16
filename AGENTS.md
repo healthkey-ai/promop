@@ -1030,9 +1030,9 @@ the same Identity id is a different person on another instance.
 The field-mapping tables go through `field_curation_transfer`, whose payload is
 also the `dump_field_curation` fixture format. Keep that payload stable.
 A field's disease scope (`memberships`, #2331) is replaced from the source,
-not merged: a built-in field that is base at the source becomes base here,
-with or without `--prune`. A field created only on this instance keeps its
-scope.
+not merged, with or without `--prune`: a field both instances have takes the
+source's scope, base included. A field or a Disease Category that exists only
+on this instance keeps what it has.
 
 ### copy_patient
 

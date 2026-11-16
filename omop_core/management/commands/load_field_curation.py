@@ -57,7 +57,9 @@ class Command(BaseCommand):
             '--prune', action='store_true',
             help=(
                 'Delete local rows the fixture does not have, mirroring it '
-                'exactly. Off by default, so a load is additive.'
+                'exactly. Off by default, so a load is additive, except a '
+                "field's disease scope (memberships), which is replaced from "
+                'the fixture for the fields and categories it names.'
             ),
         )
         parser.add_argument(
