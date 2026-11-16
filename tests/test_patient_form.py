@@ -200,6 +200,8 @@ def test_infection_status_rows_offer_the_reviewed_answer_words():
     offered by the same canonical positive column, with both answers spelled
     out, so the control does not answer "HIV Positive: No".
     """
+    from omop_core.services.boolean_answers import BOOLEAN_QUESTION_LABELS
+
     descriptors = patient_form_descriptors({
         'hiv_status': {'kind': 'direct', 'writable': True, 'target': 'patient_record'},
         'hepatitis_b_status': {'kind': 'direct', 'writable': True, 'target': 'patient_record'},
@@ -213,7 +215,9 @@ def test_infection_status_rows_offer_the_reviewed_answer_words():
     }
     for name, (positive, negative) in expected.items():
         entry = descriptors[name]
-        assert entry['label'] == positive
+        # The row asks the question; the answers name the fact (#2608).
+        assert entry['label'] == BOOLEAN_QUESTION_LABELS[name]
+        assert entry['label'] not in (positive, negative)
         assert entry['answer_labels'] == {'true': positive, 'false': negative}
         assert entry['control'] == 'boolean'
         # The reviewed wording does not introduce a second field: only the

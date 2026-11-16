@@ -19,7 +19,9 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.write_refusal import WriteRefused
-from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
+from omop_core.services.boolean_answers import (
+    BOOLEAN_ANSWERS, BOOLEAN_QUESTION_LABELS,
+)
 from omop_core.services.creatinine_units import (
     CANONICAL_FIELD as CREATININE_CANONICAL,
     DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
@@ -298,9 +300,9 @@ FORM_LABELS = {
     'mipi_risk': ('MIPI Risk', None),
     'mipi_c_risk': ('MIPI-C Risk', None),
     'date_of_birth': ('Date of birth', None),
-    'hiv_status': ('HIV Positive', None),
-    'hepatitis_b_status': ('Hepatitis B Positive', None),
-    'hepatitis_c_status': ('Hepatitis C Positive', None),
+    'hiv_status': ('HIV status', None),
+    'hepatitis_b_status': ('Hepatitis B status', None),
+    'hepatitis_c_status': ('Hepatitis C status', None),
 }
 
 
@@ -418,6 +420,15 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         if kind == 'BooleanField' and name in BOOLEAN_ANSWERS:
             positive, negative = BOOLEAN_ANSWERS[name]
             entry['answer_labels'] = {'true': positive, 'false': negative}
+            # One wording owner (#2608): a row whose label is one of its own
+            # answers must ask the question instead, whichever table supplied
+            # the label.
+            if entry['label'].strip().casefold() in (
+                positive.strip().casefold(), negative.strip().casefold(),
+            ):
+                entry['label'] = BOOLEAN_QUESTION_LABELS.get(
+                    name, str(field.verbose_name).replace('_', ' ').capitalize(),
+                )
         if name in FORM_INPUTS:
             entry['inputs'] = list(FORM_INPUTS[name])
             entry.update(kind='computed', writable=False)
