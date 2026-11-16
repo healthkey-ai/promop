@@ -282,6 +282,12 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **The clinician-validation block is staff-only on every descriptor (#2604)** —
+  `validated`, `validated_by`, `validation_date` and
+  `suppress_demographics_for_others` are dropped from a nonstaff caller's PATCH,
+  but only the shared-form descriptor said so; the native editor reads the plain
+  (person-scoped) one and kept offering boxes whose saves vanished. Both
+  descriptors now answer for the caller, including the `envelope=1` shape.
 - **`meets_crab` has one rule on refresh and on edit (#2480, #2482, #2485)** —
   without an explicit 89599-5 result, a full refresh now derives CRAB with
   `derive_meets_crab` from the record's canonical hemoglobin, calcium,
