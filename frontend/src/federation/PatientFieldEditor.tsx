@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
 import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
+import ExplicitAnswerActions from '@/components/PatientInfo/ExplicitAnswerActions';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 
 interface Props {
@@ -303,11 +304,19 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // dialog must not promise that every edit saves itself.
   // The gate reason used to be reachable inside the dialog. Rows that lose the
   // dialog must keep it, or the clinical restriction disappears with the pencil.
-  const reason = inputsUnavailable || (inputs.length > 0 && !editPath)
-    ? ['This value is derived from data that is not editable in this view.',
-      field.compatibility_reason].filter(Boolean).join(' ')
-    : field.compatibility_reason ?? field.reason
-      ?? (lockedByView ? undefined : 'Derived value; edit the source inputs.');
+  // An explicit answer is not a derived dead end: it has its own endpoint and
+  // the row renders its labelled actions (#2606). Its `inputs` list is the
+  // source fact the attestation is checked against, so it must not turn into
+  // the "not editable in this view" sentence.
+  const explicitAnswer = field.answerable === true && field.endpoint === 'negative-answer'
+    ? field.endpoint : undefined;
+  const reason = explicitAnswer
+    ? field.compatibility_reason ?? field.reason
+    : inputsUnavailable || (inputs.length > 0 && !editPath)
+      ? ['This value is derived from data that is not editable in this view.',
+        field.compatibility_reason].filter(Boolean).join(' ')
+      : field.compatibility_reason ?? field.reason
+        ?? (lockedByView ? undefined : 'Derived value; edit the source inputs.');
   // A compatibility gate withholds the RESULT, not the clinical facts it is
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
@@ -475,6 +484,17 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             </Dialog.Content></Dialog.Portal>
         </Dialog.Root>
       </div>
+    </> : explicitAnswer ? <>
+      <div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
+      {state.personId && <ExplicitAnswerActions personId={state.personId} name={canonical}
+        endpoint={explicitAnswer} actions={field.actions} actionLabels={field.action_labels}
+        value={value} readOnly={readOnly || !state.writable}
+        onSaved={async (values) => {
+          // The endpoint bypasses the PATCH queue; the record view and the
+          // host's listeners must hear about it without a save.
+          store.applyServerValues(values);
+          store.announceUpdated();
+        }} />}
     </> : writable ? <>
       {showUnitPicker ? <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">{controlNode}</div>

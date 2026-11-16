@@ -5,6 +5,7 @@ import type { VocabSource } from '@/hooks/useVocabulary';
 import { editableWithoutFormStore, type FieldDescriptor } from '@/hooks/useWritableFields';
 import { PatientFormReadOnlyContext, usePatientFormStore } from '@/federation/PatientFormContext';
 import PatientFieldEditor from '@/federation/PatientFieldEditor';
+import ExplicitAnswerActions from './ExplicitAnswerActions';
 
 interface Props {
   label: string;
@@ -34,6 +35,11 @@ interface Props {
    *  "Hemoglobin (g/dL)"). The federated editor then leaves the unit out of
    *  its own suffix, so the row shows it once (#5704). */
   labelIncludesUnit?: boolean;
+  /** The patient this row belongs to. An explicit answer is written through its
+   *  own endpoint, which needs the record; a field without it stays read-only. */
+  personId?: number;
+  /** Server values to adopt without a write (an explicit answer's response). */
+  onServerValues?: (values: Record<string, unknown>) => void | Promise<void>;
 }
 
 /**
@@ -64,6 +70,8 @@ export default function ClinicalField({
   onDateChange,
   showReason = true,
   labelIncludesUnit = false,
+  personId,
+  onServerValues,
 }: Props) {
   const store = usePatientFormStore();
   const formReadOnly = useContext(PatientFormReadOnlyContext);
@@ -109,12 +117,21 @@ export default function ClinicalField({
   if (!writable) {
     const reason =
       descriptor?.reason
-      ?? (absent
-        // Not a PatientRecord column at all: the API neither returns it nor
-        // accepts it, so the box could never show a value and never save one.
-        // Saying "derived" here would be wrong in the other direction (#646).
-        ? 'Not stored on the patient record yet.'
-        : 'Derived from OMOP data; not editable here.');
+      ?? (descriptor?.answerable
+        // An answerable field is not derived and not dead: this surface simply
+        // cannot offer its endpoint (no patient or no way to apply the answer).
+        ? 'Answered through its own endpoint; this view cannot offer the action.'
+        : absent
+          // Not a PatientRecord column at all: the API neither returns it nor
+          // accepts it, so the box could never show a value and never save one.
+          // Saying "derived" here would be wrong in the other direction (#646).
+          ? 'Not stored on the patient record yet.'
+          : 'Derived from OMOP data; not editable here.');
+    // An answer with its own endpoint is not a read-only value: the server
+    // advertises the actions, and this is the surface that renders them (#2606).
+    const answerEndpoint = descriptor?.answerable === true
+      && descriptor.endpoint === 'negative-answer'
+      ? descriptor.endpoint : undefined;
     return (
       <div>
         <Field
@@ -129,7 +146,18 @@ export default function ClinicalField({
           answerLabels={descriptor?.answer_labels}
           precision={precision}
         />
-        {showReason && (
+        {answerEndpoint && personId && onServerValues ? (
+          <ExplicitAnswerActions
+            personId={personId}
+            name={name}
+            endpoint={answerEndpoint}
+            actions={descriptor?.actions}
+            actionLabels={descriptor?.action_labels}
+            value={value}
+            readOnly={formReadOnly}
+            onSaved={onServerValues}
+          />
+        ) : showReason && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
             {reason}
           </p>

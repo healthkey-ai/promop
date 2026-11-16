@@ -59,7 +59,7 @@ describe('GeneralTab pre-existing conditions', () => {
           editedName="Alishia Howell"
           onNameChange={vi.fn()}
           onZipcodeChange={vi.fn()}
-          onConditionsSaved={vi.fn()}
+          onServerValues={vi.fn()}
         />,
       );
     });

@@ -5,6 +5,12 @@ import type { AxiosInstance } from 'axios';
 import PatientFieldEditor from './PatientFieldEditor';
 import { PatientFormStore } from './patientFormStore';
 
+const answers = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
+vi.mock('@/api/clinicalTransport', () => ({
+  clinicalClient: () => answers,
+  clinicalUrl: (path: string) => `/host${path}`,
+}));
+
 async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
   const fields = {
     height: { writable: true, target: 'patient_record', control: 'number', label: 'Height', unit: 'cm' },
@@ -1024,6 +1030,40 @@ describe('single unit display (#5704)', () => {
 
     expect(screen.getByText('INR')).toBeVisible();
     expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
+  });
+
+  it('renders the explicit answer actions instead of a derived dead end', async () => {
+    answers.get.mockResolvedValue({ data: {
+      field: 'no_other_active_malignancies', value: false, confirmed: false, source: [],
+    } });
+    answers.post.mockResolvedValue({ data: {
+      field: 'no_other_active_malignancies', value: true, confirmed: true, source: [],
+    } });
+    const { store } = await setup({
+      no_other_active_malignancies: {
+        kind: 'explicit-answer', writable: false, answerable: true,
+        target: 'patient_record', endpoint: 'negative-answer',
+        actions: ['confirm_negative', 'withdraw'],
+        action_labels: {
+          confirm_negative: 'Confirm no other active malignancies',
+          withdraw: 'Withdraw confirmation',
+        },
+        inputs: ['active_malignancies'], value_kind: 'boolean',
+        reason: 'Answered explicitly through the negative-answer endpoint.',
+      },
+    }, { no_other_active_malignancies: false });
+    render(<PatientFieldEditor store={store} name="no_other_active_malignancies"
+      label="No Other Active Malignancies" />);
+
+    expect(screen.getByText(/No Other Active Malignancies/)).toBeVisible();
+    expect(screen.queryByText(/not editable in this view/)).toBeNull();
+    const confirm = screen.getByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(answers.post).toHaveBeenCalledWith(
+      '/host/v1/patient-records/12/negative-answer/',
+      expect.objectContaining({ field: 'no_other_active_malignancies', action: 'confirm_negative' }),
+    ));
   });
 
   it('applies the same rule to a read-only row', async () => {
