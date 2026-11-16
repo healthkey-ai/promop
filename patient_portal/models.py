@@ -996,3 +996,125 @@ class ConsentLedgerEntry(AppendOnlyModel):
 
     def __str__(self):
         return f'{self.email} {self.key} {self.decision} v{self.version} @ {self.recorded_at:%Y-%m-%d}'
+
+
+class DeletionLogEntry(AppendOnlyModel):
+    """One account deletion: who was deleted (by id) and when, and nothing else.
+
+    Written in the same transaction as the deletion itself, so a deletion
+    without an entry, or an entry without a deletion, cannot be committed.
+    The entry carries no content: the identifiers are enough for
+    ``manage.py replay_deletion_log`` to remove again whatever a backup
+    restore brought back.
+
+    Each row is signed with an HMAC over its fields and linked to its
+    predecessor's ``chain_hash`` in the style of ``AuditEvent``, so an
+    altered, removed or inserted entry is detectable
+    (``patient_portal.account_deletion.verify_deletion_log``). Unlike the
+    audit trail the chain cannot be switched off and the table is never
+    pruned: the first row is the anchor. Each row names the key that signed
+    it (``key_id``), so after a key rotation it still verifies against the
+    key it was written with, listed in ``AUDIT_HMAC_PREVIOUS_KEYS``.
+    """
+    ACCOUNT_CLOSED, PERMISSION_WITHDRAWN, ADMIN, INACTIVITY = (
+        'account_closed', 'permission_withdrawn', 'admin', 'inactivity',
+    )
+    REASONS = [
+        (ACCOUNT_CLOSED, 'Account closed'), (PERMISSION_WITHDRAWN, 'Record permission withdrawn'),
+        (ADMIN, 'Administrator'), (INACTIVITY, 'Inactivity'),
+    ]
+
+    person_id = models.BigIntegerField(db_index=True, help_text='The deleted Person id.')
+    identity_id = models.BigIntegerField(
+        null=True, blank=True, help_text='The deleted Identity id, when the login was deleted too.',
+    )
+    reason = models.CharField(max_length=30, choices=REASONS)
+    deleted_at = models.DateTimeField(default=timezone.now)
+    subject_hash = models.CharField(
+        max_length=64, blank=True, default='', db_index=True,
+        help_text='SHA-256 over the deleted partner login\'s issuer|sub, so a provider token for that '
+                  'subject is not provisioned again for ACCOUNT_CLOSED_BLOCK_SECONDS. Empty for a local login.',
+    )
+    signature = models.CharField(max_length=64, editable=False, help_text='HMAC-SHA256 over the fields.')
+    chain_hash = models.CharField(
+        max_length=64, editable=False, help_text='HMAC-SHA256 over (previous chain_hash | signature).',
+    )
+    key_id = models.CharField(
+        max_length=16, editable=False,
+        help_text='The first 16 hex digits of SHA-256 over the HMAC key that signed the row.',
+    )
+
+    # Distinct from AuditEvent's key: the two chains are appended independently.
+    _CHAIN_LOCK_KEY = 728144
+
+    class Meta:
+        db_table = 'deletion_log_entry'
+        ordering = ['id']
+
+    @staticmethod
+    def key_id_of(key: bytes) -> str:
+        import hashlib
+        return hashlib.sha256(key).hexdigest()[:16]
+
+    @classmethod
+    def signing_keys(cls) -> dict[str, bytes]:
+        """The current key first, then the ones rotated out, by key id."""
+        from django.conf import settings
+        current = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
+        keys = {cls.key_id_of(current): current}
+        for previous in getattr(settings, 'AUDIT_HMAC_PREVIOUS_KEYS', []):
+            keys.setdefault(cls.key_id_of(previous.encode()), previous.encode())
+        return keys
+
+    def _key(self) -> bytes | None:
+        """The key this row was (or is about to be) signed with; None when
+        the key that signed it is no longer configured."""
+        keys = self.signing_keys()
+        if not self.key_id:
+            return next(iter(keys.values()))
+        return keys.get(self.key_id)
+
+    @property
+    def key_known(self) -> bool:
+        return self._key() is not None
+
+    def compute_signature(self) -> str:
+        import hashlib
+        import hmac
+        canonical = '|'.join([
+            str(self.person_id),
+            '' if self.identity_id is None else str(self.identity_id),
+            self.reason,
+            self.deleted_at.isoformat(),
+            self.subject_hash or '',
+        ])
+        return hmac.new(self._key(), canonical.encode(), hashlib.sha256).hexdigest()
+
+    def compute_chain_hash(self, prev_chain_hash: str) -> str:
+        import hashlib
+        import hmac
+        material = f'{prev_chain_hash}|{self.signature}'.encode()
+        return hmac.new(self._key(), material, hashlib.sha256).hexdigest()
+
+    def signature_valid(self) -> bool:
+        import hmac
+        if not self.key_known:
+            return False
+        return bool(self.signature) and hmac.compare_digest(self.signature, self.compute_signature())
+
+    def save(self, *args, **kwargs):
+        from django.db import connection, transaction
+        self.key_id = next(iter(self.signing_keys()))
+        self.signature = self.compute_signature()
+        # Serialize "read latest, link, insert" so concurrent deletions extend
+        # one chain rather than forking it.
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cur:
+                    cur.execute('SELECT pg_advisory_xact_lock(%s)', [self._CHAIN_LOCK_KEY])
+            prev = DeletionLogEntry.objects.order_by('-id').values_list('chain_hash', flat=True).first() or ''
+            self.chain_hash = self.compute_chain_hash(prev)
+            super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f'person {self.person_id} {self.reason} @ {self.deleted_at:%Y-%m-%d %H:%M}'

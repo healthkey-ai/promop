@@ -8,6 +8,22 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Account deletion** — `DELETE /api/v1/phr/account/` closes the signed-in
+  member's account: the login, the record, the clinical rows and the PROlog
+  responses go in one transaction, and so does withdrawing the record
+  permission (`CONSENT_RECORD_PURPOSE_KEY`, `my_record`) through
+  `/api/v1/phr/consent/`. The legacy `/api/patient-info/me/` DELETE and the
+  administrator's `admin-delete` share the same service. Every deletion writes
+  an append-only, hash-chained `DeletionLogEntry` holding ids and a time, no
+  content; `manage.py replay_deletion_log` verifies the chain and deletes
+  again whatever a backup restore brought back. The consent ledger stays. See
+  [account deletion](docs/account-deletion.md). The PHR account delete and
+  consent POST accept a session or partner login only; an OAuth2 token or
+  service credential gets 403. A partner login's subject is not provisioned
+  again for `ACCOUNT_CLOSED_BLOCK_SECONDS` after its deletion, uploaded
+  document files are deleted with their rows, and each log entry names its
+  signing key so `AUDIT_HMAC_PREVIOUS_KEYS` keeps the chain verifiable across
+  a rotation. (#2307)
 - **The PHR record PDF renders Cyrillic, Greek and extended Latin names** —
   the export is set in DejaVu Sans, bundled under `patient_portal/api/phr/fonts/`
   and embedded in each PDF, instead of reportlab's built-in Helvetica, whose

@@ -12,15 +12,30 @@ GET  consent/history/    every answer the member has given, newest first
 English. A decision names the version the member saw, and is refused with
 409 when that is no longer the published version, so stale wording is never
 agreed to.
+
+Withdrawing the record permission (``CONSENT_RECORD_PURPOSE_KEY``) closes the
+account: the withdrawal and its ledger entry are written, then the account,
+record and data are deleted in the same transaction, and the response says
+``account_deleted`` instead of the consent state (docs/account-deletion.md).
+Because of that, the two POSTs here take a session or partner login only; an
+OAuth2 token or service credential gets 403, though it may still GET.
 """
 from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from omop_core.models import Person
 from patient_portal import consent as svc
-from patient_portal.models import ConsentEvent, ConsentPurpose, DocumentAcceptance, LegalDocument
+from patient_portal.api.permissions import InteractiveSessionForWrites
+from patient_portal.account_deletion import (
+    AlreadyDeleted, actor_snapshot, delete_member, end_session, patient_only_identity,
+)
+from patient_portal.models import (
+    ConsentEvent, ConsentPurpose, DeletionLogEntry, DocumentAcceptance, LegalDocument,
+)
 
 from .views import PhrView
 
@@ -87,6 +102,10 @@ def document_payload(state: svc.DocumentState) -> dict:
 
 
 class ConsentView(PhrView):
+    # Any credential may read the answers; only the member's own login may
+    # record one, since withdrawing the record purpose closes the account.
+    permission_classes = [IsAuthenticated, InteractiveSessionForWrites]
+
     def build(self, person, record, language=svc.DEFAULT_LANGUAGE):
         return {
             'language': language,
@@ -115,8 +134,16 @@ class ConsentView(PhrView):
         if not email:
             return Response({'detail': svc.NO_EMAIL}, status=400)
         purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
+        closes_account = False
+        actor = actor_snapshot(request.user)
+        person_id = person.person_id  # the instance loses its pk on delete
         try:
             with transaction.atomic():
+                # Locked before anything is written: a second withdrawal that
+                # arrives while the first deletes the person would otherwise
+                # fail its event insert on the vanished row (500, not 404).
+                if not Person.objects.select_for_update().filter(pk=person_id).exists():
+                    raise AlreadyDeleted(f'Person {person_id} is already deleted.')
                 for item in decisions:
                     if not isinstance(item, dict):
                         raise ValidationError('Each decision is an object.')
@@ -124,21 +151,41 @@ class ConsentView(PhrView):
                     purpose = purposes.get(key)
                     if purpose is None:
                         raise ValidationError(f'Unknown purpose {key!r}.')
+                    decision = _string(item.get('decision'), 'decision')
                     frequency = item.get('frequency') or ''
                     svc.record_consent(
-                        person, purpose, _string(item.get('decision'), 'decision'),
+                        person, purpose, decision,
                         version=_string(item.get('version'), 'version'), language=language,
                         frequency=frequency if isinstance(frequency, str) else '',
                         recorded_by=request.user, source=ConsentEvent.MEMBER, email=email,
+                    )
+                    closes_account = closes_account or svc.withdrawal_closes_account(key, decision)
+                if closes_account:
+                    # After every decision is recorded: the person must still
+                    # exist for the events, and the ledger keeps them all. A
+                    # staff or provider login is kept; its patient side goes.
+                    identity = patient_only_identity(person)
+                    entry = delete_member(
+                        person, reason=DeletionLogEntry.PERMISSION_WITHDRAWN, identity=identity,
                     )
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)
         except ValidationError as e:
             return Response({'detail': e.messages[0]}, status=400)
+        except AlreadyDeleted:
+            return Response({'detail': 'No record.'}, status=404)
+        if closes_account:
+            end_session(request, actor, person_id, identity)
+            return Response({
+                'account_deleted': True,
+                'detail': 'Your record permission was withdrawn, so your account and all of its data have been deleted.',
+                'deleted_at': entry.deleted_at,
+            })
         return Response(self.build(person, record, language))
 
 
 class ConsentDocumentsView(PhrView):
+    permission_classes = [IsAuthenticated, InteractiveSessionForWrites]
     http_method_names = ['post', 'head', 'options']
 
     def post(self, request):

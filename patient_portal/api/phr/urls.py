@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .account import AccountView
 from .consent import ConsentDocumentsView, ConsentHistoryView, ConsentView
 from .entries import (
     ConditionEntryView,
@@ -70,6 +71,8 @@ urlpatterns = [
     path('whats-new/', WhatsNewView.as_view(), name='phr-whats-new'),
     path('imaging/', ImagingView.as_view(), name='phr-imaging'),
     path('outcomes/', OutcomesView.as_view(), name='phr-outcomes'),
+    # Closing the account (docs/account-deletion.md).
+    path('account/', AccountView.as_view(), name='phr-account'),
     # The member's own record to keep: ?format=fhir or ?format=pdf.
     path('record/export/', RecordExportView.as_view(), name='phr-record-export'),
     # Consent model v2: the member's permissions, preferences and documents.

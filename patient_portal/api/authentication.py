@@ -168,6 +168,12 @@ class PartnerAuthentication(BaseAuthentication):
     def _get_or_create_identity(claims: TokenClaims) -> Identity:
         identity, created = Identity.objects.get_or_create_from_claims(claims)
         if created:
+            # The subject's account was deleted here and the provider's token
+            # (or a refresh of it) is still presented: not a new member.
+            from patient_portal.account_deletion import account_closed_recently
+            if account_closed_recently(claims.issuer, claims.sub):
+                identity.delete()
+                raise AuthenticationFailed("This account was closed.")
             if claims.email and claims.email_verified:
                 identity.email = claims.email
             if claims.name:
