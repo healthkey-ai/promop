@@ -812,8 +812,8 @@ class OmopSnapshot:
     # Rows whose concept is a proposed mapping's (confidence is not null). The
     # lists above hold real rows only, so a provisional value never reaches
     # patient_record (docs/provisional_data_plan.md, invariant 3).
-    # Raw: not read through _read_values_in_source_units (#2249), so a consumer of
-    # these lists must prove the unit itself before trusting a value.
+    # provisional_measurements is read through _read_values_in_source_units like
+    # the real list (#2249).
     provisional_measurements: list = dataclasses.field(default_factory=list)
     provisional_observations: list = dataclasses.field(default_factory=list)
     provisional_conditions: list = dataclasses.field(default_factory=list)
@@ -968,6 +968,9 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     )
     measurements, provisional_measurements = _split_provisional(measurements)
     _read_values_in_source_units(person, measurements)
+    # Provisional rows are not unit-converted on write, but read them the same
+    # way, so a consumer never has to prove the unit itself (#2249).
+    _read_values_in_source_units(person, provisional_measurements)
     observations = list(
         Observation.objects
         .filter(person=person, is_erroneous=False)

@@ -6347,6 +6347,8 @@ def resolve_run_status(request: Request, run_id) -> Response:
         'done': run.done,
         'resolved': run.resolved,
         'created': run.created,
+        'provisional': run.provisional,
+        'reverted': run.reverted,
         'skipped': run.skipped,
         'already_resolved': run.already_resolved,
         'errors': run.errors,

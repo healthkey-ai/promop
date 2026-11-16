@@ -194,10 +194,14 @@ are not. What the code does, where the plan left a choice:
   (`annotate_context`); and the diagnosis context reader (`condition_contexts`),
   matching `medication_contexts`. `_lookup_genomics` reads the snapshot, which
   is real-only already.
-- **Not yet:** `code-mappings/lookup/` and the ETL (phase 2), FHIR sync
-  (#2581), and reading `snapshot.provisional_measurements` through
-  `_read_values_in_source_units` (they are raw today; the provisional pass in
-  phase 1c is their first consumer).
+- **Bulk resolve totals** count the new results: `SourceCodeResolveRun` has
+  `provisional` and `reverted` columns (migration 0344), the run-status
+  endpoint returns them, and the Patients dialog summary shows them.
+- **`snapshot.provisional_measurements`** is read through
+  `_read_values_in_source_units` like the real list, so the provisional pass
+  (phase 1c) never has to prove a unit itself.
+- **Not yet:** `code-mappings/lookup/` and the ETL (phase 2), and FHIR sync
+  (#2581).
 
 ## Derivation
 

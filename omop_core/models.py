@@ -5695,6 +5695,10 @@ class SourceCodeResolveRun(models.Model):
     skipped = models.IntegerField(default=0)
     already_resolved = models.IntegerField(default=0)
     created = models.IntegerField(default=0)
+    # Provisional data (#2530): rows written, or rewritten, from a proposed
+    # mapping, and provisional rows sent back to unresolved.
+    provisional = models.IntegerField(default=0)
+    reverted = models.IntegerField(default=0)
     errors = models.IntegerField(default=0)
     error_detail = models.JSONField(default=list, blank=True)
     code_details = models.JSONField(default=list, blank=True)
