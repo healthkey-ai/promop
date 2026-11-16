@@ -455,6 +455,27 @@ class PatientSelfScopePermission(BasePermission):
         return obj_person_id == patient_person.person_id
 
 
+class NotPatientRolePermission(BasePermission):
+    """Refuses a patient's own session (403); everyone else is for other checks.
+
+    The provisional record is a clinician's view: a proposed value is a guess a
+    patient would read as a finding (docs/provisional_data_plan.md, open
+    decision 3). A service token and staff pass; a clinician who is also
+    someone's patient passes, because ``patient_person_for`` is empty for an
+    identity holding a provider grant.
+    """
+
+    message = 'The provisional record is not available to the patient role.'
+
+    def has_permission(self, request, view):
+        if is_service_token(request):
+            return True
+        if getattr(request.user, 'is_staff', False):
+            return True
+        from patient_portal.services import patient_person_for
+        return patient_person_for(request.user) is None
+
+
 class PatientDeletePermission(ScopedTokenPermission):
     """ScopedTokenPermission that also allows DELETE for patient account deletion.
 

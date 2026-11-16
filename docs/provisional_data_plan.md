@@ -173,6 +173,49 @@ write-time conversion is an approved mapping's privilege (#2157).
   runs afterwards rebuilds them. A person's delete cascades.
 - Tests: `tests/test_patient_record_provisional_tables.py`.
 
+### As built in phase 1c (#2531)
+
+All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provisional_record.py`.
+
+- **The pass** runs at the end of `refresh_patient_record`, in its transaction,
+  once the real record is saved. Failures are logged and leave the provisional
+  pair as it was; the approved record is never lost to it. Every refresh writes
+  both rows (full, not sparse), the provisional one a copy of the real record
+  with the overlay, the confidence one all null unless a value is provisional.
+- **Readers run:** labs and blood counts (`_get_laboratory_data`), assertions
+  (`_get_assertion_data`) and the curated field mappings
+  (`curated_values_from_snapshot`), in the real refresh's order, over a snapshot
+  of the person's provisional rows only (`OmopSnapshot` rebuilt with
+  `dataclasses.replace`, with its own per-refresh caches). Nothing else runs;
+  computed fields (BMI, scores) are not recomputed from a provisional input.
+- **What is kept:** a value only for a field the real record leaves empty
+  (`_is_empty`), that is not a pending user edit (the set before the refresh and
+  the one after, so an explicit clear stays clear), and that has a confidence
+  column. A companion the reader sets with it (`hemoglobin_level` and its
+  `_units` beside `hemoglobin_g_dl`) is kept at the same confidence.
+- **Confidence per field** is the lowest among the source-code groups that
+  decide it: the pass re-reads the provisional rows once per (table, source
+  value) group with that group removed, and a field whose value changes is that
+  group's. A field no single group decides (several codes agree) takes the
+  lowest confidence of all. Past `MAX_ATTRIBUTION_GROUPS` (40) groups every kept
+  field takes the lowest of all, which never overstates and bounds the cost.
+- **PATCH mirror** (`mirror_user_edit`, at the end of `_patch_record`): edited
+  fields take the record's value in the provisional row and lose their
+  confidence; every other field that is approved in the provisional row follows
+  the record too, so a computed field moves with an edit; a field still waiting
+  on a proposal keeps it. A person with no provisional row has nothing to mirror.
+- **Endpoint** `GET /api/v1/patient-records-provisional/{person_id}/` and the
+  list, read-only, v1 only. Tenancy is `PatientRecordViewSet.get_queryset` and
+  its person lookup; the body is `PatientRecordSerializer` run over the real
+  record with the provisional columns laid over it, so the shape is the real
+  one's plus `confidence` (only fields that have a number). The patient role is
+  refused (`NotPatientRolePermission`: 403, for the list too); a person not yet
+  derived is served the real record with `confidence: {}`; with the switch off
+  the resource is 404.
+- **Not done:** the frontend (badge, show-provisional toggle, the untouched-form
+  PATCH test), and the per-organization/domain floor. HealthTree's
+  `patient_record` row count is still unread, so full-versus-sparse stays open.
+
 ### As built in phase 1b (#2530)
 
 Generate OMOP is the writer built so far; the lookup contract and FHIR sync

@@ -22,7 +22,7 @@ from .views import (
     SurveyViewSet, PatientSurveyResponseViewSet,
     PrologSurveyListView,
     CurrentUserViewSet, PatientRecordViewSet,
-    PatientRecordV1ViewSet, login_view, logout_view, auth_test,
+    PatientRecordV1ViewSet, PatientRecordProvisionalViewSet, login_view, logout_view, auth_test,
     change_password,
     PersonViewSet,
     derivation_status,
@@ -97,6 +97,10 @@ router.register(r'service-applications', ServiceApplicationViewSet, basename='se
 
 router.register(r'user', CurrentUserViewSet, basename='v1-user')
 router.register(r'patient-records', PatientRecordV1ViewSet, basename='v1-patient-records')
+# The provisional picture of the same records (#2531); read-only, off unless
+# PROVISIONAL_DATA_ENABLED.
+router.register(r'patient-records-provisional', PatientRecordProvisionalViewSet,
+                basename='v1-patient-records-provisional')
 router.register(r'persons', PersonViewSet, basename='v1-persons')
 router.register(r'conditions', V1ConditionOccurrenceViewSet, basename='v1-conditions')
 router.register(r'drug-exposures', V1DrugExposureViewSet, basename='v1-drug-exposures')

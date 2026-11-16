@@ -15,6 +15,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
+from django.conf import settings
 from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
@@ -780,6 +781,30 @@ def _split_provisional(rows) -> tuple[list, list]:
     return real, provisional
 
 
+def _code_source_indexes(measurements, observations):
+    """(meas_by_code, meas_by_source, obs_by_code, obs_by_source) for two row lists."""
+    meas_by_code: dict[str, list] = defaultdict(list)
+    meas_by_source: dict[str, list] = defaultdict(list)
+    for m in measurements:
+        cc = getattr(m.measurement_concept, 'concept_code', None)
+        if cc:
+            meas_by_code[cc].append(m)
+        sv = m.measurement_source_value
+        if sv:
+            meas_by_source[sv].append(m)
+
+    obs_by_code: dict[str, list] = defaultdict(list)
+    obs_by_source: dict[str, list] = defaultdict(list)
+    for o in observations:
+        cc = getattr(o.observation_concept, 'concept_code', None)
+        if cc:
+            obs_by_code[cc].append(o)
+        sv = o.observation_source_value
+        if sv:
+            obs_by_source[sv].append(o)
+    return dict(meas_by_code), dict(meas_by_source), dict(obs_by_code), dict(obs_by_source)
+
+
 def _build_snapshot(person: Person) -> OmopSnapshot:
     """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes.
 
@@ -854,25 +879,8 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     observations = without_cleared_history(observations, 'observation')
 
     # Build code/source indexes
-    meas_by_code: dict[str, list] = defaultdict(list)
-    meas_by_source: dict[str, list] = defaultdict(list)
-    for m in measurements:
-        cc = getattr(m.measurement_concept, 'concept_code', None)
-        if cc:
-            meas_by_code[cc].append(m)
-        sv = m.measurement_source_value
-        if sv:
-            meas_by_source[sv].append(m)
-
-    obs_by_code: dict[str, list] = defaultdict(list)
-    obs_by_source: dict[str, list] = defaultdict(list)
-    for o in observations:
-        cc = getattr(o.observation_concept, 'concept_code', None)
-        if cc:
-            obs_by_code[cc].append(o)
-        sv = o.observation_source_value
-        if sv:
-            obs_by_source[sv].append(o)
+    meas_by_code, meas_by_source, obs_by_code, obs_by_source = _code_source_indexes(
+        measurements, observations)
 
     return OmopSnapshot(
         measurements=measurements,
@@ -886,10 +894,10 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         cytogenetic_observations=cytogenetic_observations,
         breast_measurements=breast_measurements,
         clinical_input_observations=clinical_input_observations,
-        meas_by_code=dict(meas_by_code),
-        obs_by_code=dict(obs_by_code),
-        meas_by_source=dict(meas_by_source),
-        obs_by_source=dict(obs_by_source),
+        meas_by_code=meas_by_code,
+        obs_by_code=obs_by_code,
+        meas_by_source=meas_by_source,
+        obs_by_source=obs_by_source,
         provisional_measurements=provisional_measurements,
         provisional_observations=provisional_observations,
         provisional_conditions=provisional_conditions,
@@ -1021,6 +1029,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         # Pre-fetch all OMOP rows once (~6 queries) instead of per-section.
         snapshot = _build_snapshot(person)
+        full_snapshot = snapshot   # keeps the provisional_* lists for the provisional pass
         from omop_core.services.cancer_details import primary_snapshot
         snapshot, linked_cancer_values = primary_snapshot(person, snapshot)
 
@@ -1123,10 +1132,16 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
-        return recompute_patient_record_fields(
+        record = recompute_patient_record_fields(
             patient_info,
             changed_fields=user_edited & {'flipi_score_options', 'gelf_criteria_options'},
         )
+        if settings.PROVISIONAL_DATA_ENABLED:
+            # The second, provisional picture, in the same transaction so it is
+            # as fresh as the record it overlays (docs/provisional_data_plan.md).
+            from omop_core.services.provisional_record import write_provisional_pair
+            write_provisional_pair(person, full_snapshot, record, user_edited)
+        return record
 
 
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:

@@ -7,7 +7,8 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from django.core.exceptions import ObjectDoesNotExist
 from rest_framework.pagination import CursorPagination, PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -33,7 +34,7 @@ from omop_core.services.source_fhir_context import based_on_labels as _source_ba
 from omop_core.services.provisional import is_real_row as _is_real_row
 from omop_core.models import (
     Organization,
-    Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
+    Person, PatientRecord, PatientRecordProvisional, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     SourceCodeConceptMapping, SourceVocabulary, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
@@ -148,7 +149,8 @@ from patient_portal.api.bulk_upload import (
 from .permissions import (
     EtlDeletePermission, EtlPatientCrudPermission, EtlWritePermission,
     PatientCrudPermission, GenomicsCrudPermission,
-    PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
+    NotPatientRolePermission, PatientDeletePermission, PatientSelfScopePermission,
+    ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
 )
@@ -1482,6 +1484,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
+
+            # A direct edit is approved: the provisional picture takes it too,
+            # and drops any proposal's confidence on the edited fields.
+            if direct_fields:
+                from omop_core.services.provisional_record import mirror_user_edit
+                mirror_user_edit(patient_info, direct_fields)
 
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
@@ -6337,6 +6345,76 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             {'run_id': str(run.id), 'total': run.total},
             status=status.HTTP_202_ACCEPTED,
         )
+
+
+class PatientRecordProvisionalViewSet(viewsets.ReadOnlyModelViewSet):
+    """The provisional picture of a patient record (phase 1c, #2531).
+
+    The real record's every field, with a proposal's value where only a
+    proposal answers, plus ``confidence``: a percentage for each such field
+    and nothing for an approved one. Same tenancy as ``patient-records``; the
+    patient role is refused. A person not yet derived is served the real
+    record with an empty ``confidence``. Off, with ``PROVISIONAL_DATA_ENABLED``,
+    it does not exist.
+    """
+    serializer_class = PatientRecordSerializer
+    permission_classes = [ScopedTokenPermission, NotPatientRolePermission, PatientSelfScopePermission]
+    pagination_class = PatientRecordPagination
+
+    # Tenancy and the person lookup are the real resource's own.
+    get_queryset = PatientRecordViewSet.get_queryset
+    _resolve_patient_with_auth = PatientRecordViewSet._resolve_patient_with_auth
+
+    def initial(self, request, *args, **kwargs):
+        if not settings.PROVISIONAL_DATA_ENABLED:
+            raise NotFound('Provisional data is not enabled.')
+        super().initial(request, *args, **kwargs)
+
+    @staticmethod
+    def _optional(person, relation):
+        try:
+            return getattr(person, relation)
+        except ObjectDoesNotExist:
+            return None
+
+    def _body(self, request, record, provisional, confidence):
+        import copy
+        from omop_core.models import PatientRecordConfidence
+        view = copy.copy(record)
+        if provisional is not None:
+            for field in PatientRecordProvisional._meta.concrete_fields:
+                if field.name != 'person':
+                    setattr(view, field.attname, getattr(provisional, field.attname))
+        marks = {}
+        if confidence is not None:
+            for field in PatientRecordConfidence._meta.concrete_fields:
+                if field.name != 'person' and getattr(confidence, field.name) is not None:
+                    marks[field.name] = getattr(confidence, field.name)
+        return {**PatientRecordSerializer(view, context={'request': request}).data, 'confidence': marks}
+
+    def retrieve(self, request, pk=None):
+        person, record, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+        return Response(self._body(
+            request, record,
+            self._optional(person, 'patient_record_provisional'),
+            self._optional(person, 'patient_record_confidence'),
+        ))
+
+    def list(self, request):
+        queryset = self.filter_queryset(self.get_queryset()).select_related(
+            'person__patient_record_provisional', 'person__patient_record_confidence',
+        ).order_by('person_id')
+        page = self.paginate_queryset(queryset)
+        rows = [self._body(
+            request, record,
+            self._optional(record.person, 'patient_record_provisional'),
+            self._optional(record.person, 'patient_record_confidence'),
+        ) for record in (page if page is not None else queryset)]
+        if page is not None:
+            return self.get_paginated_response(rows)
+        return Response(rows)
 
 
 @api_view(['GET'])
