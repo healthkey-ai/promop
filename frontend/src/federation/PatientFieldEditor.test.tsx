@@ -1026,6 +1026,37 @@ describe('single unit display (#5704)', () => {
     expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
   });
 
+  it('aligns the unit selector with its input, not the field label (#2609)', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Weight',
+        unit: 'kg', unit_options: unitOptions,
+      },
+      weight_units: {
+        writable: true, target: 'patient_record', control: 'select',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 80, weight_units: 'kg' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    const unit = screen.getByLabelText('Unit for Weight (kg)');
+    const value = screen.getByDisplayValue('80');
+    // Bottom-aligned columns plus the input's own height: the select's centre
+    // sits on the input's, instead of on the label row above it. Deriving the
+    // height keeps this honest if the shared Input changes.
+    const height = [...value.classList].find((name) => /^h-\d+$/.test(name));
+    expect(height).toBeDefined();
+    expect(unit.closest('label')?.parentElement).toHaveClass('items-end');
+    expect(unit).toHaveClass(height!);
+    // The row's number inputs keep no browser spinners (both rules, not just
+    // the selector prefix).
+    const row = value.closest('[data-field]');
+    expect(row?.className).toContain('appearance-none');
+    expect(row?.className).toContain('::-webkit-inner-spin-button');
+    expect(row?.className).toContain('::-webkit-outer-spin-button');
+  });
+
   it('never prints a {placeholder} unit beside the value', async () => {
     const { store } = await setup({
       ecog_performance_status: {

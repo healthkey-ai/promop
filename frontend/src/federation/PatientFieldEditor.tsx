@@ -33,6 +33,13 @@ interface Props {
   controlType?: 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'date' | 'email';
 }
 
+/** A value/unit pair is one clinical fact, so the two controls share one height
+ * and baseline (#2609). The select carried its own padding against the input's
+ * fixed height; the spinners are removed so the number reads as text. */
+const ROW_CLASS = 'space-y-1 [&_input[type=number]]:[appearance:textfield] '
+  + '[&_input[type=number]::-webkit-inner-spin-button]:appearance-none '
+  + '[&_input[type=number]::-webkit-outer-spin-button]:appearance-none';
+
 /** Today in the browser's zone, not UTC: a result date is a local calendar day. */
 function todayIso() {
   const now = new Date();
@@ -449,7 +456,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     triState={field.tri_state === true} answerLabels={field.answer_labels}
     precision={precision}
     onChange={onChangeValue} />;
-  return <div className="space-y-1" data-field={canonical}>
+  return <div className={ROW_CLASS} data-field={canonical}>
     {inputs.length && !inputsUnavailable && editPath ? <>
       {!compact && <div className="text-sm font-medium">{label}</div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
@@ -485,7 +492,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </Dialog.Root>
       </div>
     </> : writable ? <>
-      {showUnitPicker ? <div className="flex items-start gap-2">
+      {showUnitPicker ? <div className="flex items-end gap-2">
         <div className="min-w-0 flex-1">{controlNode}</div>
         <label className="flex shrink-0 flex-col gap-1 text-xs text-muted-foreground">
           <span className="sr-only">Unit for {label}</span>
@@ -511,7 +518,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
                 setUnitDraft(null);
               }
             }}
-            className="rounded-md border border-input px-2 py-1 text-sm">
+            className="h-9 rounded-md border border-input px-2 text-sm">
             {unitOptions.map((option) => (
               <option key={option.value} value={option.value}>{option.label ?? option.value}</option>
             ))}
