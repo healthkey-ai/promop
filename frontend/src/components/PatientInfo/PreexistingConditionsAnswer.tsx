@@ -22,6 +22,12 @@ export default function PreexistingConditionsAnswer({
   const [selected, setSelected] = useState<string[]>(
     Array.isArray(categories) ? categories.filter((v): v is string => typeof v === 'string') : []);
   const [busy, setBusy] = useState(false);
+  // The list is a multi-value choice, not an always-open checklist: the row
+  // shows what is selected and opens the categories on request (#2607). A
+  // stored answer starts open so the record never hides what it holds.
+  const [chooserOpen, setChooserOpen] = useState(
+    Array.isArray(categories) && categories.length > 0,
+  );
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   // A saved answer comes back as new props. Re-seed the selection from them
@@ -62,6 +68,9 @@ export default function PreexistingConditionsAnswer({
   const hasCategories = answerCategories != null && JSON.stringify(answerCategories) !== '[]';
   const malformed = answerCategories != null && !Array.isArray(answerCategories);
   const unknownCodes = selected.filter(code => !options.some(option => option.value === code));
+  const selectedLabels = options
+    .filter(option => selected.includes(option.value))
+    .map(option => option.label ?? option.value);
 
   const save = async (action: 'confirm_none' | 'withdraw' | 'set_categories') => {
     setBusy(true);
@@ -101,22 +110,37 @@ export default function PreexistingConditionsAnswer({
     </p>
     {malformed && <p role="alert">Categories need review. Confirmation is unavailable.</p>}
     {!malformed && <>
-      {loading ? <p>Loading categories…</p> : options.map(option => <label
-        key={option.value} className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={selected.includes(option.value)} onChange={e => {
-          setSelected(e.target.checked ? [...selected, option.value]
-            : selected.filter(code => code !== option.value));
-        }} />{option.label}
-      </label>)}
+      <button type="button" aria-expanded={chooserOpen}
+        className="inline-flex items-center gap-2 rounded-md border border-input px-3 py-1.5 text-sm"
+        onClick={() => setChooserOpen((open) => !open)}>
+        {selected.length
+          ? `Choose conditions (${selected.length} selected)`
+          : 'Choose conditions'}
+        <span aria-hidden>{chooserOpen ? '▴' : '▾'}</span>
+      </button>
+      {selectedLabels.length > 0 && <p className="text-sm">Selected: {selectedLabels.join(', ')}</p>}
+      {chooserOpen && <div role="group" aria-label="Pre-existing condition categories"
+        className="space-y-1 rounded-md border border-input p-3">
+        {loading ? <p>Loading categories…</p> : options.map(option => <label
+          key={option.value} className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={selected.includes(option.value)} onChange={e => {
+            setSelected(e.target.checked ? [...selected, option.value]
+              : selected.filter(code => code !== option.value));
+          }} />{option.label}
+        </label>)}
+      </div>}
       {unknownCodes.length > 0 && <p role="alert">Some recorded category codes need review.</p>}
-      <button type="button" className="text-sm underline" disabled={loading || !options.length || unknownCodes.length > 0}
+      <button type="button" className="rounded-md border border-input px-3 py-1.5 text-sm disabled:opacity-50"
+        disabled={loading || !options.length || unknownCodes.length > 0}
         onClick={() => save('set_categories')}>Save categories and withdraw “none”</button>
     </>}
     <p className="text-xs text-muted-foreground">These answers save only when you press a button, not through autosave.</p>
-    <div className="flex flex-wrap gap-4">
-      <button type="button" className="text-sm underline" disabled={hasCategories || selected.length > 0}
+    <div className="flex flex-wrap gap-2">
+      <button type="button" className="rounded-md border border-input px-3 py-1.5 text-sm disabled:opacity-50"
+        disabled={hasCategories || selected.length > 0}
         onClick={() => save('confirm_none')}>Confirm no pre-existing conditions</button>
-      <button type="button" className="text-sm underline" onClick={() => save('withdraw')}>Withdraw answer</button>
+      <button type="button" className="rounded-md border border-input px-3 py-1.5 text-sm"
+        onClick={() => save('withdraw')}>Withdraw answer</button>
     </div>
     {busy && <p role="status">Saving answer…</p>}
     {message && <p role="status">{message}</p>}

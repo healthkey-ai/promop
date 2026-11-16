@@ -16,6 +16,11 @@ vi.mock('@/hooks/useVocabulary', () => ({
 
 beforeEach(() => { post.mockReset(); get.mockReset(); });
 
+/** The categories live behind the "Choose conditions" disclosure (#2607). */
+function openChooser() {
+  fireEvent.click(screen.getByRole('button', { name: /Choose conditions/ }));
+}
+
 function editor(flag: boolean | null = true, categories: string[] = [], readOnly = false) {
   const saved = vi.fn();
   render(<PreexistingConditionsAnswer personId={42} flag={flag} categories={categories}
@@ -48,6 +53,7 @@ describe('explicit pre-existing-conditions answers', () => {
   it('does not confirm on mount or while selecting categories', () => {
     editor();
     expect(post).not.toHaveBeenCalled();
+    openChooser();
     fireEvent.click(screen.getByLabelText('Infections'));
     expect(post).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' })).toBeDisabled();
@@ -73,6 +79,7 @@ describe('explicit pre-existing-conditions answers', () => {
   it('saves category codes separately from autosave and withdraws none', async () => {
     post.mockResolvedValue({ data: { no_pre_existing_conditions: null, preexisting_conditions: ['infections'] } });
     editor();
+    openChooser();
     fireEvent.click(screen.getByLabelText('Infections'));
     fireEvent.click(screen.getByRole('button', { name: /Save categories/ }));
     await waitFor(() => expect(post).toHaveBeenCalled());
@@ -91,6 +98,28 @@ describe('explicit pre-existing-conditions answers', () => {
     expect(post.mock.calls[0][1]).not.toHaveProperty('categories');
   });
 
+  it('presents the categories as one control with a selected count (#2607)', () => {
+    editor(null);
+    const open = screen.getByRole('button', { name: 'Choose conditions' });
+    expect(open).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('group', { name: 'Pre-existing condition categories' })).toBeNull();
+
+    openChooser();
+    expect(screen.getByRole('group', { name: 'Pre-existing condition categories' })).toBeVisible();
+    fireEvent.click(screen.getByLabelText('Infections'));
+    expect(screen.getByRole('button', { name: 'Choose conditions (1 selected)' }))
+      .toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Selected: Infections')).toBeVisible();
+  });
+
+  it('starts with the stored categories open and summarised', () => {
+    editor(null, ['infections']);
+    expect(screen.getByRole('button', { name: 'Choose conditions (1 selected)' }))
+      .toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Selected: Infections')).toBeVisible();
+    expect(screen.getByLabelText('Infections')).toBeChecked();
+  });
+
   it('reports conflict without claiming confirmation succeeded', async () => {
     post.mockRejectedValue({ response: { status: 409 } });
     const saved = editor();
@@ -102,6 +131,7 @@ describe('explicit pre-existing-conditions answers', () => {
   it('disables actions for read-only callers', () => {
     editor(true, [], true);
     expect(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' })).toBeDisabled();
+    openChooser();
     expect(screen.getByLabelText('Infections')).toBeDisabled();
   });
 
@@ -139,6 +169,7 @@ describe('after a save the host re-renders with the new answer', () => {
     });
     const view = render(<PreexistingConditionsAnswer {...props} flag={true} categories={[]}
       onSaved={onSaved} />);
+    openChooser();
     fireEvent.click(screen.getByLabelText('Infections'));
     fireEvent.click(screen.getByRole('button', { name: /Save categories/ }));
     expect(await screen.findByText('Answer saved.')).toBeInTheDocument();
