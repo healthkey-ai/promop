@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 import PatientFieldEditor from './PatientFieldEditor';
+import { labelNamesUnit } from './unitPresentation';
 import { PatientFormStore } from './patientFormStore';
 
 async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
@@ -1354,5 +1355,78 @@ describe('a dated scalar clear', () => {
     expect(patch.mock.calls[0][1]).toEqual({
       hemoglobin_level: { value: null, date: '2026-08-01' },
     });
+  });
+});
+
+
+describe('unit presentation (#2610)', () => {
+  it.each([
+    ['Systolic Blood Pressure (mmHg)', 'mm[Hg]', true],
+    ['Heart Rate (bpm)', '/min', true],
+    ['Average Sleep Hours per Night', 'h', true],
+    ['Resting Heart Rate (bpm)', '/min', true],
+    ['Respiratory Rate (breaths/min)', '/min', true],
+    ['Weight', 'kg', false],
+    ['Weight (kg)', 'kg', true],
+    ['Stress Level', 's', false],
+    ['HIV status', 'h', false],
+    ['age', 'y', false],
+  ])('recognises that %s names its unit %s: %s', (label, unit, expected) => {
+    expect(labelNamesUnit(label, unit)).toBe(expected);
+  });
+
+  it('prints a UCUM code as the wording a reader knows', async () => {
+    const { store } = await setup({
+      systolic_blood_pressure: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Systolic blood pressure', unit: 'mm[Hg]',
+        unit_options: [{ value: 'mm[Hg]', label: 'mm[Hg]' }],
+      },
+    }, { systolic_blood_pressure: 120 });
+    render(<PatientFieldEditor store={store} name="systolic_blood_pressure"
+      label="Systolic Blood Pressure (mmHg)" />);
+
+    expect(screen.getByDisplayValue('120')).toBeVisible();
+    expect(screen.queryByText('mm[Hg]')).not.toBeInTheDocument();
+    expect(screen.queryByText('mmHg')).not.toBeInTheDocument();
+  });
+
+  it('does not print a lone "h" when the label already says hours', async () => {
+    const { store } = await setup({
+      sleep_hours_per_night: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Sleep hours per night', unit: 'h',
+        unit_options: [{ value: 'h', label: 'h' }],
+      },
+    }, { sleep_hours_per_night: 7 });
+    render(<PatientFieldEditor store={store} name="sleep_hours_per_night"
+      label="Average Sleep Hours per Night" />);
+
+    expect(screen.getByDisplayValue('7')).toBeVisible();
+    expect(screen.queryByText('h')).not.toBeInTheDocument();
+  });
+
+  it('lets the picker own the unit when the label does not name one', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Weight', unit: 'kg', unit_options: unitOptions,
+      },
+      weight_units: {
+        writable: true, target: 'patient_record', control: 'text',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 80, weight_units: 'kg' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    // The picker owns the unit, so the label's "(kg)" cannot contradict "lb".
+    expect(screen.getByText('Weight')).toBeVisible();
+    expect(screen.queryByText('Weight (kg)')).toBeNull();
+    expect(screen.getByLabelText('Unit for Weight')).toBeVisible();
+    // No second, static unit beside the picker (the option text is the picker).
+    expect(screen.queryByText('kg', { selector: 'span' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Unit for Weight'), { target: { value: 'lb' } });
+    expect(screen.getByLabelText('Unit for Weight')).toHaveValue('lb');
   });
 });

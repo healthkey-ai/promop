@@ -4,6 +4,7 @@ import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
 import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
+import { displayUnitLabel, labelNamesUnit } from './unitPresentation';
 
 interface Props {
   store: PatientFormStore;
@@ -39,6 +40,7 @@ function todayIso() {
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 10);
 }
+
 
 /** Unit labels accept the same micro spellings as the server's pair reader. */
 function normaliseUnitLabel(value: string): string {
@@ -275,20 +277,33 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       })
     : undefined;
   const storedUnitLabel = matchedUnit
-    ? (matchedUnit.label ?? matchedUnit.value)
+    ? displayUnitLabel(matchedUnit.label ?? matchedUnit.value)
     : undefined;
   const authoritativeUnit = matchedUnit?.value
     ?? (storedUnit || unitOptions[0]?.value || '');
-  const displayUnit = storedUnit
-    ? (storedUnitLabel ?? 'unit unknown')
-    : (unitOptions.length
-      ? (unitOptions[0].label ?? unitOptions[0].value)
-      : field.unit ?? field.projection?.unit);
+  // The unit the reviewed label is about: the field's own, not the one just
+  // chosen. A label naming kg stays a label naming kg when the reader switches
+  // to lb; the picker is what moves (#2610).
+  const unitInPlay = field.unit ?? field.projection?.unit ?? unitOptions[0]?.value;
+  const displayUnit = displayUnitLabel(
+    storedUnit ? (storedUnitLabel ?? 'unit unknown')
+      : (unitOptions.length
+        ? (unitOptions[0].label ?? unitOptions[0].value)
+        : field.unit ?? field.projection?.unit),
+  );
   const chosenUnit = dated
     ? (unitDraft ?? authoritativeUnit)
     : (value == null || value === '')
       ? (unitDraft ?? authoritativeUnit) : authoritativeUnit;
   const showUnitPicker = writable && Boolean(unitFieldName) && unitOptions.length > 1;
+  // A label that names the unit and a picker that names it too would disagree as
+  // soon as another unit is chosen ("Weight (kg)" with lb selected, #2610). With
+  // a picker the control owns the unit, so the label's trailing parenthetical is
+  // dropped here; the reviewed label stays intact for the report and the tab.
+  const shownLabel = showUnitPicker && !labelIncludesUnit
+    && labelNamesUnit(label, unitInPlay)
+    ? (label.replace(/\s*\([^)]*\)\s*$/, '').trim() || label)
+    : label;
   const pairError = state.errors[canonical]
     ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
   const pairPending = canonical in state.pending
@@ -434,7 +449,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     }
     store.enqueue(name, next);
   };
-  const controlNode = <Field label={compact ? '' : label} ariaLabel={label}
+  const controlNode = <Field label={compact ? '' : shownLabel} ariaLabel={shownLabel}
     name={canonical} type={control}
     value={dated ? datedValue : value} options={choices}
     triState={field.tri_state === true} answerLabels={field.answer_labels}
@@ -442,7 +457,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     onChange={onChangeValue} />;
   return <div className="space-y-1" data-field={canonical}>
     {inputs.length && !inputsUnavailable && editPath ? <>
-      {!compact && <div className="text-sm font-medium">{label}</div>}
+      {!compact && <div className="text-sm font-medium">{shownLabel}</div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
         <Dialog.Root open={open} onOpenChange={setOpen}>
           {/* A pencil, not an "Edit inputs" label: the row already shows the
@@ -450,7 +465,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
               on narrow screens. The accessible name stays explicit. */}
           <Dialog.Trigger asChild><button type="button"
             className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
-            aria-label={`Edit ${label} inputs`} title={`Edit ${label} inputs`}>
+            aria-label={`Edit ${shownLabel} inputs`} title={`Edit ${shownLabel} inputs`}>
             <Pencil className="h-4 w-4" strokeWidth={1.67} />
           </button></Dialog.Trigger>
           {/* Centred by auto margins, not translate utilities: a Tailwind 3
@@ -458,7 +473,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
               both moves apply (see ui-labs/dialog.tsx). */}
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed inset-0 z-[61] m-auto h-fit max-h-[85vh] w-[min(32rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
-              <Dialog.Title className="font-semibold">{label}</Dialog.Title>
+              <Dialog.Title className="font-semibold">{shownLabel}</Dialog.Title>
               <Dialog.Description className="text-sm text-muted-foreground">{readOnly || !state.writable
                 ? 'These inputs are read-only in this view.'
                 : !inputGraph.editable
@@ -479,8 +494,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       {showUnitPicker ? <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">{controlNode}</div>
         <label className="flex shrink-0 flex-col gap-1 text-xs text-muted-foreground">
-          <span className="sr-only">Unit for {label}</span>
-          <select aria-label={`Unit for ${label}`} value={chosenUnit}
+          <span className="sr-only">Unit for {shownLabel}</span>
+          <select aria-label={`Unit for ${shownLabel}`} value={chosenUnit}
             onChange={(event) => {
               const nextUnit = event.target.value;
               setUnitDraft(nextUnit);
@@ -504,7 +519,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             }}
             className="rounded-md border border-input px-2 py-1 text-sm">
             {unitOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label ?? option.value}</option>
+              <option key={option.value} value={option.value}>
+                {displayUnitLabel(option.label ?? option.value)}
+              </option>
             ))}
           </select>
         </label>
@@ -541,7 +558,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
-    {!showUnitPicker && !labelIncludesUnit && displayUnit
+    {!showUnitPicker && !labelIncludesUnit && !labelNamesUnit(label, unitInPlay)
+      && displayUnit
       && <span className="text-xs text-muted-foreground">{displayUnit}</span>}
     {writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
