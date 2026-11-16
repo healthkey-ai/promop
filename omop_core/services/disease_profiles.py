@@ -17,10 +17,13 @@ decides what a tab renders or what a save accepts; those are #2332 and #2333.
 """
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
-from django.db import transaction
+from django.db import connection, transaction
+
+logger = logging.getLogger(__name__)
 
 SCOPE_BASE = 'base'
 SCOPE_DISEASE = 'disease'
@@ -29,9 +32,12 @@ OTHER = 'Other'
 SEED_PROVENANCE = 'disease-tab-seed v1'
 
 # The fields DiseaseTab.tsx renders for each disease, section by section: the
-# extensions MM, BC, FL, MCL and CLL start with. tests/test_disease_profiles.py
-# fails when this and the tab drift apart. It is a seed, not a reader: once
-# seeded, the rows are what every reader uses and a curator may change them.
+# extensions MM, BC, FL, MCL and CLL start with. Two tests hold it in place:
+# tests/test_disease_relevance.py fails when it and the tab drift apart, and
+# tests/test_disease_profiles.py fails when it and the rows the migrations
+# write drift apart, so a field added here needs a data migration too. It is
+# a seed, not a reader: once seeded, the rows are what every reader uses and
+# a curator may change them.
 SEED_DISEASE_FIELDS: dict[str, frozenset[str]] = {
     'BC': frozenset({
         'histologic_type', 'tumor_grade', 'menopausal_status', 'tumor_stage', 'nodes_stage',
@@ -114,15 +120,6 @@ def extension_fields(code: str) -> set[str]:
                .values_list('field_name', flat=True))
 
 
-def extension_sizes() -> dict[str, int]:
-    """How many fields each disease's extension holds; a category with none is absent."""
-    from django.db.models import Count
-    from omop_core.models import FieldDiseaseMembership
-
-    return dict(FieldDiseaseMembership.objects.values_list('disease')
-                .annotate(n=Count('id')).values_list('disease', 'n'))
-
-
 def scope_of(diseases: Iterable[str]) -> str:
     return SCOPE_DISEASE if diseases else SCOPE_BASE
 
@@ -136,6 +133,45 @@ def in_profile(field_diseases: Iterable[str], profile: Iterable[str]) -> bool:
     """
     field_diseases = set(field_diseases)
     return not field_diseases or bool(field_diseases & set(profile))
+
+
+def field_names() -> set[str]:
+    """Every name a membership may be keyed by: a column, a genomics component, a created field."""
+    from omop_core.models import CustomPatientField, PatientRecord
+    from omop_core.services.genomics_components import components
+
+    names = {field.name for field in PatientRecord._meta.get_fields() if getattr(field, 'concrete', False)}
+    names |= {'genetic_mutations.' + attribute['key'] for attribute in components()}
+    return names | set(CustomPatientField.objects.values_list('field_name', flat=True))
+
+
+def resolver() -> Callable[[object], str | None]:
+    """A function from a code or a disease name to its Disease Category code.
+
+    The categories are read once, so resolving a batch costs no query per
+    value for a code. A code matches in any case; a name resolves through
+    ``disease_code`` and then ``DiseaseCategoryMapping``, ``Other`` included.
+    Anything else is ``None``.
+    """
+    from omop_core.models import DiseaseCategoryMapping
+    from omop_core.services.genomics_catalog import disease_code
+
+    by_lower = {code.lower(): code for code in category_codes()}
+    known = set(by_lower.values())
+
+    def resolve(value) -> str | None:
+        text = str(value or '').strip()
+        if not text:
+            return None
+        code = by_lower.get(text.lower()) or disease_code(text)
+        if code is None:
+            # disease_code leaves a name mapped to Other unresolved; its
+            # profile is the base record, which is an answer, not an error.
+            code = (DiseaseCategoryMapping.objects.filter(disease_name__iexact=text)
+                    .values_list('category', flat=True).first())
+        return code if code in known else None
+
+    return resolve
 
 
 def clean_codes(codes: Iterable[str]) -> list[str]:
@@ -166,7 +202,11 @@ def set_field_diseases(field_name: str, codes: Iterable[str], *, user=None,
     A membership edit and nothing else: no mapping, placement or stored value
     changes, a created field's key in ``custom_fields`` included. Rows the new
     scope keeps are left as they are, so their provenance still names whoever
-    added them.
+    added them. A removed row is gone, so the change itself is logged with
+    the scope before and after and who made it.
+
+    Edits to one field are serialised: two saves read-then-write the same
+    rows, and without the lock they would leave the union of both scopes.
     """
     from omop_core.models import FieldDiseaseMembership
     from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, user_provenance
@@ -174,59 +214,66 @@ def set_field_diseases(field_name: str, codes: Iterable[str], *, user=None,
     wanted = clean_codes(codes)
     label = provenance or (user_provenance(user) if user is not None else CURATOR_PROVENANCE)
     with transaction.atomic():
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT pg_advisory_xact_lock(hashtext(%s))',
+                               [f'field_disease_membership:{field_name}'])
         rows = FieldDiseaseMembership.objects.filter(field_name=field_name)
+        before = sorted(rows.values_list('disease', flat=True))
+        if before == wanted:
+            return wanted
         rows.exclude(disease__in=wanted).delete()
-        held = set(rows.values_list('disease', flat=True))
         FieldDiseaseMembership.objects.bulk_create([
             FieldDiseaseMembership(field_name=field_name, disease=code, provenance=label,
                                    created_by=user if getattr(user, 'pk', None) else None)
-            for code in wanted if code not in held
+            for code in wanted if code not in before
         ])
+    logger.info('Field scope changed: field=%s before=%s after=%s by=%s',
+                field_name, before, wanted, getattr(user, 'pk', None) or label)
     return wanted
 
 
-def seed(membership_model=None, category_model=None) -> int:
-    """Write the known extensions; additive, so a replay changes nothing.
+def seed() -> int:
+    """Write the known extensions, as the migrations do on a deployed instance.
 
-    A row a curator removed is not a row that exists, so a replay would put it
-    back: the seed runs once, from its migration. A category this instance's
-    curators deleted is skipped rather than given members. The models are
-    parameters so the migration can pass its historical ones.
+    For a database built without migrations (pytest). The migrations carry
+    their own frozen copy of the rows and never import this module; a test
+    holds ``SEED_DISEASE_FIELDS`` equal to what they write. Additive, and a
+    category the instance does not have is skipped rather than given members.
     """
-    from omop_core import models
+    from omop_core.models import DiseaseCategoryChoice, FieldDiseaseMembership
 
-    membership_model = membership_model or models.FieldDiseaseMembership
-    category_model = category_model or models.DiseaseCategoryChoice
-    known = set(category_model.objects.values_list('code', flat=True))
-    held = set(membership_model.objects.values_list('field_name', 'disease'))
+    known = set(DiseaseCategoryChoice.objects.values_list('code', flat=True))
+    held = set(FieldDiseaseMembership.objects.values_list('field_name', 'disease'))
     rows = [
-        membership_model(field_name=field_name, disease=code, provenance=SEED_PROVENANCE)
+        FieldDiseaseMembership(field_name=field_name, disease=code, provenance=SEED_PROVENANCE)
         for code, fields in sorted(SEED_DISEASE_FIELDS.items())
         if not known or code in known
         for field_name in sorted(fields)
         if (field_name, code) not in held
     ]
-    membership_model.objects.bulk_create(rows)
+    FieldDiseaseMembership.objects.bulk_create(rows)
     return len(rows)
 
 
 def profile_codes(values: Iterable[str]) -> set[str]:
     """The diseases a ``?disease=`` filter names, as extension codes.
 
-    Accepts a Disease Category code in any case, or a disease name
-    ``disease_code`` resolves. ``Other`` is accepted and names no extension.
-    Raises ``ScopeError`` for anything else.
+    Accepts a Disease Category code in any case, or a disease name that
+    resolves to one. ``Other``, and a name mapped to it, is accepted and names
+    no extension. Blank values are dropped. Raises ``ScopeError`` for anything
+    else.
     """
-    from omop_core.services.genomics_catalog import disease_code
-
-    known = {code.lower(): code for code in category_codes()}
+    resolve = resolver()
     codes = set()
     for value in values:
         text = str(value or '').strip()
-        code = known.get(text.lower()) or disease_code(text)
-        if code not in known.values():
+        if not text:
+            continue
+        code = resolve(text)
+        if code is None:
             raise ScopeError(f'Unknown disease {text!r}. Choose from the Disease Categories: '
-                             f'{", ".join(sorted(known.values()))}.')
+                             f'{", ".join(sorted(category_codes()))}.')
         codes.add(code)
     return codes - {OTHER}
 
@@ -234,15 +281,15 @@ def profile_codes(values: Iterable[str]) -> set[str]:
 def annotate(descriptor: dict[str, dict]) -> dict[str, dict]:
     """A ``{field: entry}`` descriptor with ``scope`` and ``diseases`` on each entry.
 
-    An alias mirrors its canonical field, so it shares that field's scope.
+    A field's scope is its own rows, here as in the field-mapping descriptors.
     The entries are copied: the builder's own dicts are left as they were.
     """
     scoped = memberships()
-    annotated = {}
-    for field_name, entry in descriptor.items():
-        diseases = scoped.get(field_name) or scoped.get(entry.get('canonical') or '', [])
-        annotated[field_name] = {**entry, 'scope': scope_of(diseases), 'diseases': list(diseases)}
-    return annotated
+    return {
+        field_name: {**entry, 'scope': scope_of(scoped.get(field_name, [])),
+                     'diseases': list(scoped.get(field_name, []))}
+        for field_name, entry in descriptor.items()
+    }
 
 
 def profile(descriptor: dict[str, dict], codes: Iterable[str]) -> dict[str, dict]:

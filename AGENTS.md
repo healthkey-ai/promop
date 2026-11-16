@@ -274,9 +274,11 @@ Category code (#2331), written through
 `omop_core/services/disease_profiles.py::set_field_diseases`, which refuses a
 code that is not a `DiseaseCategoryChoice`. For a new built-in field on the
 disease tab, add it to `SEED_DISEASE_FIELDS` there (a drift test holds that
-list to `DiseaseTab.tsx`) **and** add the rows in a data migration: the seed
-migration has already run on every existing instance. A field a curator
-creates takes `diseases` on `POST /api/v1/custom-patient-fields/` instead.
+list to `DiseaseTab.tsx`) **and** add the rows in a data migration that
+declares its own frozen `FIELD_DISEASE_SEED`, as 0344 does: the seed migration
+has already run on every existing instance, and a second test fails until
+some migration writes the field. A field a curator creates takes `diseases`
+on `POST /api/v1/custom-patient-fields/` instead.
 See [the architecture](docs/field_concept_mapping_architecture.md#whose-record-a-field-is-part-of-fielddiseasemembership).
 
 ### 7. TypeScript Type (`frontend/src/types/patient.ts`)
@@ -1027,6 +1029,10 @@ the same Identity id is a different person on another instance.
 
 The field-mapping tables go through `field_curation_transfer`, whose payload is
 also the `dump_field_curation` fixture format. Keep that payload stable.
+A field's disease scope (`memberships`, #2331) is replaced from the source,
+not merged: a built-in field that is base at the source becomes base here,
+with or without `--prune`. A field created only on this instance keeps its
+scope.
 
 ### copy_patient
 

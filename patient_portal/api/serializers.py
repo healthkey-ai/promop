@@ -1937,10 +1937,11 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             )
             custom_field.full_clean()
             custom_field.save()
-            if diseases:
-                from omop_core.services import disease_profiles
-                disease_profiles.set_field_diseases(
-                    custom_field.field_name, diseases, user=request.user)
+            # Always, so a new field starts from exactly the scope sent: rows
+            # left under this name by a field since removed are not inherited.
+            from omop_core.services import disease_profiles
+            disease_profiles.set_field_diseases(
+                custom_field.field_name, diseases, user=request.user)
             if custom_field.mode == 'computed':
                 field_formula = FieldFormula.objects.create(
                     field_name=custom_field.field_name,

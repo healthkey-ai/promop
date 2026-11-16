@@ -27,18 +27,25 @@ GET /api/v1/relevance/?person_id=123
 }
 ```
 
-`disease` takes `BC`, `FL`, `MM`, `CLL` or `MCL`. Names are accepted too, for
-example `multiple myeloma`. The parameter is repeatable, and the response is
-the union of the sets.
+`disease` takes a Disease Category code other than `Other` (#2331): `BC`,
+`FL`, `MM`, `CLL`, `MCL`, `DLBCL` as seeded, plus any a curator adds on the
+Disease Category Mappings page. A code matches in any case, and names are
+accepted too, for example `multiple myeloma`. The parameter is repeatable,
+and the response is the union of the sets. Before #2331 the list was the
+first five, fixed in code.
 
 A set is built from approved `FieldConceptMapping` rows only. It contains three
 tiers, listed in this order:
 
 | Tier | What |
 |---|---|
-| `disease` | The fields the disease tab shows (`DiseaseTab.tsx`), plus the genomics priority markers the catalog lists for the disease (#1180). |
+| `disease` | The fields in the disease's extension (`FieldDiseaseMembership`, seeded from what the disease tab shows and curated since), plus the genomics priority markers the catalog lists for the disease (#1180). A category with no extension and no markers has none. |
 | `curated` | Concepts a curator accepted from an absent-from-relevance signal (see below). |
-| `common` | Clinical fields every supported cancer shares: general clinical, blood, chemistry and treatment. |
+| `common` | Base-record clinical fields, in no disease's extension: general clinical, blood, chemistry and treatment. |
+
+`version` covers every category's set, so it also changes when a curator adds
+or removes a Disease Category or moves a field between the base record and an
+extension.
 
 A field in the set that has no approved concept yet is listed in
 `unmapped_fields`. This is how much curation is still to do (#1611, #1076), not
@@ -80,8 +87,11 @@ patient's diseases it belongs to. This is the decision #1942 asked for. It does
 not depend on per-cancer stage and markers (#1858), which concern how the
 record is stored, not what is relevant.
 
-If the patient has no supported cancer, `diseases` is `[]` and `concepts` is
-`[]`. The extractor then extracts everything without emphasis.
+If the record names no Disease Category but `Other`, `diseases` is `[]` and
+`concepts` is `[]`. The extractor then extracts everything without emphasis.
+A patient whose disease falls in a category with no extension yet (`DLBCL` at
+the time of writing) gets that category's set: the common tier, its markers
+and its curated concepts.
 
 ## Absent-from-relevance signals
 

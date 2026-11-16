@@ -109,10 +109,15 @@ is the base record. Which category a record's disease name falls in is
 disease name a curator maps, or a category a curator adds, gets a profile
 with no deploy. A category that still has member fields cannot be deleted.
 
-Migration 0344 seeds MM, BC, FL, MCL and CLL from
-`disease_profiles.SEED_DISEASE_FIELDS`, the fields `DiseaseTab.tsx` renders
-for each (a drift test holds the two together); every other field starts as
-base. The genomics catalog's per-disease markers are not seeded: a priority
+Migration 0344 seeds MM, BC, FL, MCL and CLL with the fields
+`DiseaseTab.tsx` renders for each; every other field starts as base. The
+migration carries its own frozen copy of the rows (`FIELD_DISEASE_SEED`), so
+what a fresh install seeds does not depend on the code it is installed from.
+`disease_profiles.SEED_DISEASE_FIELDS` is the same list for a database built
+without migrations, and two tests hold the three together: one against the
+tab, one against the union of what the migrations write. A new disease-tab
+field therefore needs the constant and a data migration that declares its
+own `FIELD_DISEASE_SEED`. The genomics catalog's per-disease markers are not seeded: a priority
 is not a scope, and relevance still reads them from the catalog.
 
 | Reader | What it gets |
@@ -123,13 +128,30 @@ is not a scope, and relevance still reads them from the catalog.
 | `GET /api/v1/custom-patient-fields/` | `scope` and `diseases` on each created field |
 | `disease_relevance` | A disease's `disease` tier is its extension; `common` is the base clinical fields |
 
-Writers: `PATCH`/`POST /api/v1/field-mappings/` take `diseases` (omitted
-leaves the scope alone, `[]` makes the field base), following mapping write
-access, and `POST /api/v1/custom-patient-fields/` takes it for a new field. A
-scope edit is not part of the recipe, so it never signs a mapping off. Rows
-travel as the `memberships` table of the curation payload: additive, mirrored
-with `--prune` only when the payload carries the table, and a row naming a
-category the target lacks is skipped with a warning.
+Writers, all following mapping write access:
+
+- `PUT /api/v1/field-mappings/<field_name>/diseases/` sets a field's scope by
+  name (`GET` reads it). It needs no mapping row, so a field with no concept
+  yet is scoped without creating an empty proposed mapping.
+- `PATCH`/`POST /api/v1/field-mappings/` take `diseases` with the rest of a
+  mapping save: omitted leaves the scope alone, `[]` makes the field base.
+- `POST /api/v1/custom-patient-fields/` takes it for a new field, which
+  starts from exactly the scope sent.
+
+A scope edit is not part of the recipe, so it never signs a mapping off.
+Edits to one field are serialised, and each change is logged with the scope
+before and after and who made it, since a removed row leaves nothing behind.
+
+Rows travel as the `memberships` table of the curation payload, and a
+field's scope is **replaced**, not merged: a field the payload names takes
+exactly the source's diseases, and a field it does not name is base at the
+source and becomes base on the target. Adding rows alone could never carry a
+narrowed or cleared scope, because both instances start from the same seed.
+Three exceptions keep that safe: a field created on the target that the
+source does not have keeps its scope; a row naming a category or a field the
+target lacks is skipped with a warning; and a payload written before the
+table existed (the committed fixture) changes no scope at all, with or
+without `--prune`. Pruning a created field removes its memberships with it.
 
 This is the read-only stage. No tab and no save consults the rows yet: what
 the disease tab renders (#2332) and what a PATCH accepts (#2333) are

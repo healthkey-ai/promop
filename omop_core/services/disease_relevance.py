@@ -49,6 +49,21 @@ def supported(code: str | None) -> bool:
     return code in diseases()
 
 
+def resolver():
+    """A function from a code or disease name to a supported disease, or ``None``.
+
+    Reads the categories once, so a batch of signals is not a query per row.
+    A code matches in any case, as a curator may have typed it.
+    """
+    resolve = disease_profiles.resolver()
+
+    def supported_code(value):
+        code = resolve(value)
+        return None if code == disease_profiles.OTHER else code
+
+    return supported_code
+
+
 def _common_fields(field_names, claimed=None) -> set[str]:
     """The approved base fields on a common clinical tab, as the curator placed them.
 

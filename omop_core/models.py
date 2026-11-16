@@ -4764,6 +4764,10 @@ class FieldDiseaseMembership(models.Model):
     code, held as text like ``DiseaseCategoryMapping.category``; writers go
     through ``omop_core.services.disease_profiles``, which refuses a code that
     is not a category and ``Other``, whose profile is the base record.
+
+    ``required``, ``section`` and ``sort_order`` are carried between instances
+    but nothing sets or reads them yet: they are for the disease tab that
+    renders from these rows (#2332).
     """
     field_name = models.CharField(max_length=100)
     disease = models.CharField(

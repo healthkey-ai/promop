@@ -5781,11 +5781,12 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         # extension of the diseases it names (#2331). ?disease= narrows the
         # answer to one profile; it describes the record and refuses nothing.
         descriptor = disease_profiles.annotate(build_writable_field_descriptor())
-        if 'disease' in request.query_params:
+        named = [value for value in request.query_params.getlist('disease') if value.strip()]
+        if named:
             try:
-                codes = disease_profiles.profile_codes(request.query_params.getlist('disease'))
+                codes = disease_profiles.profile_codes(named)
             except disease_profiles.ScopeError as error:
-                return Response({'disease': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
             descriptor = disease_profiles.profile(descriptor, codes)
 
         raw_person = request.query_params.get('person_id')
@@ -10888,13 +10889,11 @@ def disease_therapy_regimen_detail(request, pk):
 
 def _valid_category_codes() -> set[str]:
     """Return valid category codes from the DB table, falling back to the enum."""
+    from omop_core.services import disease_profiles
     try:
-        codes = set(DiseaseCategoryChoice.objects.values_list('code', flat=True))
-        if codes:
-            return codes
+        return disease_profiles.category_codes()
     except Exception:
-        pass
-    return {c.value for c in DiseaseCategory}
+        return {c.value for c in DiseaseCategory}
 
 
 @api_view(['GET', 'POST'])
@@ -10967,11 +10966,12 @@ def disease_category_detail(request, code):
         )
     # Nor one whose extension still has fields: they would be scoped to a
     # disease that no longer exists (#2331). Make them base, or move them.
-    from omop_core.models import FieldDiseaseMembership
-    members = FieldDiseaseMembership.objects.filter(disease=code).count()
+    from omop_core.services import disease_profiles
+    members = sorted(disease_profiles.extension_fields(code))
     if members:
+        named = ', '.join(members[:5]) + (', …' if len(members) > 5 else '')
         return Response(
-            {'detail': f'Cannot delete: {members} field(s) belong to this disease'},
+            {'detail': f'Cannot delete: {len(members)} field(s) belong to this disease ({named})'},
             status=status.HTTP_409_CONFLICT,
         )
     obj.delete()
@@ -15732,11 +15732,13 @@ def field_mapping_list(request):
             q = search.lower()
             descriptors = [d for d in descriptors if q in d['field_name'].lower()]
         # ?disease=MM&set=extension|profile: one disease's fields (#2331).
-        if 'disease' in request.query_params:
+        # A blank value is no filter, as it is for category and search.
+        named = [value for value in request.query_params.getlist('disease') if value.strip()]
+        if named:
             from omop_core.services import disease_field_sets
             try:
                 descriptors = disease_field_sets.disease_set(
-                    descriptors, request.query_params.getlist('disease'),
+                    descriptors, named,
                     request.query_params.get('set') or disease_field_sets.SET_PROFILE)
             except disease_field_sets.SetError as error:
                 return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
@@ -15783,6 +15785,43 @@ def field_mapping_export(request):
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     response['Cache-Control'] = 'no-store'
     return response
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def field_scope(request, field_name):
+    """Whose record a field is part of, read or set by the field's name (#2331).
+
+    GET /api/v1/field-mappings/<field_name>/diseases/
+    PUT /api/v1/field-mappings/<field_name>/diseases/  {"diseases": ["MM", "FL"]}
+
+    An empty list makes the field part of the base record. Scope is keyed by
+    name, so this needs no mapping row: a field with no concept yet is scoped
+    without creating an empty proposed mapping for it. Reading follows mapping
+    read access and writing mapping write access, as a placement edit does.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from omop_core.models import FieldDiseaseMembership
+    from omop_core.services import disease_profiles
+
+    if field_name not in disease_profiles.field_names():
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PUT':
+        diseases = request.data.get('diseases') if isinstance(request.data, dict) else None
+        if not isinstance(diseases, list) or not all(isinstance(code, str) for code in diseases):
+            return Response({'diseases': 'Send a list of Disease Category codes; an empty list is the base record.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            disease_profiles.set_field_diseases(field_name, diseases, user=request.user)
+        except disease_profiles.ScopeError as error:
+            return Response({'diseases': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    diseases = sorted(FieldDiseaseMembership.objects.filter(field_name=field_name)
+                      .values_list('disease', flat=True))
+    return Response({'field_name': field_name, 'scope': disease_profiles.scope_of(diseases),
+                     'diseases': diseases})
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])

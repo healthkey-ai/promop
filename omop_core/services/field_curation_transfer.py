@@ -366,8 +366,11 @@ def apply_payload(
                 _apply_mappings(payload.get('mappings', []), stats)
             if 'custom_fields' in tables:
                 _apply_custom_fields(payload.get('custom_fields', []), stats)
-            if 'memberships' in tables:
-                _apply_memberships(payload.get('memberships', []), stats)
+            # Only a payload that carries the table can say what a field's
+            # scope is: one written before memberships existed (the committed
+            # fixture) would otherwise make every disease-specific field base.
+            if 'memberships' in tables and 'memberships' in payload:
+                _apply_memberships(payload, stats)
             if 'choices' in tables:
                 _apply_choices(payload.get('choices', []), stats)
             if 'formulas' in tables:
@@ -493,40 +496,74 @@ def _apply_custom_fields(rows: list[dict], stats: TransferStats) -> None:
         stats._bump(stats.updated, 'custom_fields')
 
 
-def _apply_memberships(rows: list[dict], stats: TransferStats) -> None:
-    """Add the source's memberships; a row here the source lacks stays without --prune.
+def _apply_memberships(payload: dict, stats: TransferStats) -> None:
+    """Make each field's scope here what it is at the source.
+
+    A scope is one value, the set of diseases, and narrowing it or making a
+    field base is done by removing rows. Adding the source's rows to the
+    target's would leave a union neither curator chose, so the set is
+    replaced: a field the payload names takes exactly the payload's diseases,
+    and a field it does not name is base at the source and becomes base here.
+    The exception is a field created on this instance that the source does
+    not have: the source says nothing about it, so its scope is kept.
 
     A membership names a Disease Category by code. copy_reference_data copies
     the categories first; a payload loaded on its own may name one this
     instance does not have, and that row is skipped rather than scoping a
-    field to a disease nobody here can pick.
+    field to a disease nobody here can pick. So is a row for a field that
+    does not exist here.
     """
-    from omop_core.services.disease_profiles import OTHER, category_codes
+    from omop_core.services.disease_profiles import extension_codes, field_names
 
-    known = category_codes() - {OTHER}
-    existing = {(m.field_name, m.disease): m for m in FieldDiseaseMembership.objects.all()}
-    for row in rows:
-        if row['disease'] not in known:
-            stats.warn(
-                f"membership {row['field_name']}: disease category {row['disease']!r} "
-                f"does not exist on this instance; skipped."
-            )
+    known = set(extension_codes())
+    fields = field_names()
+    wanted: dict[str, dict[str, dict]] = defaultdict(dict)
+    for row in payload['memberships']:
+        reason = (f"disease category {row['disease']!r} does not exist on this instance"
+                  if row['disease'] not in known
+                  else 'no such field on this instance' if row['field_name'] not in fields else '')
+        if reason:
+            stats.warn(f"membership {row['field_name']}: {reason}; skipped.")
             stats._bump(stats.skipped, 'memberships')
             continue
-        values = {name: row[name] for name in _MEMBERSHIP_FIELDS}
-        values['provenance'] = row.get('provenance', '')
-        # Attribution does not cross instances, see module docstring.
-        values['created_by'] = None
-        membership = existing.get((row['field_name'], row['disease']))
-        if membership is None:
-            FieldDiseaseMembership.objects.create(
-                field_name=row['field_name'], disease=row['disease'], **values)
-            stats._bump(stats.created, 'memberships')
-            continue
-        for name, value in values.items():
-            setattr(membership, name, value)
-        membership.save(update_fields=[*values, 'updated_at'])
-        stats._bump(stats.updated, 'memberships')
+        wanted[row['field_name']][row['disease']] = row
+
+    # A created field the source does not carry keeps the scope it has here.
+    # Without the source's custom fields in the payload none can be told apart.
+    local_custom = set(CustomPatientField.objects.values_list('field_name', flat=True))
+    if 'custom_fields' in payload:
+        local_custom -= {row['field_name'] for row in payload['custom_fields']}
+
+    existing: dict[str, dict[str, FieldDiseaseMembership]] = defaultdict(dict)
+    for membership in FieldDiseaseMembership.objects.all():
+        existing[membership.field_name][membership.disease] = membership
+    stale = [
+        membership.pk
+        for field_name, held in existing.items()
+        if field_name in wanted or field_name not in local_custom
+        for disease, membership in held.items()
+        if disease not in wanted.get(field_name, {})
+    ]
+    if stale:
+        FieldDiseaseMembership.objects.filter(pk__in=stale).delete()
+        stats._bump(stats.deleted, 'memberships', len(stale))
+
+    for field_name, by_disease in wanted.items():
+        for disease, row in by_disease.items():
+            values = {name: row[name] for name in _MEMBERSHIP_FIELDS}
+            values['provenance'] = row.get('provenance', '')
+            # Attribution does not cross instances, see module docstring.
+            values['created_by'] = None
+            membership = existing[field_name].get(disease)
+            if membership is None:
+                FieldDiseaseMembership.objects.create(
+                    field_name=field_name, disease=disease, **values)
+                stats._bump(stats.created, 'memberships')
+                continue
+            for name, value in values.items():
+                setattr(membership, name, value)
+            membership.save(update_fields=[*values, 'updated_at'])
+            stats._bump(stats.updated, 'memberships')
 
 
 def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
@@ -780,25 +817,18 @@ def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None
     """
     if 'custom_fields' in tables:
         keep = {row['field_name'] for row in payload.get('custom_fields', [])}
-        deleted, _ = CustomPatientField.objects.exclude(field_name__in=keep).delete()
+        gone = list(CustomPatientField.objects.exclude(field_name__in=keep)
+                    .values_list('field_name', flat=True))
+        # Memberships are keyed by name: left behind, a field created later
+        # under the same name would inherit a scope nobody gave it.
+        FieldDiseaseMembership.objects.filter(field_name__in=gone).delete()
+        deleted, _ = CustomPatientField.objects.filter(field_name__in=gone).delete()
         stats._bump(stats.deleted, 'custom_fields', deleted)
 
     if 'mappings' in tables:
         keep = {row['field_name'] for row in payload.get('mappings', [])}
         deleted, _ = FieldConceptMapping.objects.exclude(field_name__in=keep).delete()
         stats._bump(stats.deleted, 'mappings', deleted)
-
-    # Only a payload that carries the table can say what it lacks: one written
-    # before memberships existed (the committed fixture) would otherwise turn
-    # every disease-specific field here into a base field.
-    if 'memberships' in tables and 'memberships' in payload:
-        keep = {(row['field_name'], row['disease']) for row in payload['memberships']}
-        stale = [pk for pk, field_name, disease in FieldDiseaseMembership.objects
-                 .values_list('pk', 'field_name', 'disease')
-                 if (field_name, disease) not in keep]
-        if stale:
-            FieldDiseaseMembership.objects.filter(pk__in=stale).delete()
-            stats._bump(stats.deleted, 'memberships', len(stale))
 
     if 'choices' in tables:
         keep = {(row['field_name'], row['display']) for row in payload.get('choices', [])}

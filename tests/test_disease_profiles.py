@@ -6,7 +6,10 @@ with rows belongs to the diseases they name. This stage is read-only: the
 rows are stored, exposed and exported, and no tab or save consults them.
 """
 import csv
+import importlib
 import io
+import pkgutil
+from collections import Counter, defaultdict
 
 import pytest
 from django.db import connection
@@ -15,7 +18,7 @@ from rest_framework.test import APIClient
 
 from omop_core.models import (
     CustomPatientField, DiseaseCategoryChoice, DiseaseCategoryMapping, FieldConceptMapping,
-    FieldDiseaseMembership, GroupAccess, Organization,
+    FieldDiseaseMembership, GroupAccess, Organization, RelevanceSignal,
 )
 from omop_core.services import disease_field_sets, disease_profiles, disease_relevance
 from omop_core.services.field_curation_transfer import apply_payload, read_payload
@@ -53,6 +56,14 @@ def diseases_of(field_name):
                   .values_list('disease', flat=True))
 
 
+def sizes():
+    return dict(Counter(FieldDiseaseMembership.objects.values_list('disease', flat=True)))
+
+
+def scope_url(field_name):
+    return f'{MAPPINGS}{field_name}/diseases/'
+
+
 def descriptor(name):
     return next(d for d in get_all_field_descriptors() if d['field_name'] == name)
 
@@ -70,7 +81,7 @@ def custom_field(name='frailty_index', **kwargs):
 # ── The seed and the model ────────────────────────────────────────────────
 
 def test_the_seed_writes_each_diseases_tab_fields_and_a_replay_adds_nothing():
-    assert disease_profiles.extension_sizes() == {'BC': 27, 'CLL': 21, 'MM': 19, 'FL': 13, 'MCL': 8}
+    assert sizes() == {'BC': 27, 'CLL': 21, 'MM': 19, 'FL': 13, 'MCL': 8}
     assert disease_profiles.extension_fields('MCL') == set(disease_profiles.SEED_DISEASE_FIELDS['MCL'])
     assert set(FieldDiseaseMembership.objects.values_list('provenance', flat=True)) == {
         disease_profiles.SEED_PROVENANCE}
@@ -82,7 +93,21 @@ def test_the_seed_gives_no_members_to_a_category_the_instance_deleted():
     for code in ('BC', 'MM', 'Other'):
         DiseaseCategoryChoice.objects.create(code=code, label=code)
     disease_profiles.seed()
-    assert set(disease_profiles.extension_sizes()) == {'BC', 'MM'}
+    assert set(sizes()) == {'BC', 'MM'}
+
+
+def test_every_seeded_field_is_written_by_a_migration():
+    # A deployed instance gets its rows from the migrations' own frozen
+    # copies, never from the constant. Adding a field to the constant (the
+    # tab drift test forces that) without a data migration fails here.
+    import omop_core.migrations as package
+
+    written = defaultdict(set)
+    for info in pkgutil.iter_modules(package.__path__):
+        module = importlib.import_module(f'omop_core.migrations.{info.name}')
+        for code, fields in getattr(module, 'FIELD_DISEASE_SEED', {}).items():
+            written[code] |= set(fields)
+    assert written == {code: set(fields) for code, fields in disease_profiles.SEED_DISEASE_FIELDS.items()}
 
 
 def test_a_field_with_no_rows_is_base_and_one_with_rows_names_its_diseases():
@@ -101,6 +126,11 @@ def test_setting_a_scope_replaces_the_set_and_keeps_who_added_the_rows_it_keeps(
     rows = {m.disease: m for m in FieldDiseaseMembership.objects.filter(field_name='stage')}
     assert rows['MM'].provenance == disease_profiles.SEED_PROVENANCE
     assert rows['CLL'].provenance == 'admin@example.org' and rows['CLL'].created_by == user
+
+    # The same scope again writes nothing.
+    with CaptureQueriesContext(connection) as queries:
+        disease_profiles.set_field_diseases('stage', ['MM', 'CLL'])
+    assert not [q for q in queries if q['sql'].startswith(('INSERT', 'DELETE', 'UPDATE'))]
 
     disease_profiles.set_field_diseases('stage', [])
     assert descriptor('stage')['scope'] == 'base'
@@ -122,7 +152,8 @@ def test_a_category_a_curator_adds_gets_a_profile_and_cannot_be_deleted_with_mem
     disease_profiles.set_field_diseases('bulky_disease', ['DLBCL'])
 
     response = staff.delete('/api/v1/disease-categories/DLBCL/')
-    assert response.status_code == 409 and '1 field(s)' in response.data['detail']
+    assert response.status_code == 409
+    assert '1 field(s)' in response.data['detail'] and 'bulky_disease' in response.data['detail']
     disease_profiles.set_field_diseases('bulky_disease', [])
     assert staff.delete('/api/v1/disease-categories/DLBCL/').status_code == 204
 
@@ -157,6 +188,66 @@ def test_relevance_reads_the_rows_so_moving_a_field_moves_its_tier():
     assert tier('MM') == 'common' and tier('BC') == 'common'
     disease_profiles.set_field_diseases('hemoglobin_g_dl', ['MM'])
     assert tier('MM') == 'disease' and tier('BC') is None
+
+
+def test_a_code_resolves_in_any_case_and_a_name_mapped_to_other_is_the_base_record(staff):
+    for code, label in (('MM', 'Myeloma'), ('Lung', 'Lung cancer'), ('Other', 'Other')):
+        DiseaseCategoryChoice.objects.create(code=code, label=label)
+    DiseaseCategoryMapping.objects.create(disease_name='Glioblastoma', category='Other')
+    disease_profiles.set_field_diseases('bulky_disease', ['Lung'])
+
+    # A curator typed "Lung"; relevance used to upper-case it and refuse it.
+    assert staff.get('/api/v1/relevance/', {'disease': 'lung'}).data['diseases'] == ['Lung']
+    assert staff.get('/api/v1/relevance/', {'disease': 'Other'}).status_code == 400
+    assert 'bulky_disease' in staff.get(WRITABLE, {'disease': 'LUNG'}).data
+
+    base = staff.get(WRITABLE, {'disease': 'Glioblastoma'})
+    assert base.status_code == 200 and all(entry['scope'] == 'base' for entry in base.data.values())
+    assert staff.get(WRITABLE, {'disease': 'no such disease'}).status_code == 400
+
+
+def test_receiving_signals_reads_the_categories_once_not_once_per_signal(staff):
+    concepts = [ConceptFactory().concept_id for _ in range(6)]
+
+    def post(ids):
+        with CaptureQueriesContext(connection) as queries:
+            response = staff.post('/api/v1/relevance/signals/', [
+                {'disease': 'MM', 'concept_id': concept_id, 'document_count': 1, 'period': '2026-11'}
+                for concept_id in ids], format='json')
+        assert response.status_code in (200, 201), response.data
+        return sum('disease_category_choice' in q['sql'] for q in queries)
+
+    assert post(concepts[:1]) == post(concepts[1:]) == 1
+    assert RelevanceSignal.objects.count() == 6
+
+
+# ── Scope by field name ───────────────────────────────────────────────────
+
+def test_a_fields_scope_is_read_and_set_by_name_without_a_mapping_row(staff):
+    assert staff.get(scope_url('myeloma_type')).data == {
+        'field_name': 'myeloma_type', 'scope': 'disease', 'diseases': ['MM']}
+
+    response = staff.put(scope_url('myeloma_type'), {'diseases': ['MM', 'CLL']}, format='json')
+    assert response.status_code == 200 and response.data['diseases'] == ['CLL', 'MM']
+    assert staff.put(scope_url('myeloma_type'), {'diseases': []}, format='json').data['scope'] == 'base'
+    # No concept was asserted, so no mapping row appears for the field.
+    assert not FieldConceptMapping.objects.filter(field_name='myeloma_type').exists()
+
+    assert staff.put(scope_url('myeloma_type'), {'diseases': ['GLIOMA']}, format='json').status_code == 400
+    assert staff.put(scope_url('myeloma_type'), {'diseases': 'MM'}, format='json').status_code == 400
+    assert staff.put(scope_url('myeloma_type'), {}, format='json').status_code == 400
+    assert staff.get(scope_url('no_such_field')).status_code == 404
+    assert staff.put(scope_url('no_such_field'), {'diseases': ['MM']}, format='json').status_code == 404
+    assert diseases_of('no_such_field') == []
+
+
+@pytest.mark.parametrize('role,read,write', (
+    ('org_admin', 200, 200), ('analyst', 200, 200), ('doctor', 200, 403), ('patient', 403, 403)))
+def test_scope_by_name_follows_the_mapping_page_roles(role, read, write):
+    client = as_role(role)
+    assert client.get(scope_url('stage')).status_code == read
+    assert client.put(scope_url('stage'), {'diseases': ['MM']}, format='json').status_code == write
+    assert diseases_of('stage') == (['MM'] if write == 200 else ['FL', 'MCL', 'MM'])
 
 
 # ── The mapping API ───────────────────────────────────────────────────────
@@ -222,6 +313,18 @@ def test_a_created_field_takes_its_diseases_and_is_base_without_any(staff):
     assert listed['frailty_index']['diseases'] == ['MM'] and listed['frailty_note']['scope'] == 'base'
 
 
+def test_a_created_field_does_not_inherit_rows_left_under_its_name(staff):
+    # A field of this name existed, was scoped to MM and was removed.
+    FieldDiseaseMembership.objects.create(field_name='frailty_index', disease='MM')
+    concept = ConceptFactory(vocabulary_id='LOINC', concept_code='2160-0')
+    response = staff.post(CUSTOM, {
+        'confirm_patient_record': True, 'field_name': 'frailty_index', 'display_name': 'Frailty Index',
+        'field_type': 'number', 'concept': concept.concept_id, 'omop_table': 'observation',
+    }, format='json')
+    assert response.status_code == 201, response.data
+    assert response.data['scope'] == 'base' and diseases_of('frailty_index') == []
+
+
 def test_a_created_field_with_an_unknown_disease_is_not_created(staff):
     concept = ConceptFactory(vocabulary_id='LOINC', concept_code='2160-0')
     response = staff.post(CUSTOM, {
@@ -270,7 +373,18 @@ def test_writable_fields_for_a_disease_are_the_base_record_plus_its_extension(st
     assert other and all(entry['scope'] == 'base' for entry in other.values())
 
     response = staff.get(WRITABLE, {'disease': 'glioma'})
-    assert response.status_code == 400 and 'disease' in response.data
+    assert response.status_code == 400 and 'glioma' in response.data['detail']
+    # A blank value is no filter, as it is on the field list.
+    assert staff.get(WRITABLE, {'disease': ''}).data == everything
+
+
+def test_both_descriptors_give_every_field_the_same_scope(staff):
+    disease_profiles.set_field_diseases('hemoglobin_g_dl', ['MM'])
+    writable = staff.get(WRITABLE).data
+    listed = {d['field_name']: d for d in staff.get(MAPPINGS).data}
+    shared = set(writable) & set(listed)
+    assert 'hemoglobin_level' in shared and 'hemoglobin_g_dl' in shared
+    assert {f: writable[f]['diseases'] for f in shared} == {f: listed[f]['diseases'] for f in shared}
 
 
 # ── A disease's field list and its CSV ────────────────────────────────────
@@ -284,6 +398,7 @@ def test_the_field_list_filters_to_a_diseases_extension_or_its_full_record(staff
     assert extension < profile < everything
     assert 'hemoglobin_g_dl' in profile and 'estrogen_receptor_status' not in profile
     assert staff.get(MAPPINGS, {'disease': 'Other', 'set': 'extension'}).data == []
+    assert {d['field_name'] for d in staff.get(MAPPINGS, {'disease': ''}).data} == everything
     assert staff.get(MAPPINGS, {'disease': 'MM', 'set': 'tab'}).status_code == 400
     assert staff.get(MAPPINGS, {'disease': 'glioma'}).status_code == 400
 
@@ -344,6 +459,14 @@ def test_a_created_field_is_in_its_diseases_csv_under_its_display_name(staff):
         row['field_name'] for row in read_csv(staff.get(EXPORT, {'disease': 'MM'}))}
 
 
+def test_the_csv_filename_takes_nothing_from_a_category_code_but_safe_characters(staff):
+    for code in ('MM', 'Other', 'Lung "A"\nx'):
+        DiseaseCategoryChoice.objects.create(code=code, label=code)
+    response = staff.get(EXPORT, {'disease': 'Lung "A"\nx', 'set': 'extension'})
+    assert response.status_code == 200
+    assert 'filename="field-mappings-Lung_A_x-extension-' in response['Content-Disposition']
+
+
 def test_a_csv_cell_a_spreadsheet_would_run_is_quoted(staff):
     custom = custom_field()
     custom.display_name = '=HYPERLINK("http://x")'
@@ -390,27 +513,63 @@ def test_scope_round_trips_through_the_curation_payload_without_naming_a_person(
     assert copied.created_by is None and copied.provenance == 'curator'
     assert FieldDiseaseMembership.objects.get(field_name='stage', disease='MM').provenance == (
         disease_profiles.SEED_PROVENANCE)
-    assert apply_payload(payload).updated == {'memberships': 89}
+    again = apply_payload(payload)
+    assert again.updated == {'memberships': 89} and not again.deleted
 
 
-def test_a_payload_naming_a_category_this_instance_lacks_skips_that_row():
+def test_a_narrowed_or_cleared_scope_reaches_the_target():
+    # Both instances start from the same seed, and narrowing a scope removes
+    # rows: adding the source's rows to the target's would change nothing.
+    disease_profiles.set_field_diseases('stage', ['CLL'])
+    disease_profiles.set_field_diseases('myeloma_type', [])
+    payload = read_payload('default', tables=('memberships',))
+
+    FieldDiseaseMembership.objects.all().delete()
+    disease_profiles.seed()
+    assert diseases_of('stage') == ['FL', 'MCL', 'MM'] and diseases_of('myeloma_type') == ['MM']
+
+    stats = apply_payload(payload)
+    assert diseases_of('stage') == ['CLL'] and diseases_of('myeloma_type') == []
+    assert stats.created == {'memberships': 1} and stats.deleted == {'memberships': 4}
+
+
+def test_a_field_created_here_that_the_source_lacks_keeps_its_scope():
+    payload = read_payload('default', tables=('custom_fields', 'memberships'))
+    custom_field('local_only')
+    disease_profiles.set_field_diseases('local_only', ['BC'])
+
+    apply_payload(payload, tables=('memberships',))
+    assert diseases_of('local_only') == ['BC']
+    # Named by the source, it takes the source's scope like any other field.
+    payload['memberships'].append({'field_name': 'local_only', 'disease': 'MM', 'required': False,
+                                   'section': '', 'sort_order': 0})
+    apply_payload(payload, tables=('memberships',))
+    assert diseases_of('local_only') == ['MM']
+
+
+def test_a_row_for_a_category_or_a_field_this_instance_lacks_is_skipped():
     payload = {'memberships': [
         {'field_name': 'hemoglobin_g_dl', 'disease': 'DLBCL', 'required': False, 'section': '', 'sort_order': 0},
         {'field_name': 'hemoglobin_g_dl', 'disease': 'CLL', 'required': True, 'section': '', 'sort_order': 0},
+        {'field_name': 'no_such_field_here', 'disease': 'MM', 'required': False, 'section': '', 'sort_order': 0},
     ]}
     stats = apply_payload(payload, tables=('memberships',))
-    assert stats.skipped == {'memberships': 1} and 'DLBCL' in stats.warnings[0]
-    assert diseases_of('hemoglobin_g_dl') == ['CLL']
+    assert stats.skipped == {'memberships': 2}
+    assert 'DLBCL' in stats.warnings[0] and 'no such field' in stats.warnings[1]
+    assert diseases_of('hemoglobin_g_dl') == ['CLL'] and diseases_of('no_such_field_here') == []
     assert FieldDiseaseMembership.objects.get(field_name='hemoglobin_g_dl').required is True
 
 
-def test_prune_mirrors_the_sources_scopes_but_an_older_payload_removes_none():
-    payload = read_payload('default', tables=('memberships',))
+def test_a_payload_written_before_memberships_changes_no_scope_even_with_prune():
     disease_profiles.set_field_diseases('hemoglobin_g_dl', ['MM'])
-
-    # field_curation_v1.json predates the table: it cannot say what it lacks.
-    apply_payload({'mappings': []}, tables=('mappings', 'memberships'), prune=True)
+    # field_curation_v1.json predates the table: it cannot say what a scope is.
+    stats = apply_payload({'mappings': []}, tables=('mappings', 'memberships'), prune=True)
     assert diseases_of('hemoglobin_g_dl') == ['MM'] and FieldDiseaseMembership.objects.count() == 89
+    assert 'memberships' not in stats.deleted
 
-    stats = apply_payload(payload, tables=('memberships',), prune=True)
-    assert stats.deleted == {'memberships': 1} and diseases_of('hemoglobin_g_dl') == []
+
+def test_pruning_a_created_field_takes_its_memberships_with_it():
+    custom_field('frailty_index')
+    disease_profiles.set_field_diseases('frailty_index', ['MM'])
+    apply_payload({'mappings': [], 'custom_fields': []}, tables=('custom_fields',), prune=True)
+    assert not CustomPatientField.objects.exists() and diseases_of('frailty_index') == []

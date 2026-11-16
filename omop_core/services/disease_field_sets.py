@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from collections.abc import Iterable
 
 from django.utils.timezone import localdate
@@ -124,5 +125,6 @@ def csv_export(diseases: Iterable[str], which: str = SET_PROFILE) -> tuple[str, 
     writer = csv.DictWriter(buffer, fieldnames=COLUMNS, lineterminator='\n')
     writer.writeheader()
     writer.writerows(rows(chosen))
-    name = '-'.join(sorted(codes)) or 'base'
+    # A category code is whatever a curator typed; the header takes only this.
+    name = re.sub(r'[^A-Za-z0-9_.-]+', '_', '-'.join(sorted(codes))) or 'base'
     return f'field-mappings-{name}-{which}-{localdate().isoformat()}.csv', buffer.getvalue()
