@@ -3,20 +3,21 @@ name: Deploy to Production
 # Cloud Run production (promop-prod in ht-phr). Mirrors deploy-staging.yml with
 # three deliberate differences:
 #
-# - main only. The prod workload identity pool accepts refs/heads/main and
-#   nothing else, so there is no pull_request trigger: a PR run could not log
-#   in. workflow_dispatch exists to redeploy; run it from main.
+# - One branch only: dev for now, main later. The prod workload
+#   identity pool trusts only that ref, so there is no pull_request trigger: a
+#   PR run could not log in. workflow_dispatch exists to redeploy; run it from
+#   that branch.
 # - Variables come from the `production` GitHub environment, which shadows the
 #   repo-level GCP_* variables that staging uses.
 # - The image is pushed as ctomop:<sha> only. :latest is what staging's jobs and
 #   a fresh Terraform apply pick up, so a prod build must never move it.
 #
-# Tests are not re-run here: main is reached by a PR, and ci.yml runs on PRs
-# into main.
+# Tests are not re-run here: the branch is reached by a PR, and ci.yml runs on
+# PRs into it.
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
   workflow_dispatch:
 
 env:
@@ -33,7 +34,7 @@ permissions:
 jobs:
   build:
     name: Build image
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/dev'
     environment: production
     runs-on: ubuntu-latest
 
