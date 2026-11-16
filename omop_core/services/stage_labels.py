@@ -22,19 +22,26 @@ SEMANTIC_TAGS = frozenset({
     'environment or geographical location', 'qualifier',
 })
 
-_ROMAN = {'1': 'I', '2': 'II', '3': 'III', '4': 'IV',
+_ROMAN = {'0': '0', '1': 'I', '2': 'II', '3': 'III', '4': 'IV',
           'i': 'I', 'ii': 'II', 'iii': 'III', 'iv': 'IV'}
 
 _TRAILING_PAREN = re.compile(r'\s*\(([^()]*)\)\s*$')
-_FULL_STAGE = re.compile(r'stage\s*(1|2|3|4|i{1,3}|iv)\b', re.IGNORECASE)
-_PARTIAL_STAGE = re.compile(r'stage\s*([1-4])\s*([abc])\b', re.IGNORECASE)
+# The reviewed label family, with an optional AJCC prefix. A leading descriptor
+# ("American Joint Committee on Cancer stage IA") and a value the importer
+# truncated before its closing parenthesis both reduce to the label.
+_STAGE_PREFIX = re.compile(
+    r'^\s*(?:american joint committee on cancer\s+)?stage\s*'
+    r'(?P<number>iv|iii|ii|i|0|[1-4])(?P<suffix>[abc])?\b',
+    re.IGNORECASE,
+)
 
 
-def _without_semantic_tag(text: str) -> str:
-    match = _TRAILING_PAREN.search(text)
-    if match and match.group(1).strip().lower() in SEMANTIC_TAGS:
-        return text[:match.start()].strip()
-    return text
+def _without_semantic_tags(text: str) -> str:
+    while True:
+        match = _TRAILING_PAREN.search(text)
+        if not match or match.group(1).strip().lower() not in SEMANTIC_TAGS:
+            return text
+        text = text[:match.start()].strip()
 
 
 def normalise_stage_label(value):
@@ -45,11 +52,9 @@ def normalise_stage_label(value):
     """
     if not isinstance(value, str):
         return value
-    text = _without_semantic_tag(value.strip())
-    match = _FULL_STAGE.fullmatch(text)
+    text = _without_semantic_tags(value.strip())
+    match = _STAGE_PREFIX.match(text)
     if match:
-        return f'Stage {_ROMAN[match.group(1).lower()]}'
-    partial = _PARTIAL_STAGE.fullmatch(text)
-    if partial:
-        return f'Stage {_ROMAN[partial.group(1)]}{partial.group(2).upper()}'
+        suffix = (match.group('suffix') or '').upper()
+        return f"Stage {_ROMAN[match.group('number').lower()]}{suffix}"
     return text

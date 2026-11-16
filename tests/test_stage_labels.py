@@ -1,7 +1,7 @@
 """A stage reads as a stage, not as a SNOMED display (#2618)."""
 import pytest
 
-from omop_core.models import Measurement
+from omop_core.models import Measurement, PatientRecord
 from omop_core.services.patient_record_service import _get_staging_data
 from omop_core.services.stage_labels import normalise_stage_label
 from tests.factories import (
@@ -20,6 +20,11 @@ pytestmark = pytest.mark.django_db
     ('Stage IV', 'Stage IV'),
     ('stage 2', 'Stage II'),
     ('Stage 2A (qualifier value)', 'Stage IIA'),
+    ('Stage 4 (qualifier value) (finding)', 'Stage IV'),
+    ('Stage 0 (qualifier value)', 'Stage 0'),
+    ('american joint committee on cancer stage ia (qualifier value)', 'Stage IA'),
+    ('American Joint Committee on Cancer stage IA (qualifier val', 'Stage IA'),
+    ('stage iiia', 'Stage IIIA'),
 ])
 def test_a_stage_value_has_a_reviewed_label(stored, reviewed):
     assert normalise_stage_label(stored) == reviewed
@@ -66,3 +71,48 @@ def test_a_refresh_does_not_restore_the_semantic_tag():
 
     record.refresh_from_db()
     assert record.stage == 'Stage IV'
+
+
+def test_the_migration_normalises_stored_values_and_is_idempotent():
+    """The deployed rows are rewritten by a frozen copy; run it twice."""
+    from omop_core.services.stage_labels import normalise_stage_label
+    from tests.migration_utils import run_data_migration
+
+    seen = {}
+    for value in ('Stage 4 (qualifier value)', 'stage iv', 'Stage 2A',
+                  'ISS II', 'Rai 0', 'III', 'Stage 1 (qualifier value)'):
+        record = PatientRecordFactory(stage=value)
+        seen[record.pk] = value
+
+    run_data_migration('0344_normalise_stage_labels', 'normalise_stages')
+    by_value = {value: pk for pk, value in seen.items()}
+    after_first = {r.pk: r.stage for r in PatientRecord.objects.filter(pk__in=seen)}
+    assert after_first[by_value['Stage 4 (qualifier value)']] == 'Stage IV'
+    assert after_first[by_value['stage iv']] == 'Stage IV'
+    assert after_first[by_value['Stage 2A']] == 'Stage IIA'
+    assert after_first[by_value['Stage 1 (qualifier value)']] == 'Stage I'
+    # Other staging systems and already-plain roman values are untouched.
+    for value in ('ISS II', 'Rai 0', 'III'):
+        assert after_first[by_value[value]] == value
+
+    run_data_migration('0344_normalise_stage_labels', 'normalise_stages')
+    after_second = {r.pk: r.stage for r in PatientRecord.objects.filter(pk__in=seen)}
+    assert after_second == after_first
+    # The service and the frozen copy agree on every stored value.
+    for pk, value in after_first.items():
+        assert normalise_stage_label(value) == value
+
+
+def test_a_linked_stage_fact_reads_as_the_reviewed_label():
+    """The PHR card and its export overlay the linked fact, not record.stage."""
+    from types import SimpleNamespace
+
+    from patient_portal.api.phr.views import _apply_cancer_details
+
+    row = SimpleNamespace(pk=1)
+    out = _apply_cancer_details(
+        {}, {'stage': ('Stage 4 (qualifier value)', row)},
+        {(type(row), row.pk): {'kind': 'record'}}, 'BC',
+    )
+
+    assert out['stage']['value'] == 'Stage IV'
