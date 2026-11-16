@@ -1,16 +1,10 @@
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { buildPatientReport, loadReportExtras, type DiseaseType } from './patientReport';
 import { renderReportPdf } from './renderReportPdf';
+import { saveBlob } from '@/utils/download';
 
 export function saveFile(data: BlobPart, filename: string, type: string) {
-  const url = URL.createObjectURL(new Blob([data], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  saveBlob(new Blob([data], { type }), filename);
 }
 
 /** `patient-123-record`, or the patient's own wording when it is their copy. */

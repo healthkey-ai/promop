@@ -726,7 +726,7 @@ describe("FieldMappingPage", () => {
     } });
     renderPage();
     await screen.findByText("Field Concept Mappings");
-    expect(screen.getByRole("status")).toHaveTextContent("Read-only: mapping codes needs the analyst role.");
+    expect(screen.getByText("Read-only: mapping codes needs the analyst role.")).toHaveAttribute("role", "status");
     expect(screen.queryByRole("button", { name: /add field/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /suggest/i })).not.toBeInTheDocument();
     expect(screen.queryByTitle("Manage synonyms")).not.toBeInTheDocument();

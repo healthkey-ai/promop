@@ -10,6 +10,7 @@ import { useLocalPagination } from "@/lib/pagination";
 
 import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
+import { blobErrorMessage, filenameFromDisposition, saveBlob } from '@/utils/download';
 
 interface Patient {
   person_id: number;
@@ -298,30 +299,15 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters, ordering }
         : { person_ids: Array.from(selectedIds).join(",") };
       const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
-      const disposition = String(response.headers?.["content-disposition"] ?? "");
-      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "patients.csv";
-      const url = URL.createObjectURL(response.data);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      saveBlob(response.data, filenameFromDisposition(response.headers?.["content-disposition"], "patients.csv"));
       setError(null);
     } catch (err) {
       // With responseType "blob" the error body arrives as a Blob too.
+      const fallback = "Failed to download patients";
       const data = (err as { response?: { data?: unknown } })?.response?.data;
-      let message = "Failed to download patients";
-      if (data instanceof Blob) {
-        try {
-          const parsed = JSON.parse(await data.text()) as { error?: string; detail?: string };
-          message = parsed.error || parsed.detail || message;
-        } catch { /* not JSON */ }
-      } else {
-        message = getErrorMessage(err, message);
-      }
-      setError(message);
+      setError(data instanceof Blob
+        ? (await blobErrorMessage(err)) ?? fallback
+        : getErrorMessage(err, fallback));
     } finally {
       setDownloading(false);
     }
