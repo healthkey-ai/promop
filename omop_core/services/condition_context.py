@@ -56,7 +56,9 @@ def condition_contexts(person_id, condition_ids):
     for model in (Measurement, Observation):
         table = model._meta.db_table
         rows = list(model.objects.filter(**{
-            'person_id': person_id, 'is_erroneous': False,
+            # Real rows only: a provisional context must neither set a value nor,
+            # as a newer blank, clear one (docs/provisional_data_plan.md).
+            'person_id': person_id, 'is_erroneous': False, 'confidence__isnull': True,
             f'{table}_event_id__in': ids,
             f'{EVENT_FIELDS[model]}_id__in': event_ids,
             f'{table}_source_value__in': set().union(*keys.values()),

@@ -214,3 +214,19 @@ def test_missing_event_vocabulary_rejects_write_instead_of_untyped_link(setup):
     assert response.status_code == 400
     assert not Measurement.objects.filter(measurement_event_id=dx.pk).exists()
     assert not Observation.objects.filter(observation_event_id=dx.pk).exists()
+
+
+def test_provisional_context_neither_sets_nor_clears_a_value(setup):
+    record, dx, client, *_ = setup
+    client.patch(url(dx), {'note': 'Real note'}, format='json')
+    fact = Measurement.objects.get(measurement_event_id=dx.pk)
+    # A newer provisional blank must not clear the real note ...
+    Measurement.objects.create(
+        measurement_id=fact.pk + 1000, person=record.person, measurement_concept_id=fact.measurement_concept_id,
+        measurement_type_concept_id=fact.measurement_type_concept_id, measurement_date='2999-01-01',
+        measurement_event_id=dx.pk, meas_event_field_concept_id=fact.meas_event_field_concept_id,
+        measurement_source_value=fact.measurement_source_value, value_as_string='', confidence=80)
+    assert condition_contexts(record.person_id, [dx.pk]) == {dx.pk: {'note': 'Real note'}}
+    # ... and a provisional value alone must not appear.
+    Measurement.objects.filter(pk=fact.pk).delete()
+    assert condition_contexts(record.person_id, [dx.pk]) == {}
