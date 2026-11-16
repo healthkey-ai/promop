@@ -37,12 +37,3 @@ BOOLEAN_ANSWERS = {
     'plasma_cell_leukemia': ('Present', 'Not present'),
 }
 
-#: A row asks about the fact its answers name ("HIV Positive" / "No HIV"), so the
-#: row's own label must not repeat one of them: "HIV Positive: HIV Positive" is
-#: a stutter, not a question (#2608). The answers keep the reviewed clinical
-#: wording; the row asks the neutral question.
-BOOLEAN_QUESTION_LABELS = {
-    'hiv_status': 'HIV status',
-    'hepatitis_b_status': 'Hepatitis B status',
-    'hepatitis_c_status': 'Hepatitis C status',
-}

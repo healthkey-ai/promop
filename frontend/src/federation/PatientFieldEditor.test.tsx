@@ -27,9 +27,9 @@ async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
 
 describe('computed patient field input dialogs', () => {
   it.each([
-    ['hiv_status', 'Hiv status', 'HIV Positive'],
-    ['hepatitis_b_status', 'Hepatitis b status', 'Hepatitis B Positive'],
-    ['hepatitis_c_status', 'Hepatitis c status', 'Hepatitis C Positive'],
+    ['hiv_status', 'Hiv status', 'HIV status'],
+    ['hepatitis_b_status', 'Hepatitis b status', 'Hepatitis B status'],
+    ['hepatitis_c_status', 'Hepatitis c status', 'Hepatitis C status'],
   ])('uses the caller label for %s instead of the generated descriptor label', async (name, generatedLabel, callerLabel) => {
     const { store } = await setup({ [name]: {
       writable: false, label: generatedLabel, value_kind: 'boolean', reason: 'Computed status.',
