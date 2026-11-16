@@ -7,7 +7,7 @@ from omop_core.services.field_descriptor import (
     get_all_field_descriptors,
     _INTERNAL_FIELDS,
 )
-from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+from omop_core.services.mappings import LAB_FIELD_TO_LOINC, physical_unit
 
 
 pytestmark = pytest.mark.django_db
@@ -217,14 +217,15 @@ def test_suggestion_present_for_loinc_fields():
 
 
 def test_suggestion_has_unit_for_lab_fields():
-    """Lab fields have unit in suggestion."""
+    """Lab fields have unit in suggestion; `{...}` means no unit (#2605)."""
     descriptors = get_all_field_descriptors()
     by_name = {d['field_name']: d for d in descriptors}
     for field_name, (code, unit, display) in LAB_FIELD_TO_LOINC.items():
         if field_name in by_name and unit:
             d = by_name[field_name]
-            assert d['suggestion']['unit'] == unit, (
-                f"Field '{field_name}' suggestion unit should be '{unit}'"
+            expected = physical_unit(unit)
+            assert d['suggestion']['unit'] == expected, (
+                f"Field '{field_name}' suggestion unit should be {expected!r}"
             )
 
 

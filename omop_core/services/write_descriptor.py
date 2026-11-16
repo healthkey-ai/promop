@@ -31,7 +31,7 @@ from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, CONCEPT_PATIENT_REPORTED_TYPE,
-    DERIVED_FIELD_TO_CODE, FIELD_COMMON_UNITS, LAB_FIELD_TO_LOINC,
+    DERIVED_FIELD_TO_CODE, FIELD_COMMON_UNITS, LAB_FIELD_TO_LOINC, physical_unit,
 )
 from omop_core.services.patient_record_service import (
     DERIVED_LANGUAGE_FIELDS,
@@ -746,7 +746,11 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
         name: _lookup_titles(name)
         for name in {r.value_vocabulary for r in rows if r.value_vocabulary}
     }
-    unit_ids = _resolve_concept_ids({row.unit for row in rows if row.unit}, 'UCUM')
+    # A `{...}` placeholder is not a unit (#2605); resolve only the real ones.
+    unit_ids = _resolve_concept_ids(
+        {unit for unit in map(physical_unit, (row.unit for row in rows)) if unit},
+        'UCUM',
+    )
     for row in rows:
         target = mapping_target_for(row.omop_table)
         concept_id = row.concept_id
@@ -796,10 +800,14 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
                 'source_value': source_value,
             },
         }
-        if row.unit:
-            entry['unit'] = row.unit
-            entry['projection']['unit'] = row.unit
-            entry['projection']['unit_concept_id'] = unit_ids.get(row.unit)
+        # A curated row may carry the same `{score}` / `{INR}` / `{ratio}`
+        # placeholder the code-side tables use for "no physical unit". Copying
+        # it verbatim put the literal beside the edit box (#2605).
+        unit = physical_unit(row.unit)
+        if unit:
+            entry['unit'] = unit
+            entry['projection']['unit'] = unit
+            entry['projection']['unit_concept_id'] = unit_ids.get(unit)
         if row.value_vocabulary and row.field_name not in _TAB_OWNED_ANSWER_SETS:
             options = titles.get(row.value_vocabulary) or ()
             if options:
@@ -937,22 +945,6 @@ def get_serializer_read_only_fields():
     read_only -= {'relapse_count', 'treatment_refractory_status'}
     _CACHED_SERIALIZER_READ_ONLY = frozenset(read_only)
     return _CACHED_SERIALIZER_READ_ONLY
-
-
-def _descriptor_unit(unit):
-    """The unit to show, or None when the mapping has only a placeholder.
-
-    `LAB_FIELD_TO_LOINC` spells "no physical unit" as `{score}` for ECOG,
-    Karnofsky and the other ordinal scales. Sending that to a client put the
-    literal `{score}` beside an edit box (and in the projection metadata).
-    A placeholder is not a unit; the field is a score, and the value needs no
-    suffix.
-    """
-    if isinstance(unit, str):
-        stripped = unit.strip()
-        if stripped.startswith('{') and stripped.endswith('}'):
-            return None
-    return unit
 
 
 def build_writable_field_descriptor():
@@ -1389,7 +1381,7 @@ def build_writable_field_descriptor():
             continue
 
         code, unit, display = mapping
-        unit = _descriptor_unit(unit)
+        unit = physical_unit(unit)
         concept_id = loinc_ids.get(code)
         if concept_id is None:
             # The mapping exists but the vocabulary doesn't carry the concept.
@@ -1868,9 +1860,11 @@ def build_writable_field_descriptor():
     # field, already ordered; the client draws its picker from it rather than
     # spelling the values a second time. Both the field a write lands in and the
     # `*_units` entry beside it carry the same list, so a client that resolves
-    # either shape sees one answer.
+    # either shape sees one answer. Placeholder markers are dropped here as well
+    # as at the curated read, so no path can turn one into a one-item "unit".
     for name, units in FIELD_COMMON_UNITS.items():
         entry = descriptor.get(name)
+        units = [unit for unit in map(physical_unit, units) if unit]
         if entry is not None and units:
             entry['unit_options'] = [
                 {'value': unit, 'label': unit} for unit in units
@@ -1879,6 +1873,7 @@ def build_writable_field_descriptor():
         if not field.endswith('_units') or entry.get('kind') != KIND_SELECTABLE:
             continue
         units = FIELD_COMMON_UNITS.get(entry.get('qualifies') or '')
+        units = [unit for unit in map(physical_unit, units or ()) if unit]
         if units:
             entry['unit_options'] = [
                 {'value': unit, 'label': unit} for unit in units

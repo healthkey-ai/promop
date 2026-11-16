@@ -767,3 +767,63 @@ class TestGenomicsWritability:
         entry = descriptor_fields()['genetic_mutations']
         assert entry['writable'] is True
         assert 'vocabular' not in entry['reason'].lower()
+
+
+class TestPlaceholderUnits:
+    """#2605: `{score}` / `{INR}` / `{ratio}` mean "no unit", not a label.
+
+    The curated path copied the stored marker into `unit` and `projection.unit`,
+    which is how the literal reached the record page even after #2241 filtered
+    the hard-coded LOINC table.
+    """
+
+    def test_a_curated_placeholder_unit_is_dropped(self):
+        from omop_core.models import FieldConceptMapping
+
+        concept = _load_loinc('89243-0')
+        FieldConceptMapping.objects.update_or_create(
+            field_name='karnofsky_performance_score',
+            defaults={
+                'concept': concept,
+                'omop_table': 'Measurement',
+                'status': 'approved',
+                'source_value': '89243-0',
+                'unit': '{score}',
+            },
+        )
+
+        entry = descriptor_fields()['karnofsky_performance_score']
+
+        assert entry.get('unit') is None
+        assert entry['projection'].get('unit') is None
+        assert entry['projection'].get('unit_concept_id') is None
+        assert 'unit_options' not in entry
+
+    def test_no_descriptor_field_ships_a_placeholder_unit(self):
+        _load_loinc('89247-1')
+
+        for name, entry in descriptor_fields().items():
+            units = [
+                entry.get('unit'),
+                (entry.get('projection') or {}).get('unit'),
+            ]
+            for option in entry.get('unit_options') or ():
+                units += [option.get('value'), option.get('label')]
+            for unit in units:
+                assert not (
+                    isinstance(unit, str) and unit.strip().startswith('{')
+                    and unit.strip().endswith('}')
+                ), (name, unit)
+
+
+class TestSuggestedUnits:
+    """#2605 review: the mapping admin's suggestion is a write prefill."""
+
+    def test_no_placeholder_is_suggested_as_a_unit(self):
+        from omop_core.services.concept_unit_info import get_loinc_to_unit
+
+        suggested = get_loinc_to_unit()
+        # 89247-1 (ECOG) and 6301-6 (INR) are the curated ones; whatever else
+        # the LOINC table carries must not offer a brace-only marker either.
+        for code, unit in suggested.items():
+            assert not (unit.strip().startswith('{') and unit.strip().endswith('}')), (code, unit)
