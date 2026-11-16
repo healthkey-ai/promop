@@ -1055,6 +1055,26 @@ describe('single unit display (#5704)', () => {
     expect(screen.queryByText(/not editable in this view/)).toBeNull();
   });
 
+  it('does not name a dedicated editor that refuses every write (#2614 review)', async () => {
+    const { store } = await setup({
+      tp53_disruption: {
+        kind: 'computed', writable: false, label: 'Tp53 disruption',
+        inputs: ['genetic_mutations'],
+      },
+      genetic_mutations: {
+        kind: 'editable', writable: false, target: 'genomics',
+        endpoint: '/api/v1/patient-records/{person_id}/genomics/',
+        label: 'Genetic mutations',
+        reason: 'The OMOP CDM and type vocabularies needed to store variants are not loaded.',
+      },
+    }, { tp53_disruption: null });
+    render(<PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />);
+
+    expect(screen.queryByText(/Genomics/)).toBeNull();
+    expect(screen.getByText(/not editable in this view/)).toBeVisible();
+    expect(screen.getByText(/vocabularies needed to store variants/)).toBeVisible();
+  });
+
   it('marks a read-only computed row too (#2620)', async () => {
     const { store } = await setup({
       tnbc_status: {

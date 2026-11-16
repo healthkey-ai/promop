@@ -113,22 +113,25 @@ function inspectInputs(
   return graph;
 }
 
-/** Where a dedicated writer lives, by the endpoint segment it exposes.
+/** The surface that authors a descriptor, if it has one of its own.
  *
- * A computed field whose source is authored by its own surface (genomics,
- * languages) has no PATCH target, so the row must name that surface instead of
- * claiming the data is not editable at all (#2614).
+ * A computed field whose source is authored by a dedicated writer has no PATCH
+ * target, so the row must name that surface instead of claiming the data is not
+ * editable at all (#2614). `target` is the descriptor's own answer; the
+ * endpoint tail is only a fallback for older entries.
  */
-function dedicatedSurface(endpoint?: string | null): string | undefined {
+const DEDICATED_SURFACES: Record<string, string> = {
+  genomics: 'Genomics',
+};
+
+function dedicatedSurface(
+  target?: string | null, endpoint?: string | null,
+): string | undefined {
+  if (target && DEDICATED_SURFACES[target]) return DEDICATED_SURFACES[target];
   if (!endpoint) return undefined;
   const segment = endpoint.replace(/\/$/, '').split('/').pop() || '';
   return DEDICATED_SURFACES[segment];
 }
-
-const DEDICATED_SURFACES: Record<string, string> = {
-  genomics: 'Genomics',
-  'language-skills': 'Languages',
-};
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
@@ -331,21 +334,40 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     const descriptor = child ? state.fields[child] : undefined;
     return descriptor?.label || input.replace(/_/g, ' ');
   });
-  const dedicated = inputs
+  // A dedicated surface is worth naming only when it can actually store the
+  // fact: an endpoint is attached even where its vocabulary is missing and the
+  // editor refuses every write (#2614 review).
+  const inputDescriptors = inputs
     .map((input) => store.resolve(input))
-    .map((child) => (child ? state.fields[child] : undefined))
-    .map((descriptor) => descriptor && dedicatedSurface(descriptor.endpoint))
+    .map((child) => (child ? state.fields[child] : undefined));
+  const dedicated = inputDescriptors
+    .filter((descriptor) => descriptor?.writable === true)
+    .map((descriptor) => dedicatedSurface(descriptor?.target, descriptor?.endpoint))
+    .find(Boolean);
+  // A dedicated writer that exists but refuses explains itself on its own
+  // descriptor; the computed row should carry that sentence (#2614 review).
+  const blockedInputReason = inputDescriptors
+    .filter((descriptor) => descriptor?.endpoint && descriptor.writable !== true)
+    .map((descriptor) => descriptor?.reason)
     .find(Boolean);
   const blocked = inputsUnavailable || (inputs.length > 0 && !editPath);
   const reason = blocked
-    ? (dedicated
-      ? `Computed from ${inputLabels.join(', ')}. Edit them in ${dedicated}.`
-      : ['This value is derived from data that is not editable in this view.',
-        field.compatibility_reason].filter(Boolean).join(' '))
+    ? [
+      dedicated
+        ? `Computed from ${inputLabels.join(', ')}. Edit them in ${dedicated}.`
+        : 'This value is derived from data that is not editable in this view.',
+      field.compatibility_reason,
+      dedicated ? undefined : blockedInputReason ?? field.reason,
+    ].filter(Boolean).join(' ')
     : field.compatibility_reason
-      ?? (derived && inputs.length
-        ? `Computed from ${inputLabels.join(', ')}.`
-        : field.reason ?? (lockedByView ? undefined : 'Derived value; edit the source inputs.'));
+      // A reviewed explanation ("Normalised from … in the default unit") says
+      // more than the mechanical "Computed from height, weight."; only the
+      // mechanical form is worth replacing with the inputs' own labels.
+      ?? (field.reason && !/^Computed from [a-z0-9_, ]+\.$/.test(field.reason)
+        ? field.reason
+        : derived && inputs.length
+          ? `Computed from ${inputLabels.join(', ')}.`
+          : (lockedByView ? undefined : 'Derived value; edit the source inputs.'));
   // A compatibility gate withholds the RESULT, not the clinical facts it is
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
