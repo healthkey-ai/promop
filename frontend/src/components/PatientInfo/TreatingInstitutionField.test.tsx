@@ -49,6 +49,8 @@ it('keeps Clear at its natural width and lets the input shrink (#2615)', () => {
   // action keeps its own, instead of the button collapsing to one letter per
   // line. jsdom has no layout, so this pins the classes the fix relies on.
   expect(screen.getByRole('combobox')).toHaveClass('min-w-0', 'flex-1');
+  // The children only work inside one flex line.
+  expect(screen.getByRole('combobox').parentElement).toHaveClass('flex');
   expect(screen.getByRole('button', { name: 'Clear treating institution' }))
     .toHaveClass('shrink-0', 'whitespace-nowrap');
 });
