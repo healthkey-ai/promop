@@ -6314,6 +6314,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                     if entry is not None:
                         descriptor[field] = {
                             **entry, 'writable': False,
+                            # An attestation would keep its own endpoint open to
+                            # a caller who may not use this block at all; the
+                            # caller mask clears the same flag (#5665).
+                            **({'answerable': False} if entry.get('answerable') else {}),
                             'read_only_for_caller': True,
                             'reason': 'Staff only.',
                         }

@@ -818,10 +818,11 @@ def test_a_deliberate_refusal_raised_deep_in_the_write_keeps_its_sentence():
     assert exc.value.messages == ['Select recognized GELF criteria.']
 
 
-STAFF_ONLY_FIELDS = (
-    'validated', 'validated_by', 'validation_date',
-    'suppress_demographics_for_others',
-)
+from patient_portal.api.views import PatientRecordViewSet
+
+# The view's list, not a copy: a fifth staff-only field must fail these tests
+# until its descriptor is masked too.
+STAFF_ONLY_FIELDS = tuple(sorted(PatientRecordViewSet._STAFF_ONLY_FIELDS))
 DESCRIPTOR_URL = '/api/v1/patient-records/writable-fields/'
 
 
@@ -844,15 +845,34 @@ def test_a_nonstaff_writer_is_not_offered_the_clinician_validation_block():
     record = PatientRecordFactory()
     client = _self_writer(record)
 
-    for headers in ({}, {'HTTP_X_PATIENT_FORM': '1'}):
+    # The native editor asks for the envelope; the plain and shared shapes are
+    # the other two clients. All three must answer for this caller (#2604).
+    surfaces = (
+        ({'envelope': '1'}, {}),
+        ({}, {}),
+        ({}, {'HTTP_X_PATIENT_FORM': '1'}),
+    )
+    for params, headers in surfaces:
         descriptor = client.get(
-            DESCRIPTOR_URL, {'person_id': record.person_id}, **headers,
+            DESCRIPTOR_URL, {'person_id': record.person_id, **params}, **headers,
         ).data
         for field in STAFF_ONLY_FIELDS:
             entry = descriptor[field]
-            assert entry['writable'] is False, (field, headers)
-            assert entry['read_only_for_caller'] is True, (field, headers)
-            assert entry['reason'] == 'Staff only.', (field, headers)
+            assert entry['writable'] is False, (field, params, headers)
+            assert entry['read_only_for_caller'] is True, (field, params, headers)
+            assert entry['reason'] == 'Staff only.', (field, params, headers)
+
+    # The mask and the write agree: the native PATCH drops these keys silently,
+    # so nothing may store them and no client may advertise them.
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'validated': True, 'validated_by': 'Dr Example'},
+        format='json',
+    )
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.validated is None
+    assert record.validated_by is None
 
 
 def test_a_staff_writer_keeps_the_clinician_validation_block():
