@@ -4066,7 +4066,10 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         stage_val = next((o.value_as_string for o in sample_stage_rows
                           if o.value_as_string), None)
     if stage_val:
-        data['stage'] = stage_val
+        # A SNOMED display ("Stage 4 (qualifier value)") is not clinical
+        # wording; the record keeps the reviewed label (#2618).
+        from omop_core.services.stage_labels import normalise_stage_label
+        data['stage'] = normalise_stage_label(stage_val)
 
     # T stage — LOINC 21905-5
     t_val = _stage_value('21905-5')
