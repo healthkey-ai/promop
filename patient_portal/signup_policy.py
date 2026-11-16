@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import date
 
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ImproperlyConfigured, ValidationError
 
 DEFAULT_MINIMUM_AGE = 18
 # The oldest year of birth accepted: nobody signing up was born before this
@@ -54,7 +54,14 @@ def _configured_codes() -> list[str]:
 
 def _configured_ages() -> dict[str, int]:
     raw = getattr(settings, 'PHR_SIGNUP_MINIMUM_AGES', None) or {}
-    return {str(k).strip().upper(): int(v) for k, v in raw.items()}
+    if not isinstance(raw, dict):
+        raise ImproperlyConfigured('PHR_SIGNUP_MINIMUM_AGES must be a JSON object of country code to age.')
+    ages = {}
+    for code, age in raw.items():
+        if isinstance(age, bool) or not isinstance(age, int) or not 0 < age < MAX_AGE:
+            raise ImproperlyConfigured(f'PHR_SIGNUP_MINIMUM_AGES[{code!r}] must be an age in years, got {age!r}.')
+        ages[normalize_country(code)] = age
+    return ages
 
 
 def minimum_age(code: str) -> int:
@@ -98,7 +105,7 @@ def validate_year_of_birth(year, country: str, today: date | None = None) -> int
     if isinstance(year, bool) or not isinstance(year, (int, str)):
         raise ValidationError('year_of_birth must be a four-digit year.')
     text = str(year).strip()
-    if not (text.isdigit() and len(text) == 4):
+    if not (text.isascii() and text.isdigit() and len(text) == 4):
         raise ValidationError('year_of_birth must be a four-digit year.')
     value = int(text)
     if value < today.year - MAX_AGE:

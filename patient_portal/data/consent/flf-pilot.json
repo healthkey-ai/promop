@@ -1,0 +1,157 @@
+{
+  "_comment": [
+    "Consent purposes and documents for the FLF Patient Movement pilot, in the shape",
+    "manage.py load_consent_texts reads. The wording here is a DRAFT placeholder that",
+    "paraphrases the Oct 29 consent form and the FLF Terms and Privacy Policy; FLF's",
+    "own approved text replaces it before publication. No version carries a",
+    "published_at, so loading this file publishes nothing: `--publish` publishes every",
+    "version at load time (for staging), or set published_at per version once FLF sign off.",
+    "Translations (ES, PT) are added as further texts on the same version."
+  ],
+  "purposes": [
+    {
+      "key": "age_declaration",
+      "kind": "declaration",
+      "answers": "yes_no",
+      "stage": "sign_up",
+      "sort_order": 1,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "I am old enough to join",
+          "summary": "I confirm that I have reached the minimum age for my country.",
+          "body": "I confirm that I have reached the minimum age to use this service in the country I live in. The minimum age is 18 in most countries and 19 in some Canadian provinces and US states."
+        }
+      ]
+    },
+    {
+      "key": "sign_up_declaration",
+      "kind": "declaration",
+      "answers": "yes_no",
+      "stage": "sign_up",
+      "sort_order": 2,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "I confirm the statements above",
+          "summary": "I confirm the statements above.",
+          "body": "I confirm that:\n\n- I have, or have had, follicular lymphoma, or I am joining on behalf of someone who has.\n- The information I give is true to the best of my knowledge.\n- I have read the Terms of Service and the Privacy Policy."
+        }
+      ]
+    },
+    {
+      "key": "my_record",
+      "kind": "permission",
+      "answers": "yes_no",
+      "stage": "first_profile",
+      "sort_order": 10,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "My record",
+          "summary": "Keep my answers in my record so I can see and update them.",
+          "body": "Keep the answers I give about my follicular lymphoma, my treatment and how I am doing in my record, so that I can see them, update them and download them. The Follicular Lymphoma Foundation combines members' answers into insights and reports about the condition; nobody is identified in them."
+        }
+      ]
+    },
+    {
+      "key": "community_figures",
+      "kind": "permission",
+      "answers": "yes_no",
+      "stage": "first_profile",
+      "sort_order": 11,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "Community figures",
+          "summary": "Include my answers in the figures shown to other members.",
+          "body": "Include my answers in the figures the community sees, such as how many members have had a given treatment. Figures are only shown for groups large enough that nobody can be picked out."
+        }
+      ]
+    },
+    {
+      "key": "research",
+      "kind": "permission",
+      "answers": "yes_no_ask_later",
+      "stage": "first_profile",
+      "sort_order": 12,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "Research",
+          "summary": "Share my coded answers with approved research.",
+          "body": "Share my answers, with my name and contact details removed, with research that the Follicular Lymphoma Foundation has approved. You can say yes, no, or ask me when research starts."
+        }
+      ]
+    },
+    {
+      "key": "flf_updates",
+      "kind": "contact_preference",
+      "answers": "yes_no",
+      "asks_frequency": true,
+      "frequency_options": ["weekly", "monthly", "quarterly"],
+      "stage": "first_profile",
+      "sort_order": 20,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "Updates from FLF",
+          "summary": "Send me updates from the Follicular Lymphoma Foundation.",
+          "body": "Send me updates from the Follicular Lymphoma Foundation about the community, new findings and events, as often as I choose."
+        }
+      ]
+    },
+    {
+      "key": "study_contact",
+      "kind": "contact_preference",
+      "answers": "yes_no",
+      "stage": "first_profile",
+      "sort_order": 21,
+      "texts": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "Contact about a study or trial",
+          "summary": "Contact me about a specific study or trial I may be able to join.",
+          "body": "Contact me when there is a specific study or clinical trial that my answers suggest I may be able to join."
+        }
+      ]
+    }
+  ],
+  "documents": [
+    {
+      "key": "terms",
+      "name": "Terms of Service",
+      "sort_order": 1,
+      "versions": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "Terms of Service",
+          "body": "PLACEHOLDER. The Follicular Lymphoma Foundation's Terms of Service, as approved, replace this text.",
+          "requires_reacceptance": true
+        }
+      ]
+    },
+    {
+      "key": "privacy_policy",
+      "name": "Privacy Policy",
+      "sort_order": 2,
+      "versions": [
+        {
+          "version": "0.1",
+          "language": "en",
+          "title": "Privacy Policy",
+          "body": "PLACEHOLDER. The Follicular Lymphoma Foundation's Privacy Policy, as approved, replace this text.",
+          "requires_reacceptance": true
+        }
+      ]
+    }
+  ]
+}

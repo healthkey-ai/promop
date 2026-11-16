@@ -10,9 +10,12 @@ consent v2 in the caller's transaction, so an account is never created with
 half its declarations.
 
 The country and year are optional at the API: an invitation to a hospital
-record carries both already. The declarations are not: when a deployment has
-loaded sign-up purposes or documents, an acceptance that omits one is refused,
-because the declaration is the age check (``signup_policy``).
+record carries both already. Whether the declarations are required is the
+record's organisation's call (``Organization.requires_signup_declarations``):
+a member app's org requires every sign-up declaration and document, because
+the declaration is the age check (``signup_policy``); a hospital's org, whose
+own claim page asks none, records whatever the form sends and requires none.
+One promop instance serves both.
 """
 from __future__ import annotations
 
@@ -20,6 +23,7 @@ from datetime import date
 
 from django.core.exceptions import ValidationError
 
+from omop_core.models import PERSON_YEAR_PLACEHOLDERS
 from omop_core.services.field_write_service import write_person_location
 from patient_portal import consent as svc
 from patient_portal import signup_policy as policy
@@ -59,16 +63,14 @@ def signup_policy(language: str = svc.DEFAULT_LANGUAGE) -> dict:
                 'key': p.key, 'kind': p.kind, 'answers': p.allowed_decisions(), 'stage': p.stage,
                 'gated_by_country': p.gated_by_country,
                 'enabled_countries': [str(c).upper() for c in p.enabled_countries] if p.gated_by_country else [],
-                'text': {'version': t.version, 'language': t.language, 'title': t.title,
-                         'summary': t.summary, 'body': t.body},
+                'text': _text(t),
             }
             for p, t in _published_purposes(language)
         ],
         'documents': [
             {
                 'key': d.key, 'name': d.name,
-                'text': {'version': t.version, 'language': t.language, 'title': t.title,
-                         'summary': t.summary, 'body': t.body},
+                'text': _text(t),
             }
             for d, t in _published_documents(language)
         ],
@@ -83,14 +85,13 @@ def _items(value, name: str) -> list[dict]:
     return value
 
 
-def _string(value, name: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValidationError(f'{name} is required and must be a string.')
-    return value
+_string = svc.required_string
+_text = svc.text_payload
 
 
 def apply_signup(person, record, *, email: str, data: dict, language: str = svc.DEFAULT_LANGUAGE,
-                 recorded_by=None, today: date | None = None, refresh=None) -> dict:
+                 recorded_by=None, today: date | None = None, refresh=None,
+                 require_declarations: bool | None = None) -> dict:
     """Validate and write the sign-up form. Returns what was written, as
     ``{'country': ..., 'year_of_birth': ..., 'consents': n, 'documents': n}``.
 
@@ -101,7 +102,13 @@ def apply_signup(person, record, *, email: str, data: dict, language: str = svc.
     replaced). Must run inside the caller's transaction. ``refresh`` is
     called after the country and year are written and before the consent is
     recorded, so a purpose gated by country sees the country just given.
+    ``require_declarations`` defaults to the record's organisation's
+    ``requires_signup_declarations``; False records what is sent and
+    requires nothing.
     """
+    if require_declarations is None:
+        org = getattr(record, 'organization', None) if record is not None else None
+        require_declarations = bool(org is not None and org.requires_signup_declarations)
     written = {'country': None, 'year_of_birth': None, 'consents': 0, 'documents': 0}
     country = data.get('country')
     year = data.get('year_of_birth')
@@ -134,51 +141,84 @@ def apply_signup(person, record, *, email: str, data: dict, language: str = svc.
 
     purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
     documents = {d.key: d for d in LegalDocument.objects.filter(is_active=True).prefetch_related('versions')}
-    for key in decided:
-        if key not in purposes:
+    # Everything a refusal can name is checked here, before a fact is written
+    # or the record derived: unknown keys, malformed items, stale versions, and
+    # what the organisation requires.
+    for key, item in decided.items():
+        purpose = purposes.get(key)
+        if purpose is None:
             raise ValidationError(f'Unknown purpose {key!r}.')
-    for key in accepted:
-        if key not in documents:
+        _string(item.get('decision'), 'decision')
+        version = _string(item.get('version'), 'version')
+        current = svc.current_version(list(purpose.texts.all()))
+        if current is not None and version != current:
+            raise svc.StaleVersion(f'{key} is now version {current}, not {version}.')
+    for key, item in accepted.items():
+        document = documents.get(key)
+        if document is None:
             raise ValidationError(f'Unknown document {key!r}.')
+        version = _string(item.get('version'), 'version')
+        current = svc.current_version(list(document.versions.all()))
+        if current is not None and version != current:
+            raise svc.StaleVersion(f'{key} is now version {current}, not {version}.')
 
-    # Every sign-up declaration available to this member must be confirmed, and
-    # every document accepted. Checked before anything is written so the
-    # refusal names what is missing.
-    effective_country = written['country'] or svc.record_country(person)
-    for purpose, _text in _published_purposes(language):
-        if not purpose.available_in(effective_country):
-            continue
-        item = decided.get(purpose.key)
-        if item is None:
-            raise ValidationError(f'{purpose.key} must be answered to sign up.')
-        if purpose.kind == ConsentPurpose.DECLARATION and item.get('decision') != ConsentEvent.GRANTED:
-            raise ValidationError(f'{purpose.key} must be confirmed to sign up.')
-    for document, _text in _published_documents(language):
-        if document.key not in accepted:
-            raise ValidationError(f'{document.key} must be accepted to sign up.')
+    # Where the organisation requires it, every sign-up declaration available
+    # to this member must be confirmed and every document accepted.
+    if require_declarations:
+        effective_country = written['country'] or svc.record_country(person)
+        for purpose in purposes.values():
+            if purpose.stage != SIGN_UP_STAGE or not purpose.available_in(effective_country):
+                continue
+            if svc.current_text(list(purpose.texts.all()), language) is None:
+                continue
+            item = decided.get(purpose.key)
+            if item is None:
+                raise ValidationError(f'{purpose.key} must be answered to sign up.')
+            if purpose.kind == ConsentPurpose.DECLARATION and item.get('decision') != ConsentEvent.GRANTED:
+                raise ValidationError(f'{purpose.key} must be confirmed to sign up.')
+        for document in documents.values():
+            if svc.current_text(list(document.versions.all()), language) is None:
+                continue
+            if document.key not in accepted:
+                raise ValidationError(f'{document.key} must be accepted to sign up.')
+
+    # The sign-up is the member's own, newer statement: a pending UI edit of
+    # the same field on the record would otherwise be restored over the
+    # derived value and leave the record's country disagreeing with the
+    # Location the consent gate was checked against.
+    if record is not None:
+        superseded = set()
+        if written['country'] is not None:
+            superseded.add('country')
+        if written['year_of_birth'] is not None:
+            superseded |= {'date_of_birth', 'date_of_birth_precision'}
+        pending = set(record.user_edited_fields or [])
+        if pending & superseded:
+            record.user_edited_fields = sorted(pending - superseded)
+            record.save(update_fields=['user_edited_fields'])
 
     if written['country'] is not None:
         write_person_location(person, {'country': written['country']})
-    if written['year_of_birth'] is not None:
-        person.year_of_birth = written['year_of_birth']
+    year = written['year_of_birth']
+    if year is not None and (person.year_of_birth in PERSON_YEAR_PLACEHOLDERS or person.year_of_birth != year):
+        # A year the record already holds, from a hospital, keeps its month and
+        # day: the member's year is support for the declaration, not a
+        # correction. A different year is the member's own statement about
+        # themselves and replaces the stored one, year-only.
+        person.year_of_birth = year
         person.month_of_birth = None
         person.day_of_birth = None
         person.save(update_fields=['year_of_birth', 'month_of_birth', 'day_of_birth'])
     if refresh is not None:
         refresh(person)
 
-    for key, item in decided.items():
-        frequency = item.get('frequency') or ''
-        svc.record_consent(
-            person, purposes[key], _string(item.get('decision'), 'decision'),
-            version=_string(item.get('version'), 'version'), language=language,
-            frequency=frequency if isinstance(frequency, str) else '',
-            recorded_by=recorded_by, source=ConsentEvent.MEMBER, email=email,
-        )
-        written['consents'] += 1
+    written['consents'] = len(svc.record_decisions(
+        person, [(purposes[key], item) for key, item in decided.items()],
+        language=language, recorded_by=recorded_by, email=email,
+    ))
     for key, item in accepted.items():
         svc.accept_document(
-            person, documents[key], version=_string(item.get('version'), 'version'), language=language,
+            person, documents[key], version=item['version'], language=language,
             recorded_by=recorded_by, source=ConsentEvent.MEMBER, email=email,
         )
         written['documents'] += 1

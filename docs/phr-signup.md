@@ -49,15 +49,28 @@ credential) takes, besides `token` and `password`:
 | `lang` | The language the member read; otherwise `Accept-Language`. |
 
 `country` and `year_of_birth` are optional: an invitation to a hospital record
-already carries both. The declarations are not: a deployment that has loaded
-sign-up purposes or documents refuses an acceptance that omits one (**400**,
-naming it), because the declaration *is* the age check. A deployment with
-none loaded keeps the old contract, token and password alone.
+already carries both. A year the person already holds, from a hospital, keeps
+its month and day when the member gives the same year; a different year is the
+member's own statement and replaces it, year-only. A pending UI edit of the
+same field on the record is retired, so the sign-up's value is the one the
+record derives.
 
-Everything is one transaction. A refused sign-up leaves no account, no
-consent history, no ledger entry and no location; the invitation stays
-pending so the member can try again. On success the person is linked to the
-new (or claimed) identity, given the `patient` role at the record's
+Whether the declarations are **required** is the record's organisation's
+call: `Organization.requires_signup_declarations`, off by default. A member
+app's org (the FLF org) turns it on, and an acceptance that omits a sign-up
+declaration or a document is refused (**400**, naming it), because the
+declaration *is* the age check. A hospital's org leaves it off: its claim
+page asks none, token and password are enough, and any consent the form does
+send is still recorded. One promop instance serves both, so loading the
+pilot texts on staging does not change the hospital record claim. Either way
+an answer at a version that is no longer current is a **409**, and nothing is
+written before every check has passed.
+
+Everything is one transaction, with the invitation row locked, so two
+requests racing on one token record one sign-up. A refused sign-up leaves no
+account, no consent history, no ledger entry and no location; the invitation
+stays pending so the member can try again. On success the person is linked
+to the new (or claimed) identity, given the `patient` role at the record's
 organisation, and the record is derived once from the written facts before
 the consent is recorded, so a purpose gated by country sees the country just
 given.
@@ -83,6 +96,8 @@ provinces and some US states. It is configuration, not code
 | `PHR_SIGNUP_COUNTRIES` | JSON list of alpha-2 codes offered. Unset: the pilot list, the UK, the EU and EEA, the US, Canada, Australia and Switzerland. |
 | `PHR_SIGNUP_MINIMUM_AGES` | JSON object, code to age, e.g. `{"CA": 19}`. Unset: 18 everywhere. |
 
+A value that is not JSON of that shape refuses to start, naming the variable.
+
 ## The pilot texts
 
 `patient_portal/data/consent/flf-pilot.json` holds the FLF pilot's purposes
@@ -93,7 +108,10 @@ contact preferences (`flf_updates` with a frequency, `study_contact`), and
 the Terms of Service and Privacy Policy. Its wording is a **draft
 placeholder** that FLF's approved text replaces, so no version carries a
 `published_at`: loading it publishes nothing until `--publish` (staging) or a
-date is set per version once FLF sign off.
+date is set per version once FLF sign off. Nothing in the deploy loads it:
+the load is a step an operator runs, once per wording change, against the
+deployment's database, after turning `requires_signup_declarations` on for the
+member app's organisation.
 
 ```bash
 DATABASE_URL="${STAGING_DATABASE_URL:?}" \

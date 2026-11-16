@@ -17,13 +17,18 @@ All notable changes to PRomop are documented here.
   missing or declined declaration is a 400 and republished wording a 409,
   and nothing of a refused sign-up survives. A year that cannot reach the
   country's minimum age is refused; the age check is otherwise the
-  declaration. The minimum age is per country (`PHR_SIGNUP_MINIMUM_AGES`,
-  default 18) and the country list is `PHR_SIGNUP_COUNTRIES`. The public
+  declaration. Whether the declarations are required is the record's
+  organisation's call (`Organization.requires_signup_declarations`, off by
+  default, migration 0343), so the hospital record claim on the same
+  instance is unchanged. The minimum age is per country
+  (`PHR_SIGNUP_MINIMUM_AGES`, default 18) and the country list is
+  `PHR_SIGNUP_COUNTRIES`. The public
   `GET /api/v1/phr/signup/policy/` serves the form the countries, ages,
   declarations and documents with their current versions. The FLF pilot's
   draft texts are in `patient_portal/data/consent/flf-pilot.json`. Also
   fixes acceptance never granting the member the `patient` role at the
-  record's organisation. See [Sign-up through an invitation](docs/phr-signup.md).
+  record's organisation, committing a half-made account on a refusal, and
+  two requests racing on one token both being accepted. See [Sign-up through an invitation](docs/phr-signup.md).
   (#2596)
 - **The PHR record PDF renders Cyrillic, Greek and extended Latin names** —
   the export is set in DejaVu Sans, bundled under `patient_portal/api/phr/fonts/`

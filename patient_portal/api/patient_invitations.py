@@ -275,6 +275,14 @@ def accept_patient_invitation(request):
     record = None
     try:
         with transaction.atomic():
+            # Two requests racing on one token must not both record the
+            # sign-up: lock the row and re-check it before anything is written.
+            invitation = PatientInvitation.objects.select_for_update().select_related('person').get(pk=invitation.pk)
+            if invitation.accepted_at or invitation.cancelled_at:
+                raise _Refused(Response(
+                    {'error': 'Invitation already accepted. Please sign in.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ))
             # Search all issuers — not just urn:local — so we don't create a
             # duplicate Identity when the email already has an SSO/OAuth account.
             identity = _find_local_or_any_identity(email)

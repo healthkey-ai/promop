@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 import json
 import os
+
+from django.core.exceptions import ImproperlyConfigured
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
@@ -472,10 +474,24 @@ PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "")
 
 # ── Sign-up policy (patient_portal/signup_policy.py) ───────────────────────
 # The countries a member may sign up from (ISO 3166-1 alpha-2) and the age they
-# must declare per country. Unset, the pilot list and 18 apply.
+# must declare per country. Unset, the pilot list and 18 apply. A value that is
+# not JSON of the right shape refuses to start, naming the variable.
 #   PHR_SIGNUP_COUNTRIES='["GB","IE","US"]'   PHR_SIGNUP_MINIMUM_AGES='{"CA": 19}'
-PHR_SIGNUP_COUNTRIES = json.loads(os.environ.get("PHR_SIGNUP_COUNTRIES") or "null")
-PHR_SIGNUP_MINIMUM_AGES = json.loads(os.environ.get("PHR_SIGNUP_MINIMUM_AGES") or "{}")
+def _json_env(name, default, expected, example):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f"{name} must be JSON, e.g. {example}") from None
+    if not isinstance(value, expected):
+        raise ImproperlyConfigured(f"{name} must be a JSON {expected.__name__}, e.g. {example}")
+    return value
+
+
+PHR_SIGNUP_COUNTRIES = _json_env("PHR_SIGNUP_COUNTRIES", None, list, '["GB","IE","US"]')
+PHR_SIGNUP_MINIMUM_AGES = _json_env("PHR_SIGNUP_MINIMUM_AGES", {}, dict, '{"CA": 19}')
 
 # ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
 # PROMOP issues the HealthKey family's RS256 tokens for its own identities, so

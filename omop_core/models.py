@@ -82,6 +82,13 @@ class Organization(models.Model):
         default=False,
         help_text="When true, patients may self-register via the org's public page.",
     )
+    requires_signup_declarations = models.BooleanField(
+        default=False,
+        help_text="When true, a member accepting an invitation to a record of this org must "
+                  "give the sign-up declarations and document acceptances the deployment's "
+                  "consent texts define (docs/phr-signup.md). Off, the acceptance records "
+                  "whatever consent the form sends and requires none.",
+    )
     clinical_unit_system = models.CharField(
         max_length=20,
         choices=ClinicalUnitSystem.choices,
