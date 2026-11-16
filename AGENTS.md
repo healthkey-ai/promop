@@ -275,7 +275,7 @@ Category code (#2331), written through
 code that is not a `DiseaseCategoryChoice`. For a new built-in field on the
 disease tab, add it to `SEED_DISEASE_FIELDS` there (a drift test holds that
 list to `DiseaseTab.tsx`) **and** add the rows in a data migration that
-declares its own frozen `FIELD_DISEASE_SEED`, as 0346 does: the seed migration
+declares its own frozen `FIELD_DISEASE_SEED`, as 0347 does: the seed migration
 has already run on every existing instance, and a second test fails until
 some migration writes the field. A field a curator creates takes `diseases`
 on `POST /api/v1/custom-patient-fields/` instead.

@@ -109,7 +109,7 @@ is the base record. Which category a record's disease name falls in is
 disease name a curator maps, or a category a curator adds, gets a profile
 with no deploy. A category that still has member fields cannot be deleted.
 
-Migration 0346 seeds MM, BC, FL, MCL and CLL with the fields
+Migration 0347 seeds MM, BC, FL, MCL and CLL with the fields
 `DiseaseTab.tsx` renders for each; every other field starts as base. The
 migration carries its own frozen copy of the rows (`FIELD_DISEASE_SEED`), so
 what a fresh install seeds does not depend on the code it is installed from.
