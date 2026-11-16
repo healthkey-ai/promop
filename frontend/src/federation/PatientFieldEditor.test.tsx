@@ -5,11 +5,6 @@ import type { AxiosInstance } from 'axios';
 import PatientFieldEditor from './PatientFieldEditor';
 import { PatientFormStore } from './patientFormStore';
 
-const answers = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
-vi.mock('@/api/clinicalTransport', () => ({
-  clinicalClient: () => answers,
-  clinicalUrl: (path: string) => `/host${path}`,
-}));
 
 async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
   const fields = {
@@ -1041,12 +1036,6 @@ describe('single unit display (#5704)', () => {
   });
 
   it('renders the explicit answer actions instead of a derived dead end', async () => {
-    answers.get.mockResolvedValue({ data: {
-      field: 'no_other_active_malignancies', value: false, confirmed: false, source: [],
-    } });
-    answers.post.mockResolvedValue({ data: {
-      field: 'no_other_active_malignancies', value: true, confirmed: true, source: [],
-    } });
     const { store, post } = await setup({
       no_other_active_malignancies: {
         kind: 'explicit-answer', writable: false, answerable: true,

@@ -159,9 +159,13 @@ describe('explicit answers travel on the editor connection (#2606 review)', () =
   });
 
   it('re-reads the attestation when another mounted editor writes', async () => {
+    let confirmed = false;
     const client = {
-      get: vi.fn(async () => ({ data: { value: false, confirmed: false, source: [] } })),
-      post: vi.fn(async () => ({ data: { value: true, confirmed: true, source: [] } })),
+      get: vi.fn(async () => ({ data: { value: confirmed, confirmed, source: [] } })),
+      post: vi.fn(async () => {
+        confirmed = true;
+        return { data: { value: true, confirmed: true, source: [] } };
+      }),
     };
     const store = new PatientFormStore(client as never, '');
     const saved = vi.fn(async (values: Record<string, unknown>) => store.applyServerValues(values));
@@ -170,12 +174,13 @@ describe('explicit answers travel on the editor connection (#2606 review)', () =
     render(<><ExplicitAnswerActions {...props} /><ExplicitAnswerActions {...props} /></>);
 
     await waitFor(() => expect(client.get).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Explicitly confirmed.')).toBeNull();
     const [first] = screen.getAllByRole('button', { name: 'Confirm no other active malignancies' });
     await waitFor(() => expect(first).toBeEnabled());
     fireEvent.click(first);
 
-    // Both editors re-read the snapshot after the store announced the answer.
-    await waitFor(() => expect(client.get.mock.calls.length).toBeGreaterThan(2));
+    // The other editor must stop saying "not confirmed", not just re-request.
+    await waitFor(() => expect(screen.getAllByText('Explicitly confirmed.')).toHaveLength(2));
   });
 });
 
