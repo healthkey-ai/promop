@@ -44,7 +44,7 @@ def lab_field_mappings(db):
 
 @pytest.fixture
 def disease_extensions(db):
-    """Each disease's extension as migration 0344 seeds it (#2331).
+    """Each disease's extension as migration 0345 seeds it (#2331).
 
     pytest builds the database without migrations, so a test that reads which
     fields belong to a disease asks for the rows here.
