@@ -298,6 +298,10 @@ class Command(BaseCommand):
                 ids = next_pk_batch(Measurement, 'measurement_id', len(chunk))
                 objs = []
                 for mid, (person_id, loinc, value, unit) in zip(ids, chunk):
+                    # `{score}` is the mapping's "no unit" marker, not a unit
+                    # someone should read on a lab row (#2605).
+                    from omop_core.services.mappings import physical_unit
+                    unit = physical_unit(unit)
                     objs.append(Measurement(
                         measurement_id=mid,
                         person_id=person_id,

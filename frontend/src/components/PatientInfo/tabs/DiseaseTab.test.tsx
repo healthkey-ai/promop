@@ -451,6 +451,10 @@ describe('LymphomaSection — transformation to DLBCL fields', () => {
 
   it('renders all three transformation field labels', () => {
     renderLymphoma();
+    // The section says "Transformation" so its first field ("Transformed to
+    // DLBCL") does not repeat the heading (#2619).
+    expect(screen.getByText('Transformation')).toBeInTheDocument();
+    expect(screen.queryByText('Transformation to DLBCL')).toBeNull();
     expect(screen.getByText('Transformed to DLBCL')).toBeInTheDocument();
     expect(screen.getByText('Transformation Date')).toBeInTheDocument();
     expect(screen.getByText('Post-Transformation Outcome')).toBeInTheDocument();

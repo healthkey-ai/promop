@@ -41,6 +41,15 @@ function todayIso() {
   return local.toISOString().slice(0, 10);
 }
 
+/** `{score}` / `{INR}` / `{ratio}` mean "no physical unit", not a label. The
+ * descriptor drops them (#2605), and a client that still receives one from an
+ * older deployment must not print it beside the value. */
+function physicalUnit(unit?: string | null): string | null {
+  const trimmed = unit?.trim();
+  if (!trimmed || /^\{.*\}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
 /** Unit labels accept the same micro spellings as the server's pair reader. */
 function normaliseUnitLabel(value: string): string {
   return value.trim().toLowerCase()
@@ -283,8 +292,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const displayUnit = storedUnit
     ? (storedUnitLabel ?? 'unit unknown')
     : (unitOptions.length
-      ? (unitOptions[0].label ?? unitOptions[0].value)
-      : field.unit ?? field.projection?.unit);
+      ? physicalUnit(unitOptions[0].label ?? unitOptions[0].value)
+      : physicalUnit(field.unit ?? field.projection?.unit));
   const chosenUnit = dated
     ? (unitDraft ?? authoritativeUnit)
     : (value == null || value === '')
