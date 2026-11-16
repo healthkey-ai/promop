@@ -270,7 +270,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         { params }
       );
       const runId = res.data.run_id;
-      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, created: 0, skipped: 0, already_resolved: 0, errors: 0, code_details: [] });
+      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, created: 0, provisional: 0, reverted: 0, skipped: 0, already_resolved: 0, errors: 0, code_details: [] });
 
       resolvePollRef.current = setInterval(async () => {
         try {
@@ -844,6 +844,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                     <p className="text-sm text-muted-foreground">
                       Resolved {resolveRun.resolved} source code(s).
                       {resolveRun.created > 0 && ` ${resolveRun.created} clinical row(s) created.`}
+                      {resolveRun.provisional > 0 && ` ${resolveRun.provisional} provisional from proposed mappings.`}
+                      {resolveRun.reverted > 0 && ` ${resolveRun.reverted} provisional reverted.`}
                       {resolveRun.skipped > 0 && ` ${resolveRun.skipped} skipped.`}
                       {resolveRun.already_resolved > 0 && ` ${resolveRun.already_resolved} already resolved.`}
                       {resolveRun.errors > 0 && ` ${resolveRun.errors} error(s).`}

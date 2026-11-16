@@ -44,6 +44,8 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
     total_created = 0
     total_skipped = 0
     total_already_resolved = 0
+    total_provisional = 0
+    total_reverted = 0
     total_errors = 0
     error_details: list[dict] = []
     all_code_details: list[dict] = []
@@ -57,6 +59,8 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
                 result = resolve_person_source_codes(person)
                 total_resolved += result['resolved']
                 total_created += result.get('created', 0)
+                total_provisional += result.get('provisional', 0)
+                total_reverted += result.get('reverted', 0)
                 total_skipped += result['skipped']
                 total_already_resolved += result['already_resolved']
                 all_code_details.extend(result.get('code_details', []))
@@ -73,10 +77,15 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
             run.done = i + 1
             run.resolved = total_resolved
             run.created = total_created
+            run.provisional = total_provisional
+            run.reverted = total_reverted
             run.skipped = total_skipped
             run.already_resolved = total_already_resolved
             run.errors = total_errors
-            run.save(update_fields=['done', 'resolved', 'created', 'skipped', 'already_resolved', 'errors'])
+            run.save(update_fields=[
+                'done', 'resolved', 'created', 'provisional', 'reverted', 'skipped',
+                'already_resolved', 'errors',
+            ])
 
         run.state = SourceCodeResolveRun.COMPLETED
     except BaseException:
