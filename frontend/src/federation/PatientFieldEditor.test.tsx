@@ -1024,7 +1024,69 @@ describe('single unit display (#5704)', () => {
     render(<PatientFieldEditor store={store} name="inr" label="INR" labelIncludesUnit />);
 
     expect(screen.getByText('INR')).toBeVisible();
+
     expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
+  });
+
+  it('marks a computed value and states what it is computed from (#2620)', async () => {
+    const { store } = await setup({}, { height: 170, weight: 60 });
+    render(<PatientFieldEditor store={store} name="bmi" label="BMI" />);
+
+    // The marker and the explanation are on the row, not behind the pencil.
+    expect(screen.getByText('(computed)')).toBeVisible();
+    expect(screen.getByText('Computed from Height, Weight.')).toBeVisible();
+    expect(screen.getByLabelText('Edit BMI inputs')).toBeVisible();
+  });
+
+  it('points at the dedicated editor instead of denying that one exists (#2614)', async () => {
+    const { store } = await setup({
+      tp53_disruption: {
+        kind: 'computed', writable: false, label: 'Tp53 disruption',
+        inputs: ['genetic_mutations'],
+      },
+      genetic_mutations: {
+        kind: 'editable', writable: true, target: 'genomics',
+        endpoint: '/api/v1/patient-records/{person_id}/genomics/',
+        label: 'Genetic mutations',
+      },
+    }, { tp53_disruption: 'Unknown.shift' });
+    render(<PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />);
+
+    expect(screen.getByText(/Computed from Genetic mutations\. Edit them in Genomics\./)).toBeVisible();
+    expect(screen.queryByText(/not editable in this view/)).toBeNull();
+  });
+
+  it('does not name a dedicated editor that refuses every write (#2614 review)', async () => {
+    const { store } = await setup({
+      tp53_disruption: {
+        kind: 'computed', writable: false, label: 'Tp53 disruption',
+        inputs: ['genetic_mutations'],
+      },
+      genetic_mutations: {
+        kind: 'editable', writable: false, target: 'genomics',
+        endpoint: '/api/v1/patient-records/{person_id}/genomics/',
+        label: 'Genetic mutations',
+        reason: 'The OMOP CDM and type vocabularies needed to store variants are not loaded.',
+      },
+    }, { tp53_disruption: null });
+    render(<PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />);
+
+    expect(screen.queryByText(/Genomics/)).toBeNull();
+    expect(screen.getByText(/not editable in this view/)).toBeVisible();
+    expect(screen.getByText(/vocabularies needed to store variants/)).toBeVisible();
+  });
+
+  it('marks a read-only computed row too (#2620)', async () => {
+    const { store } = await setup({
+      tnbc_status: {
+        kind: 'computed', writable: false, label: 'Tnbc status',
+        reason: 'Computed from ER, PR and HER2 status.',
+      },
+    }, { tnbc_status: null });
+    render(<PatientFieldEditor store={store} name="tnbc_status" label="Triple Negative Status" />);
+
+    expect(screen.getByText(/Triple Negative Status \(computed\):/)).toBeVisible();
+    expect(screen.getByText(/Computed from ER, PR and HER2 status\./)).toBeVisible();
   });
 
   it('aligns the unit selector with its input, not the field label (#2609)', async () => {
@@ -1041,7 +1103,8 @@ describe('single unit display (#5704)', () => {
     }, { weight: 80, weight_units: 'kg' });
     render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
 
-    const unit = screen.getByLabelText('Unit for Weight (kg)');
+    // The picker owns the unit, so the reviewed "(kg)" is dropped (#2610).
+    const unit = screen.getByLabelText('Unit for Weight');
     const value = screen.getByDisplayValue('80');
     // Bottom-aligned columns plus the input's own height: the select's centre
     // sits on the input's, instead of on the label row above it. Deriving the
