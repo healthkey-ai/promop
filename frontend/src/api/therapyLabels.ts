@@ -2,9 +2,9 @@
  *
  * Therapy intents arrive from the ETL as uppercase tokens
  * (`DEFINITIVE_LOCAL`, `METASTATIC_DISEASE_CONTROL`, …); a clinician must not
- * read a database value. The table is the reviewed wording; a token it does
- * not know is still humanised rather than printed raw, so a new code cannot
- * leak a second time.
+ * read a database value. The table is the reviewed wording; an underscore-joined
+ * code it does not know is humanised, and anything else is shown unchanged so
+ * clinical shorthand (`CR`, `VGPR`, `COVID-19`) is never rewritten.
  */
 const INTENT_LABELS: Record<string, string> = {
   DEFINITIVE_LOCAL: 'Definitive local',

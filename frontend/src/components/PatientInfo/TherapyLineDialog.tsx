@@ -431,7 +431,9 @@ export default function TherapyLineDialog({
               {/* A stored token the reviewed list does not know must stay
                   visible and keep its value; otherwise the select shows no
                   answer and an untouched save would drop it (#2634 review). */}
-              {intent && !THERAPY_INTENT_CHOICES.some((o) => o.value === intent) && (
+              {intentLabel(intent) && !THERAPY_INTENT_CHOICES.some(
+                (o) => o.value.toLowerCase() === intent.toLowerCase(),
+              ) && (
                 <option value={intent}>{intentLabel(intent)}</option>
               )}
               {THERAPY_INTENT_CHOICES.map((o) => (

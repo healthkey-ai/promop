@@ -287,7 +287,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
         {supportiveCourses.length > 0 ? <ul className="divide-y divide-border rounded-md border border-border">
           {supportiveCourses.map((course) => <li key={course.id} className="flex items-center gap-3 px-3 py-2 text-sm">
             <div className="flex-1">
-              <p className="font-medium">{course.regimen_title}{course.intent && <span className="ml-2 font-normal">{course.intent}</span>}</p>
+              <p className="font-medium">{course.regimen_title}</p>
               <p className="text-xs text-muted-foreground">{course.start_date || 'No start date'} to {course.end_date || 'present'}{intentLabel(course.intent) && ` · Intent: ${intentLabel(course.intent)}`}{valueLabel(course.discontinuation_reason) && ` · Reason: ${valueLabel(course.discontinuation_reason)}`}</p>
             </div>
             {!readOnly && <button type="button" aria-label={`Edit ${course.regimen_title}`} onClick={() => setSupportiveDialog({ course })} className="rounded-md border px-2.5 py-1.5">Edit</button>}
