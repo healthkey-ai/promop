@@ -281,10 +281,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     : undefined;
   const authoritativeUnit = matchedUnit?.value
     ?? (storedUnit || unitOptions[0]?.value || '');
-  // The unit the reviewed label is about: the field's own, not the one just
-  // chosen. A label naming kg stays a label naming kg when the reader switches
-  // to lb; the picker is what moves (#2610).
-  const unitInPlay = field.unit ?? field.projection?.unit ?? unitOptions[0]?.value;
+  // Two units matter here. `descriptorUnit` is what a reviewed label is likely
+  // to name ("Weight (kg)"); `unitInPlay` is what the row actually shows, which
+  // is the stored one when the record holds another ("lb") (#2610 review).
+  const descriptorUnit = field.unit ?? field.projection?.unit ?? unitOptions[0]?.value;
+  const unitInPlay = storedUnit || descriptorUnit;
   const displayUnit = displayUnitLabel(
     storedUnit ? (storedUnitLabel ?? 'unit unknown')
       : (unitOptions.length
@@ -300,8 +301,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // soon as another unit is chosen ("Weight (kg)" with lb selected, #2610). With
   // a picker the control owns the unit, so the label's trailing parenthetical is
   // dropped here; the reviewed label stays intact for the report and the tab.
-  const shownLabel = showUnitPicker && !labelIncludesUnit
-    && labelNamesUnit(label, unitInPlay)
+  // The label's own unit is right for the descriptor but wrong for a record
+  // stored in another unit; then the control must say the stored one, so the
+  // label's parenthetical goes rather than the fact (#2610 review).
+  const storedDiffersFromDescriptor = Boolean(storedUnit) && Boolean(descriptorUnit)
+    && normaliseUnitLabel(storedUnit) !== normaliseUnitLabel(String(descriptorUnit));
+  const shownLabel = !labelIncludesUnit && labelNamesUnit(label, descriptorUnit)
+    && (showUnitPicker || storedDiffersFromDescriptor)
     ? (label.replace(/\s*\([^)]*\)\s*$/, '').trim() || label)
     : label;
   const pairError = state.errors[canonical]
@@ -554,7 +560,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
         </p>}
     </>
-      : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
+      : <><div>{!compact && <span className="text-sm font-medium">{shownLabel}: </span>}{formatted}</div>
         {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}

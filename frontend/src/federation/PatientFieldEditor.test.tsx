@@ -1406,6 +1406,25 @@ describe('unit presentation (#2610)', () => {
     expect(screen.queryByText('h')).not.toBeInTheDocument();
   });
 
+  it('shows the stored unit when the reviewed label names another (#2610 review)', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: false, label: 'Weight', unit: 'kg', reason: 'Read-only.',
+      },
+      weight_units: {
+        writable: false, target: 'patient_record', control: 'text',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 180, weight_units: 'lb' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    // 180 is pounds: the label must not pin kilograms, and the unit still shows.
+    expect(screen.getByText(/Weight:/)).toBeVisible();
+    expect(screen.getByText('lb')).toBeVisible();
+    expect(screen.queryByText(/Weight \(kg\):/)).toBeNull();
+  });
+
   it('lets the picker own the unit when the label does not name one', async () => {
     const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
     const { store } = await setup({
