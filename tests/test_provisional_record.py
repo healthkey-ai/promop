@@ -11,13 +11,13 @@ import pytest
 from rest_framework.test import APIClient
 
 from omop_core.models import (
-    PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
+    GroupAccess, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
 )
 from omop_core.services import provisional_record
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import Identity, PatientUser
-from tests.factories import MeasurementFactory, PatientRecordFactory
+from tests.factories import MeasurementFactory, OrganizationFactory, PatientRecordFactory
 from tests.test_provisional_derivation import (  # noqa: F401 (fixtures)
     _add_measurement, _add_observation, _concept, record, snomed,
 )
@@ -147,14 +147,36 @@ def test_too_many_code_groups_fall_back_to_the_lowest_confidence(snomed, record,
     assert (marks.hemoglobin_g_dl, marks.b_symptom_fever) == (82, 82)
 
 
-def test_a_person_with_no_provisional_rows_gets_a_copy_of_the_record(snomed, record):
-    refreshed = refresh_patient_record(record.person)
+def test_a_person_with_no_provisional_rows_gets_no_row(snomed, record):
+    refresh_patient_record(record.person)
 
-    row = provisional(record.person)
-    assert row.disease == refreshed.disease
-    marks = confidence(record.person)
-    assert all(getattr(marks, f.name) is None
-               for f in PatientRecordConfidence._meta.concrete_fields if f.name != 'person')
+    assert not PatientRecordProvisional.objects.exists()
+    assert not PatientRecordConfidence.objects.exists()
+
+
+def test_a_stored_pair_is_rewritten_clean_when_the_proposals_are_gone(snomed, record):
+    from omop_core.models import Measurement
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+    refresh_patient_record(record.person)
+    assert provisional(record.person).hemoglobin_g_dl is not None
+
+    Measurement.objects.filter(person=record.person).delete()
+    refresh_patient_record(record.person)
+
+    assert provisional(record.person).hemoglobin_g_dl is None
+    assert confidence(record.person).hemoglobin_g_dl is None
+
+
+def test_one_value_that_does_not_fit_costs_only_itself(snomed, record):
+    with suppress_patient_record_refresh():
+        hemoglobin(record.person, 9999999, date(2024, 6, 1), conf=82)   # a wrong-unit proposal
+        _add_observation(record.person, 91)
+
+    refresh_patient_record(record.person)
+
+    assert provisional(record.person).hemoglobin_g_dl is None
+    assert confidence(record.person).b_symptom_fever == 91
 
 
 def test_the_switch_off_writes_nothing(snomed, record, settings):
@@ -268,11 +290,15 @@ def test_the_patient_role_is_refused(snomed, record):
     assert client.get(f'/api/v1/patient-records/{record.person_id}/').status_code == 200
 
 
-def test_another_professionals_patient_is_not_found(snomed, record):
+def test_a_stranger_is_refused_and_another_orgs_doctor_finds_nothing(snomed, record):
     stranger = Identity.objects.create_user(email='prov-stranger@example.test')
     client = APIClient()
     client.force_authenticate(stranger)
+    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 403
 
+    elsewhere = Identity.objects.create_user(email='prov-elsewhere@example.test')
+    GroupAccess.objects.create(identity=elsewhere, org=OrganizationFactory(), role='doctor')
+    client.force_authenticate(elsewhere)
     assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 404
 
 
@@ -288,3 +314,121 @@ def test_the_endpoint_is_read_only(snomed, record, staff):
 
     assert staff.patch(url, {'disease': 'x'}, format='json').status_code == 405
     assert staff.delete(url).status_code == 405
+
+
+# --- review findings (#2628) ------------------------------------------------------------
+
+def test_a_reader_with_no_curation_access_gets_nothing(snomed):
+    """The demo-org browse lists sample patients to an analyst, de-identified (#2460).
+    A provisional row is a whole record: the endpoint refuses such a reader."""
+    demo = OrganizationFactory(allows_patient_signup=True)
+    sample = PatientRecordFactory(organization=demo)
+    analyst = Identity.objects.create_user(email='prov-analyst@example.test')
+    GroupAccess.objects.create(identity=analyst, org=demo, role='analyst')
+    client = APIClient()
+    client.force_authenticate(analyst)
+
+    assert client.get('/api/v1/patient-records-provisional/').status_code == 403
+    assert client.get(f'/api/v1/patient-records-provisional/{sample.person_id}/').status_code == 403
+
+
+def test_the_endpoint_never_lets_a_stale_row_override_the_live_record(snomed, record, staff):
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+    refresh_patient_record(record.person)
+    other = OrganizationFactory()
+    # Changed outside any derivation, after the provisional row was written.
+    PatientRecord.objects.filter(person=record.person).update(
+        organization=other, hemoglobin_g_dl=9, hemoglobin_level=9, hemoglobin_level_units='g/dL')
+
+    body = staff.get(f'/api/v1/patient-records-provisional/{record.person_id}/').json()
+
+    assert body['organization'] == other.pk
+    assert float(body['hemoglobin_g_dl']) == 9
+    assert 'hemoglobin_g_dl' not in body['confidence']          # approved now, so no mark
+
+
+def test_an_edit_also_settles_the_aliases_it_fills(snomed, record, staff):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+    refresh_patient_record(record.person)
+    assert confidence(record.person).hemoglobin_level == 82
+
+    staff.patch(f'/api/v1/patient-records/{record.person_id}/', {'hemoglobin_g_dl': '13.0'}, format='json')
+
+    real = PatientRecord.objects.get(person=record.person)
+    row, marks = provisional(record.person), confidence(record.person)
+    assert real.hemoglobin_level is not None
+    assert row.hemoglobin_level == real.hemoglobin_level          # not the old 11.5 proposal
+    assert marks.hemoglobin_level is None and marks.hemoglobin_level_units is None
+
+
+def test_a_users_clear_is_not_refilled_by_an_older_proposal(snomed, record, staff):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    with suppress_patient_record_refresh():
+        hemoglobin(record.person, 9.0, date(2024, 5, 1))
+        hemoglobin(record.person, 11.5, date(2024, 4, 1), conf=82)   # older than the clear below
+    refresh_patient_record(record.person)
+
+    staff.patch(f'/api/v1/patient-records/{record.person_id}/', {'hemoglobin_g_dl': None}, format='json')
+    refresh_patient_record(record.person)
+
+    assert PatientRecord.objects.get(person=record.person).hemoglobin_g_dl is None
+    assert provisional(record.person).hemoglobin_g_dl is None
+    assert confidence(record.person).hemoglobin_g_dl is None
+
+
+def test_a_verified_representative_is_refused(snomed, record):
+    from omop_core.models import PersonalRepresentative
+    caregiver = Identity.objects.create_user(email='prov-caregiver@example.test')
+    PersonalRepresentative.objects.create(
+        representative=caregiver, person_id=record.person_id, relationship='caregiver',
+        verification_status='VERIFIED')
+    client = APIClient()
+    client.force_authenticate(caregiver)
+
+    assert client.get(f'/api/v1/patient-records/{record.person_id}/').status_code == 200   # control
+    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 403
+
+
+def test_a_doctor_with_access_reads_it(snomed, record):
+    doctor = Identity.objects.create_user(email='prov-doctor@example.test')
+    GroupAccess.objects.create(identity=doctor, org=record.organization, role='doctor')
+    client = APIClient()
+    client.force_authenticate(doctor)
+
+    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 200
+
+
+def test_a_failing_mirror_does_not_lose_the_users_edit(snomed, record, staff, monkeypatch):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+    refresh_patient_record(record.person)
+    monkeypatch.setattr(PatientRecordProvisional, 'save',
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('mirror boom')))
+
+    response = staff.patch(f'/api/v1/patient-records/{record.person_id}/',
+                           {'hemoglobin_g_dl': '13.0'}, format='json')
+
+    assert response.status_code == 200
+    assert float(PatientRecord.objects.get(person=record.person).hemoglobin_g_dl) == 13.0
+
+
+def test_the_provisional_readers_match_the_real_refresh(snomed, record):
+    """The orchestration in provisional_record restates the real refresh's order of
+    the same readers. Fed real rows as if they were proposals it must agree with it."""
+    from omop_core.services.patient_record_service import _build_snapshot
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, None)
+        _add_observation(record.person, None)
+    refreshed = refresh_patient_record(record.person)
+    snapshot = _build_snapshot(record.person)
+
+    view = provisional_record._view(snapshot, snapshot.measurements, snapshot.observations)
+    values = provisional_record._read_values(record.person, refreshed, view)
+
+    for field in ('hemoglobin_g_dl', 'hemoglobin_level', 'b_symptom_fever'):
+        assert getattr(refreshed, field) is not None, field    # the control: the fixture feeds it
+        assert values[field] == getattr(refreshed, field), field

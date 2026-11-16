@@ -179,9 +179,17 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
 
 - **The pass** runs at the end of `refresh_patient_record`, in its transaction,
   once the real record is saved. Failures are logged and leave the provisional
-  pair as it was; the approved record is never lost to it. Every refresh writes
-  both rows (full, not sparse), the provisional one a copy of the real record
-  with the overlay, the confidence one all null unless a value is provisional.
+  pair as it was; the approved record is never lost to it. The pair is written
+  for a person who has provisional clinical rows, or already has a stored pair
+  (so an approval or a revert rewrites it clean); the provisional row is a copy
+  of the real record with the overlay, the confidence row all null unless a
+  value is provisional. A person who never had a proposal has no row, which the
+  endpoint answers with the real record. That is sparse by use: it keeps the
+  common refresh free of two 400-column upserts, and makes the HealthTree row
+  count a smaller question than the plan assumed.
+- **Rollout:** the pair is not written, and the PATCH mirror does not run, while
+  the switch is off, so rows written earlier go stale. After enabling it, run
+  `backfill_patient_records --all` before relying on the endpoint.
 - **Readers run:** labs and blood counts (`_get_laboratory_data`), assertions
   (`_get_assertion_data`) and the curated field mappings
   (`curated_values_from_snapshot`), in the real refresh's order, over a snapshot
@@ -199,19 +207,31 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
   group's. A field no single group decides (several codes agree) takes the
   lowest confidence of all. Past `MAX_ATTRIBUTION_GROUPS` (40) groups every kept
   field takes the lowest of all, which never overstates and bounds the cost.
-- **PATCH mirror** (`mirror_user_edit`, at the end of `_patch_record`): edited
-  fields take the record's value in the provisional row and lose their
-  confidence; every other field that is approved in the provisional row follows
-  the record too, so a computed field moves with an edit; a field still waiting
-  on a proposal keeps it. A person with no provisional row has nothing to mirror.
+- **PATCH mirror** (`mirror_user_edit`, at the end of `_patch_record`): a
+  proposal stays only while the record still has no answer for the field. An
+  edited field, and any alias the edit filled in (`hemoglobin_level` after
+  `hemoglobin_g_dl`), takes the record's value and loses its confidence; every
+  other approved field follows the record too, so a computed field moves with an
+  edit. A person with no provisional row has nothing to mirror. A failure is
+  logged; the edit is already saved.
+- **Clears and misfits:** the real clear markers are laid among the provisional
+  rows before they are read, so a proposal older than a user's clear cannot
+  refill it (matched on concept and source value, as derivation does); a
+  proposed number or text that does not fit its column is dropped alone, as the
+  real refresh drops it, and does not cost the person's other proposals.
 - **Endpoint** `GET /api/v1/patient-records-provisional/{person_id}/` and the
   list, read-only, v1 only. Tenancy is `PatientRecordViewSet.get_queryset` and
   its person lookup; the body is `PatientRecordSerializer` run over the real
-  record with the provisional columns laid over it, so the shape is the real
-  one's plus `confidence` (only fields that have a number). The patient role is
-  refused (`NotPatientRolePermission`: 403, for the list too); a person not yet
-  derived is served the real record with `confidence: {}`; with the switch off
-  the resource is 404.
+  record with a proposal laid over each field that has a confidence mark and
+  that the live record still leaves empty, so a stale row can never override
+  approved data, and the shape is the real one's plus `confidence` (the marks
+  that were applied). Access is an allow-list (`NotPatientRolePermission`):
+  service tokens, org-scoped credentials, staff and readers with curation
+  access. A patient, a verified representative and an analyst (including at a
+  public demo org, whose sample patients the real list shows de-identified) are
+  refused with 403, list and detail alike. A person without a pair is served the
+  real record with `confidence: {}`; with the switch off the resource is 404.
+  The list pages 25 at a time, because each row runs the full-width serializer.
 - **Not done:** the frontend (badge, show-provisional toggle, the untouched-form
   PATCH test), and the per-organization/domain floor. HealthTree's
   `patient_record` row count is still unread, so full-versus-sparse stays open.

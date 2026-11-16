@@ -6347,6 +6347,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         )
 
 
+class ProvisionalRecordPagination(PatientRecordPagination):
+    page_size = 25
+    max_page_size = 25
+
+
 class PatientRecordProvisionalViewSet(viewsets.ReadOnlyModelViewSet):
     """The provisional picture of a patient record (phase 1c, #2531).
 
@@ -6359,7 +6364,8 @@ class PatientRecordProvisionalViewSet(viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = PatientRecordSerializer
     permission_classes = [ScopedTokenPermission, NotPatientRolePermission, PatientSelfScopePermission]
-    pagination_class = PatientRecordPagination
+    # Each row runs the full-width record serializer, which does per-row queries.
+    pagination_class = ProvisionalRecordPagination
 
     # Tenancy and the person lookup are the real resource's own.
     get_queryset = PatientRecordViewSet.get_queryset
@@ -6378,18 +6384,24 @@ class PatientRecordProvisionalViewSet(viewsets.ReadOnlyModelViewSet):
             return None
 
     def _body(self, request, record, provisional, confidence):
+        """The real record with each proposal laid over a field the record leaves empty.
+
+        Only a field with a confidence mark is taken from the provisional row,
+        and only while the live record still has no answer for it: everything
+        else, and any value the record has gained since the pass ran, is the
+        record's own. So a stale provisional row can never override approved data.
+        """
         import copy
         from omop_core.models import PatientRecordConfidence
+        from omop_core.services.patient_record_service import _is_empty
         view = copy.copy(record)
-        if provisional is not None:
-            for field in PatientRecordProvisional._meta.concrete_fields:
-                if field.name != 'person':
-                    setattr(view, field.attname, getattr(provisional, field.attname))
         marks = {}
-        if confidence is not None:
+        if provisional is not None and confidence is not None:
             for field in PatientRecordConfidence._meta.concrete_fields:
-                if field.name != 'person' and getattr(confidence, field.name) is not None:
-                    marks[field.name] = getattr(confidence, field.name)
+                mark = getattr(confidence, field.name) if field.name != 'person' else None
+                if mark is not None and _is_empty(getattr(record, field.attname, None)):
+                    setattr(view, field.attname, getattr(provisional, field.attname))
+                    marks[field.name] = mark
         return {**PatientRecordSerializer(view, context={'request': request}).data, 'confidence': marks}
 
     def retrieve(self, request, pk=None):
