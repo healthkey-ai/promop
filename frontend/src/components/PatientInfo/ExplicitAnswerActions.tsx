@@ -85,7 +85,12 @@ export default function ExplicitAnswerActions({
         .then(({ data }) => data);
     load
       .then((data) => {
-        if (!cancelled) setLoaded({ key: queryKey, data });
+        if (!cancelled) {
+          setLoaded({ key: queryKey, data });
+          // A refresh after a transient failure recovers instead of keeping the
+          // error for the rest of the mount (#2627 review).
+          setLoadFailure(null);
+        }
       })
       .catch(() => {
         if (!cancelled) {
