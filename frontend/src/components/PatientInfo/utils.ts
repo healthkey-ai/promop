@@ -5,7 +5,7 @@ export function prettyLabel(key: string) {
     .replace(/^./, (s) => s.toUpperCase());
 }
 
-export type Option = { value: unknown; label: string };
+export type Option = { value: unknown; label: string; code?: string | null };
 
 export function optionKey(v: unknown) {
   return String(v);
@@ -17,10 +17,11 @@ export function stringsToOptions(strings: string[]): Option[] {
 
 /** An option may arrive as a bare display string or with a stored value that
  *  differs from its label (a host catalog stores codes, patients read titles). */
-export type OptionInput = string | { value: string; label?: string };
+export type OptionInput = string | { value: string; label?: string; code?: string | null };
 
 export function optionsToObjects(options: OptionInput[]): Option[] {
   return options.map((option) => typeof option === 'string'
     ? { value: option, label: option }
-    : { value: option.value, label: option.label ?? option.value });
+    : { value: option.value, label: option.label ?? option.value,
+        ...(option.code ? { code: option.code } : {}) });
 }

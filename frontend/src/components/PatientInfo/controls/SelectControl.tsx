@@ -7,7 +7,7 @@ import {
   SelectValue,
 } from "@/components/shadcn/select";
 
-type Option = { value: unknown; label: string };
+type Option = { value: unknown; label: string; code?: string | null };
 
 const CLEAR = "__clear__";
 const UNKNOWN = "__unknown__";
@@ -59,11 +59,26 @@ export default function SelectControl({
     return m;
   }, [normalized]);
 
+  // A vocabulary may carry the code a record stores beside the display it
+  // shows (`{value: 'Male', code: 'M'}` from the descriptor's FieldChoice rows).
+  // The record holds the code, so matching only `value` made the stored answer
+  // look like an extra, unnamed option beside the real one — the Gender menu
+  // listed both `M` and `Male`. A stored code selects its own option, and a
+  // selection still writes the option's `value`.
+  const codeToKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of normalized) {
+      const code = o.code ? keyOf(o.code) : '';
+      if (code) m.set(code, o.__key);
+    }
+    return m;
+  }, [normalized]);
   const currentKey = useMemo(() => {
     const k = keyOf(value);
     if (!k && treatEmptyOptionAsUnknown) return UNKNOWN;
+    if (k && !keyToValue.has(k) && codeToKey.has(k)) return codeToKey.get(k)!;
     return k;
-  }, [value, treatEmptyOptionAsUnknown]);
+  }, [value, treatEmptyOptionAsUnknown, keyToValue, codeToKey]);
 
   // A Radix Select falls back to its placeholder when `value` matches no item,
   // so a stored value outside the vocabulary reads as "not set" even though the
