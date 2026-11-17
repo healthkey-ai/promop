@@ -347,6 +347,135 @@ the better read: it is paged, filterable and carries `updated_at`.
 In the Word document long identifiers wrap at invisible zero-width spaces.
 Copy exact codes from the CSV, not from the document.
 
+## Public voting on the wearable proposals
+
+A curator can put the wearable mapping proposals to a vote by people who have
+no account, such as a standards working group. The curator makes a link
+(Share, on the Wearables tab); a voter opens it, chooses Yes or No or writes
+a comment on any proposal, gives an email address and submits.
+
+**Votes are not recorded until the voter confirms them from an email**, and
+**a vote never changes a mapping**: curators read the votes and approve or
+reject as before.
+
+### For curators (session required)
+
+```
+GET  /api/v1/code-mappings/vote-shares/
+POST /api/v1/code-mappings/vote-shares/                 {"title": "...", "note": "...", "expires_at": "2027-01-31"}
+POST /api/v1/code-mappings/vote-shares/<id>/revoke/
+GET  /api/v1/code-mappings/vote-shares/<id>/votes-export/
+GET  /api/v1/code-mappings/<mapping_id>/votes/
+```
+
+Reading needs a role that reads the mapping pages; creating, revoking and the
+CSV need one that writes mappings (staff, org admin or analyst), and so does
+seeing a share's `url` or a voter's address. `title` is required, at most 200
+characters, and is shown to voters; `note` (at most 2,000) is shown under it;
+`expires_at` is optional, a date (through the end of that day, UTC) or an
+RFC 3339 instant, and must be in the future.
+
+A share:
+
+```json
+{"id": 4, "title": "HL7 PHR working group review", "note": "", "created_at": "...",
+ "expires_at": null, "revoked_at": null, "active": true, "voters": 7, "votes": 61,
+ "url": "https://<app>/vote/<token>"}
+```
+
+`voters` is the number of addresses that confirmed at least one vote.
+Revoking stops the link at once, keeps the confirmed votes and discards
+submissions still waiting for confirmation.
+
+A mapping's votes:
+
+```json
+{"tally": {"yes": 3, "no": 1, "comments": 2}, "emails_included": true,
+ "votes": [{"id": 9, "choice": "yes", "comment": "", "confirmed_at": "...",
+            "share_id": 4, "share_title": "HL7 PHR working group review",
+            "stale": false, "voter_email": "..."}]}
+```
+
+`choice` is `yes`, `no` or `""` for a comment alone. `stale` is true for a
+vote cast on a destination the mapping has since moved off; stale votes are
+kept and are not in `tally`. `voter_email` is absent, and `emails_included`
+false, for a reader who cannot write mappings. Each row of the mapping list
+(`GET /api/v1/code-mappings/`, browse and flat, for a session) carries the
+same tally as `votes`; a single-mapping response and a service token's read
+do not.
+
+The CSV has one line per confirmed vote: Share, Category, Metric key, Source,
+Source code, Description, Voted on destination (`vocabulary:code`), Voted on
+concept, OMOP concept ID, Vote, Comment, Voter email, Confirmed at, Stale. It
+follows the conventions of the Wearables download above: a byte order mark,
+and a leading apostrophe on any cell a spreadsheet would run as a formula,
+which matters here because comments are whatever a stranger typed.
+
+### For voters (no account)
+
+```
+GET  /api/v1/public/mapping-votes/<token>/
+POST /api/v1/public/mapping-votes/<token>/submit/       {"email": "...", "votes": [{"mapping": 12, "choice": "yes", "comment": ""}]}
+GET  /api/v1/public/mapping-votes/confirm/<confirm_token>/
+POST /api/v1/public/mapping-votes/confirm/<confirm_token>/
+```
+
+These read no session, set no cookie and are never cached. In the app they
+are the pages `/vote/<token>` and `/vote/confirm/<confirm_token>`.
+
+The page lists the proposals open for voting: wearable mappings that are
+proposed, not hospital-specific, and have a destination concept. It is read
+live, so a proposal approved or rejected later drops off and a new one
+appears. Each proposal carries `id`, `metric_key`, `measure_class`, `source`,
+`source_code`, `description`, `destination_vocabulary`, `destination_code`,
+`destination_name` and `unit`, grouped by category in the Wearables
+download's order. Nothing else about a mapping is public.
+
+A submission names only the proposals the voter acted on. `choice` is `yes`,
+`no` or `""`; `comment` is at most 1,000 characters; an entry with neither is
+ignored, and a submission with none is a 400. So are an invalid address, an
+id that is not on the page (the answer does not say which), and more votes
+than there are proposals. A body over 200 KB is a 413. Otherwise the answer
+is always
+
+```
+202 {"detail": "Check your email to confirm your votes. They are not recorded until you confirm."}
+```
+
+whether or not that address has voted before, and whether or not an email was
+sent. The email holds the share's title, the number of votes and comments and
+the confirmation link, and nothing the voter typed.
+
+Opening the link (`GET`) returns the pending votes and records nothing.
+`POST` records them, once, and answers `{"recorded": n, "skipped": m}`:
+`skipped` counts proposals that were approved, rejected, deleted or pointed at
+another destination since the voter read the page. One vote is kept per
+share, address and mapping, so confirming a later submission replaces the
+voter's earlier vote on the mappings it names and leaves the rest. The link
+is valid for 48 hours.
+
+A share link that is unknown, revoked or expired is the same
+`404 {"detail": "This link is not available."}`; a confirmation link that is
+unknown, used or expired is the same
+`404 {"detail": "This confirmation link is no longer valid."}`.
+
+### Limits
+
+Per client address, as `429`s: reading 60 a minute, submitting 5 an hour,
+the confirmation endpoints 20 an hour
+(`MAPPING_VOTE_READ_THROTTLE_RATE`, `MAPPING_VOTE_SUBMIT_THROTTLE_RATE`,
+`MAPPING_VOTE_CONFIRM_THROTTLE_RATE`). Counted in the database, so they hold
+across workers: at most 3 unconfirmed submissions per share and address
+(`MAPPING_VOTE_MAX_PENDING_PER_EMAIL`), 5 confirmation emails per address in
+24 hours across all shares (`MAPPING_VOTE_MAX_EMAILS_PER_DAY`), and 500
+confirmation emails in 24 hours in total
+(`MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL`). Past a database limit the answer
+is the usual 202 and no email is sent.
+
+Voting needs working outbound email: the links are built from `APP_BASE_URL`
+and sent through the deployment's mail backend (`MAILGUN_API_KEY`,
+`MAILGUN_SENDER_DOMAIN`, `DEFAULT_FROM_EMAIL`).
+
 ## Uploading a source-code inventory
 
 Users with Code Mapping access can select **Upload** on the Code Mapping page,
