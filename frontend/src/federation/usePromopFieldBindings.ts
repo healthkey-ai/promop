@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AxiosInstance } from 'axios';
 
+import { resolveEditField } from './editBinding';
 import { editorBasePath, type EditorConnection } from './editorSession';
 import { parseWritableDescriptor } from './descriptorVersion';
 
 /** One descriptor entry, as far as bindings matter here. */
 interface DescriptorEntry {
   bindings?: string[];
+  kind?: string | null;
+  writable?: boolean;
+  target?: string | null;
+  normalised_read_model?: boolean;
 }
 interface Answer {
   client: AxiosInstance;
@@ -97,18 +102,22 @@ export function usePromopFieldBindings(
     : null;
   const resolvable = useMemo(() => {
     const entries = new Map<string, Record<string, unknown>>();
-    // Same precedence as `PatientFormStore.resolve()`: a canonical key wins
-    // over a binding, and the first entry declaring a binding wins over a
-    // later one. One pass would let a later binding overwrite a canonical key
-    // and route the row to a different kind than the editor resolves.
-    const declared = Object.entries(current ?? {});
-    for (const [name, entry] of declared) {
-      entries.set(name, entry as Record<string, unknown>);
+    const declared = (current ?? {}) as Record<string, DescriptorEntry>;
+    // An exact key is its own answer; a binding goes through the same resolver
+    // the editor uses, so the host never hands over a row the store will then
+    // resolve to a different column (a normalised read-model instead of the
+    // source pair it is derived from, most often).
+    for (const [name, entry] of Object.entries(declared)) {
+      entries.set(name, entry as unknown as Record<string, unknown>);
     }
-    for (const [, entry] of declared) {
-      for (const alias of entry.bindings ?? []) {
-        if (!entries.has(alias)) entries.set(alias, entry as Record<string, unknown>);
-      }
+    const aliases = new Set<string>();
+    for (const entry of Object.values(declared)) {
+      for (const alias of entry.bindings ?? []) aliases.add(alias);
+    }
+    for (const alias of aliases) {
+      if (entries.has(alias)) continue;
+      const key = resolveEditField(declared, alias);
+      if (key) entries.set(alias, declared[key] as unknown as Record<string, unknown>);
     }
     return entries;
   }, [current]);

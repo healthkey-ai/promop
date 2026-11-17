@@ -470,6 +470,29 @@ describe('load failures', () => {
   });
 });
 
+describe('edit binding resolution', () => {
+  it('edits the source pair even when its normalised read-model is declared first', async () => {
+    const descriptor = {
+      hemoglobin_g_dl: { kind: 'computed', writable: false, target: 'patient_record',
+        bindings: ['hemoglobinLevel'], normalised_read_model: true, unit: 'g/dL' },
+      hemoglobin_level: { kind: 'direct', writable: true, target: 'patient_record',
+        bindings: ['hemoglobinLevel'], unit_options: [
+          { value: 'G/DL', label: 'g/dL' }, { value: 'G/L', label: 'g/L' }] },
+      hemoglobin_level_units: { kind: 'selectable', writable: false,
+        qualifies: 'hemoglobin_level' },
+    };
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? descriptor
+      : { patient_info: { person_id: 12, hemoglobin_level: 14.2 }, write_enabled: true } }));
+    const store = new PatientFormStore(
+      { get, patch: vi.fn() } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    expect(store.resolve('hemoglobinLevel')).toBe('hemoglobin_level');
+    // The canonical column is still addressable by its own name.
+    expect(store.resolve('hemoglobin_g_dl')).toBe('hemoglobin_g_dl');
+  });
+});
+
 describe('shared patient-form queue', () => {
   it('loads caller/patient-specific descriptors and fails closed for unsupported writes', async () => {
     const { store, get, patch } = setup();
