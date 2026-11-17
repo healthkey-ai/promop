@@ -14,6 +14,10 @@ import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
+import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
+import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
+import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
+import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -103,6 +107,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const [editedName, setEditedName] = useState(initialName);
   const [activeTab, setActiveTab] = useState(0);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  // Fields added through Field Concept Mapping, read once for every tab.
+  const addedFields = useCustomPatientFields();
+  const { categoryForDisease } = useAllDiseaseMappings();
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
@@ -344,6 +351,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   }
 
   const diseaseType = getDiseaseType();
+  const diseaseCode = recordDiseaseCategory(
+    typeof editedInfo.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
+    diseaseType,
+  );
   const showDiseaseTab = diseaseType !== "other";
   // Keyed rather than positional: a host that cannot serve wearable uploads
   // drops that tab, and arithmetic indices would silently shift every tab after it.
@@ -451,6 +462,16 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           {wearableIdx >= 0 && activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
           {activeTab === historyIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
+          {/* Fields added through Field Concept Mapping, last on their tab
+              (#721). The host has no Field Mappings page, so no Add Field. */}
+          {tabKeys[activeTab] !== "history" && (
+            <CustomPatientFields
+              fields={addedFields}
+              tabs={addedFieldTabs(tabKeys[activeTab])}
+              diseases={diseaseCode ? [diseaseCode] : []}
+              formData={editedInfo}
+            />
+          )}
         </div>
       </div>
     </div>

@@ -5,7 +5,13 @@ from django.utils import timezone
 
 from omop_core.mapping import axis_variants
 from omop_core.models import Concept, ConceptMappingDone, FieldConceptMapping, SourceCodeConceptMapping
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, WEARABLE_SOURCE_VOCABULARIES
+
+# A choice in the tab's domain list that is not an OMOP domain: the standard
+# concepts a wearable source code is mapped to (#2656). The codes of one metric
+# (HealthKit, Health Connect, OpenWearables, Garmin, HL7 PHR) should converge
+# on one concept, and this is where a curator sees whether they do.
+WEARABLES_DOMAIN = 'wearables'
 
 
 def standard_destinations():
@@ -70,7 +76,8 @@ def browse_concepts(params):
     fields = FieldConceptMapping.objects.exclude(status='rejected')
     if params.get('status'):
         fields = fields.filter(status=params['status'])
-    if params.get('domain'):
+    wearables = params.get('domain') == WEARABLES_DOMAIN
+    if params.get('domain') and not wearables:
         fields = fields.filter(omop_table=params['domain'])
     disease = (params.get('disease') or '').strip()
     if disease:
@@ -78,7 +85,17 @@ def browse_concepts(params):
         fields = fields.filter(field_name__in=_disease_fields(disease))
     concepts = standard_destinations()
     scope = 'fields' if disease else params.get('scope', 'fields')
-    if scope == 'fields':
+    if wearables:
+        # Wearables is its own scope: few of these concepts back a patient
+        # field, so "Patient field concepts" would hide nearly all of them.
+        # A disease still narrows, as it does under every other domain. A
+        # rejected mapping is a code that is not mapped to the concept.
+        concepts = concepts.filter(Exists(SourceCodeConceptMapping.objects.filter(
+            target_concept_id=OuterRef('pk'), source_vocabulary_id__in=WEARABLE_SOURCE_VOCABULARIES,
+        ).exclude(status='rejected')))
+        if disease:
+            concepts = concepts.filter(Exists(fields.filter(concept_id=OuterRef('pk'))))
+    elif scope == 'fields':
         concepts = concepts.filter(Exists(fields.filter(concept_id=OuterRef('pk'))))
     elif params.get('domain'):
         domains = [domain for domain, table in DOMAIN_TO_TABLE.items() if table == params['domain']]

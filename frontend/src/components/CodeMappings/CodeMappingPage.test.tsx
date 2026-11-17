@@ -12,7 +12,7 @@ const mockDelete = vi.fn();
 
 // The page is exercised as an analyst: a mapping writer who cannot approve (#2416).
 const ANALYST_USER = { id: 7, org_accesses: [{ org_slug: "acme", org_name: "Acme", role: "analyst", expires_at: null }] };
-const mockUseAuth = vi.hoisted(() => vi.fn((): { currentUser: unknown } => ({ currentUser: null })));
+const mockUseAuth = vi.hoisted(() => vi.fn((): { currentUser: unknown; loading?: boolean } => ({ currentUser: null })));
 mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER });
 vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/api/axios", () => ({
@@ -318,6 +318,33 @@ describe("CodeMappingPage", () => {
     await screen.findByText(/No matching standard concepts/);
     fireEvent.click(screen.getByRole("button", { name: "Source Code → Concept" }));
     expect(await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
+  });
+
+  it("opens the concept-first tab on the domain the account chose, once the account is known (#2656)", async () => {
+    localStorage.setItem(`promop-concept-to-code:${ANALYST_USER.id}`, JSON.stringify({ domain: "wearables" }));
+    const conceptCalls = () => mockGet.mock.calls.filter(([url]) => url === "/v1/concept-to-code/");
+    try {
+      mockUseAuth.mockReturnValue({ currentUser: null, loading: true });
+      const view = renderPage([proposedRow]);
+      const previousGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/concept-to-code/"
+        ? Promise.resolve({ data: { results: [], total: 0, page: 1, page_size: 50 } }) : previousGet(url, ...rest));
+      fireEvent.click(await screen.findByRole("button", { name: "Concept → Source Code" }));
+      // No account yet: no tab, so no unfiltered list request and nothing to save a choice under.
+      expect(screen.queryByRole("region", { name: "Concept to source code" })).not.toBeInTheDocument();
+      expect(conceptCalls()).toHaveLength(0);
+
+      mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER, loading: false });
+      view.rerender(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+      expect(await screen.findByRole("region", { name: "Concept to source code" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Concept domain")).toHaveValue("wearables");
+      await waitFor(() => expect(conceptCalls().length).toBeGreaterThan(0));
+      // The first list request already asks for the saved domain.
+      expect((conceptCalls()[0][1] as { params: { domain: string } }).params.domain).toBe("wearables");
+    } finally {
+      mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER });
+      localStorage.removeItem(`promop-concept-to-code:${ANALYST_USER.id}`);
+    }
   });
 
   describe("duplicate source-code errors", () => {

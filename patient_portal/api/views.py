@@ -1198,10 +1198,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         # Pass request in context so PH.1.2#05 demographic redaction can
         # identify whether the reader is the account holder.
-        patient_serializer = PatientRecordSerializer(patient_info, context={'request': request})
+        from omop_core.services.provisional_record import overlay
+        shown, provisional_fields = overlay(patient_info)
+        patient_serializer = PatientRecordSerializer(shown, context={'request': request})
 
         return Response({
-            'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
+            # legacy wire format — preserved for frontend/federation host compatibility
+            'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
             'user': user_data
         })
 
@@ -1482,6 +1485,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
+
+            # A direct edit is approved: the provisional picture takes it too,
+            # and drops any proposal's confidence on the edited fields.
+            if direct_fields:
+                from omop_core.services.provisional_record import mirror_user_edit
+                mirror_user_edit(patient_info, direct_fields)
 
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
@@ -1771,10 +1780,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         if request.method == 'GET':
             user_serializer = UserSerializer(request.user)
-            patient_serializer = PatientRecordSerializer(patient_info)
+            from omop_core.services.provisional_record import overlay
+            shown, provisional_fields = overlay(patient_info)
+            patient_serializer = PatientRecordSerializer(shown)
             full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
             return Response({
-                'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
+                # legacy wire format — preserved for frontend/federation host compatibility
+                'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
                 'user': user_serializer.data,
                 'patient_name': full_name,
             })
@@ -12716,11 +12728,12 @@ def _can_manage_mappings(user):
     """Whether a user may create or change a mapping (#2398, #2416).
 
     Creating, editing, proposing and uploading code and field mappings,
-    synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis
-    variants, LOINC axes, SNOMED attributes, concept minting and source-system
-    facility review. Staff, org admins and analysts; a doctor needs an analyst
-    grant as well, since roles are additive and mapping is the analyst's.
-    Approval is narrower still: ``_can_approve_mappings``.
+    synonyms and choices, Suggest, Lock, Done, priority, axis variants, LOINC
+    axes, SNOMED attributes, concept minting and source-system facility
+    review. Staff, org admins and analysts; a doctor needs an analyst grant
+    as well, since roles are additive and mapping is the analyst's. Approval
+    is narrower still, ``_can_approve_mappings``, and so is adding a field to
+    PatientRecord, which creates an approved mapping (#721).
     """
     return bool(getattr(user, 'is_staff', False) or has_mapping_write_access(user))
 
@@ -15761,7 +15774,10 @@ def custom_patient_field_list(request):
     """List runtime PatientRecord fields or atomically add one with its mapping.
 
     Definitions are visible to every signed-in user because Patient Info needs
-    them to render values.  Creation remains limited to mapping administrators.
+    them to render values.  Creating one is an approval: the field arrives with
+    an approved mapping, so only staff and org admins may (#721). An analyst
+    proposes and remaps existing fields and is refused here, as on any other
+    approval.
     """
     from .serializers import CustomPatientFieldCreateSerializer, CustomPatientFieldSerializer
 
@@ -15774,7 +15790,7 @@ def custom_patient_field_list(request):
             fields, many=True, context={'field_diseases': disease_profiles.memberships()},
         ).data)
 
-    if not _can_manage_mappings(request.user):
+    if not _can_approve_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = CustomPatientFieldCreateSerializer(

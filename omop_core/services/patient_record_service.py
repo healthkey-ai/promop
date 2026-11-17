@@ -15,6 +15,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
+from django.conf import settings
 from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
@@ -780,6 +781,30 @@ def _split_provisional(rows) -> tuple[list, list]:
     return real, provisional
 
 
+def _code_source_indexes(measurements, observations):
+    """(meas_by_code, meas_by_source, obs_by_code, obs_by_source) for two row lists."""
+    meas_by_code: dict[str, list] = defaultdict(list)
+    meas_by_source: dict[str, list] = defaultdict(list)
+    for m in measurements:
+        cc = getattr(m.measurement_concept, 'concept_code', None)
+        if cc:
+            meas_by_code[cc].append(m)
+        sv = m.measurement_source_value
+        if sv:
+            meas_by_source[sv].append(m)
+
+    obs_by_code: dict[str, list] = defaultdict(list)
+    obs_by_source: dict[str, list] = defaultdict(list)
+    for o in observations:
+        cc = getattr(o.observation_concept, 'concept_code', None)
+        if cc:
+            obs_by_code[cc].append(o)
+        sv = o.observation_source_value
+        if sv:
+            obs_by_source[sv].append(o)
+    return dict(meas_by_code), dict(meas_by_source), dict(obs_by_code), dict(obs_by_source)
+
+
 def _build_snapshot(person: Person) -> OmopSnapshot:
     """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes.
 
@@ -800,8 +825,10 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     measurements, provisional_measurements = _split_provisional(measurements)
     _read_values_in_source_units(person, measurements)
     # Provisional rows are not unit-converted on write, but read them the same
-    # way, so a consumer never has to prove the unit itself (#2249).
-    _read_values_in_source_units(person, provisional_measurements)
+    # way, so a consumer never has to prove the unit itself (#2249). With the
+    # switch off nothing reads them, so no work is spent on them.
+    if settings.PROVISIONAL_DATA_ENABLED:
+        _read_values_in_source_units(person, provisional_measurements)
     observations = list(
         Observation.objects
         .filter(person=person, is_erroneous=False)
@@ -854,25 +881,8 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     observations = without_cleared_history(observations, 'observation')
 
     # Build code/source indexes
-    meas_by_code: dict[str, list] = defaultdict(list)
-    meas_by_source: dict[str, list] = defaultdict(list)
-    for m in measurements:
-        cc = getattr(m.measurement_concept, 'concept_code', None)
-        if cc:
-            meas_by_code[cc].append(m)
-        sv = m.measurement_source_value
-        if sv:
-            meas_by_source[sv].append(m)
-
-    obs_by_code: dict[str, list] = defaultdict(list)
-    obs_by_source: dict[str, list] = defaultdict(list)
-    for o in observations:
-        cc = getattr(o.observation_concept, 'concept_code', None)
-        if cc:
-            obs_by_code[cc].append(o)
-        sv = o.observation_source_value
-        if sv:
-            obs_by_source[sv].append(o)
+    meas_by_code, meas_by_source, obs_by_code, obs_by_source = _code_source_indexes(
+        measurements, observations)
 
     return OmopSnapshot(
         measurements=measurements,
@@ -886,10 +896,10 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         cytogenetic_observations=cytogenetic_observations,
         breast_measurements=breast_measurements,
         clinical_input_observations=clinical_input_observations,
-        meas_by_code=dict(meas_by_code),
-        obs_by_code=dict(obs_by_code),
-        meas_by_source=dict(meas_by_source),
-        obs_by_source=dict(obs_by_source),
+        meas_by_code=meas_by_code,
+        obs_by_code=obs_by_code,
+        meas_by_source=meas_by_source,
+        obs_by_source=obs_by_source,
         provisional_measurements=provisional_measurements,
         provisional_observations=provisional_observations,
         provisional_conditions=provisional_conditions,
@@ -990,6 +1000,69 @@ def _get_blood_type_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     return {'blood_type': blood_type_from_measurements(rows)}
 
 
+def _section_readers():
+    """The section extractors ``refresh_patient_record`` runs, in the order it runs them.
+
+    One definition, read by the real refresh and by the provisional pass
+    (``PROVISIONAL_SECTION_READERS`` names the subset the pass runs), so the two
+    cannot disagree about which readers run or which wins a field (#2646).
+    """
+    return (
+        _get_demographics,
+        _get_blood_type_data,
+        _get_location_data,
+        _get_disease_data,
+        _get_active_condition_data,
+        _get_treatment_data,
+        _get_vitals_data,
+        _get_biomarker_data,
+        _get_genomics_pathology_data,
+        _get_staging_data,
+        _get_social_data,
+        _get_behavior_data,
+        _get_assertion_data,
+        _get_infection_data,
+        _get_assessment_data,
+        _get_laboratory_data,
+        _get_performance_data,
+        _get_genetic_mutations,
+        _get_tumor_size_data,
+        _get_cll_data,
+        _get_lymphoma_data,
+        _get_bc_clinical_data,
+        _get_prior_procedures,
+        _get_wearable_data,
+        _get_mm_specific_data,
+        _get_sct_cytogenetic_data,
+    )
+
+
+def provisional_section_readers():
+    """The readers the provisional pass runs: those whose fields can carry a confidence,
+    in the real refresh's relative order."""
+    wanted = {_get_assertion_data, _get_laboratory_data}
+    return tuple(fn for fn in _section_readers() if fn in wanted)
+
+
+def _curated_values(patient_info, snapshot, lab_derived_fields, confirmed_inputs) -> dict:
+    """Values from approved field mappings, as the refresh applies them.
+
+    The lab extractor has already selected the latest code across canonical and
+    approved-alias results (including unit handling), so an older exact mapping
+    row must not overwrite a field it decided. Shared with the provisional pass.
+    """
+    from omop_core.services.omop_projection import curated_values_from_snapshot
+    values = {}
+    for field, value in curated_values_from_snapshot(
+        snapshot, confirmed_clinical_fields=confirmed_inputs,
+    ).items():
+        if field in _ANSWER_LINE_FIELDS and value is not None:
+            value = _answer_line(field, value)
+        if field not in lab_derived_fields and _fits_column(patient_info, field, value):
+            values[field] = value
+    return values
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -1021,6 +1094,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         # Pre-fetch all OMOP rows once (~6 queries) instead of per-section.
         snapshot = _build_snapshot(person)
+        full_snapshot = snapshot   # keeps the provisional_* lists for the provisional pass
         from omop_core.services.cancer_details import primary_snapshot
         snapshot, linked_cancer_values = primary_snapshot(person, snapshot)
 
@@ -1032,34 +1106,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         # Populate all sections
         lab_derived_fields = set()
-        for section_fn in [
-            _get_demographics,
-            _get_blood_type_data,
-            _get_location_data,
-            _get_disease_data,
-            _get_active_condition_data,
-            _get_treatment_data,
-            _get_vitals_data,
-            _get_biomarker_data,
-            _get_genomics_pathology_data,
-            _get_staging_data,
-            _get_social_data,
-            _get_behavior_data,
-            _get_assertion_data,
-            _get_infection_data,
-            _get_assessment_data,
-            _get_laboratory_data,
-            _get_performance_data,
-            _get_genetic_mutations,
-            _get_tumor_size_data,
-            _get_cll_data,
-            _get_lymphoma_data,
-            _get_bc_clinical_data,
-            _get_prior_procedures,
-            _get_wearable_data,
-            _get_mm_specific_data,
-            _get_sct_cytogenetic_data,
-        ]:
+        for section_fn in _section_readers():
             section_values = section_fn(person, snapshot)
             if section_fn is _get_laboratory_data:
                 lab_derived_fields = set(section_values)
@@ -1067,18 +1114,11 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 setattr(patient_info, field, value)
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
-        from omop_core.services.omop_projection import curated_values_from_snapshot
         confirmed_inputs = set()
-        for field, value in curated_values_from_snapshot(
-            snapshot, confirmed_clinical_fields=confirmed_inputs,
+        for field, value in _curated_values(
+            patient_info, snapshot, lab_derived_fields, confirmed_inputs,
         ).items():
-            # The lab extractor has already selected the latest code across
-            # canonical and approved-alias results (including unit handling).
-            # An older exact FCM row must not overwrite that latest result.
-            if field in _ANSWER_LINE_FIELDS and value is not None:
-                value = _answer_line(field, value)
-            if field not in lab_derived_fields and _fits_column(patient_info, field, value):
-                setattr(patient_info, field, value)
+            setattr(patient_info, field, value)
 
         for field, value in linked_cancer_values.items():
             width = PatientRecord._meta.get_field(field).max_length
@@ -1123,10 +1163,16 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
-        return recompute_patient_record_fields(
+        record = recompute_patient_record_fields(
             patient_info,
             changed_fields=user_edited & {'flipi_score_options', 'gelf_criteria_options'},
         )
+        if settings.PROVISIONAL_DATA_ENABLED:
+            # The second, provisional picture, in the same transaction so it is
+            # as fresh as the record it overlays (docs/provisional_data_plan.md).
+            from omop_core.services.provisional_record import write_provisional_pair
+            write_provisional_pair(person, full_snapshot, record, user_edited)
+        return record
 
 
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:

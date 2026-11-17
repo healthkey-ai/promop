@@ -173,6 +173,78 @@ write-time conversion is an approved mapping's privilege (#2157).
   runs afterwards rebuilds them. A person's delete cascades.
 - Tests: `tests/test_patient_record_provisional_tables.py`.
 
+### As built in phase 1c (#2531)
+
+All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provisional_record.py`.
+
+- **The pass** runs at the end of `refresh_patient_record`, in its transaction,
+  once the real record is saved. Failures are logged and leave the provisional
+  pair as it was; the approved record is never lost to it. The pair is written
+  for a person who has provisional clinical rows, or already has a stored pair
+  (so an approval or a revert rewrites it clean); the provisional row is a copy
+  of the real record with the overlay, the confidence row all null unless a
+  value is provisional. A person who never had a proposal has no row, which the
+  endpoint answers with the real record. That is sparse by use: it keeps the
+  common refresh free of two 400-column upserts, and makes the HealthTree row
+  count a smaller question than the plan assumed.
+- **Rollout:** the pair is not written, and the PATCH mirror does not run, while
+  the switch is off, so rows written earlier go stale. After enabling it, run
+  `backfill_patient_records --all` before relying on the endpoint.
+- **Readers run:** labs and blood counts (`_get_laboratory_data`), assertions
+  (`_get_assertion_data`) and the curated field mappings
+  (`curated_values_from_snapshot`), in the real refresh's order, over a snapshot
+  of the person's provisional rows only (`OmopSnapshot` rebuilt with
+  `dataclasses.replace`, with its own per-refresh caches). Nothing else runs;
+  computed fields (BMI, scores) are not recomputed from a provisional input.
+- **One reader list, not a copy (#2646):** `refresh_patient_record` and the pass
+  both read `_section_readers()`, the pass runs the subset
+  `provisional_section_readers()` in the real order, and the curated-mapping step
+  is the shared `_curated_values`. A new or reordered reader in the real refresh
+  therefore reaches the pass; a differential test holds every field the pass sets
+  to the real refresh's value.
+- **What is kept:** a value only for a field the real record leaves empty
+  (`_is_empty`), that is not a pending user edit (the set before the refresh and
+  the one after, so an explicit clear stays clear), and that has a confidence
+  column. A companion the reader sets with it (`hemoglobin_level` and its
+  `_units` beside `hemoglobin_g_dl`) is kept at the same confidence.
+- **Confidence per field** is the lowest among the source-code groups that
+  decide it: the pass re-reads the provisional rows once per (table, source
+  value) group with that group removed, and a field whose value changes is that
+  group's. A field no single group decides (several codes agree) takes the
+  lowest confidence of all. Past `MAX_ATTRIBUTION_GROUPS` (40) groups every kept
+  field takes the lowest of all, which never overstates and bounds the cost.
+- **PATCH mirror** (`mirror_user_edit`, at the end of `_patch_record`): a
+  proposal stays only while the record still has no answer for the field. An
+  edited field, and any alias the edit filled in (`hemoglobin_level` after
+  `hemoglobin_g_dl`), takes the record's value and loses its confidence; every
+  other approved field follows the record too, so a computed field moves with an
+  edit. A person with no provisional row has nothing to mirror. A failure is
+  logged; the edit is already saved.
+- **Clears and misfits:** the real clear markers are laid among the provisional
+  rows before they are read, so a proposal older than a user's clear cannot
+  refill it (matched on concept and source value, as derivation does); a
+  proposed number or text that does not fit its column is dropped alone, as the
+  real refresh drops it, and does not cost the person's other proposals.
+- **Read: an overlay on the normal record read.** There is no separate
+  endpoint and no role gate. `patient-records/{id}/` and `patient-records/me/`
+  run the serializer over the record with a proposal laid over each field that
+  has a confidence mark and that the live record still leaves empty
+  (`provisional_record.overlay`), so a stale row can never override approved
+  data, and add `provisional_fields` to `patient_info`: field to confidence
+  percentage, `{}` when nothing is proposed. Access is exactly the real
+  record's: a patient reads their own, a verified representative and a doctor
+  the patient's, with the same demo-org de-identification; an analyst reads no
+  patient, so no proposal either. Nothing is written: the overlay is a copy.
+  The list view is not overlaid yet.
+- **Switch off means nothing:** with `PROVISIONAL_DATA_ENABLED` off no pair is
+  written or mirrored, no provisional measurement is unit-read, the overlay is
+  the record itself and `provisional_fields` is `{}`. A pair stored while the
+  switch was on is simply never served; `backfill_patient_records --all` after
+  turning it on refreshes one that has gone stale.
+- **Not done:** the frontend (badge, show-provisional toggle, the untouched-form
+  PATCH test), and the per-organization/domain floor. HealthTree's
+  `patient_record` row count is still unread, so full-versus-sparse stays open.
+
 ### As built in phase 1b (#2530)
 
 Generate OMOP is the writer built so far; the lookup contract and FHIR sync
@@ -302,6 +374,12 @@ hand-coded computations do not; phase 1 writes the list for the ones that
 read a phase 1 field and leaves the rest equal to `patient_record`.
 Custom fields (`custom_fields` JSON) are phase 3.
 
+Decision (2026-11-17): with the switch on, computed fields use provisional
+inputs, so a patient with a proposed weight and height sees a BMI. The
+computation runs over the overlaid values without saving, and the result is a
+provisional field at the lowest confidence of its inputs
+([#2661](https://github.com/healthkey-ai/promop/issues/2661)).
+
 ### User edits
 
 A PATCH to `patient_record` writes the value as today. Because direct saves do
@@ -379,29 +457,30 @@ concept) but never put a number on a real row.
 
 ## API
 
-The provisional picture is a separate read-only resource, so the current
-`/api/v1/patient-records/` contract does not change and the legacy path is not
-touched:
+The provisional picture is not a separate resource. The existing read
+(`/api/v1/patient-records/{person_id}/` and `/me/`, v1 only) lays each proposal
+over a field the record leaves empty and adds the marks, so every audience that
+may read a patient reads what is proposed for them, with no toggle:
 
 ```
-GET /api/v1/patient-records-provisional/{person_id}/
-GET /api/v1/patient-records-provisional/            (list, same tenancy as the real one)
-  200 {<every patient_record field, from the provisional row>,
-       "confidence": {"hemoglobin_g_dl": 82, "her2_status": 91}}
+GET /api/v1/patient-records/{person_id}/
+  200 {"patient_info": {<every field, a proposal where only a proposal answers>,
+                        "provisional_fields": {"hemoglobin_g_dl": 82, "her2_status": 91}},
+       "user": ...}
 ```
 
-`confidence` lists only the fields with a number, so a fully approved person
-returns an empty object. Tenancy and role checks reuse
-`PatientRecordViewSet.get_queryset`; the patient role is refused (403) in
-phase 1. A person not yet derived returns the real record with an empty
-`confidence`. Foundations that need it in bulk read the two tables by column
-name through the same endpoint's list form, or directly, joined on `person`.
+`provisional_fields` lists only the fields shown from a proposal, so a fully
+approved person returns an empty object, and so does every read with the switch
+off. A person not yet derived reads as the real record. A client must not send
+the overlaid values back as edits: diff against the real record, or send only
+what the user changed. Foundations that need it in bulk read the two tables by
+column name, joined on `person`.
 
 ## Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served |
+| `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served, and a record read carries no overlay |
 | `PROVISIONAL_CONFIDENCE_FLOOR` | `70` | least confidence a provisional row is written at |
 | `Organization.accepts_provisional_data` | `False` | FHIR sync for this organization passes `accept_proposed` |
 
@@ -417,20 +496,23 @@ so the floor only matters for the band between the two. Build the floor first;
 every PATCH read and write approved data only. This is the main reason for the
 split.
 
-**Patient page (professional roles).** The page loads the provisional view and
-shows each provisional value with an amber "Provisional 82%" badge after the
-label, with a title saying the value came from an unapproved mapping and a link
-to the mapping dialog for its code (the Source Codes tab already links a code
-to its mapping). The control reads the badge from `confidence[name]`. An edit
-on a provisional field saves to the real endpoint as an approved value, and
-the badge goes. A per-user "show provisional" toggle returns the page to the
-approved-only view.
+**Patient page, every role that reads the patient.** Where the switch is on, a
+patient (on their own page), a verified representative and every professional who
+may read the patient see proposed values **by default**, with no toggle. The
+record read lays each proposal over a field the record leaves empty and returns
+`provisional_fields` (field to confidence). The page shows an amber "Provisional
+82%" indicator after the label, with a title saying the value came from a
+mapping not yet approved (a patient sees "not yet confirmed"), and a clinician's
+link to the mapping dialog for its code. An edit on a provisional field saves
+to the real endpoint as an approved value, and the indicator goes. The page
+keeps the real record as its PATCH baseline. The purpose is to give patients a
+view of their data while the concepts are mapped to codes. Analysts read no
+patient, so they see no proposals. With the switch off nothing is computed,
+stored or shown to anyone ([#2659](https://github.com/healthkey-ai/promop/issues/2659)).
 
-**Patient page (patient role) and PHR APIs.** A patient sees no provisional
-values in phase 1: the role cannot reach the provisional endpoint, and the PHR
-labs API (`patient_portal/api/phr/labs.py`) skips provisional rows as it skips
-unproven ones. Showing a patient an unconfirmed diagnosis is a product
-decision for a later phase.
+**PHR APIs and lists.** The same audiences see the same proposals on the PHR
+labs and other APIs and on the patient list, with `confidence` on each, never a
+different answer on another screen ([#2660](https://github.com/healthkey-ai/promop/issues/2660)).
 
 **Patient OMOP tab and Source Codes tab.** A provisional row shows the badge
 in its row. The "Generate OMOP" banner says how many provisional rows the run
@@ -489,7 +571,7 @@ existing-mapping view) is the same number and lands with this.
   rejection and on a moved proposal, wired into `_upsert_source_code_mapping`
   and Suggest's re-point.
 - The provisional pass, the two table writes, the PATCH mirror, and the
-  `patient-records-provisional` endpoint.
+  overlay on the patient-record read.
 - Frontend: badge on `ClinicalField`/`Field`, real record as PATCH baseline,
   show-provisional toggle, PHR labs skip, Source Codes tab outcome.
 - Tests: `patient_record` unchanged by a provisional row; derivation
@@ -512,6 +594,24 @@ existing-mapping view) is the same number and lands with this.
 - FHIR sync opt-in per organization.
 - Patient-facing display policy.
 - #1532 auto-approval reading the same floor.
+
+### Gaps before HealthTree can run with provisional data on (2026-11-17)
+
+Phases 0 to 1c are on `dev`: the confidence column, the Generate OMOP writes,
+the two tables, the provisional pass, the PATCH mirror and the overlay on the
+patient-record read, all behind `PROVISIONAL_DATA_ENABLED`. To deploy to
+HealthTree GCP with it on, and have patients see proposals without a click:
+
+| Gap | Issue |
+|---|---|
+| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) |
+| The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) |
+| Computed fields (BMI, scores, stages) use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) |
+| HealthTree's clinical rows come from the ETL: write provisional rows for them (ETL `confidence` or a server sweep) and widen the pass beyond labs, assertions and curated mappings (#2533, #2534) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) |
+| Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) |
+
+The rule for all of them: with the switch off, no provisional data is computed,
+stored or shown to anyone.
 
 Each phase is its own PR against `dev`, with a migration in phase 0 only;
 rebase on `dev` immediately before `makemigrations` and again before merge
@@ -540,15 +640,14 @@ rebase on `dev` immediately before `makemigrations` and again before merge
    is what ingest writes today. A row Generate OMOP created from the
    inventory, which would not otherwise exist, is the one case where a delete
    would be cleaner; it is kept as an unresolved row so that one rule holds.
-3. **What a patient sees.** Phase 1 hides provisional values from the patient
-   role. Showing them with a badge is a product call that needs a clinician's
-   view of the risk of an unconfirmed diagnosis on a patient's own page.
+3. **What a patient sees.** Settled 2026-11-17: where the switch is on, a
+   patient sees their own proposed values, marked, by default. This reverses
+   the phase 1 refusal.
 4. **The floor's scope.** One deployment-wide floor in phase 1. A per-organization
    floor, or per domain (a provisional lab value is a smaller claim than a
    provisional condition), is a phase 3 setting if curators ask for it.
-5. **Default view for professionals.** The plan shows the provisional view by
-   default with a toggle to approved-only. The opposite default is safer for a
-   clinician who does not read the badge, and is a one-line change.
+5. **Default view.** Settled 2026-11-17: provisional by default for every role
+   that reads the patient, with no toggle; the site switch is the control.
 
 ## Related
 

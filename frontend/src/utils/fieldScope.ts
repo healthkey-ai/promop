@@ -48,3 +48,35 @@ export function resolveDiseaseFilter(value: string, options: DiseaseCategoryOpti
   );
   return match ? match.value : null;
 }
+
+/**
+ * The Disease Category of each disease the patient editor has a tab for, by
+ * the editor's disease type, as `disease_profiles.SEED_DISEASE_FIELDS` names
+ * them. A record of any other disease has the base record only.
+ */
+const DISEASE_TYPE_CATEGORY: Record<string, string> = {
+  breast: "BC", lymphoma: "FL", myeloma: "MM", cll: "CLL", mcl: "MCL",
+};
+
+/**
+ * A record's Disease Category code, or "" when its record is the base
+ * record. `mapped` is what Disease Category management maps the record's
+ * disease to (`useAllDiseaseMappings().categoryForDisease`), which decides
+ * when it has an answer: the editor's disease type is a name match that
+ * knows five diseases, and reads a diffuse large B-cell lymphoma as
+ * follicular. The type is the fallback for a name the mapping does not hold
+ * or has not loaded.
+ */
+export const recordDiseaseCategory = (mapped: string | null, diseaseType: string): string => {
+  if (mapped) return mapped === OTHER_DISEASE ? "" : mapped;
+  return DISEASE_TYPE_CATEGORY[diseaseType] ?? "";
+};
+
+const LAB_FIELD_TABS = ["labs", "blood"];
+
+/**
+ * The field tabs whose added fields a patient tab shows (#721). The Labs tab
+ * is where the editor shows blood counts, so a field placed on the mapping
+ * page's Blood tab renders there too.
+ */
+export const addedFieldTabs = (tab: string): string[] => (tab === "labs" ? LAB_FIELD_TABS : [tab]);
