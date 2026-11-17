@@ -1,7 +1,6 @@
 import datetime
 import json
 import logging
-import re
 import time
 from email.utils import parsedate_to_datetime
 from typing import Callable
@@ -157,19 +156,6 @@ def _get_resource_id(request):
     return None
 
 
-# The public voting pages carry their share and confirmation tokens in the URL
-# (#2678). Those are credentials, not identifiers: whoever reads the audit
-# trail must not be able to open the link, or confirm a stranger's votes, from
-# it. Matched on the path itself rather than the resolved route, so a request
-# that misses the route (no trailing slash) is covered too.
-_PUBLIC_VOTE_TOKEN = re.compile(r'^(/api/v1/public/mapping-votes/(?:confirm/)?)[^/]+')
-
-
-def _audit_path(request):
-    """The request path as the audit trail records it."""
-    return _PUBLIC_VOTE_TOKEN.sub(r'\1:token', request.path)
-
-
 # A view's own note on its request (``request.audit_detail``): a small JSON
 # object, free of health data, that the row carries in ``detail`` and the
 # stdout line repeats. It is part of the row's HMAC. Anything else is dropped
@@ -228,7 +214,7 @@ class AuditLogMiddleware:
             entry = {
                 'event': _classify_event_type(request),
                 'method': request.method,
-                'path': _audit_path(request),
+                'path': request.path,
                 'status_code': response.status_code,
                 'client_id': _get_client_id(request),
                 'user_id': str(user.pk) if authed else None,

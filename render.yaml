@@ -162,6 +162,25 @@ services:
           envVarKey: SENTRY_DSN
       - key: SENTRY_ENVIRONMENT
         value: production
+      # The worker sends the confirmation emails of the public voting pages
+      # (#2678), so it needs the web service's mail settings and the address
+      # the links are built on. Without them it has no mail backend and no
+      # voter receives a link.
+      - key: MAILGUN_API_KEY
+        fromService:
+          name: promop
+          type: web
+          envVarKey: MAILGUN_API_KEY
+      - key: MAILGUN_SENDER_DOMAIN
+        fromService:
+          name: promop
+          type: web
+          envVarKey: MAILGUN_SENDER_DOMAIN
+      - key: APP_BASE_URL
+        fromService:
+          name: promop
+          type: web
+          envVarKey: APP_BASE_URL
 
   - type: redis
     name: promop-redis
@@ -333,6 +352,23 @@ services:
           name: promop-staging
           type: web
           envVarKey: LOINC_PASSWORD
+      # The worker sends the confirmation emails of the public voting pages
+      # (#2678): see the production worker above.
+      - key: MAILGUN_API_KEY
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: MAILGUN_API_KEY
+      - key: MAILGUN_SENDER_DOMAIN
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: MAILGUN_SENDER_DOMAIN
+      - key: APP_BASE_URL
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: APP_BASE_URL
       - key: DEBUG
         value: 'False'
       - key: CELERY_BROKER_URL

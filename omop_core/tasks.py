@@ -363,3 +363,18 @@ def refresh_axis_variants_task(self, request_id: int) -> dict[str, Any]:
     recorded on the row and raised, so Celery reports FAILURE as well.
     """
     return _axis_variant_jobs.run_refresh(request_id)
+
+
+@shared_task(name='omop_core.send_vote_confirmation', ignore_result=True)
+def send_vote_confirmation_task(submission_id: int) -> None:
+    """Email the confirmation link for one pending vote submission (#2678).
+
+    The id is the only argument: the token is made inside
+    ``send_confirmation``, so none is ever in this task's arguments, the
+    broker, or anything that reports them. It never raises and is never
+    retried. A failed send deletes the submission, and the voter submits
+    again; a retry could mail a stranger twice.
+    """
+    from omop_core.services.mapping_votes import send_confirmation
+
+    send_confirmation(submission_id)

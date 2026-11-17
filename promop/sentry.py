@@ -6,12 +6,8 @@ import os
 import re
 from typing import Any
 
-# The last alternative is a URL-safe token of 40 characters or more: the
-# public voting pages carry their share and confirmation tokens in the path
-# (#2678), and those are credentials.
 _ID_SEGMENT = re.compile(
-    r'^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{16,}'
-    r'|[A-Za-z0-9_-]{40,})$'
+    r'^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{16,})$'
 )
 
 _EMAIL = re.compile(r'[^\s<>"\']+@[^\s<>"\']+\.[A-Za-z]{2,}')

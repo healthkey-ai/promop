@@ -1,10 +1,10 @@
 """Delete vote submissions nobody confirmed in time (#2678).
 
 A submission from a public voting page waits 48 hours for its emailed
-confirmation. Each new submission clears the expired ones as it arrives, so
-this command only matters on an instance where nobody has submitted since:
-run it from a scheduler, or by hand, to keep unconfirmed addresses from
-sitting in the table. It never touches a confirmed vote.
+confirmation. Every new submission and every read of a voting page clears the
+expired ones, and nothing in the project schedules jobs, so this command is
+for a cron on a deployment where nobody is voting: it keeps unconfirmed
+addresses from sitting in the table. It never touches a confirmed vote.
 """
 from django.core.management.base import BaseCommand
 

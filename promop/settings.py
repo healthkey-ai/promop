@@ -375,16 +375,29 @@ APP_BASE_URL = os.environ.get(
 ).rstrip('/')
 
 # Public voting on wearable mapping proposals (#2678). Counted in the database,
-# so they hold whatever the cache backend and however many workers: how many
-# unconfirmed submissions one address may have waiting on one share, how many
-# confirmation emails one address is sent in 24 hours across all shares, and
-# how many this deployment sends in 24 hours to every address together. The
-# last is the backstop for a sender who varies both the address and the client
-# address the throttles key on; past it, submissions are answered as usual and
-# send nothing until the day rolls on.
+# under locks, so they hold whatever the cache backend and however many
+# workers: how many unconfirmed submissions one address may have waiting on one
+# share (the oldest gives way to a new one), and how many confirmation emails
+# are sent in 24 hours to one address across all shares, for one share, and by
+# this deployment to every address together. The last two are the backstop for
+# a sender who varies the address; past either, submissions are answered 503
+# until the day rolls on. An address is counted without its "+tag".
 MAPPING_VOTE_MAX_PENDING_PER_EMAIL = int(os.environ.get('MAPPING_VOTE_MAX_PENDING_PER_EMAIL', '3'))
 MAPPING_VOTE_MAX_EMAILS_PER_DAY = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY', '5'))
+MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY = int(
+    os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY', '200'))
 MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL', '500'))
+# Where the public voting throttles read the client's address. 0: the socket's
+# peer (REMOTE_ADDR), right only when nothing proxies the request. N >= 1: the
+# Nth entry from the right of X-Forwarded-For, the address the outermost of N
+# trusted proxies saw. Measure it per platform: one too many and the entry is
+# whatever the client typed, so every request is a fresh bucket; one too few
+# and it is a proxy's own address, so every voter shares one bucket. Only these
+# throttles read it; DRF's NUM_PROXIES is left as it is for everything else.
+MAPPING_VOTE_PROXY_HOPS = int(os.environ.get('MAPPING_VOTE_PROXY_HOPS', '0'))
+# Seconds the mail backend may take over one confirmation email. Applied to
+# that message's own connection, so no other sender's timeout changes.
+MAPPING_VOTE_EMAIL_TIMEOUT = int(os.environ.get('MAPPING_VOTE_EMAIL_TIMEOUT', '10'))
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'
@@ -635,13 +648,15 @@ REST_FRAMEWORK = {
         # overhead is gone.
         'omop_write': os.environ.get('OMOP_WRITE_THROTTLE_RATE', '300/minute'),
         # The public voting pages for wearable mapping proposals (#2678): no
-        # account, so keyed by client address. Reading the page, submitting
+        # account, so keyed by client address (MAPPING_VOTE_PROXY_HOPS below
+        # says where that address is read from). Reading the page, submitting
         # votes (which sends an email) and following the emailed link each
-        # have their own bucket. The limits that must hold across workers and
-        # cache backends are in the database: MAPPING_VOTE_MAX_* below.
+        # have their own bucket. Submitting is generous on purpose: a working
+        # group voting from one meeting room is one address. What bounds
+        # outgoing mail is counted in the database: MAPPING_VOTE_MAX_* below.
         'mapping_vote_read': os.environ.get('MAPPING_VOTE_READ_THROTTLE_RATE', '60/minute'),
-        'mapping_vote_submit': os.environ.get('MAPPING_VOTE_SUBMIT_THROTTLE_RATE', '5/hour'),
-        'mapping_vote_confirm': os.environ.get('MAPPING_VOTE_CONFIRM_THROTTLE_RATE', '20/hour'),
+        'mapping_vote_submit': os.environ.get('MAPPING_VOTE_SUBMIT_THROTTLE_RATE', '30/hour'),
+        'mapping_vote_confirm': os.environ.get('MAPPING_VOTE_CONFIRM_THROTTLE_RATE', '60/hour'),
     },
 }
 
