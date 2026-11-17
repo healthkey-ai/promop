@@ -1399,7 +1399,7 @@ export default function CodeMappingPage() {
     </div>
     {directionControls}
     <ConceptToCodeTab canApprove={canApprove} canWrite={canWrite} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId}
-      onInitialConceptHandled={() => setLinkedConceptId(undefined)} />
+      onInitialConceptHandled={() => setLinkedConceptId(undefined)} userId={currentUser?.id} />
   </div></div>;
 
   return (

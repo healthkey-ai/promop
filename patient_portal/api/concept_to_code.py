@@ -15,7 +15,7 @@ from omop_core.models import (
 )
 from omop_core.services import concept_lock
 from omop_core.services.concept_to_code import (
-    browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
+    WEARABLES_DOMAIN, browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
 from omop_core.services.mapping_samples import attach_source_samples
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
@@ -58,7 +58,7 @@ def concept_to_code_list(request):
     params = request.query_params
     if params.get('scope', 'fields') not in ('fields', 'all'):
         raise ValidationError({'scope': 'Choose fields or all.'})
-    if params.get('domain') and params['domain'] not in DOMAIN_TO_TABLE.values():
+    if params.get('domain') and params['domain'] not in (*DOMAIN_TO_TABLE.values(), WEARABLES_DOMAIN):
         raise ValidationError({'domain': 'Unknown clinical table.'})
     if params.get('status') and params['status'] not in ('approved', 'proposed'):
         raise ValidationError({'status': 'Choose approved or proposed.'})

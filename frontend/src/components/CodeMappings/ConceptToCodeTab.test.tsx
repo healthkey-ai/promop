@@ -31,6 +31,8 @@ const run = (state = 'success') => ({
 });
 
 beforeEach(() => {
+  // The tab remembers the chosen domain (#2656): one test's choice is not the next one's.
+  localStorage.clear();
   get.mockReset(); post.mockReset();
   get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept])
     : url === '/v1/concept-to-code/axis-variant-walk/' ? { active: null, last: null, completed: null, patients_since: 0, walked_at: null } : page([source]) }));
@@ -438,6 +440,83 @@ describe('concept-first curation', () => {
     expect(screen.getByText('Not yet mapped')).toBeInTheDocument();
     // The proposal failed, so no approval was attempted.
     expect(post.mock.calls.filter(([url]) => String(url).includes('/mappings/'))).toHaveLength(1);
+  });
+});
+
+describe('the Wearables domain and the remembered domain (#2656)', () => {
+  const listParams = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').map(([, config]) => config.params);
+  const lastListParams = () => listParams().at(-1);
+
+  it('offers Wearables after All domains and asks the server for it', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    const domain = screen.getByLabelText('Concept domain') as HTMLSelectElement;
+    expect(Array.from(domain.options).map(option => option.textContent).slice(0, 2)).toEqual(['All domains', 'Wearables']);
+    expect(screen.getByLabelText('Concept scope')).toBeEnabled();
+    fireEvent.change(domain, { target: { value: 'wearables' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', page: 1 }));
+    // Wearables is its own scope, so the scope choice is set aside while it is chosen.
+    expect(screen.getByLabelText('Concept scope')).toBeDisabled();
+    fireEvent.change(domain, { target: { value: 'measurement' } });
+    expect(screen.getByLabelText('Concept scope')).toBeEnabled();
+  });
+
+  it('restores the domain an account chose, and only for that account', async () => {
+    const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables' }));
+    expect(JSON.parse(localStorage.getItem('promop-concept-to-code:7') || '{}')).toEqual({ domain: 'wearables' });
+    first.unmount();
+
+    get.mockClear();
+    const again = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('wearables');
+    // The first request already carries it: no flash of the unfiltered list.
+    expect(listParams()[0]).toMatchObject({ domain: 'wearables' });
+    again.unmount();
+
+    get.mockClear();
+    render(<ConceptToCodeTab canWrite canApprove userId={8} />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('');
+    expect(listParams()[0]).toMatchObject({ domain: '' });
+  });
+
+  it('remembers any domain, and a return to All domains', async () => {
+    const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'condition' } });
+    first.unmount();
+    const second = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('condition');
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: '' } });
+    second.unmount();
+    render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('');
+  });
+
+  it('reads the account\'s own choice when the account arrives after the first render', async () => {
+    localStorage.setItem('promop-concept-to-code:7', JSON.stringify({ domain: 'wearables' }));
+    const view = render(<ConceptToCodeTab canWrite canApprove />);
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('');
+    view.rerender(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('wearables');
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables' }));
+    // Nothing was saved over it on the way.
+    expect(JSON.parse(localStorage.getItem('promop-concept-to-code:7') || '{}')).toEqual({ domain: 'wearables' });
+  });
+
+  it('ignores a stored value that is not a domain, or not JSON', async () => {
+    localStorage.setItem('promop-concept-to-code:7', JSON.stringify({ domain: 'not-a-domain' }));
+    const view = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('');
+    view.unmount();
+    localStorage.setItem('promop-concept-to-code:7', '{broken');
+    render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('');
+    await screen.findByRole('button', { name: 'Serum albumin' });
   });
 });
 
