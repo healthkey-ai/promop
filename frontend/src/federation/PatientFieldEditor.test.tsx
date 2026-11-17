@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
-import PatientFieldEditor from './PatientFieldEditor';
+import PatientFieldEditor, { formatCalendarDate } from './PatientFieldEditor';
 import { labelNamesUnit } from './unitPresentation';
 import { PatientFormStore } from './patientFormStore';
 
@@ -167,7 +167,7 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Circular field dependency');
   });
 
-  it('shows the recorded result date beside a computed value (#2684)', async () => {
+  it('shows the recorded result date as the calendar day it names (#2684)', async () => {
     const { store } = await setup({
       hemoglobin_g_dl: {
         writable: false, kind: 'computed', label: 'Hemoglobin (g/dL)',
@@ -181,9 +181,25 @@ describe('computed patient field input dialogs', () => {
 
     const date = await screen.findByText(/Result date/);
     expect(date).toBeVisible();
-    expect(date.textContent).toContain('2026');
+    // West of UTC a UTC-midnight parse would print the 9th; the recorded day is
+    // the 10th in every zone.
+    expect(date.textContent).toMatch(/\b10\b/);
+    expect(date.textContent).not.toMatch(/\b9\b/);
     // The date is display-only: the row still edits through its inputs.
     expect(screen.getByRole('button', { name: 'Edit Hemoglobin (g/dL) inputs' })).toBeVisible();
+  });
+
+  it('formats a date-only value as that calendar day in any timezone', () => {
+    const original = process.env.TZ;
+    try {
+      for (const zone of ['America/Los_Angeles', 'Pacific/Honolulu', 'Asia/Tokyo', 'UTC']) {
+        process.env.TZ = zone;
+        expect(formatCalendarDate('2026-11-10')).toMatch(/\b10\b/);
+        expect(formatCalendarDate('2026-01-01')).toMatch(/\b1\b/);
+      }
+    } finally {
+      process.env.TZ = original;
+    }
   });
 
   it('renders a computed value read-only when the host withholds its only source', async () => {

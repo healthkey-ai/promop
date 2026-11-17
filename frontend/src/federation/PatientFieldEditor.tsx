@@ -6,7 +6,6 @@ import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormCo
 import ExplicitAnswerActions from '@/components/PatientInfo/ExplicitAnswerActions';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 import { displayUnitLabel, labelNamesUnit } from './unitPresentation';
-import { formatDate } from '@/utils/date';
 
 interface Props {
   store: PatientFormStore;
@@ -42,6 +41,21 @@ interface Props {
 const ROW_CLASS = 'space-y-1 [&_input[type=number]]:[appearance:textfield] '
   + '[&_input[type=number]::-webkit-inner-spin-button]:appearance-none '
   + '[&_input[type=number]::-webkit-outer-spin-button]:appearance-none';
+
+/** A date-only value (`YYYY-MM-DD`) as the calendar day it names.
+ *
+ * `new Date('2026-11-10')` is UTC midnight, so formatting it in a browser west
+ * of UTC prints the previous day. The descriptor's `latest_date` is a clinical
+ * calendar date, not an instant, so it is built from its parts and formatted in
+ * the local zone, the same day the date input shows.
+ */
+export function formatCalendarDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!match) return value;
+  const [, year, month, day] = match;
+  return new Date(Number(year), Number(month) - 1, Number(day))
+    .toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
 
 /** Today in the browser's zone, not UTC: a result date is a local calendar day. */
 function todayIso() {
@@ -553,7 +567,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             date is display-only here: the write still goes through the inputs,
             where the pair's own date control lives. */}
         {derived && field.latest_date && <span className="text-xs text-muted-foreground">
-          Result date {formatDate(field.latest_date)}
+          Result date {formatCalendarDate(field.latest_date)}
         </span>}
         <Dialog.Root open={open} onOpenChange={setOpen}>
           {/* A pencil, not an "Edit inputs" label: the row already shows the
