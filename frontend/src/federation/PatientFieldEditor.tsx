@@ -6,6 +6,7 @@ import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormCo
 import ExplicitAnswerActions from '@/components/PatientInfo/ExplicitAnswerActions';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 import { displayUnitLabel, labelNamesUnit } from './unitPresentation';
+import { formatDate } from '@/utils/date';
 
 interface Props {
   store: PatientFormStore;
@@ -547,6 +548,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         {derived && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
       </div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
+        {/* A derived row shows the recorded result date beside its value so the
+            date is visible without opening the dialog that edits the pair. The
+            date is display-only here: the write still goes through the inputs,
+            where the pair's own date control lives. */}
+        {derived && field.latest_date && <span className="text-xs text-muted-foreground">
+          Result date {formatDate(field.latest_date)}
+        </span>}
         <Dialog.Root open={open} onOpenChange={setOpen}>
           {/* A pencil, not an "Edit inputs" label: the row already shows the
               value, and the label widened the column enough to wrap "Your Value"

@@ -167,6 +167,25 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Circular field dependency');
   });
 
+  it('shows the recorded result date beside a computed value (#2684)', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: {
+        writable: false, kind: 'computed', label: 'Hemoglobin (g/dL)',
+        inputs: ['hemoglobin_level'], latest_date: '2026-11-10',
+      },
+      hemoglobin_level: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Hemoglobin level',
+      },
+    }, { hemoglobin_g_dl: 14.2, hemoglobin_level: 14.2 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    const date = await screen.findByText(/Result date/);
+    expect(date).toBeVisible();
+    expect(date.textContent).toContain('2026');
+    // The date is display-only: the row still edits through its inputs.
+    expect(screen.getByRole('button', { name: 'Edit Hemoglobin (g/dL) inputs' })).toBeVisible();
+  });
+
   it('renders a computed value read-only when the host withholds its only source', async () => {
     // No Active Infection / No Other Active Malignancies depend on condition
     // facts this host does not expose; an empty "inputs below" dialog was the
