@@ -68,10 +68,10 @@ def normalise_stages(apps, schema_editor):
         PatientRecord.objects.bulk_update(changed, ['stage'], batch_size=500)
     # WARNING, not INFO: the deploy log only surfaces WARNING for this module,
     # so an INFO line would make a bulk rewrite invisible.
-    logger.warning('0344_normalise_stage_labels: normalised %s stage values', len(changed))
+    logger.warning('0345_normalise_stage_labels: normalised %s stage values', len(changed))
     if untouched:
         logger.warning(
-            '0344_normalise_stage_labels: left %s stage values unchanged: %s',
+            '0345_normalise_stage_labels: left %s stage values unchanged: %s',
             len(untouched), sorted(set(untouched))[:20],
         )
 
@@ -79,7 +79,9 @@ def normalise_stages(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0343_merge_dev_sync_20261114'),
+        # Two migrations were merged with the number 0344; this one chains
+        # after the unit-marker cleanup so the graph has a single leaf.
+        ('omop_core', '0344_drop_placeholder_units'),
     ]
 
     operations = [

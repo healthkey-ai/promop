@@ -91,7 +91,7 @@ def test_the_migration_normalises_stored_values_and_is_idempotent():
         record = PatientRecordFactory(stage=value)
         seen[record.pk] = value
 
-    run_data_migration('0344_normalise_stage_labels', 'normalise_stages')
+    run_data_migration('0345_normalise_stage_labels', 'normalise_stages')
     by_value = {value: pk for pk, value in seen.items()}
     after_first = {r.pk: r.stage for r in PatientRecord.objects.filter(pk__in=seen)}
     assert after_first[by_value['Stage 4 (qualifier value)']] == 'Stage IV'
@@ -104,7 +104,7 @@ def test_the_migration_normalises_stored_values_and_is_idempotent():
     for value in ('ISS II', 'Rai 0', 'III'):
         assert after_first[by_value[value]] == value
 
-    run_data_migration('0344_normalise_stage_labels', 'normalise_stages')
+    run_data_migration('0345_normalise_stage_labels', 'normalise_stages')
     after_second = {r.pk: r.stage for r in PatientRecord.objects.filter(pk__in=seen)}
     assert after_second == after_first
     # The service and the frozen copy agree on every stored value.
