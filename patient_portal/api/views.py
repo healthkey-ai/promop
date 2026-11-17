@@ -12853,6 +12853,18 @@ def _destination_unit_fields(mapping):
     }
 
 
+def _vote_fields(mapping):
+    """The row's current vote tally, for a list that asked for it (#2678).
+
+    Only a queryset annotated by ``mapping_votes.with_vote_counts`` carries
+    one, so a single-row response has no ``votes`` key and costs no query;
+    the list re-reads after a save.
+    """
+    from omop_core.services.mapping_votes import row_tally
+    tally = row_tally(mapping) if mapping is not None else None
+    return {} if tally is None else {'votes': tally}
+
+
 def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
                                 destination_count=None, include_source_evidence=False):
     """One row of the Code Mapping list: a source code and where it lands.
@@ -12972,6 +12984,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
         payload.update(_axis_fields(mapping))
+        payload.update(_vote_fields(mapping))
         if include_source_evidence:
             payload['source_evidence'] = source_evidence
         return payload
@@ -13065,6 +13078,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
     }
     payload.update(_axis_fields(mapping))
+    payload.update(_vote_fields(mapping))
     if include_source_evidence:
         payload['source_evidence'] = source_evidence
     return payload
@@ -14365,6 +14379,12 @@ def code_mapping_list(request):
         ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
+        if not is_service_token(request):
+            # The confirmed votes on each row's current destination (#2678),
+            # as subqueries on the page's own query. For curators: a machine
+            # reads the table, not what people thought of it.
+            from omop_core.services.mapping_votes import with_vote_counts
+            mappings = with_vote_counts(mappings)
         if request.query_params.get('duplicates_only') == '1':
             from omop_core.services.mapping_browse import mapping_duplicates
             source = request.query_params.get('source')

@@ -374,6 +374,18 @@ APP_BASE_URL = os.environ.get(
     os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5173'),
 ).rstrip('/')
 
+# Public voting on wearable mapping proposals (#2678). Counted in the database,
+# so they hold whatever the cache backend and however many workers: how many
+# unconfirmed submissions one address may have waiting on one share, how many
+# confirmation emails one address is sent in 24 hours across all shares, and
+# how many this deployment sends in 24 hours to every address together. The
+# last is the backstop for a sender who varies both the address and the client
+# address the throttles key on; past it, submissions are answered as usual and
+# send nothing until the day rolls on.
+MAPPING_VOTE_MAX_PENDING_PER_EMAIL = int(os.environ.get('MAPPING_VOTE_MAX_PENDING_PER_EMAIL', '3'))
+MAPPING_VOTE_MAX_EMAILS_PER_DAY = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY', '5'))
+MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL', '500'))
+
 # Internationalization
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
@@ -622,6 +634,14 @@ REST_FRAMEWORK = {
         # 300/minute would otherwise become the new ceiling once per-row request
         # overhead is gone.
         'omop_write': os.environ.get('OMOP_WRITE_THROTTLE_RATE', '300/minute'),
+        # The public voting pages for wearable mapping proposals (#2678): no
+        # account, so keyed by client address. Reading the page, submitting
+        # votes (which sends an email) and following the emailed link each
+        # have their own bucket. The limits that must hold across workers and
+        # cache backends are in the database: MAPPING_VOTE_MAX_* below.
+        'mapping_vote_read': os.environ.get('MAPPING_VOTE_READ_THROTTLE_RATE', '60/minute'),
+        'mapping_vote_submit': os.environ.get('MAPPING_VOTE_SUBMIT_THROTTLE_RATE', '5/hour'),
+        'mapping_vote_confirm': os.environ.get('MAPPING_VOTE_CONFIRM_THROTTLE_RATE', '20/hour'),
     },
 }
 

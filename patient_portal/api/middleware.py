@@ -156,6 +156,25 @@ def _get_resource_id(request):
     return None
 
 
+# URL arguments that are credentials, not identifiers: the public voting
+# pages' share and confirmation tokens (#2678). Whoever reads the audit trail
+# must not be able to open the link, or confirm a stranger's votes, from it.
+_SECRET_URL_KWARGS = ('token', 'confirm_token')
+
+
+def _audit_path(request):
+    """The request path as the audit trail records it: with a token that is
+    part of the URL replaced by its name."""
+    path = request.path
+    resolver_match = getattr(request, 'resolver_match', None)
+    if resolver_match:
+        for key in _SECRET_URL_KWARGS:
+            value = resolver_match.kwargs.get(key)
+            if isinstance(value, str) and value:
+                path = path.replace(f'/{value}/', f'/:{key}/')
+    return path
+
+
 # A view's own note on its request (``request.audit_detail``): a small JSON
 # object, free of health data, that the row carries in ``detail`` and the
 # stdout line repeats. It is part of the row's HMAC. Anything else is dropped
@@ -214,7 +233,7 @@ class AuditLogMiddleware:
             entry = {
                 'event': _classify_event_type(request),
                 'method': request.method,
-                'path': request.path,
+                'path': _audit_path(request),
                 'status_code': response.status_code,
                 'client_id': _get_client_id(request),
                 'user_id': str(user.pk) if authed else None,
@@ -292,6 +311,9 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
 )
 
 
+_PUBLIC_VOTE_PREFIX = '/api/v1/public/mapping-votes/'
+
+
 class ForcePasswordChangeMiddleware:
     """
     Enforce Identity.must_change_password (HL7 PHR-S FM TI.1.1#09).
@@ -323,6 +345,10 @@ class ForcePasswordChangeMiddleware:
     def _is_blocked(request):
         path = request.path
         if not path.startswith('/api/'):
+            return False
+        # The public voting pages authenticate nobody; a visitor who happens
+        # to hold a flagged session here is still only a visitor there.
+        if path.startswith(_PUBLIC_VOTE_PREFIX):
             return False
         user = getattr(request, 'user', None)
         if not (user and user.is_authenticated):

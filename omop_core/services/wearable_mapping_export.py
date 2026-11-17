@@ -116,9 +116,17 @@ def export_rows():
     applied, since it can only remove ICD10CM rows. One query, whatever the
     row count.
     """
-    found = tab_queryset(SourceCodeConceptMapping.objects.all(), WEARABLES_TAB).exclude(
-        status='rejected',
-    ).order_by().annotate(units=SourceUnits('source_unit_evidence')).values_list(
+    return rows_from(tab_mappings().exclude(status='rejected'))
+
+
+def tab_mappings():
+    """Every mapping on the Wearables tab, as a queryset to narrow."""
+    return tab_queryset(SourceCodeConceptMapping.objects.all(), WEARABLES_TAB)
+
+
+def rows_from(mappings):
+    """*mappings* as ``Row`` values in file order. One query."""
+    found = mappings.order_by().annotate(units=SourceUnits('source_unit_evidence')).values_list(
         'pk', 'category', 'measure_class', 'metric_key', 'source_vocabulary_id',
         'source_code', 'source_code_description', 'units', 'target_concept_id',
         'destination_vocabulary_id', 'target_concept__vocabulary_id',
