@@ -6819,6 +6819,17 @@ class OpenWearablesVocabularyTest(TestCase):
         self.assertLess(ow_key, uncoded_key)
         self.assertLess(ow_key, loinc_key)
 
+    def test_wearables_is_the_first_tab(self):
+        from omop_core.services.source_vocabularies import (
+            SOURCE_TAB_ORDER, source_tab_sort_key,
+        )
+        self.assertEqual(SOURCE_TAB_ORDER[0], 'OpenWearables')
+        for other in ('EPIC', 'CERNER', 'ICD10CM', 'RxNorm', '', 'LOINC', 'SNOMED'):
+            with self.subTest(other):
+                self.assertLess(source_tab_sort_key('OpenWearables'), source_tab_sort_key(other))
+        # A vocabulary with no place in the order still sorts after it.
+        self.assertLess(source_tab_sort_key('OpenWearables'), source_tab_sort_key('SomeNewVocab'))
+
     def test_tables_for_openwearables(self):
         from omop_core.services.source_vocabularies import tables_for_source_vocabulary
         tables = tables_for_source_vocabulary('OpenWearables')

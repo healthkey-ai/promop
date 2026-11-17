@@ -180,13 +180,16 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
+    # Wearable metrics (includes Apple, Garmin and HL7-PHR) come first. The
+    # page opens on the first tab with proposed rows, so this is also where a
+    # curator lands while the Wearables tab has any.
+    'OpenWearables',
     'EPIC', 'CERNER',  # Hospital-local codes are the largest curation queues
     'ICD10CM',
     'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
-    'OpenWearables',  # Wearable device metrics (includes Apple, Garmin and HL7-PHR)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
 ]
