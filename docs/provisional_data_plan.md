@@ -311,8 +311,12 @@ Edit Mapping dialog shows it as a bare percent to the right of the status
 dropdown, with a **Calc** button that scores the destination chosen now through
 `POST /api/v1/code-mappings/score/` (the rankers, with that concept guaranteed in
 the pool), so a hand-picked destination can reach the floor and yield provisional
-rows. A score is never invented: no ranker answer means no number and a note.
-Details in the Code Mapping Suggest section of `AGENTS.md`.
+rows. A score is never invented (no ranker answer, or a ranker that preferred
+another concept, means no number and a note), and it is never typed in: the server
+signs what Calc or Suggest computed for a source and destination, and a save stores
+a confidence only through that token, so no mapping writer can manufacture the
+evidence provisional data trusts. Details in the Code Mapping Suggest section of
+`AGENTS.md`.
 
 ### As built in phase 1b (#2530)
 

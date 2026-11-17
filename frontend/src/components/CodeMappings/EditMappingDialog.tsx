@@ -46,6 +46,8 @@ import {
   type MappingForm,
   type MappingSurface,
   rankedConfidence,
+  rankedScore,
+  type ConfidenceScore,
   type Reference,
   type RepointResult,
   type SearchScope,
@@ -223,6 +225,18 @@ export default function EditMappingDialog({
   const [calcNote, setCalcNote] = useState("");
   const [calcd, setCalcd] = useState<{ destination: string; confidence: number } | null>(null);
   const calcRequest = useRef(0);
+  // The destination the form holds now, readable from callbacks that must tell a
+  // change from a repeat without depending on the form.
+  const destinationRef = useRef("");
+  // Abandon a Calc in flight, forget what it computed and what it said. Calc
+  // describes one source and one destination: when either changes it is stale.
+  const resetCalc = useCallback(() => {
+    calcRequest.current += 1;
+    setCalcing(false);
+    setCalcNote("");
+    setCalcd(null);
+  }, []);
+  useEffect(() => { destinationRef.current = form.destination_concept_id; }, [form.destination_concept_id]);
   // The note as the dialog opened with it. A save sends the note only when
   // the curator changed it: the row this form was built from may be stale or
   // carry no note at all (the patient page's rows), and sending that back
@@ -426,10 +440,7 @@ export default function EditMappingDialog({
       setSavedSourceUnit(selectedRow?.source_unit || "");
       setSourceSaveMessage("");
       // A score computed for the last row says nothing about this one.
-      calcRequest.current += 1;
-      setCalcing(false);
-      setCalcNote("");
-      setCalcd(null);
+      resetCalc();
       setUnitSelectionAuto(false);
       setUnitSelectionNeedsReview(false);
       const openedMetric: MetricFields = {
@@ -478,7 +489,7 @@ export default function EditMappingDialog({
         }
       }
     })();
-  }, [open, mode, selectedRow, reference, withDefaultDestination, applyStored]);
+  }, [open, mode, selectedRow, reference, withDefaultDestination, applyStored, resetCalc]);
 
   // ── Example patients for the source code (#1911) ─────────────────
   const exampleVocabulary = selectedRow?.source_vocabulary_id ?? "";
@@ -618,20 +629,24 @@ export default function EditMappingDialog({
   const setField = useCallback((field: keyof MappingForm, value: string) => {
     if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");
     if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
-    if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
+    const sourceEdited = ["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field);
+    if (sourceEdited) {
       dialogRequest.current += 1;
       suggestionStale.current = true;
       setSearchingConcepts(false);
       setError("");
     }
+    // A confidence (and a Calc in flight) describes one source and one destination.
+    const destinationMoved = field === "destination_concept_id" && value !== destinationRef.current;
+    if (sourceEdited || destinationMoved) resetCalc();
+    if (field === "destination_concept_id") destinationRef.current = value;
     setForm((prev) => ({
       ...prev,
       [field]: value,
-      // A confidence described the destination it was computed for.
-      ...(field === "destination_concept_id" && value !== prev.destination_concept_id
-        ? { suggestion_confidence: null } : {}),
+      ...(sourceEdited || destinationMoved
+        ? { suggestion_confidence: null, suggestion_confidence_token: null } : {}),
     }));
-  }, []);
+  }, [resetCalc]);
 
   const setDomain = useCallback((domainId: string) => {
     setSuggestionMessage("");
@@ -639,6 +654,7 @@ export default function EditMappingDialog({
     suggestionStale.current = true;
     setSearchingConcepts(false);
     setError("");
+    resetCalc();
     setForm((prev) => {
       const offered = reference.source_code_systems_by_domain[domainId] || [];
       const stillOffered =
@@ -649,14 +665,18 @@ export default function EditMappingDialog({
         domain_id: domainId,
         source_vocabulary_id: stillOffered ? prev.source_vocabulary_id : "",
         omop_table: omopTableFor(reference, domainId),
+        suggestion_confidence: null,
+        suggestion_confidence_token: null,
       };
     });
-  }, [reference]);
+  }, [reference, resetCalc]);
 
-  const applyConcept = useCallback((concept: ConceptResult, adoptDomain = false, confidence?: number | null) => {
+  const applyConcept = useCallback((concept: ConceptResult, adoptDomain = false, score?: ConfidenceScore) => {
     dialogChoice.current = dialogRequest.current;
     setSuggestionMessage("");
-    setCalcNote("");
+    // A new destination makes a Calc in flight, and what it said, stale; the same one does not.
+    if (destinationRef.current !== String(concept.concept_id)) resetCalc();
+    destinationRef.current = String(concept.concept_id);
     setForm((prev) => {
       // The confidence described the destination it was computed for. A new
       // destination carries the one a Suggest run scored it with, else none
@@ -677,11 +697,15 @@ export default function EditMappingDialog({
         measurement_type: concept.measurement_type || "",
         suggested_unit: concept.suggested_unit || "",
         example_units: concept.example_units || [],
-        suggestion_confidence: confidence !== undefined ? confidence
+        // A score the run gave this concept, with its signed token; otherwise a repeat keeps
+        // what it had and a different destination has none until Calc computes it.
+        suggestion_confidence: score ? score.confidence
           : sameDestination ? prev.suggestion_confidence : null,
+        suggestion_confidence_token: score ? score.token
+          : sameDestination ? prev.suggestion_confidence_token : null,
       };
     });
-  }, [reference]);
+  }, [reference, resetCalc]);
 
   const resolveConceptId = useCallback(async (rawId: string) => {
     const id = rawId.trim();
@@ -874,7 +898,7 @@ export default function EditMappingDialog({
       } else if (result?.suggested && dialogChoice.current !== request) {
         applyConcept(
           result.suggested as ConceptResult, false,
-          rankedConfidence(current.activity ?? [], String((result.suggested as ConceptResult).concept_id)),
+          rankedScore(current.activity ?? [], String((result.suggested as ConceptResult).concept_id)) ?? undefined,
         );
         setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
       } else if (!result?.suggested && dialogChoice.current !== request) {
@@ -928,17 +952,20 @@ export default function EditMappingDialog({
         return;
       }
       const result = finished.activity?.filter(event => event.stage === "result").at(-1) as
-        { scored?: { confidence: number | null; note?: string } } | undefined;
+        { scored?: { confidence: number | null; token?: string; note?: string } } | undefined;
       const confidence = result?.scored?.confidence;
-      if (typeof confidence === "number") {
+      const token = result?.scored?.token;
+      if (typeof confidence === "number" && token) {
         setForm((prev) => prev.destination_concept_id === destination
-          ? { ...prev, suggestion_confidence: confidence } : prev);
+          ? { ...prev, suggestion_confidence: confidence, suggestion_confidence_token: token } : prev);
         setCalcd({ destination, confidence });
       } else {
         setCalcNote(result?.scored?.note || "No confidence could be computed for this destination.");
       }
-    } catch {
-      if (current()) setCalcNote("Could not compute a confidence. Try again.");
+    } catch (failure) {
+      // A destination the server will not score says why (400).
+      const detail = (failure as { response?: { data?: { destination_concept_id?: string } } })?.response?.data?.destination_concept_id;
+      if (current()) setCalcNote(detail || "Could not compute a confidence. Try again.");
     } finally {
       if (current()) setCalcing(false);
     }
@@ -997,8 +1024,13 @@ export default function EditMappingDialog({
   const suggestedHere = individualSuggestion !== null && !individualSuggestion.axisKey
     && !suggestionStale.current;
 
+  // The number on screen is never sent (the server stores only a confidence it signed):
+  // a token for it goes instead, and null when the dialog cleared it.
+  const { suggestion_confidence: shownConfidence, suggestion_confidence_token: confidenceToken, ...formFields } = form;
   const savePayload = () => ({
-    ...form,
+    ...formFields,
+    ...(shownConfidence != null && confidenceToken ? { suggestion_confidence_token: confidenceToken } : {}),
+    ...(shownConfidence === null ? { suggestion_confidence: null } : {}),
     notes: form.notes !== openedNotes.current ? form.notes : undefined,
     ...(patientId ? { patient_id: Number(patientId) } : {}),
     // The table this code was listed under on the patient page: rows there
@@ -1510,8 +1542,8 @@ export default function EditMappingDialog({
                       void axesPanel.current?.setVariantDestination(axisKey, candidate.concept_id);
                       return;
                     }
-                    applyConcept(candidate as ConceptResult, false, rankedConfidence(
-                      individualSuggestion.activity, String(candidate.concept_id)));
+                    applyConcept(candidate as ConceptResult, false, rankedScore(
+                      individualSuggestion.activity, String(candidate.concept_id)) ?? undefined);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}
                 {!defaultDestination && (<><div className="flex gap-2">
