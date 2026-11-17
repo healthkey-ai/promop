@@ -226,7 +226,14 @@ def concept_to_code_detail(request, concept_id):
     rows = apply_notes(rows, request.query_params)
     counts = rows.aggregate(encountered=Count('pk', filter=Q(occurrence_count__gt=0)),
                             zero_seen=Count('pk', filter=Q(occurrence_count=0)))
-    rows = apply_seen(rows, request.query_params)
+    # Seen > 0 narrows the work queue (the codes that could be mapped here),
+    # never the stored mappings: a concept's mapped codes are all listed, as
+    # the Code to Concept page lists its Mapped sections (#1648), so the
+    # concept list's counts and this list agree. A platform's own code
+    # (HealthKit, Health Connect, OpenWearables) is seeded with Seen 0 and
+    # was hidden here while the concept list counted it (#2686).
+    if mode == 'available':
+        rows = apply_seen(rows, request.query_params)
     # The dialog lists approved, proposed and rejected mappings as separate
     # groups (#2010); counts cover every status so a collapsed group can show
     # how many rows it holds before it is fetched. Available rows are all
