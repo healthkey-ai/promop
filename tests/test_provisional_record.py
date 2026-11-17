@@ -416,9 +416,37 @@ def test_a_failing_mirror_does_not_lose_the_users_edit(snomed, record, staff, mo
     assert float(PatientRecord.objects.get(person=record.person).hemoglobin_g_dl) == 13.0
 
 
+def test_the_provisional_readers_are_the_real_refreshs_readers_in_its_order():
+    """The pass runs a subset of the refresh's own list, so the relative order is
+    the refresh's and a new or reordered reader cannot be missed (#2646)."""
+    from omop_core.services.patient_record_service import (
+        _get_assertion_data, _get_laboratory_data, _section_readers, provisional_section_readers,
+    )
+    real = list(_section_readers())
+    mine = list(provisional_section_readers())
+
+    assert mine == [fn for fn in real if fn in set(mine)]
+    assert set(mine) == {_get_assertion_data, _get_laboratory_data}
+    assert real.index(_get_assertion_data) < real.index(_get_laboratory_data)
+    assert len(real) == len(set(real))
+
+
+def test_the_refresh_runs_the_shared_reader_list(snomed, record, monkeypatch):
+    """Not a copy of it: replacing the list changes what the real refresh runs."""
+    from omop_core.services import patient_record_service as service
+    ran = []
+    real = service._section_readers()
+    monkeypatch.setattr(service, '_section_readers', lambda: tuple(
+        (lambda person, snapshot, fn=fn: (ran.append(fn), fn(person, snapshot))[1]) for fn in real))
+
+    refresh_patient_record(record.person)
+
+    assert len(ran) == len(real)
+
+
 def test_the_provisional_readers_match_the_real_refresh(snomed, record):
-    """The orchestration in provisional_record restates the real refresh's order of
-    the same readers. Fed real rows as if they were proposals it must agree with it."""
+    """Fed real rows as if they were proposals, every field the pass sets equals the real
+    refresh's value for it, whatever the fixture feeds."""
     from omop_core.services.patient_record_service import _build_snapshot
     with suppress_patient_record_refresh():
         _add_measurement(record.person, None)
@@ -429,6 +457,6 @@ def test_the_provisional_readers_match_the_real_refresh(snomed, record):
     view = provisional_record._view(snapshot, snapshot.measurements, snapshot.observations)
     values = provisional_record._read_values(record.person, refreshed, view)
 
-    for field in ('hemoglobin_g_dl', 'hemoglobin_level', 'b_symptom_fever'):
-        assert getattr(refreshed, field) is not None, field    # the control: the fixture feeds it
-        assert values[field] == getattr(refreshed, field), field
+    assert {'hemoglobin_g_dl', 'hemoglobin_level', 'b_symptom_fever'} <= set(values)   # the control
+    for field, value in values.items():
+        assert value == getattr(refreshed, field), field

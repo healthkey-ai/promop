@@ -73,20 +73,22 @@ def _view(snapshot, measurements, observations, lab_routing_cache=None):
 
 
 def _read_values(person, record, view) -> dict:
-    """The phase 1 readers over *view*, in the order the real refresh runs them."""
-    from omop_core.services.omop_projection import curated_values_from_snapshot
+    """The phase 1 readers over *view*, run exactly as the real refresh runs them.
+
+    The readers and their order come from the real refresh's own list, and the
+    curated-mapping step is the helper the refresh calls, so the two cannot
+    drift apart (#2646).
+    """
     from omop_core.services.patient_record_service import (
-        _ANSWER_LINE_FIELDS, _answer_line, _fits_column, _get_assertion_data,
-        _get_laboratory_data,
+        _curated_values, _get_laboratory_data, provisional_section_readers,
     )
-    values = dict(_get_assertion_data(person, view))
-    lab = _get_laboratory_data(person, view)
-    values.update(lab)
-    for field, value in curated_values_from_snapshot(view, confirmed_clinical_fields=set()).items():
-        if field in _ANSWER_LINE_FIELDS and value is not None:
-            value = _answer_line(field, value)
-        if field not in lab and _fits_column(record, field, value):
-            values[field] = value
+    values, lab_derived = {}, set()
+    for section_fn in provisional_section_readers():
+        section_values = section_fn(person, view)
+        if section_fn is _get_laboratory_data:
+            lab_derived = set(section_values)
+        values.update(section_values)
+    values.update(_curated_values(record, view, lab_derived, set()))
     return values
 
 

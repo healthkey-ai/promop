@@ -196,6 +196,12 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
   of the person's provisional rows only (`OmopSnapshot` rebuilt with
   `dataclasses.replace`, with its own per-refresh caches). Nothing else runs;
   computed fields (BMI, scores) are not recomputed from a provisional input.
+- **One reader list, not a copy (#2646):** `refresh_patient_record` and the pass
+  both read `_section_readers()`, the pass runs the subset
+  `provisional_section_readers()` in the real order, and the curated-mapping step
+  is the shared `_curated_values`. A new or reordered reader in the real refresh
+  therefore reaches the pass; a differential test holds every field the pass sets
+  to the real refresh's value.
 - **What is kept:** a value only for a field the real record leaves empty
   (`_is_empty`), that is not a pending user edit (the set before the refresh and
   the one after, so an explicit clear stays clear), and that has a confidence
