@@ -83,14 +83,17 @@ def _grouped(queryset):
             destination_unit=Max('destination_unit_concept_id'),
             # The wearable metric category, measure class and metric key, by
             # the same rule. They are columns of the mapping itself, so they
-            # add no join, and none is ever NULL: blank against a value
-            # already counts as two.
-            categories=Count('category', distinct=True),
-            only_category=Max('category'),
-            measure_classes=Count('measure_class', distinct=True),
-            only_measure_class=Max('measure_class'),
-            metric_keys=Count('metric_key', distinct=True),
-            only_metric_key=Max('metric_key'),
+            # add no join, and none is ever NULL: the members agree exactly
+            # when the least value is the greatest, blank against a value
+            # included. Min and Max rather than COUNT(DISTINCT), which sorts
+            # each group's values and cost every tab's grouped page a quarter
+            # more for three columns only the Wearables tab fills.
+            min_category=Min('category'),
+            max_category=Max('category'),
+            min_measure_class=Min('measure_class'),
+            max_measure_class=Max('measure_class'),
+            min_metric_key=Min('metric_key'),
+            max_metric_key=Max('metric_key'),
             statuses=Count('status', distinct=True),
             # Not named `status`: an annotation shadows the column of the same
             # name, so Q(status='proposed') below would resolve against
@@ -115,11 +118,11 @@ def _grouped(queryset):
             # What the entry shows: the members' category, and their metric
             # key, when they agree.
             category_sort=Case(
-                When(categories=1, then=F('only_category')),
+                When(min_category=F('max_category'), then=F('max_category')),
                 default=Value(''), output_field=CharField(),
             ),
             metric_key_sort=Case(
-                When(metric_keys=1, then=F('only_metric_key')),
+                When(min_metric_key=F('max_metric_key'), then=F('max_metric_key')),
                 default=Value(''), output_field=CharField(),
             ),
         )
@@ -166,7 +169,8 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
             'description': entry['description'],
             # '' when the members disagree, as when none has one.
             'category': entry['category_sort'],
-            'measure_class': entry['only_measure_class'] if entry['measure_classes'] == 1 else '',
+            'measure_class': (entry['max_measure_class']
+                              if entry['min_measure_class'] == entry['max_measure_class'] else ''),
             'metric_key': entry['metric_key_sort'],
             'members': entry['members'],
             'seen': entry['seen'],

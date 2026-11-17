@@ -114,10 +114,12 @@ def test_the_allowed_lists_are_the_ones_agreed_and_fit_their_columns():
         assert max(len(value) for value in allowed) <= width, field
 
 
-def test_the_metric_key_column_is_indexed_and_as_wide_as_the_rule():
+def test_the_metric_key_column_is_as_wide_as_the_rule():
     column = SourceCodeConceptMapping._meta.get_field('metric_key')
     assert column.max_length == METRIC_KEY_MAX_LENGTH == 64
-    assert column.db_index
+    # No index until a query looks rows up by key: a CharField index is two
+    # (btree and varchar_pattern_ops) over a column that is '' on nearly every row.
+    assert not column.db_index
 
 
 def test_metric_key_shape():
@@ -376,6 +378,61 @@ def test_an_unauthenticated_request_cannot_write_the_field(f):
     assert stored(mapping, f.name) == f.values[0]
 
 
+def test_an_approved_mapping_stays_with_those_who_may_approve(curator):
+    """The rule predates these fields: a non-approver changes nothing on an
+    approved row, the three metric fields included."""
+    mapping = row('steps', status='approved', target_concept=ConceptFactory(),
+                  category='Activity', measure_class='Aggregate over interval', metric_key='steps')
+    analyst = with_role('analyst')
+    for payload in ({'category': 'Fitness'}, {'measure_class': 'Vendor score'},
+                    {'metric_key': 'step_count'}):
+        response = patch(analyst, mapping, **payload)
+        assert response.status_code == 400, payload
+        assert 'Only org admins and staff' in str(response.data['status'])
+    mapping.refresh_from_db()
+    assert (mapping.category, mapping.measure_class, mapping.metric_key, mapping.status) == (
+        'Activity', 'Aggregate over interval', 'steps', 'approved')
+
+    for approver in (curator, with_role('org_admin')):
+        response = patch(approver, mapping, category='Fitness', status='approved')
+        assert response.status_code == 200, response.data
+    assert patch(curator, mapping, metric_key='step_count').status_code == 200
+    mapping.refresh_from_db()
+    assert (mapping.category, mapping.metric_key, mapping.status) == (
+        'Fitness', 'step_count', 'approved')
+
+
+# ── Blank means "not yet described" ─────────────────────────────────────
+
+def test_a_cleared_field_is_refilled_by_the_seed_and_a_changed_one_is_kept(curator):
+    """Blank is not a curator's answer the seed respects: it means the metric
+    has not been described yet, and the next fill describes it again. A value
+    a curator changed is theirs and is never replaced."""
+    from django.core.management import call_command
+    call_command('seed_openwearables_mappings', verbosity=0)
+    cleared = SourceCodeConceptMapping.objects.get(
+        source_vocabulary_id='OpenWearables', source_code='resting_heart_rate')
+    changed = SourceCodeConceptMapping.objects.get(
+        source_vocabulary_id='OpenWearables', source_code='steps')
+    assert patch(curator, cleared, category='', measure_class='', metric_key='').status_code == 200
+    assert patch(curator, changed, category='Fitness', measure_class='Vendor score',
+                 metric_key='step_count').status_code == 200
+    cleared.refresh_from_db()
+    assert (cleared.category, cleared.measure_class, cleared.metric_key) == ('', '', '')
+
+    # A plain re-run leaves both alone; --update-seeded fills only the blanks.
+    call_command('seed_openwearables_mappings', verbosity=0)
+    cleared.refresh_from_db()
+    assert (cleared.category, cleared.measure_class, cleared.metric_key) == ('', '', '')
+    call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+    cleared.refresh_from_db()
+    changed.refresh_from_db()
+    assert (cleared.category, cleared.measure_class, cleared.metric_key) == (
+        'Heart & Cardiovascular', 'Aggregate over interval', 'resting_hr')
+    assert (changed.category, changed.measure_class, changed.metric_key) == (
+        'Fitness', 'Vendor score', 'step_count')
+
+
 # ── Sort ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(('field', 'values'), [
@@ -419,6 +476,36 @@ def test_grouped_entries_name_a_value_only_when_every_member_agrees(curator, f):
     }
     rolled = browse(curator, rollup='1').data['groups']['Unmapped']
     assert {entry['label']: entry[f.name] for entry in rolled}['sleepduration'] == f.values[1]
+
+
+def test_grouped_rows_of_another_tab_carry_the_three_keys_blank(curator):
+    for code in ('E11.9', 'E11.8'):
+        row(code, source_vocabulary_id='ICD10CM', source_code_description='Type 2 diabetes',
+            domain_id='Condition', omop_table='condition_occurrence')
+    row('I10', source_vocabulary_id='ICD10CM', source_code_description='Hypertension',
+        domain_id='Condition', omop_table='condition_occurrence')
+    groups = browse(curator, source='ICD10CM', rollup='1').data['groups']['Unmapped']
+    assert sorted(entry['members'] for entry in groups) == [1, 2]
+    for entry in groups:
+        assert (entry['category'], entry['measure_class'], entry['metric_key']) == ('', '', '')
+    # And it may still be sorted by them, as every tab's endpoint accepts.
+    assert browse(curator, source='ICD10CM', rollup='1', order_0='category').status_code == 200
+
+
+def test_the_grouped_page_agrees_without_counting_distinct_values(curator):
+    """COUNT(DISTINCT) on the three columns cost every tab's grouped page a
+    quarter more; the members agree exactly when Min equals Max."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    row('A', source_code_description='Steps', category='Activity')
+    row('B', source_code_description='steps', category='Activity')
+    with CaptureQueriesContext(connection) as queries:
+        found = group_entries(SourceCodeConceptMapping.objects.all(), 1, 100)
+    assert found[0]['category'] == 'Activity'
+    [aggregate] = [q['sql'] for q in queries if 'GROUP BY' in q['sql']]
+    for column in ('category', 'measure_class', 'metric_key'):
+        assert f'COUNT(DISTINCT "source_code_concept_mapping"."{column}")' not in aggregate
+        assert f'MIN("source_code_concept_mapping"."{column}")' in aggregate
 
 
 @pytest.mark.parametrize(('field', 'values'), [

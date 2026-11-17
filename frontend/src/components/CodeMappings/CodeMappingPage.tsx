@@ -391,7 +391,11 @@ function sortsAcrossGrouping(previous: Partial<Record<MappingSection, SectionSor
     return next;
   }, {});
 }
-/** A Category or Metric sort belongs to the Wearables tab: no other tab has the column. */
+/**
+ * A Category or Metric sort belongs to the Wearables tab: no other tab has the
+ * column. Returns its argument when there is nothing to drop, so the result is
+ * stable to depend on.
+ */
 function sortsWithoutWearableColumns(previous: Partial<Record<MappingSection, SectionSort>>) {
   const wearableOnly = (sort?: SectionSort) => Boolean(sort && WEARABLE_SORT_COLUMNS.includes(sort.column));
   if (!sectionNames.some((section) => wearableOnly(previous[section]))) return previous;
@@ -466,6 +470,15 @@ export default function CodeMappingPage() {
   // own default. Before a tab is chosen the server names the one it opened.
   const [rollupChoice, setRollupChoice] = useState<boolean | null>(null);
   const rollup = rollupChoice ?? groupsByDefault(activeVocabulary ?? browse?.selected_source);
+  // The sort each section is shown and requested with. A Category or Metric
+  // sort is kept in state but applies only on the Wearables tab, whichever
+  // way the page got there: a click, or the server naming the tab it opened
+  // on, which can change under a curator who never clicked one.
+  const onWearablesTab = (activeVocabulary ?? browse?.selected_source) === WEARABLES_TAB;
+  const effectiveSorts = useMemo(
+    () => onWearablesTab ? sectionSorts : sortsWithoutWearableColumns(sectionSorts),
+    [onWearablesTab, sectionSorts],
+  );
   const [seenOnly, setSeenOnly] = useState(true);
   // Only the codes a curator has left a note on (#2423).
   const [withNotes, setWithNotes] = useState(false);
@@ -533,7 +546,7 @@ export default function CodeMappingPage() {
     if (withNotes) params.with_notes = "1";
     // Grouping can start without a click, when the tab the server opens on
     // changes, and a grouped queue refuses any other sort with a 400.
-    const sorts = rollup ? sortsAcrossGrouping(sectionSorts) : sectionSorts;
+    const sorts = rollup ? sortsAcrossGrouping(effectiveSorts) : effectiveSorts;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
       const sort = sorts[section];
@@ -568,7 +581,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, direction,
+  }, [activeVocabulary, debouncedSearch, pages, effectiveSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, direction,
     unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
@@ -1186,7 +1199,7 @@ export default function CodeMappingPage() {
     // Wearables tab only; every other tab keeps its eight columns.
     const showMetricColumns = selectedVocabulary === WEARABLES_TAB;
     const colCount = showMetricColumns ? 10 : 8;
-    const sort = sectionSorts[section];
+    const sort = effectiveSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
     const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
@@ -1626,7 +1639,6 @@ export default function CodeMappingPage() {
                   if (rollupChoice === null && groupsByDefault(tab.vocabulary_id) !== rollup) {
                     setSectionSorts(sortsAcrossGrouping);
                   }
-                  if (tab.vocabulary_id !== WEARABLES_TAB) setSectionSorts(sortsWithoutWearableColumns);
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);

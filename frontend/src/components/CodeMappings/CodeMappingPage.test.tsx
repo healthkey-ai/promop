@@ -2941,6 +2941,69 @@ describe("server mapping pages", () => {
       browseCalls("EPIC").forEach((params) => expect(params.order_1).toBe("-occurrence_count"));
     });
 
+    it("stops sending a Category sort when the server moves the page off the Wearables tab", async () => {
+      // No tab was clicked: the server names the tab on every response, and
+      // its default can change under a curator who sorted by Category.
+      let selected = "OpenWearables";
+      mockGet.mockImplementation((url: string) => {
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({
+          tabs: tabsWithWearables, selected_source: selected, results: [wearableRow()] }) });
+        return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      });
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      fireEvent.click(await within(table).findByRole("button", { name: /^Metric/ }));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("metric_key"));
+      expect(lastBrowse()).not.toHaveProperty("source");
+
+      selected = "EPIC";
+      // Any refresh will do; this one touches no sort.
+      fireEvent.click(within(table).getByLabelText("Proposed: only codes with a curator note"));
+      // The tab the answer names has no Metric column, so the sort goes with it.
+      await waitFor(() => expect(headerNames(screen.getByRole("table", { name: "Proposed mappings" }))).not.toContain("Metric"));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("-occurrence_count"));
+      expect(lastBrowse().order_0).toBe("-occurrence_count");
+      const proposed = screen.getByRole("table", { name: "Proposed mappings" });
+      expect(headerNames(proposed)).not.toContain("Category");
+      // The header that is sorted is one the table has.
+      expect(within(proposed).getByRole("columnheader", { name: "Seen" })).toHaveAttribute("aria-sort", "descending");
+    });
+
+    it("puts the three fields in the CSV download", async () => {
+      let saved: Blob | null = null;
+      const urls = URL as unknown as { createObjectURL: unknown; revokeObjectURL: unknown };
+      const original = { create: urls.createObjectURL, revoke: urls.revokeObjectURL };
+      urls.createObjectURL = vi.fn((blob: Blob) => { saved = blob; return "blob:code-mappings"; });
+      urls.revokeObjectURL = vi.fn();
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      try {
+        onWearables({ results: [wearableRow(), wearableRow({
+          mapping_id: 502, source_code: "hydration", category: "", measure_class: "", metric_key: "" })] });
+        await screen.findAllByTestId("category");
+        fireEvent.click(screen.getByTitle("Download Proposed"));
+        fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+        expect(click).toHaveBeenCalledTimes(1);
+        expect(saved).not.toBeNull();
+        const text = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.readAsText(saved!);
+        });
+        const [header, first, second] = text.split("\n").map((line) => line.split(","));
+        for (const column of ["category", "measure_class", "metric_key"]) expect(header).toContain(column);
+        const cell = (line: string[], column: string) => line[header.indexOf(column)];
+        expect(cell(first, "source_code")).toBe("resting_heart_rate");
+        expect(cell(first, "category")).toBe("Heart & Cardiovascular");
+        expect(cell(first, "measure_class")).toBe("Aggregate over interval");
+        expect(cell(first, "metric_key")).toBe("resting_hr");
+        expect([cell(second, "category"), cell(second, "measure_class"), cell(second, "metric_key")]).toEqual(["", "", ""]);
+      } finally {
+        click.mockRestore();
+        urls.createObjectURL = original.create;
+        urls.revokeObjectURL = original.revoke;
+      }
+    });
+
     it("keeps a Category sort when the Wearables tab is grouped", async () => {
       onWearables();
       const table = await screen.findByRole("table", { name: "Proposed mappings" });

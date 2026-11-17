@@ -161,6 +161,13 @@ function tableLabel(omopTable: string): string {
     : "no table";
 }
 
+/** What a wearable mapping says about its source metric. */
+type MetricFields = { category: string; measure_class: string; metric_key: string };
+const METRIC_FIELD_KEYS = ["category", "measure_class", "metric_key"] as const;
+const BLANK_METRIC_FIELDS: MetricFields = { category: "", measure_class: "", metric_key: "" };
+/** GET /v1/code-mappings/<id>/: the stored row and its destination options. */
+type StoredMapping = CodeMappingRow & { destination_options: DestinationOption[] };
+
 // ── Component ───────────────────────────────────────────────────────
 
 export default function EditMappingDialog({
@@ -218,12 +225,19 @@ export default function EditMappingDialog({
   // changed it: a row built by another page (the patient's source codes)
   // carries none of them, and sending that blank back would erase the stored
   // value.
-  const [category, setCategory] = useState("");
-  const [measureClass, setMeasureClass] = useState("");
-  const [metricKey, setMetricKey] = useState("");
-  const openedCategory = useRef("");
-  const openedMeasureClass = useRef("");
-  const openedMetricKey = useRef("");
+  // State rather than refs, unlike the note's baseline: the selects render
+  // the opened value too, so a stored value outside the allowed list stays
+  // selectable after the curator has picked another.
+  const [metric, setMetric] = useState<{ opened: MetricFields; current: MetricFields }>(
+    { opened: BLANK_METRIC_FIELDS, current: BLANK_METRIC_FIELDS });
+  const setMetricField = (key: keyof MetricFields, value: string) =>
+    setMetric((prev) => ({ ...prev, current: { ...prev.current, [key]: value } }));
+  // What the mapping's own GET returned for the row the dialog is open on
+  // (data null when it failed). The form is rebuilt whenever the row or the
+  // reference payload changes, which can be after that GET has settled; the
+  // rebuild applies this again so the stored note, unit and metric fields are
+  // not replaced by the blanks of a row that never carried them.
+  const hydration = useRef<{ mappingId: number; data: StoredMapping | null } | null>(null);
   // The destination unit as the dialog opened with it, and whether that is
   // what the mapping stores. A patient page row carries no unit, so the form
   // opens blank over a mapping that may have one: the mapping's own GET
@@ -327,6 +341,61 @@ export default function EditMappingDialog({
     return withBlank;
   }, [reference, form.domain_id, form.source_vocabulary_id, sourceSystemContext]);
 
+  /**
+   * Put what the mapping stores into a form built from a row that may be
+   * stale or carry less (a patient page row has no note, unit or metric
+   * fields). Each stored value replaces what the form opened with and becomes
+   * the baseline a save is compared against; a value the curator has already
+   * typed, picked or cleared is left alone.
+   */
+  const applyStored = useCallback((data: StoredMapping, patientRow: boolean) => {
+    const stored = data.notes;
+    const openedWith = openedNotes.current;
+    if (typeof stored === "string" && stored !== openedWith) {
+      openedNotes.current = stored;
+      setForm((prev) => prev.notes === openedWith ? { ...prev, notes: stored } : prev);
+    }
+    setMetric((prev) => {
+      let next = prev;
+      for (const key of METRIC_FIELD_KEYS) {
+        const value = data[key];
+        if (typeof value !== "string" || value === next.opened[key]) continue;
+        next = {
+          opened: { ...next.opened, [key]: value },
+          current: next.current[key] === next.opened[key] ? { ...next.current, [key]: value } : next.current,
+        };
+      }
+      return next;
+    });
+    // The stored unit, on the same rule: it replaces what the form opened
+    // with, never a unit the curator picked or cleared since.
+    if ("destination_unit_concept_id" in data) {
+      const storedUnit = data.destination_unit_concept_id ? String(data.destination_unit_concept_id) : "";
+      const openedUnit = openedUnitId.current;
+      openedUnitId.current = storedUnit;
+      setForm((prev) => prev.destination_unit_concept_id === openedUnit ? {
+        ...prev,
+        destination_unit_concept_id: storedUnit,
+        destination_unit_concept_code: storedUnit ? data.destination_unit_code || "" : "",
+        destination_unit_concept_name: storedUnit ? data.destination_unit_name || "" : "",
+      } : prev);
+    }
+    setUnitBaseline("known");
+    // Auto-populate source_unit from evidence when the form has none
+    // (e.g. opened from Code Mapping browse, where the list omits units).
+    const dominant = dominantSourceUnit(data.source_evidence?.units);
+    if (dominant) {
+      setForm((prev) => {
+        // A patient inventory row has an explicit source value, including
+        // an intentional curator correction to blank. Never replace it
+        // with the aggregate mapping's unit evidence.
+        if (patientRow || prev.source_unit) return prev;
+        setUnitAutoPopulated(true);
+        return { ...prev, source_unit: dominant };
+      });
+    }
+  }, []);
+
   // ── Initialize form when dialog opens ───────────────────────────
   useEffect(() => {
     if (!open) return;
@@ -350,12 +419,12 @@ export default function EditMappingDialog({
       setSourceSaveMessage("");
       setUnitSelectionAuto(false);
       setUnitSelectionNeedsReview(false);
-      openedCategory.current = selectedRow?.category || "";
-      openedMeasureClass.current = selectedRow?.measure_class || "";
-      openedMetricKey.current = selectedRow?.metric_key || "";
-      setCategory(openedCategory.current);
-      setMeasureClass(openedMeasureClass.current);
-      setMetricKey(openedMetricKey.current);
+      const openedMetric: MetricFields = {
+        category: selectedRow?.category || "",
+        measure_class: selectedRow?.measure_class || "",
+        metric_key: selectedRow?.metric_key || "",
+      };
+      setMetric({ opened: openedMetric, current: openedMetric });
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -386,9 +455,17 @@ export default function EditMappingDialog({
         setSearchScope(DEFAULT_SEARCH_SCOPE);
         setConceptSearchQuery("");
         setConceptResults([]);
+        // A rebuild after the mapping's GET settled (the reference payload
+        // arriving late, the parent handing over a fresh row object): that
+        // effect does not run again, so what it learned is applied here.
+        const settled = hydration.current;
+        if (settled && settled.mappingId === selectedRow.mapping_id) {
+          if (settled.data) applyStored(settled.data, Boolean(selectedRow.source_code_id));
+          else setUnitBaseline(rowCarriesUnit.current ? "known" : "unknown");
+        }
       }
     })();
-  }, [open, mode, selectedRow, reference, withDefaultDestination]);
+  }, [open, mode, selectedRow, reference, withDefaultDestination, applyStored]);
 
   // ── Example patients for the source code (#1911) ─────────────────
   const exampleVocabulary = selectedRow?.source_vocabulary_id ?? "";
@@ -466,6 +543,8 @@ export default function EditMappingDialog({
   // ── Load destination options & source evidence for edit mode ─────
   useEffect(() => {
     let active = true;
+    // Whatever an earlier GET returned was for another opening of the dialog.
+    hydration.current = null;
     (async () => {
       setDestinationOptions([]);
       setDestinationError("");
@@ -474,67 +553,22 @@ export default function EditMappingDialog({
       if (!open || mode !== "edit" || !selectedRow?.mapping_id) return;
       setLoadingDestinations(true);
       try {
-        const { data } = await api.get<CodeMappingRow & { destination_options: DestinationOption[] }>(
+        const { data } = await api.get<StoredMapping>(
           `/v1/code-mappings/${selectedRow.mapping_id}/`,
         );
         if (!active) return;
         setDestinationOptions(data.destination_options || []);
         const evidence = data.source_evidence || null;
         setSourceEvidence(evidence);
-        // The stored note is the one to show and to compare a save against:
-        // the row this dialog opened from may be stale, or have none (a
-        // patient page row). A note already being typed is left alone.
-        const stored = data.notes;
-        const openedWith = openedNotes.current;
-        if (typeof stored === "string" && stored !== openedWith) {
-          openedNotes.current = stored;
-          setForm((prev) => prev.notes === openedWith ? { ...prev, notes: stored } : prev);
-        }
-        // The same for the wearable metric fields: the stored value is what a
-        // save is compared against, and a value already being edited is kept.
-        const adoptStored = (
-          value: unknown, opened: { current: string },
-          set: (update: (previous: string) => string) => void,
-        ) => {
-          if (typeof value !== "string" || value === opened.current) return;
-          const was = opened.current;
-          opened.current = value;
-          set((previous) => previous === was ? value : previous);
-        };
-        adoptStored(data.category, openedCategory, setCategory);
-        adoptStored(data.measure_class, openedMeasureClass, setMeasureClass);
-        adoptStored(data.metric_key, openedMetricKey, setMetricKey);
-        // The stored unit, on the same rule: it replaces what the form opened
-        // with, never a unit the curator picked or cleared since.
-        if ("destination_unit_concept_id" in data) {
-          const storedUnit = data.destination_unit_concept_id ? String(data.destination_unit_concept_id) : "";
-          const openedUnit = openedUnitId.current;
-          openedUnitId.current = storedUnit;
-          setForm((prev) => prev.destination_unit_concept_id === openedUnit ? {
-            ...prev,
-            destination_unit_concept_id: storedUnit,
-            destination_unit_concept_code: storedUnit ? data.destination_unit_code || "" : "",
-            destination_unit_concept_name: storedUnit ? data.destination_unit_name || "" : "",
-          } : prev);
-        }
-        setUnitBaseline("known");
-        // Auto-populate source_unit from evidence when the form has none
-        // (e.g. opened from Code Mapping browse, where the list omits units).
-        const dominant = dominantSourceUnit(evidence?.units);
-        if (dominant) {
-          setForm((prev) => {
-            // A patient inventory row has an explicit source value, including
-            // an intentional curator correction to blank. Never replace it
-            // with the aggregate mapping's unit evidence.
-            if (selectedRow?.source_code_id || prev.source_unit) return prev;
-            setUnitAutoPopulated(true);
-            return { ...prev, source_unit: dominant };
-          });
-        }
+        // What the mapping stores is the truth to show and to compare a save
+        // against; kept so a later rebuild of the form can apply it again.
+        hydration.current = { mappingId: selectedRow.mapping_id, data };
+        applyStored(data, Boolean(selectedRow.source_code_id));
       } catch {
         if (!active) return;
         setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry.");
         setSourceEvidenceError("Could not load source evidence. Close and reopen this mapping to retry.");
+        hydration.current = { mappingId: selectedRow.mapping_id, data: null };
         // Only a row that carried the unit says what the mapping stores.
         setUnitBaseline(rowCarriesUnit.current ? "known" : "unknown");
       } finally {
@@ -542,7 +576,7 @@ export default function EditMappingDialog({
       }
     })();
     return () => { active = false; };
-  }, [open, mode, selectedRow?.mapping_id, selectedRow?.source_code_id]);
+  }, [open, mode, selectedRow?.mapping_id, selectedRow?.source_code_id, applyStored]);
 
   // ── Cleanup timers on unmount ───────────────────────────────────
   useEffect(() => () => {
@@ -887,9 +921,12 @@ export default function EditMappingDialog({
     ...(patientId && selectedRow?.destination_omop_table ? { rows_omop_table: selectedRow.destination_omop_table } : {}),
     ...(surface && !patientId ? { decision_surface: surface } : {}),
     // Never sent for a row the fields are not shown on, nor when unchanged.
-    ...(showMetricFields && category !== openedCategory.current ? { category } : {}),
-    ...(showMetricFields && measureClass !== openedMeasureClass.current ? { measure_class: measureClass } : {}),
-    ...(showMetricFields && metricKey.trim() !== openedMetricKey.current ? { metric_key: metricKey.trim() } : {}),
+    ...(showMetricFields && metric.current.category !== metric.opened.category
+      ? { category: metric.current.category } : {}),
+    ...(showMetricFields && metric.current.measure_class !== metric.opened.measure_class
+      ? { measure_class: metric.current.measure_class } : {}),
+    ...(showMetricFields && metric.current.metric_key.trim() !== metric.opened.metric_key
+      ? { metric_key: metric.current.metric_key.trim() } : {}),
     ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
     source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
     // Empty stays empty: never send concept 0 as a destination.
@@ -1200,8 +1237,9 @@ export default function EditMappingDialog({
                   ) : showMetricFields ? (
                     // The cell beside BasedOn is free outside the patient page.
                     <MetricChoiceField id="category" label="Category" tip={TIP.category}
-                      value={category} options={reference.wearable_metric_categories ?? []}
-                      canWrite={canWrite} onChange={setCategory} />
+                      value={metric.current.category} stored={metric.opened.category}
+                      options={reference.wearable_metric_categories ?? []}
+                      canWrite={canWrite} onChange={(value) => setMetricField("category", value)} />
                   ) : <div />}
                   <div className="min-w-0">
                     <ReadOnlyField id="source_based_on" label="BasedOn"
@@ -1211,24 +1249,26 @@ export default function EditMappingDialog({
                   </div>
                   {showMetricFields && patientId && selectedRow?.source_code_id && (
                     <MetricChoiceField id="category" label="Category" tip={TIP.category}
-                      value={category} options={reference.wearable_metric_categories ?? []}
-                      canWrite={canWrite} onChange={setCategory} />
+                      value={metric.current.category} stored={metric.opened.category}
+                      options={reference.wearable_metric_categories ?? []}
+                      canWrite={canWrite} onChange={(value) => setMetricField("category", value)} />
                   )}
                   {showMetricFields && (
                     <MetricChoiceField id="measure_class" label="Measure Class" tip={TIP.measure_class}
-                      value={measureClass} options={reference.wearable_measure_classes ?? []}
-                      canWrite={canWrite} onChange={setMeasureClass} />
+                      value={metric.current.measure_class} stored={metric.opened.measure_class}
+                      options={reference.wearable_measure_classes ?? []}
+                      canWrite={canWrite} onChange={(value) => setMetricField("measure_class", value)} />
                   )}
                   {showMetricFields && (canWrite ? (
                     <Field id="metric_key" label="Metric Key" tip={TIP.metric_key}>
-                      <input id="metric_key" title={TIP.metric_key} value={metricKey}
-                        onChange={(e) => setMetricKey(e.target.value)}
+                      <input id="metric_key" title={TIP.metric_key} value={metric.current.metric_key}
+                        onChange={(e) => setMetricField("metric_key", e.target.value)}
                         maxLength={64} spellCheck={false} autoCapitalize="none"
                         placeholder="e.g. resting_hr" className={`${INPUT_CLASS} font-mono`} />
                     </Field>
                   ) : (
                     <ReadOnlyField id="metric_key" label="Metric Key" tip={TIP.metric_key}
-                      value={metricKey} fullWidth />
+                      value={metric.current.metric_key} fullWidth />
                   ))}
                 </div>
               </div>
@@ -1848,14 +1888,16 @@ const DESTINATION_UNIT_TIP = "UCUM concept linked to this mapping. Used for unit
 /**
  * One of a wearable metric's two fields with a fixed list (Category, Measure Class):
  * a select of the allowed values for a curator, plain text for anyone else. A
- * stored value the list no longer offers stays selectable, so opening the
- * dialog never shows it as blank.
+ * stored value the list does not offer is shown, not blanked, and stays
+ * selectable after the curator has picked another, so they can go back to it.
  */
-function MetricChoiceField({ id, label, tip, value, options, canWrite, onChange }: {
+function MetricChoiceField({ id, label, tip, value, stored, options, canWrite, onChange }: {
   id: string;
   label: string;
   tip: string;
   value: string;
+  /** What the mapping stores: offered beside the list when it is not on it. */
+  stored: string;
   options: string[];
   canWrite: boolean;
   onChange: (next: string) => void;
@@ -1863,7 +1905,10 @@ function MetricChoiceField({ id, label, tip, value, options, canWrite, onChange 
   if (!canWrite) {
     return <ReadOnlyField id={id} label={label} tip={tip} value={value} fullWidth />;
   }
-  const offered = value && !options.includes(value) ? [...options, value] : options;
+  const offered = [...options];
+  for (const extra of [stored, value]) {
+    if (extra && !offered.includes(extra)) offered.push(extra);
+  }
   return (
     <Field id={id} label={label} tip={tip}>
       <select id={id} title={tip} value={value} onChange={(e) => onChange(e.target.value)} className={INPUT_CLASS}>

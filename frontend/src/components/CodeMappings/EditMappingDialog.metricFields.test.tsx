@@ -281,4 +281,179 @@ describe("EditMappingDialog wearable metric fields", () => {
       expect(lastPayload()).not.toHaveProperty(key);
     }
   });
+
+  // ── The stored row arrives late, or not at all ─────────────────────────
+  // A patient page row carries none of the three fields.
+  const stale: CodeMappingRow = { ...wearableRow, category: undefined, measure_class: undefined, metric_key: undefined };
+  const dialogProps = {
+    open: true, mode: "edit" as const, canApprove: false, rankingModel: "anthropic" as const,
+    strategies: { umls: true, lexical: true, vectors: true },
+    onClose: vi.fn(), onSaved: vi.fn(), onDeleted: vi.fn(),
+  };
+  /** Renders the dialog over a detail GET the test settles by hand. */
+  const renderOverPendingDetail = (row: CodeMappingRow, extra: Record<string, unknown> = {}) => {
+    let settle!: { resolve: (value: unknown) => void; reject: (reason: unknown) => void };
+    const detail = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    mockGet.mockImplementation((url: string) =>
+      url === `/v1/code-mappings/${row.mapping_id}/` ? detail : Promise.resolve({ data: {} }));
+    const view = render(<EditMappingDialog {...dialogProps} row={row} reference={reference} {...extra} />);
+    return { ...view, settle, source: within(screen.getByTestId("source-block")) };
+  };
+  const expectNoneSent = () => {
+    for (const key of ["category", "measure_class", "metric_key"]) {
+      expect(lastPayload()).not.toHaveProperty(key);
+    }
+  };
+
+  it("sends none of them from a row that lacks them while the mapping is still loading", async () => {
+    const { source } = renderOverPendingDetail(stale);
+    expect(source.getByLabelText("Category")).toHaveValue("");
+    save();
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expectNoneSent();
+  });
+
+  it("sends none of them from a row that lacks them when the mapping could not be read", async () => {
+    const { settle, source } = renderOverPendingDetail(stale);
+    settle.reject(new Error("503"));
+    expect(await screen.findByText(/Could not load source evidence/)).toBeInTheDocument();
+    expect(source.getByLabelText("Category")).toHaveValue("");
+    expect(source.getByLabelText("Metric Key")).toHaveValue("");
+    save();
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expectNoneSent();
+  });
+
+  it("keeps an edit made before the mapping loaded, and sends only that", async () => {
+    const { settle, source } = renderOverPendingDetail(stale);
+    fireEvent.change(source.getByLabelText("Category"), { target: { value: "Sleep" } });
+    settle.resolve({ data: { ...wearableRow, destination_options: [] } });
+    // The fields the curator has not touched take what the mapping stores ...
+    await waitFor(() => expect(source.getByLabelText("Measure Class")).toHaveValue("Aggregate over interval"));
+    expect(source.getByLabelText("Metric Key")).toHaveValue("resting_hr");
+    // ... and the one they have keeps their choice.
+    expect(source.getByLabelText("Category")).toHaveValue("Sleep");
+    save();
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expect(lastPayload()).toMatchObject({ category: "Sleep" });
+    expect(lastPayload()).not.toHaveProperty("measure_class");
+    expect(lastPayload()).not.toHaveProperty("metric_key");
+  });
+
+  it("does not send an early edit that turns out to be what the mapping stores", async () => {
+    const { settle, source } = renderOverPendingDetail(stale);
+    fireEvent.change(source.getByLabelText("Category"), { target: { value: "Heart & Cardiovascular" } });
+    settle.resolve({ data: { ...wearableRow, destination_options: [] } });
+    await waitFor(() => expect(source.getByLabelText("Metric Key")).toHaveValue("resting_hr"));
+    save();
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expectNoneSent();
+  });
+
+  it("sends what was set when creating a mapping in a wearable vocabulary", async () => {
+    // No mapping yet: the row carries only the source identity.
+    const unmapped: CodeMappingRow = { ...stale, mapping_id: null, has_mapping: false, status: "unmapped" };
+    mockGet.mockResolvedValue({ data: {} });
+    mockPost.mockImplementation((url: string, payload: Record<string, unknown>) =>
+      Promise.resolve({ data: url === "/v1/code-mappings/" ? { ...wearableRow, ...payload, mapping_id: 77 } : {} }));
+    const onSaved = vi.fn();
+    render(<EditMappingDialog {...dialogProps} mode="new" row={unmapped} reference={reference} onSaved={onSaved} />);
+    const source = within(screen.getByTestId("source-block"));
+    fireEvent.change(source.getByLabelText("Category"), { target: { value: "Fitness" } });
+    fireEvent.change(source.getByLabelText("Measure Class"), { target: { value: "Vendor score" } });
+    fireEvent.change(source.getByLabelText("Metric Key"), { target: { value: "cardio_score" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Mapping" }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/", expect.objectContaining({
+      source_vocabulary_id: "OpenWearables", source_code: "resting_heart_rate",
+      category: "Fitness", measure_class: "Vendor score", metric_key: "cardio_score",
+    })));
+    expect(mockPatch).not.toHaveBeenCalled();
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ mapping_id: 77, category: "Fitness" }), null));
+    // A new mapping nobody described sends none of the three.
+    mockPost.mockClear();
+    render(<EditMappingDialog {...dialogProps} mode="new" row={{ ...unmapped, source_code: "other_metric" }} reference={reference} />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Save Mapping" }).at(-1)!);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/", expect.anything()));
+    const created = mockPost.mock.calls.find(([url]) => url === "/v1/code-mappings/")![1];
+    for (const key of ["category", "measure_class", "metric_key"]) expect(created).not.toHaveProperty(key);
+  });
+
+  // ── A stored value the list does not offer ─────────────────────────────
+
+  it("lets the curator go back to a stored value outside the list after picking another", async () => {
+    const { source } = renderDialog({ ...wearableRow, category: "Retired Category", measure_class: "Old Class" });
+    const category = source.getByLabelText("Category") as HTMLSelectElement;
+    const optionValues = (select: HTMLSelectElement) => Array.from(select.options).map((option) => option.value);
+    fireEvent.change(category, { target: { value: "Sleep" } });
+    expect(category).toHaveValue("Sleep");
+    // Still offered, once, after the list.
+    expect(optionValues(category)).toEqual(["", ...CATEGORIES, "Retired Category"]);
+    const measureClass = source.getByLabelText("Measure Class") as HTMLSelectElement;
+    fireEvent.change(measureClass, { target: { value: "" } });
+    expect(optionValues(measureClass)).toEqual(["", ...MEASURE_CLASSES, "Old Class"]);
+
+    fireEvent.change(category, { target: { value: "Retired Category" } });
+    fireEvent.change(measureClass, { target: { value: "Old Class" } });
+    expect(category).toHaveValue("Retired Category");
+    save();
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    // Back where it started, so nothing to send.
+    expectNoneSent();
+  });
+
+  it("offers a stored value outside the list that only the mapping's own read supplied", async () => {
+    const { settle, source } = renderOverPendingDetail(stale);
+    settle.resolve({ data: { ...wearableRow, category: "Retired Category", destination_options: [] } });
+    const category = source.getByLabelText("Category") as HTMLSelectElement;
+    await waitFor(() => expect(category).toHaveValue("Retired Category"));
+    fireEvent.change(category, { target: { value: "Sleep" } });
+    expect(within(category).getByRole("option", { name: "Retired Category" })).toBeInTheDocument();
+  });
+
+  // ── The form is rebuilt after the mapping has loaded ───────────────────
+
+  it("shows the stored values again when the reference payload arrives after the mapping", async () => {
+    // The patient page: a row with no note, unit or metric fields, and the
+    // dialog's own GET answering before /code-mappings/reference/ does.
+    const stored = { ...wearableRow, notes: "Checked against the proposal.", destination_options: [] };
+    const { settle, rerender } = renderOverPendingDetail(stale, { reference: emptyReference, patientId: "77" });
+    settle.resolve({ data: stored });
+    await waitFor(() => expect(screen.getByLabelText("Notes")).toHaveValue("Checked against the proposal."));
+    // No reference yet, so the three fields are not offered.
+    expect(screen.queryByLabelText("Category")).not.toBeInTheDocument();
+
+    rerender(<EditMappingDialog {...dialogProps} row={stale} reference={{ ...reference }} patientId="77" />);
+    const source = within(screen.getByTestId("source-block"));
+    await waitFor(() => expect(source.getByLabelText("Category")).toHaveValue("Heart & Cardiovascular"));
+    expect(source.getByLabelText("Measure Class")).toHaveValue("Aggregate over interval");
+    expect(source.getByLabelText("Metric Key")).toHaveValue("resting_hr");
+    expect(screen.getByLabelText("Notes")).toHaveValue("Checked against the proposal.");
+    // Applied from what the first read returned: the mapping is not read again.
+    expect(mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/41/")).toHaveLength(1);
+
+    save();
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expectNoneSent();
+    expect(lastPayload().notes).toBeUndefined();
+  });
+
+  it("applies the stored values again each time the form is rebuilt, and keeps none from another mapping", async () => {
+    const { settle, rerender } = renderOverPendingDetail(stale);
+    settle.resolve({ data: { ...wearableRow, destination_options: [] } });
+    const source = within(screen.getByTestId("source-block"));
+    await waitFor(() => expect(source.getByLabelText("Category")).toHaveValue("Heart & Cardiovascular"));
+    // A fresh row object for the same mapping (the parent re-read its list).
+    rerender(<EditMappingDialog {...dialogProps} row={{ ...stale }} reference={reference} />);
+    await waitFor(() => expect(source.getByLabelText("Metric Key")).toHaveValue("resting_hr"));
+    expect(source.getByLabelText("Category")).toHaveValue("Heart & Cardiovascular");
+
+    // Another mapping: nothing of the first one's is carried over while its
+    // own read is pending.
+    const other: CodeMappingRow = { ...stale, mapping_id: 43, source_code: "steps" };
+    mockGet.mockImplementation(() => new Promise(() => {}));
+    rerender(<EditMappingDialog {...dialogProps} row={other} reference={reference} />);
+    await waitFor(() => expect(source.getByLabelText("Category")).toHaveValue(""));
+    expect(source.getByLabelText("Measure Class")).toHaveValue("");
+    expect(source.getByLabelText("Metric Key")).toHaveValue("");
+  });
 });

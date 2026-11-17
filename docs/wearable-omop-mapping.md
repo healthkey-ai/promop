@@ -321,7 +321,24 @@ The values live beside each metric list (`OPENWEARABLES_CATEGORIES`,
 each as `[CATEGORY]`, `[MEASURE CLASS]` or `[METRIC KEY]`, counts them at the end of the summary
 line, and never changes one that is set. A plain re-run fills nothing and says how many rows
 `--update-seeded` would fill. `seed_wearable_device_mappings` fills blanks on every run, as it
-does for the source unit. A curator can change any of the three in the Edit Mapping dialog.
+does for the source unit. A curator can change any of the three in the Edit Mapping dialog; a
+mapping that is already approved (every Apple and Garmin row) takes an org admin or staff to
+change, as for any other field.
+
+A blank means "not yet described", not "none": a curator who clears a category, measure class
+or metric key gets it back from the next fill, which for the device seed is every vocabulary
+load (`load_athena_vocabularies` runs it). A value a curator changed is never replaced.
+
+**After deploying the columns.** Nothing runs `seed_openwearables_mappings` or
+`seed_hl7_phr_mappings` automatically, so on an instance seeded earlier those rows show a blank
+Category and Metric until both commands are run with `--update-seeded`:
+
+```bash
+python manage.py seed_openwearables_mappings --update-seeded --dry-run
+python manage.py seed_openwearables_mappings --update-seeded
+python manage.py seed_hl7_phr_mappings --update-seeded
+python manage.py seed_wearable_device_mappings   # or wait for the next vocabulary load
+```
 
 ## HL7 PHR: metrics with no device code yet
 

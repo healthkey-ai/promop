@@ -2341,8 +2341,11 @@ class SourceCodeConceptMapping(models.Model):
             'another. Seeded and curated as category is.'
         ),
     )
+    # Not indexed: nothing filters on it yet, a tab-scoped ORDER BY cannot use
+    # an index on it, and all but the wearable rows hold ''. Add one with the
+    # first query that looks rows up by key.
     metric_key = models.CharField(
-        max_length=64, blank=True, default='', db_default='', db_index=True,
+        max_length=64, blank=True, default='', db_default='',
         help_text=(
             'Vendor-neutral key of the wearable metric (steps, resting_hr), '
             'shared by every source code that reports it: the HealthKit '
