@@ -368,10 +368,30 @@ confidence table has no column for them until then.
 `recompute_patient_record_fields` computes BMI, scores and aliases from stored
 fields. On the provisional row it runs again over the overlaid values. A
 computed field whose inputs include a provisional value is itself provisional
-at the minimum of its inputs' confidences. That needs a declared input list
-per computed field, which the formula evaluator holds for formulas but the
-hand-coded computations do not; phase 1 writes the list for the ones that
-read a phase 1 field and leaves the rest equal to `patient_record`.
+at the minimum of its inputs' confidences.
+
+**As built (#2661).** `provisional_record.COMPUTED_INPUTS` declares, for each
+calculated field that has a confidence column, the stored fields it is
+calculated from: `bmi` (weight, height and their units), `tnbc_status`,
+`hr_status`, `metastatic_status`, `renal_adequacy_status`,
+`no_active_infection_status` and `b_symptoms`. `computed_proposals` lays the
+pass's proposals over a copy of the real record, runs the real calculation
+(`_compute_derived_fields` and `combine_b_symptoms`, shared with the real
+recompute) and keeps a result only when the record has no answer for the field,
+nobody typed one (`user_edited_fields`), no reader already proposed it, no
+active `FieldFormula` owns it, and a proposal is among its inputs. Its
+confidence is the lowest among the inputs that are proposals; an approved input
+carries no mark. Nothing is saved from the copy, so `patient_record` never
+holds a provisional value; approving the inputs lets the real refresh calculate
+the field and the mark goes. The PATCH mirror recalculates a field still on a
+proposal after an edit to one of its inputs, and drops it when the edit leaves
+it nothing to calculate from. The vitals reader joins the provisional readers
+so a proposed weight and height exist; a proposal is read only when its unit
+is already kilograms for weight or centimetres or metres for height, because a
+proposal is not unit-converted on write. Left for later: fields calculated from
+a JSON input (`no_other_active_malignancies`, FLIPI, GELF), the free light chain
+ratio and `measurable_disease_imwg` (they read one lab event's pair), age,
+`last_treatment`, and fields owned by a formula.
 Custom fields (`custom_fields` JSON) are phase 3.
 
 Decision (2026-11-17): with the switch on, computed fields use provisional
