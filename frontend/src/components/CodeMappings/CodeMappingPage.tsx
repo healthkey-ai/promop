@@ -52,7 +52,8 @@ import {
 // Shared types and constants are imported from codeMappingTypes.ts above.
 
 const EXPORT_COLUMNS: (keyof CodeMappingRow)[] = [
-  "organization_slug", "organization_name", "source_vocabulary_id", "source_code", "source_code_description",
+  "organization_slug", "organization_name", "category", "measure_class", "metric_key",
+  "source_vocabulary_id", "source_code", "source_code_description",
   "occurrence_count", "origin_system", "destination_concept_id",
   "destination_concept_name", "destination_concept_code",
   "destination_vocabulary_id", "destination_domain_id", "destination_unit_code", "status",
@@ -235,7 +236,12 @@ function mappingRowId(row: MappingIdentity): string {
 
 type MappingSection = "Unmapped" | "Proposed" | "Approved";
 type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source_code_description"
-  | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status";
+  | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status"
+  | "category" | "metric_key";
+/** The columns a grouped queue can sort by as well as a flat one. */
+const GROUP_SORT_COLUMNS: SortColumn[] = ["occurrence_count", "source_code_description", "category", "metric_key"];
+/** The columns only the Wearables tab has. */
+const WEARABLE_SORT_COLUMNS: SortColumn[] = ["category", "metric_key"];
 type SectionSort = { column: SortColumn; descending: boolean };
 
 
@@ -289,6 +295,10 @@ type GroupEntry = {
   group_key?: string;
 
   description: string;
+  /** The members' category, measure class and metric key; each '' when none or when they differ. */
+  category?: string;
+  measure_class?: string;
+  metric_key?: string;
   members: number;
   seen: number;
   proposed: number;
@@ -313,6 +323,32 @@ type GroupEntry = {
   /** Most LOINC axis variants any member's units imply (the blue flag). */
   axis_variant_count?: number;
 };
+
+/**
+ * The Wearables tab's first column: the metric's category, and under it how
+ * the source produces the value (its measure class). Both describe the source.
+ */
+function CategoryCell({ category, measureClass }: { category?: string; measureClass?: string }) {
+  return (
+    <td className="px-4 py-3 text-xs" data-testid="category">
+      {category
+        ? <div className="text-slate-900">{category}</div>
+        : <span className="text-slate-500">—</span>}
+      {measureClass && <div className="text-slate-500" data-testid="measure-class">{measureClass}</div>}
+    </td>
+  );
+}
+
+/** The Wearables tab's second column: the metric's vendor-neutral key. */
+function MetricKeyCell({ metricKey }: { metricKey?: string }) {
+  return (
+    <td className="px-4 py-3 text-xs" data-testid="metric-key">
+      {metricKey
+        ? <span className="font-mono text-slate-900">{metricKey}</span>
+        : <span className="text-slate-500">—</span>}
+    </td>
+  );
+}
 
 /**
  * The unit a mapping will store values in. The curated destination unit when
@@ -346,12 +382,26 @@ const groupKey = (entry: GroupEntry) => entry.group_key ?? entry.label ?? `:${en
 const expansionKey = (entry: GroupEntry, section: MappingSection) => `${section}|${groupKey(entry)}`;
 const sectionNames: MappingSection[] = ["Unmapped", "Proposed", "Approved"];
 const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
-/** The sort a section keeps when grouping changes: only these two exist both ways. */
+/** The sort a section keeps when grouping changes: only these exist both ways. */
 function sortsAcrossGrouping(previous: Partial<Record<MappingSection, SectionSort>>) {
   return sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>((next, section) => {
     const current = previous[section];
-    next[section] = current && (current.column === "occurrence_count" || current.column === "source_code_description")
+    next[section] = current && GROUP_SORT_COLUMNS.includes(current.column)
       ? current : DEFAULT_SECTION_SORT;
+    return next;
+  }, {});
+}
+/**
+ * A Category or Metric sort belongs to the Wearables tab: no other tab has the
+ * column. Returns its argument when there is nothing to drop, so the result is
+ * stable to depend on.
+ */
+function sortsWithoutWearableColumns(previous: Partial<Record<MappingSection, SectionSort>>) {
+  const wearableOnly = (sort?: SectionSort) => Boolean(sort && WEARABLE_SORT_COLUMNS.includes(sort.column));
+  if (!sectionNames.some((section) => wearableOnly(previous[section]))) return previous;
+  return sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>((next, section) => {
+    const current = previous[section];
+    if (current) next[section] = wearableOnly(current) ? DEFAULT_SECTION_SORT : current;
     return next;
   }, {});
 }
@@ -420,6 +470,15 @@ export default function CodeMappingPage() {
   // own default. Before a tab is chosen the server names the one it opened.
   const [rollupChoice, setRollupChoice] = useState<boolean | null>(null);
   const rollup = rollupChoice ?? groupsByDefault(activeVocabulary ?? browse?.selected_source);
+  // The sort each section is shown and requested with. A Category or Metric
+  // sort is kept in state but applies only on the Wearables tab, whichever
+  // way the page got there: a click, or the server naming the tab it opened
+  // on, which can change under a curator who never clicked one.
+  const onWearablesTab = (activeVocabulary ?? browse?.selected_source) === WEARABLES_TAB;
+  const effectiveSorts = useMemo(
+    () => onWearablesTab ? sectionSorts : sortsWithoutWearableColumns(sectionSorts),
+    [onWearablesTab, sectionSorts],
+  );
   const [seenOnly, setSeenOnly] = useState(true);
   // Only the codes a curator has left a note on (#2423).
   const [withNotes, setWithNotes] = useState(false);
@@ -487,7 +546,7 @@ export default function CodeMappingPage() {
     if (withNotes) params.with_notes = "1";
     // Grouping can start without a click, when the tab the server opens on
     // changes, and a grouped queue refuses any other sort with a 400.
-    const sorts = rollup ? sortsAcrossGrouping(sectionSorts) : sectionSorts;
+    const sorts = rollup ? sortsAcrossGrouping(effectiveSorts) : effectiveSorts;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
       const sort = sorts[section];
@@ -522,7 +581,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, direction,
+  }, [activeVocabulary, debouncedSearch, pages, effectiveSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, direction,
     unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
@@ -1136,15 +1195,17 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection) => {
-    const colCount = 8;
-    const sort = sectionSorts[section];
+    // Category (with the measure class under it) and Metric lead the
+    // Wearables tab only; every other tab keeps its eight columns.
+    const showMetricColumns = selectedVocabulary === WEARABLES_TAB;
+    const colCount = showMetricColumns ? 10 : 8;
+    const sort = effectiveSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
     const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
     const pagination = browse?.pages[section];
     const header = (label: string, column: SortColumn) => {
-      const canSortGroup = column === "occurrence_count" || column === "source_code_description";
-      const sortable = groupEntries === null || canSortGroup;
+      const sortable = groupEntries === null || GROUP_SORT_COLUMNS.includes(column);
       return (
       <th className="px-4 py-3 font-semibold" aria-label={column === "occurrence_count" || column === "source_code" ? label : undefined}
         aria-sort={!sortable || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
@@ -1197,6 +1258,10 @@ export default function CodeMappingPage() {
               navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
             }`}
           >
+            {showMetricColumns && <>
+              <CategoryCell category={row.category} measureClass={row.measure_class} />
+              <MetricKeyCell metricKey={row.metric_key} />
+            </>}
             <td className="px-4 py-3">
               {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
               <div className="font-mono text-xs text-slate-900"><span data-testid="source-code">{row.source_code}</span><AxisVariantFlag count={row.axis_variant_count} />
@@ -1271,6 +1336,8 @@ export default function CodeMappingPage() {
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
+            {showMetricColumns && header("Category", "category")}
+            {showMetricColumns && header("Metric", "metric_key")}
             {header("Source", "source_code")}
             <th className="px-4 py-3 font-semibold">Domain</th>
             {header("Seen", "occurrence_count")}
@@ -1290,6 +1357,10 @@ export default function CodeMappingPage() {
               return (
                 <Fragment key={cacheKey}>
                   <tr className="bg-slate-50/60">
+                    {showMetricColumns && <>
+                      <CategoryCell category={entry.category} measureClass={entry.measure_class} />
+                      <MetricKeyCell metricKey={entry.metric_key} />
+                    </>}
                     <td className="px-4 py-3">
                       <button type="button"
                         aria-expanded={open}
@@ -1847,6 +1918,7 @@ export default function CodeMappingPage() {
         row={selectedRow}
         reference={reference}
         canApprove={canApprove}
+        canWrite={canWrite}
         sourceExamples
         strategies={strategies}
         rankingModel={rankingModel}

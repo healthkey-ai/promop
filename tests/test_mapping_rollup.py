@@ -259,7 +259,7 @@ def test_rollup_api_rejects_row_only_sort_fields(api):
     row('A', 'Albumin', seen=10)
     response = browse(rollup='1', order_0='source_code')
     assert response.status_code == 400
-    assert response.data['order'] == 'Grouped queues can only sort by Seen or Source description.'
+    assert response.data['order'] == 'Grouped queues can only sort by Seen, Source description, Category or Metric.'
 
 
 def test_expanding_an_entry_returns_its_codes_newest_volume_first(api):

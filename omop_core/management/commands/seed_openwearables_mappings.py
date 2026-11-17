@@ -21,6 +21,15 @@ The same unit is recorded as the row's source unit (``source_unit_evidence``),
 which is what the list's Units column shows. ``--update-seeded`` fills it on
 any row that has none.
 
+Three things the proposal says about the metric itself are seeded too: its
+category (``OPENWEARABLES_CATEGORIES``), its measure class
+(``OPENWEARABLES_MEASURE_CLASSES``: how the source produces the value) and its
+internal metric key (``OPENWEARABLES_METRIC_KEYS``: the vendor-neutral name the
+Apple, Garmin and HL7 PHR codes for the same metric share). They are the
+mapping's ``category``, ``measure_class`` and ``metric_key``, the first two
+columns of the Wearables tab. ``--update-seeded`` fills any of them on any row
+where it is blank, whatever the row's status, and never changes one that is set.
+
 ``seed_hl7_phr_mappings`` runs this same command over the HL7 PHR metrics.
 """
 
@@ -28,6 +37,7 @@ import logging
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from omop_core.models import Concept, ConceptMappingLock, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
@@ -163,6 +173,135 @@ OPENWEARABLES_METRICS = [
 VOCABULARY_ID = 'OpenWearables'
 SEED_ORIGIN_SYSTEM = 'open-wearables-seed'
 
+
+def by_code(codes_by_value):
+    """``{source_code: value}`` from ``{value: (source_code, ...)}``."""
+    return {code: value for value, codes in codes_by_value.items() for code in codes}
+
+
+# Each metric's category in the wearable mapping proposal (its Category
+# column), kept beside the metric list rather than inside its tuples. Seeded as
+# the mapping's ``category``; a test holds every metric to one of
+# source_vocabularies.WEARABLE_METRIC_CATEGORIES.
+OPENWEARABLES_CATEGORIES = by_code({
+    'Activity': (
+        'steps', 'exercise_time', 'distance_walking_running', 'energy', 'basal_energy',
+        'flights_climbed', 'distance_cycling', 'distance_swimming',
+        'distance_downhill_snow_sports', 'distance_other', 'estimated_workout_effort_score',
+        'elevation', 'average_met', 'stand_time', 'physical_effort', 'active_time', 'cadence',
+        'power', 'speed', 'workout_effort_score', 'running_power', 'running_speed',
+        'running_vertical_oscillation', 'running_ground_contact_time', 'running_stride_length',
+        'running_vertical_ratio', 'running_stance_time_balance', 'swimming_stroke_count',
+        'underwater_depth', 'push_count', 'nike_fuel',
+    ),
+    'Heart & Cardiovascular': (
+        'resting_heart_rate', 'heart_rate_variability_sdnn', 'heart_rate_variability_rmssd',
+        'walking_heart_rate_average', 'heart_rate', 'heart_rate_recovery_one_minute',
+        'atrial_fibrillation_burden',
+    ),
+    'Blood & Respiratory': (
+        'oxygen_saturation', 'respiratory_rate', 'blood_glucose', 'cgm_glucose',
+        'blood_pressure_systolic', 'blood_pressure_diastolic', 'forced_vital_capacity',
+        'forced_expiratory_volume_1', 'peak_expiratory_flow_rate',
+        'breathing_disturbance_index', 'blood_alcohol_content', 'peripheral_perfusion_index',
+    ),
+    'Body Composition': (
+        'weight', 'height', 'body_fat_percentage', 'body_mass_index', 'lean_body_mass',
+        'body_temperature', 'skin_temperature', 'waist_circumference', 'body_fat_mass',
+        'skin_temperature_deviation', 'skin_temperature_trend_deviation',
+        'skeletal_muscle_mass',
+    ),
+    'Fitness': ('vo2_max', 'six_minute_walk_test_distance', 'cardiovascular_age'),
+    'Sleep': ('sleeping_breathing_disturbances',),
+    'Mobility & Gait': (
+        'walking_speed', 'walking_step_length', 'walking_double_support_percentage',
+        'walking_asymmetry_percentage', 'walking_steadiness', 'stair_descent_speed',
+        'stair_ascent_speed',
+    ),
+    'Environmental': (
+        'air_temperature', 'environmental_audio_exposure', 'headphone_audio_exposure',
+        'environmental_sound_reduction', 'time_in_daylight', 'water_temperature',
+        'uv_exposure', 'weather_temperature', 'weather_humidity',
+    ),
+    'Stress & Autonomic': ('garmin_stress_level', 'electrodermal_activity'),
+    'Garmin-specific': (
+        'garmin_body_battery', 'garmin_fitness_age', 'garmin_skin_temperature',
+    ),
+    'Medication & Device Use': ('inhaler_usage', 'insulin_delivery'),
+    'Safety': ('number_of_times_fallen',),
+    'Self-reported': ('number_of_alcoholic_beverages', 'hydration'),
+    'Location': ('latitude', 'longitude'),
+})
+
+# How the source produces each metric's value (the proposal's Measure Class
+# column), seeded as the mapping's ``measure_class``: one of
+# source_vocabularies.WEARABLE_MEASURE_CLASSES. A property of the source
+# metric, so two sources of one destination concept may differ.
+OPENWEARABLES_MEASURE_CLASSES = by_code({
+    'Direct measurement': (
+        'oxygen_saturation', 'respiratory_rate', 'weight', 'heart_rate', 'blood_glucose',
+        'cgm_glucose', 'blood_pressure_systolic', 'blood_pressure_diastolic', 'height',
+        'body_temperature', 'skin_temperature', 'waist_circumference', 'forced_vital_capacity',
+        'forced_expiratory_volume_1', 'peak_expiratory_flow_rate', 'elevation',
+        'garmin_skin_temperature', 'peripheral_perfusion_index', 'cadence', 'power', 'speed',
+        'running_power', 'running_speed', 'underwater_depth', 'electrodermal_activity',
+    ),
+    'Aggregate over interval': (
+        'steps', 'exercise_time', 'resting_heart_rate', 'distance_walking_running',
+        'heart_rate_variability_sdnn', 'heart_rate_variability_rmssd',
+        'walking_heart_rate_average', 'flights_climbed', 'breathing_disturbance_index',
+        'six_minute_walk_test_distance', 'distance_cycling', 'distance_swimming',
+        'distance_downhill_snow_sports', 'distance_other', 'heart_rate_recovery_one_minute',
+        'sleeping_breathing_disturbances', 'stand_time', 'swimming_stroke_count',
+        'time_in_daylight', 'uv_exposure', 'inhaler_usage', 'push_count',
+        'atrial_fibrillation_burden', 'number_of_times_fallen',
+    ),
+    'Algorithmic estimate': (
+        'vo2_max', 'energy', 'basal_energy', 'walking_speed', 'walking_step_length',
+        'walking_double_support_percentage', 'body_fat_percentage', 'body_mass_index',
+        'lean_body_mass', 'body_fat_mass', 'average_met', 'walking_asymmetry_percentage',
+        'stair_descent_speed', 'stair_ascent_speed', 'skin_temperature_deviation',
+        'skin_temperature_trend_deviation', 'skeletal_muscle_mass',
+        'running_vertical_oscillation', 'running_ground_contact_time', 'running_stride_length',
+        'running_vertical_ratio', 'running_stance_time_balance',
+    ),
+    'Vendor score': (
+        'estimated_workout_effort_score', 'cardiovascular_age', 'garmin_stress_level',
+        'garmin_body_battery', 'garmin_fitness_age', 'walking_steadiness', 'physical_effort',
+        'workout_effort_score', 'nike_fuel',
+    ),
+    'Environmental context': (
+        'air_temperature', 'environmental_audio_exposure', 'headphone_audio_exposure',
+        'environmental_sound_reduction', 'water_temperature', 'weather_temperature',
+        'weather_humidity', 'latitude', 'longitude',
+    ),
+    'User-entered or device log': (
+        'blood_alcohol_content', 'active_time', 'insulin_delivery',
+        'number_of_alcoholic_beverages', 'hydration',
+    ),
+})
+
+# The proposal's Internal Metric Key for the OpenWearables codes it names one
+# for: the key the Apple and Garmin codes for the same metric carry
+# (seed_wearable_device_mappings). Every other metric is keyed by its own code.
+_METRIC_KEY_OVERRIDES = {
+    'exercise_time': 'active_minutes',
+    'resting_heart_rate': 'resting_hr',
+    'oxygen_saturation': 'spo2',
+    'distance_walking_running': 'distance',
+    'energy': 'active_energy',
+    'heart_rate_variability_sdnn': 'hrv_sdnn',
+    'heart_rate_variability_rmssd': 'hrv_rmssd',
+    'walking_double_support_percentage': 'walking_double_support_pct',
+    'walking_heart_rate_average': 'walking_hr_avg',
+    'weight': 'body_mass',
+}
+# Seeded as the mapping's ``metric_key``: lowercase snake case
+# (source_vocabularies.clean_metric_key), one key per metric.
+OPENWEARABLES_METRIC_KEYS = {
+    code: _METRIC_KEY_OVERRIDES.get(code, code) for code, *_rest in OPENWEARABLES_METRICS
+}
+
 # The UCUM code for each display unit the metric lists use (the proposal's
 # "UCUM Unit" column). A unit with no UCUM concept loaded here is left unset.
 UCUM_BY_UNIT = {
@@ -269,10 +408,13 @@ def _repoint(row, target):
 class Command(BaseCommand):
     help = 'Seed SourceCodeConceptMapping rows for OpenWearables metrics.'
 
-    # What a run seeds. seed_hl7_phr_mappings overrides these three.
+    # What a run seeds. seed_hl7_phr_mappings overrides all six.
     vocabulary_id = VOCABULARY_ID
     origin_system = SEED_ORIGIN_SYSTEM
     metrics = OPENWEARABLES_METRICS
+    categories = OPENWEARABLES_CATEGORIES
+    measure_classes = OPENWEARABLES_MEASURE_CLASSES
+    metric_keys = OPENWEARABLES_METRIC_KEYS
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -285,7 +427,8 @@ class Command(BaseCommand):
                  'but only rows nothing but this command has written: proposed, '
                  'origin import / this seed, no curator decision. Never clears '
                  'a destination. Also fills a blank unit on a proposed row no '
-                 'curator has saved.',
+                 'curator has saved, and a blank source unit, category, '
+                 'measure class or metric key on any row.',
         )
 
     def handle(self, **options):
@@ -320,6 +463,8 @@ class Command(BaseCommand):
         seed_unit_ids = {c.pk for c in units.values()}
         created = existed = unresolved = repointed = kept = units_filled = 0
         source_units_filled = fillable = 0
+        described_filled = {'category': 0, 'measure_class': 0, 'metric_key': 0}
+        describable = 0
         without_unit = sorted({unit for _c, _n, unit, *_rest in self.metrics
                                if unit and UCUM_BY_UNIT.get(unit) not in units})
         left_alone = []  # (source_code, reason): the seed's target was not applied
@@ -345,6 +490,12 @@ class Command(BaseCommand):
                 unit_concept = (None if ow_code in NO_DESTINATION_UNIT
                                 else units.get(UCUM_BY_UNIT.get(unit)))
                 evidence = unit_evidence(unit)
+                # What the proposal says about the metric itself.
+                described = (
+                    ('category', self.categories.get(ow_code, ''), 'CATEGORY'),
+                    ('measure_class', self.measure_classes.get(ow_code, ''), 'MEASURE CLASS'),
+                    ('metric_key', self.metric_keys.get(ow_code, ''), 'METRIC KEY'),
+                )
                 desc = f'{display} ({unit})' if unit else display
                 omop_table = DOMAIN_TO_TABLE.get(domain, '')
                 wanted = f'{t_vocab or "-"}:{t_code or "-"}'
@@ -384,6 +535,7 @@ class Command(BaseCommand):
                             'destination_vocabulary_id': target.vocabulary_id if target else '',
                             'destination_unit_concept': unit_concept,
                             'source_unit_evidence': evidence,
+                            **{field: value for field, value, _tag in described},
                             'omop_table': omop_table,
                             'status': 'proposed',
                             'origin': 'import',
@@ -408,6 +560,21 @@ class Command(BaseCommand):
                         row.source_unit_evidence = evidence
                         detail(f'  [SOURCE UNIT] {ow_code}: '
                                f'{evidence[0].get("code") or evidence[0]["display"]}')
+                blank = [(field, value, tag) for field, value, tag in described
+                         if value and not getattr(row, field)]
+                if blank and not update_seeded:
+                    describable += 1
+                for field, value, tag in blank if update_seeded else ():
+                    # The metric's own category, measure class or key, on a row
+                    # that has none: nothing is overridden, so status and
+                    # ownership do not matter. The list API returns them, so
+                    # updated_at is stamped for a reader following the delta.
+                    if dry_run or SourceCodeConceptMapping.objects.filter(
+                            pk=row.pk, **{field: ''}).update(
+                                **{field: value, 'updated_at': timezone.now()}):
+                        described_filled[field] += 1
+                        setattr(row, field, value)
+                        detail(f'  [{tag}] {ow_code}: {value}')
                 if (update_seeded and unit_concept is not None
                         and not _unit_not_fillable(row)
                         and row.target_concept_id in locked):
@@ -491,10 +658,16 @@ class Command(BaseCommand):
                 f'{len(left_alone)} left alone at another destination, '
                 f'{kept} kept where the seed names no target, '
                 f'{units_filled} units filled, '
-                f'{source_units_filled} source units filled.'
+                f'{source_units_filled} source units filled, '
+                f"{described_filled['category']} categories filled, "
+                f"{described_filled['measure_class']} measure classes filled, "
+                f"{described_filled['metric_key']} metric keys filled."
             )
         if fillable:
             summary += (f' {fillable} existing rows have no unit or source unit; '
                         '--update-seeded would fill them.')
+        if describable:
+            summary += (f' {describable} existing rows have no category, measure '
+                        'class or metric key; --update-seeded would fill it.')
         self.stdout.write(
             self.style.WARNING(summary) if dry_run else self.style.SUCCESS(summary))

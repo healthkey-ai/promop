@@ -32,10 +32,12 @@ from django.db.models.functions import Cast, Coalesce, Concat, Lower
 SYNTHETIC_PREFIX = ':'
 
 # Group rows do not have most of a source-code row's sortable fields. These
-# are the two group-level values the review table can honestly order by.
+# are the group-level values the review table can honestly order by.
 GROUP_ORDER_FIELDS = {
     'occurrence_count': 'seen',
     'source_code_description': 'description_sort',
+    'category': 'category_sort',
+    'metric_key': 'metric_key_sort',
 }
 
 
@@ -79,6 +81,19 @@ def _grouped(queryset):
             # page's own groups afterwards, not joined across the section.
             destination_units=Count(Coalesce('destination_unit_concept_id', Value(0)), distinct=True),
             destination_unit=Max('destination_unit_concept_id'),
+            # The wearable metric category, measure class and metric key, by
+            # the same rule. They are columns of the mapping itself, so they
+            # add no join, and none is ever NULL: the members agree exactly
+            # when the least value is the greatest, blank against a value
+            # included. Min and Max rather than COUNT(DISTINCT), which sorts
+            # each group's values and cost every tab's grouped page a quarter
+            # more for three columns only the Wearables tab fills.
+            min_category=Min('category'),
+            max_category=Max('category'),
+            min_measure_class=Min('measure_class'),
+            max_measure_class=Max('measure_class'),
+            min_metric_key=Min('metric_key'),
+            max_metric_key=Max('metric_key'),
             statuses=Count('status', distinct=True),
             # Not named `status`: an annotation shadows the column of the same
             # name, so Q(status='proposed') below would resolve against
@@ -100,6 +115,16 @@ def _grouped(queryset):
         .annotate(
             seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)),
             description_sort=Lower('description'),
+            # What the entry shows: the members' category, and their metric
+            # key, when they agree.
+            category_sort=Case(
+                When(min_category=F('max_category'), then=F('max_category')),
+                default=Value(''), output_field=CharField(),
+            ),
+            metric_key_sort=Case(
+                When(min_metric_key=F('max_metric_key'), then=F('max_metric_key')),
+                default=Value(''), output_field=CharField(),
+            ),
         )
     )
 
@@ -142,6 +167,11 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
             'sample_mapping_id': entry['max_id'],
             'group_key': entry['group_key'],
             'description': entry['description'],
+            # '' when the members disagree, as when none has one.
+            'category': entry['category_sort'],
+            'measure_class': (entry['max_measure_class']
+                              if entry['min_measure_class'] == entry['max_measure_class'] else ''),
+            'metric_key': entry['metric_key_sort'],
             'members': entry['members'],
             'seen': entry['seen'],
             'proposed': entry['proposed'],

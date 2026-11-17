@@ -12923,6 +12923,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'source_system_context': system_context,
             'source_code': mapping.source_code if mapping else '',
             'source_code_description': mapping.source_code_description if mapping else '',
+            'category': mapping.category if mapping else '',
+            'measure_class': mapping.measure_class if mapping else '',
+            'metric_key': mapping.metric_key if mapping else '',
             'organization_id': mapping.organization_id if mapping else None,
             'organization_slug': mapping.organization.slug if mapping and mapping.organization_id else '',
             'organization_name': mapping.organization.name if mapping and mapping.organization_id else '',
@@ -12999,6 +13002,13 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         'source_system_context': system_context,
         'source_code': mapping.source_code if mapping else '',
         'source_code_description': mapping.source_code_description if mapping else '',
+        # What a wearable mapping says about the source metric: its category
+        # (Activity, Sleep, ...), how the source produces the value (Direct
+        # measurement, ...) and the vendor-neutral key the other vocabularies'
+        # codes for the same metric share. '' elsewhere.
+        'category': mapping.category if mapping else '',
+        'measure_class': mapping.measure_class if mapping else '',
+        'metric_key': mapping.metric_key if mapping else '',
         'organization_id': mapping.organization_id if mapping else None,
         'organization_slug': mapping.organization.slug if mapping and mapping.organization_id else '',
         'organization_name': mapping.organization.name if mapping and mapping.organization_id else '',
@@ -13676,6 +13686,19 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
                 raise serializers.ValidationError({
                     'destination_unit_concept_id': 'Unit concept not found.'
                 })
+    # What a wearable mapping says about the source metric. Category and
+    # measure class are each blank or one of an allowed list; the metric key is
+    # blank or lowercase snake case.
+    for field, clean in (
+        ('category', source_vocabularies.clean_wearable_category),
+        ('measure_class', source_vocabularies.clean_wearable_measure_class),
+        ('metric_key', source_vocabularies.clean_metric_key),
+    ):
+        if field in data:
+            try:
+                values[field] = clean(data.get(field))
+            except ValueError as exc:
+                raise serializers.ValidationError({field: str(exc)})
     if mapping is None:
         # One mapping per (organization, source system, code), whatever table
         # it lands in. The patient page lists a code under the clinical table
@@ -15449,6 +15472,12 @@ def _code_mapping_reference_payload():
         # Source vocabulary tabs for the Code Mapping page. Ordered: non-standard
         # first (the work queue), then uncoded, then standard (reference).
         'source_vocabulary_tabs': _source_vocabulary_tabs(),
+        # The Category and Measure Class a wearable mapping may carry, and
+        # the source vocabularies they apply to (the Wearables tab). The
+        # dialog offers the fields from these, so the lists live here only.
+        'wearable_metric_categories': list(source_vocabularies.WEARABLE_METRIC_CATEGORIES),
+        'wearable_measure_classes': list(source_vocabularies.WEARABLE_MEASURE_CLASSES),
+        'wearable_source_vocabularies': sorted(source_vocabularies.WEARABLE_SOURCE_VOCABULARIES),
         'suggest_max_per_run': get_suggest_dispatcher().max_codes,
     }
 

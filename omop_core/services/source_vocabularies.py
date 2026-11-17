@@ -15,6 +15,7 @@ mapping they can already make correctly.
 ``vocabulary_id`` values use OHDSI spellings where one exists, so a mapping
 recorded today lines up with the concepts a later vocabulary load brings in.
 """
+import re
 
 # OMOP domain -> the clinical table its facts land in. Picking the domain
 # settles the destination table; the curator never chooses it separately.
@@ -210,6 +211,92 @@ SOURCE_TAB_LABELS = {
 # tab (OpenWearables) on the Code Mapping page. HL7-PHR holds the HL7 PHR
 # code values for metrics no device vocabulary carries yet.
 WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR'}
+
+# The metric categories a wearable mapping may carry, in the order the Edit
+# Mapping dialog offers them: those of the wearable mapping proposal, plus the
+# five (Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing)
+# the HL7 PHR metrics about to join it need. A mapping's ``category`` is blank
+# or one of these; the seeds assign one to every metric they create.
+WEARABLE_METRIC_CATEGORIES = (
+    'Activity',
+    'Fitness',
+    'Heart & Cardiovascular',
+    'Blood & Respiratory',
+    'Body Composition',
+    'Sleep',
+    'Mobility & Gait',
+    'Nutrition',
+    'Symptoms',
+    'Reproductive Health',
+    'Mental Wellbeing',
+    'Self-care',
+    'Hearing',
+    'Medication & Device Use',
+    'Safety',
+    'Self-reported',
+    'Stress & Autonomic',
+    'Environmental',
+    'Location',
+    'Garmin-specific',
+)
+
+# How the source produces a wearable metric's value, in the order the dialog
+# offers them. It describes the *source* metric, not the destination concept:
+# one LOINC concept can be fed by a direct sensor reading from one source and
+# an algorithmic estimate from another. A mapping's ``measure_class`` is blank
+# or one of these.
+WEARABLE_MEASURE_CLASSES = (
+    'Direct measurement',
+    'Aggregate over interval',
+    'Algorithmic estimate',
+    'Vendor score',
+    'Environmental context',
+    'User-entered or device log',
+)
+
+
+# A wearable mapping's ``metric_key``: the vendor-neutral name of one metric
+# (``steps``, ``resting_hr``), shared by every source code that reports it --
+# the HealthKit identifier, the Garmin key, the OpenWearables code, the HL7 PHR
+# code. Not a fixed list, so it is held to a shape: lowercase snake case.
+METRIC_KEY_PATTERN = re.compile(r'[a-z][a-z0-9_]*')
+METRIC_KEY_MAX_LENGTH = 64
+
+
+def clean_metric_key(value):
+    """*value* as a mapping's metric key: '' or lowercase snake case.
+
+    Raises ValueError, describing the shape, for anything else.
+    """
+    key = str(value or '').strip()
+    if key and (len(key) > METRIC_KEY_MAX_LENGTH or not METRIC_KEY_PATTERN.fullmatch(key)):
+        raise ValueError(
+            'A metric key is lowercase snake case: a letter, then letters, digits '
+            f'or underscores, at most {METRIC_KEY_MAX_LENGTH} characters (e.g. resting_hr).'
+        )
+    return key
+
+
+def _clean_choice(value, allowed, label):
+    cleaned = str(value or '').strip()
+    if cleaned and cleaned not in allowed:
+        raise ValueError(
+            f"Unknown {label} {cleaned!r}. Expected one of: {', '.join(allowed)}."
+        )
+    return cleaned
+
+
+def clean_wearable_category(value):
+    """*value* as a mapping's category: '' or one of the allowed list.
+
+    Raises ValueError, naming the allowed values, for anything else.
+    """
+    return _clean_choice(value, WEARABLE_METRIC_CATEGORIES, 'category')
+
+
+def clean_wearable_measure_class(value):
+    """*value* as a mapping's measure class, on ``clean_wearable_category``'s rule."""
+    return _clean_choice(value, WEARABLE_MEASURE_CLASSES, 'measure class')
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.

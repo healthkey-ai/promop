@@ -2321,6 +2321,40 @@ class SourceCodeConceptMapping(models.Model):
     # (or empty). The list's "with notes" filter and sticky-note marker read
     # it (#2423).
     curator_note_at = models.DateTimeField(null=True, blank=True)
+    category = models.CharField(
+        max_length=40, blank=True, default='', db_default='',
+        help_text=(
+            'Metric category of a wearable mapping (Activity, Sleep, ...): '
+            'blank or one of source_vocabularies.WEARABLE_METRIC_CATEGORIES. '
+            'The wearable seeds assign it and a curator may change it; blank '
+            'on every other mapping.'
+        ),
+    )
+    measure_class = models.CharField(
+        max_length=40, blank=True, default='', db_default='',
+        help_text=(
+            'How the source produces a wearable metric (Direct measurement, '
+            'Algorithmic estimate, ...): blank or one of '
+            'source_vocabularies.WEARABLE_MEASURE_CLASSES. It describes the '
+            'source metric, not the destination concept: one concept can be '
+            'fed by a sensor reading from one source and an estimate from '
+            'another. Seeded and curated as category is.'
+        ),
+    )
+    # Not indexed: nothing filters on it yet, a tab-scoped ORDER BY cannot use
+    # an index on it, and all but the wearable rows hold ''. Add one with the
+    # first query that looks rows up by key.
+    metric_key = models.CharField(
+        max_length=64, blank=True, default='', db_default='',
+        help_text=(
+            'Vendor-neutral key of the wearable metric (steps, resting_hr), '
+            'shared by every source code that reports it: the HealthKit '
+            'identifier, the Garmin key, the OpenWearables code, the HL7 PHR '
+            'code. Blank or lowercase snake case '
+            '(source_vocabularies.clean_metric_key). It describes the source '
+            'metric and ties the wearable vocabularies together.'
+        ),
+    )
 
     # ── Provenance: who proposed this and how often it has been seen ─────
     # An SME reviewing the queue needs to know whether a row is a machine's

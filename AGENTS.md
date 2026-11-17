@@ -1688,6 +1688,70 @@ behind a proxy they are `https://` only when `SECURE_PROXY_SSL_HEADER` is
 trusted: automatic on Render and Cloud Run (`K_SERVICE`),
 `TRUST_PROXY_SSL_HEADER=true` elsewhere.
 
+## Code Mapping — Category, Measure Class and Metric Key (Wearables)
+
+Three columns on `SourceCodeConceptMapping` say what a wearable mapping's
+**source metric** is. None of them describes the destination concept: one
+LOINC concept can be fed by a direct sensor reading from one source and an
+algorithmic estimate from another, under different vendor codes.
+
+| Field | What it is | Valid values |
+|---|---|---|
+| `category` | the metric's category in the wearable mapping proposal | '' or one of `source_vocabularies.WEARABLE_METRIC_CATEGORIES` (20: Activity, Fitness, Heart & Cardiovascular, Blood & Respiratory, Body Composition, Sleep, Mobility & Gait, Nutrition, Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing, Medication & Device Use, Safety, Self-reported, Stress & Autonomic, Environmental, Location, Garmin-specific) |
+| `measure_class` | how the source produces the value | '' or one of `WEARABLE_MEASURE_CLASSES` (Direct measurement, Aggregate over interval, Algorithmic estimate, Vendor score, Environmental context, User-entered or device log) |
+| `metric_key` | the vendor-neutral key of the metric (`steps`, `resting_hr`), shared by every source code that reports it: the HealthKit identifier, the Garmin key, the OpenWearables code, the HL7 PHR code. It is what ties the wearable vocabularies together, since OpenWearables does not cover every metric. Not indexed: nothing filters on it yet | '' or lowercase snake case, `[a-z][a-z0-9_]*`, at most 64 (`clean_metric_key`) |
+
+- **Where they show.** Only on the Wearables tab (`OpenWearables`, which also
+  holds Apple, Garmin and HL7-PHR rows): Category is the first column, with
+  the measure class as a muted second line in the same cell, and Metric is
+  the second, both sortable (`category`, `metric_key` on the browse endpoint,
+  flat and grouped). Every other tab has neither column, and a Category or
+  Metric sort is not sent for one: the page derives the sort it sends from
+  the tab it is on. A grouped row names a value only when every member
+  agrees (`Min` equal to `Max` in `mapping_rollup`, not `COUNT(DISTINCT)`,
+  which cost every tab's grouped page a quarter more). In the Edit Mapping dialog they sit
+  in the source block: Category beside BasedOn, then Measure Class and Metric
+  Key. All three are in the list's CSV/JSON download.
+- **Who sets them.** The wearable seeds, and anyone who can write mappings
+  (`_can_manage_mappings`) on a row they may edit, through the mapping save
+  (`_upsert_source_code_mapping`): a value outside the list, or a key of
+  another shape, is a 400 naming the field. An approved mapping stays with
+  org_admin and staff, as for every other field: an analyst's save of one is
+  a 400 naming `status`, and the Apple and Garmin rows are seeded approved.
+  The dialog offers the two lists
+  from `code-mappings/reference/` (`wearable_metric_categories`,
+  `wearable_measure_classes`, and `wearable_source_vocabularies` for which
+  rows show the fields), sends a field only when the curator changed it, and
+  sends none for a row off the Wearables tab. The server does not tie the
+  fields to a vocabulary: it validates the value only. The dialog's GET of
+  the mapping supplies the stored values when the row it opened from has
+  none (a patient page row), and they are applied again whenever the form is
+  rebuilt, as are the stored note and unit.
+- **Seeds fill them.** `seed_openwearables_mappings`, `seed_hl7_phr_mappings`
+  and `seed_wearable_device_mappings` set all three when they create a row,
+  from maps kept beside each metric list (`*_CATEGORIES`,
+  `*_MEASURE_CLASSES`, `*_METRIC_KEYS`; `tests/test_mapping_category.py`
+  holds every seeded code to a valid value of each, and codes sharing a key
+  to one category and measure class). `--update-seeded` fills a blank one on
+  any row, whatever its status, and never replaces one that is set; the
+  device seed does the same on every run. A fill stamps `updated_at`, since
+  the list API returns the fields. An OpenWearables metric the proposal gives
+  no internal key is keyed by its own code.
+- **Blank means "not yet described", not "none".** A curator who clears one
+  of the three gets it back from the next fill: `load_athena_vocabularies`
+  runs the device seed after every load, and `--update-seeded` does it for
+  the other two. A value a curator *changed* is never replaced. To say a
+  metric has no sensible value, pick the nearest one; there is no way to pin
+  a blank.
+- **Rollout.** Nothing runs `seed_openwearables_mappings` or
+  `seed_hl7_phr_mappings` automatically. After the migration deploys, rows
+  those two seeded earlier show a blank Category and Metric until each is run
+  with `--update-seeded`; the Apple and Garmin rows are filled by the next
+  vocabulary load, or by running `seed_wearable_device_mappings`.
+- **They travel with `copy_reference_data`.** A payload written before the
+  columns leaves a target row's values alone and creates rows with blanks
+  (`_CODE_MAPPING_NOT_CARRIED_WHEN_ABSENT`).
+
 ## Code Mapping Lookup — Unit Conversion
 
 `POST /api/v1/code-mappings/lookup/` accepts optional unit fields per code entry

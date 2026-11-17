@@ -2864,6 +2864,255 @@ describe("server mapping pages", () => {
     });
   });
 
+  describe("Category and Metric columns", () => {
+    const wearableRow = (over: Record<string, unknown> = {}) => ({
+      ...proposedRow, mapping_id: 501, source_vocabulary_id: "OpenWearables",
+      source_code: "resting_heart_rate", source_code_description: "Resting heart rate (bpm)",
+      category: "Heart & Cardiovascular", measure_class: "Aggregate over interval",
+      metric_key: "resting_hr", ...over,
+    });
+    const onWearables = (overrides: Record<string, unknown> = {}) => renderBrowse({
+      tabs: tabsWithWearables, selected_source: "OpenWearables", results: [wearableRow()], ...overrides,
+    });
+    const headerNames = (table: HTMLElement) => within(table).getAllByRole("columnheader")
+      .map((header) => header.getAttribute("aria-label") ?? header.textContent?.replace(/[↕↑↓]/g, "").trim());
+    // The server opened the page on the tab, so no request names a source.
+    const lastBrowse = () => mockGet.mock.calls
+      .filter(([url]) => url === "/v1/code-mappings/").at(-1)?.[1].params as Record<string, unknown>;
+    // Columns a row spans: Qty and Units share one cell.
+    const columnsSpanned = (row: Element) => Array.from(row.querySelectorAll("td"))
+      .reduce((total, cell) => total + (cell as HTMLTableCellElement).colSpan, 0);
+
+    it("leads the Wearables tab with Category, then Metric", async () => {
+      onWearables();
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      await waitFor(() => expect(headerNames(table).slice(0, 3)).toEqual(["Category", "Metric", "Source"]));
+      expect(headerNames(table)).toHaveLength(10);
+
+      const row = within(table).getByText("resting_heart_rate", { selector: "[data-testid=source-code]" }).closest("tr")!;
+      const cells = within(row).getAllByRole("cell");
+      expect(columnsSpanned(row)).toBe(10);
+      // First cell: the category, and the measure class as its muted second line.
+      expect(cells[0]).toHaveAttribute("data-testid", "category");
+      expect(within(cells[0]).getByText("Heart & Cardiovascular")).toBeInTheDocument();
+      const measureClass = within(cells[0]).getByTestId("measure-class");
+      expect(measureClass).toHaveTextContent(/^Aggregate over interval$/);
+      expect(measureClass.className).toMatch(/text-slate-500/);
+      expect(cells[0].firstElementChild).toHaveTextContent(/^Heart & Cardiovascular$/);
+      expect(cells[0].lastElementChild).toBe(measureClass);
+      // Second cell: the key, in the mono style the source code uses.
+      expect(cells[1]).toHaveAttribute("data-testid", "metric-key");
+      expect(cells[1]).toHaveTextContent(/^resting_hr$/);
+      expect(within(cells[1]).getByText("resting_hr").className).toMatch(/font-mono/);
+      // The source code is still where it was, one column further along.
+      expect(cellUnder(row, "Source")).toHaveTextContent("resting_heart_rate");
+      // Measure Class has no column of its own.
+      expect(headerNames(table)).not.toContain("Measure Class");
+    });
+
+    it("shows a dash for a blank category or metric key, and no second line", async () => {
+      onWearables({ results: [wearableRow({ category: "", measure_class: "", metric_key: "" })] });
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      const category = await within(table).findByTestId("category");
+      expect(category).toHaveTextContent(/^—$/);
+      expect(within(category).queryByTestId("measure-class")).not.toBeInTheDocument();
+      expect(within(table).getByTestId("metric-key")).toHaveTextContent(/^—$/);
+    });
+
+    it("shows the measure class under a blank category", async () => {
+      onWearables({ results: [wearableRow({ category: "" })] });
+      const category = await screen.findByTestId("category");
+      expect(category).toHaveTextContent("—Aggregate over interval");
+    });
+
+    it("has neither column on any other tab", async () => {
+      renderBrowse({ results: [{ ...proposedRow, category: "Sleep", measure_class: "Vendor score", metric_key: "sleep" }] });
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      await screen.findByText("M-PROTEIN, SERUM", { selector: "[data-testid=source-code]" });
+      expect(headerNames(table)).toEqual(
+        ["Source", "Domain", "Seen", "Qty", "Units", "Destination", "Destination unit", "Actions"]);
+      expect(screen.queryByTestId("category")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("metric-key")).not.toBeInTheDocument();
+      const row = within(table).getByText("M-PROTEIN, SERUM", { selector: "[data-testid=source-code]" }).closest("tr")!;
+      expect(columnsSpanned(row)).toBe(8);
+      expect(row.querySelector("td")).toContainElement(within(row).getByTestId("source-code"));
+      expect(within(table).queryByText("Sleep")).not.toBeInTheDocument();
+      // An empty section's placeholder still spans the eight columns.
+      const empty = within(await screen.findByRole("table", { name: "Unmapped mappings" })).getByRole("cell");
+      expect(empty).toHaveAttribute("colspan", "8");
+    });
+
+    it("spans both extra columns in an empty section on the Wearables tab", async () => {
+      onWearables();
+      await screen.findByTestId("category");
+      const empty = within(screen.getByRole("table", { name: "Unmapped mappings" })).getByRole("cell");
+      expect(empty).toHaveAttribute("colspan", "10");
+    });
+
+    it("sorts by Category and by Metric, and drops the sort on leaving the tab", async () => {
+      onWearables();
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      fireEvent.click(await within(table).findByRole("button", { name: /^Category/ }));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("category"));
+      expect(within(table).getByRole("columnheader", { name: /Category/ })).toHaveAttribute("aria-sort", "ascending");
+      fireEvent.click(within(table).getByRole("button", { name: /^Category/ }));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("-category"));
+      fireEvent.click(within(table).getByRole("button", { name: /^Metric/ }));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("metric_key"));
+      expect(within(table).getByRole("columnheader", { name: /Metric/ })).toHaveAttribute("aria-sort", "ascending");
+
+      // No other tab has the column, so the sort does not follow the curator there.
+      mockGet.mockClear();
+      fireEvent.click(screen.getByRole("tab", { name: /Epic/ }));
+      await waitFor(() => expect(browseCalls("EPIC")).not.toHaveLength(0));
+      browseCalls("EPIC").forEach((params) => expect(params.order_1).toBe("-occurrence_count"));
+    });
+
+    it("stops sending a Category sort when the server moves the page off the Wearables tab", async () => {
+      // No tab was clicked: the server names the tab on every response, and
+      // its default can change under a curator who sorted by Category.
+      let selected = "OpenWearables";
+      mockGet.mockImplementation((url: string) => {
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({
+          tabs: tabsWithWearables, selected_source: selected, results: [wearableRow()] }) });
+        return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      });
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      fireEvent.click(await within(table).findByRole("button", { name: /^Metric/ }));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("metric_key"));
+      expect(lastBrowse()).not.toHaveProperty("source");
+
+      selected = "EPIC";
+      // Any refresh will do; this one touches no sort.
+      fireEvent.click(within(table).getByLabelText("Proposed: only codes with a curator note"));
+      // The tab the answer names has no Metric column, so the sort goes with it.
+      await waitFor(() => expect(headerNames(screen.getByRole("table", { name: "Proposed mappings" }))).not.toContain("Metric"));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("-occurrence_count"));
+      expect(lastBrowse().order_0).toBe("-occurrence_count");
+      const proposed = screen.getByRole("table", { name: "Proposed mappings" });
+      expect(headerNames(proposed)).not.toContain("Category");
+      // The header that is sorted is one the table has.
+      expect(within(proposed).getByRole("columnheader", { name: "Seen" })).toHaveAttribute("aria-sort", "descending");
+    });
+
+    it("puts the three fields in the CSV download", async () => {
+      let saved: Blob | null = null;
+      const urls = URL as unknown as { createObjectURL: unknown; revokeObjectURL: unknown };
+      const original = { create: urls.createObjectURL, revoke: urls.revokeObjectURL };
+      urls.createObjectURL = vi.fn((blob: Blob) => { saved = blob; return "blob:code-mappings"; });
+      urls.revokeObjectURL = vi.fn();
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+      try {
+        onWearables({ results: [wearableRow(), wearableRow({
+          mapping_id: 502, source_code: "hydration", category: "", measure_class: "", metric_key: "" })] });
+        await screen.findAllByTestId("category");
+        fireEvent.click(screen.getByTitle("Download Proposed"));
+        fireEvent.click(screen.getByRole("button", { name: "CSV" }));
+        expect(click).toHaveBeenCalledTimes(1);
+        expect(saved).not.toBeNull();
+        const text = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result));
+          reader.readAsText(saved!);
+        });
+        const [header, first, second] = text.split("\n").map((line) => line.split(","));
+        for (const column of ["category", "measure_class", "metric_key"]) expect(header).toContain(column);
+        const cell = (line: string[], column: string) => line[header.indexOf(column)];
+        expect(cell(first, "source_code")).toBe("resting_heart_rate");
+        expect(cell(first, "category")).toBe("Heart & Cardiovascular");
+        expect(cell(first, "measure_class")).toBe("Aggregate over interval");
+        expect(cell(first, "metric_key")).toBe("resting_hr");
+        expect([cell(second, "category"), cell(second, "measure_class"), cell(second, "metric_key")]).toEqual(["", "", ""]);
+      } finally {
+        click.mockRestore();
+        urls.createObjectURL = original.create;
+        urls.revokeObjectURL = original.revoke;
+      }
+    });
+
+    it("keeps a Category sort when the Wearables tab is grouped", async () => {
+      onWearables();
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      fireEvent.click(await within(table).findByRole("button", { name: /^Category/ }));
+      await waitFor(() => expect(lastBrowse().order_1).toBe("category"));
+      fireEvent.click(screen.getByLabelText("Group by label"));
+      await waitFor(() => expect(lastBrowse()).toMatchObject({ rollup: 1, order_1: "category" }));
+    });
+
+    it("shows a group's category, measure class and metric key, and lines members up under it", async () => {
+      mockGet.mockImplementation((url: string) => {
+        if (url.includes("/group/")) return Promise.resolve({ data: {
+          results: [wearableRow({ source_code: "MEMBER-1" })],
+        } });
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({
+          tabs: tabsWithWearables, selected_source: "OpenWearables", results: [], rollup: true,
+          groups: { Unmapped: [
+            entry({ label: "restingheartrate", description: "Resting heart rate", members: 2,
+              category: "Heart & Cardiovascular", measure_class: "Aggregate over interval", metric_key: "resting_hr" }),
+            // Members that disagree name none of the three.
+            entry({ label: "steps", description: "Steps", category: "", measure_class: "", metric_key: "" }),
+          ] },
+        }) });
+        return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      });
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+      const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+      const categories = await within(table).findAllByTestId("category");
+      expect(categories.map((cell) => cell.textContent)).toEqual(
+        ["Heart & CardiovascularAggregate over interval", "—"]);
+      expect(within(table).getAllByTestId("metric-key").map((cell) => cell.textContent)).toEqual(["resting_hr", "—"]);
+      // A grouped queue can sort by both.
+      expect(within(table).getByRole("button", { name: /^Category/ })).toBeInTheDocument();
+      expect(within(table).getByRole("button", { name: /^Metric/ })).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Expand Resting heart rate" }));
+      const member = (await screen.findByText("MEMBER-1", { selector: "[data-testid=source-code]" })).closest("tr")!;
+      const group = screen.getByRole("button", { name: "Collapse Resting heart rate" }).closest("tr")!;
+      expect(columnsSpanned(member)).toBe(10);
+      expect(columnsSpanned(group)).toBe(10);
+      expect(member.querySelectorAll("td")).toHaveLength(group.querySelectorAll("td").length);
+      expect(within(member).getByTestId("category")).toHaveTextContent("Heart & CardiovascularAggregate over interval");
+      expect(within(member).getByTestId("metric-key")).toHaveTextContent(/^resting_hr$/);
+      expect(member.querySelector("td")).toHaveAttribute("data-testid", "category");
+    });
+
+    it("opens the dialog with the row's three fields and saves a changed category", async () => {
+      // What the server holds: the list is re-read after a save.
+      let held = wearableRow();
+      mockPatch.mockImplementation((_url: string, payload: Record<string, unknown>) => {
+        held = wearableRow({ category: payload.category });
+        return Promise.resolve({ data: held });
+      });
+      mockGet.mockImplementation((url: string) => {
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({
+          tabs: tabsWithWearables, selected_source: "OpenWearables", results: [held] }) });
+        if (url === "/v1/code-mappings/501/") return Promise.resolve({ data: { ...held, destination_options: [] } });
+        return Promise.resolve({ data: url.includes("reference") ? {
+          ...reference,
+          wearable_metric_categories: ["Activity", "Heart & Cardiovascular", "Sleep"],
+          wearable_measure_classes: ["Direct measurement", "Aggregate over interval"],
+          wearable_source_vocabularies: ["Apple", "Garmin", "HL7-PHR", "OpenWearables"],
+        } : {} });
+      });
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+      fireEvent.click((await screen.findByText("resting_heart_rate", { selector: "[data-testid=source-code]" })).closest("tr")!);
+      const dialog = within(await screen.findByRole("dialog"));
+      const category = await dialog.findByLabelText("Category");
+      expect(category).toHaveValue("Heart & Cardiovascular");
+      expect(dialog.getByLabelText("Measure Class")).toHaveValue("Aggregate over interval");
+      expect(dialog.getByLabelText("Metric Key")).toHaveValue("resting_hr");
+      fireEvent.change(category, { target: { value: "Sleep" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/501/",
+        expect.objectContaining({ category: "Sleep", decision_surface: "code2concept" })));
+      expect(mockPatch.mock.calls.at(-1)![1]).not.toHaveProperty("measure_class");
+      expect(mockPatch.mock.calls.at(-1)![1]).not.toHaveProperty("metric_key");
+      // The list shows what was saved.
+      await waitFor(() => expect(screen.getByTestId("category")).toHaveTextContent("Sleep"));
+    });
+  });
+
   it("names no concept for a group whose members disagree", async () => {
     renderBrowse({ rollup: true, groups: { Unmapped: [entry({
       mixed_destinations: true, destination_concept_id: null, destination_concept_name: null,
