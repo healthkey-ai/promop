@@ -1695,3 +1695,83 @@ describe('unit presentation (#2610)', () => {
     expect(screen.getByLabelText('Unit for Weight')).toHaveValue('lb');
   });
 });
+
+const PLATELET_UNITS = [
+  { value: 'CELLS/UL', label: 'cells/µL' },
+  { value: '10*3/uL', label: '10³/µL' },
+  { value: '10*9/L', label: '10⁹/L' },
+];
+
+function plateletFields(extra: Record<string, unknown> = {}) {
+  return {
+    platelet_count: {
+      writable: true, target: 'patient_record', control: 'number', label: 'Platelet count',
+      value_kind: 'number', unit: 'CELLS/UL', unit_options: PLATELET_UNITS,
+    },
+    platelet_count_units: {
+      kind: 'selectable', writable: false, qualifies: 'platelet_count',
+      unit_options: PLATELET_UNITS,
+    },
+    platelet_count_thousand_per_ul: {
+      kind: 'computed', writable: false, normalised_read_model: true,
+      inputs: ['platelet_count'], unit: '10*3/uL', bindings: ['plateletCount'],
+      reason: 'Normalised from platelet_count in the default unit.',
+    },
+    ...extra,
+  };
+}
+
+describe('pair rows edited in a dialog (#5903)', () => {
+  it('keeps the row to the stored value and opens the pair in a dialog', async () => {
+    const user = userEvent.setup();
+    const { store } = await setup(plateletFields(), { platelet_count: 336 });
+    render(<PatientFieldEditor store={store} name="platelet_count"
+      label="Platelet Count Range" pairEditor="dialog" />);
+
+    // The cell shows the value; no form control competes with the comparison.
+    expect(screen.getByText('336')).toBeVisible();
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Edit Platelet Count Range' }));
+    expect(screen.getByRole('spinbutton')).toBeVisible();
+    expect(screen.getByRole('combobox', { name: 'Unit for Platelet Count Range' })).toBeVisible();
+    // The explanation belongs where there is room for it, not under the row.
+    expect(screen.getByText('Normalised from platelet_count in the default unit.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeVisible();
+  });
+
+  it('leaves the inline editor in place for the full patient form', async () => {
+    const { store } = await setup(plateletFields(), { platelet_count: 336 });
+    render(<PatientFieldEditor store={store} name="platelet_count"
+      label="Platelet Count Range" />);
+
+    expect(screen.getByRole('spinbutton')).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Edit Platelet Count Range' })).not.toBeInTheDocument();
+  });
+
+  it('saves the dated pair — value, unit and result date — from the dialog', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup(plateletFields({
+      platelet_count: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Platelet count',
+        value_kind: 'number', unit: 'CELLS/UL', unit_options: PLATELET_UNITS,
+        dated: true, latest_date: '2026-08-01',
+      },
+    }), { platelet_count: 336 });
+    render(<PatientFieldEditor store={store} name="platelet_count"
+      label="Platelet Count Range" pairEditor="dialog" />);
+
+    await user.click(screen.getByRole('button', { name: 'Edit Platelet Count Range' }));
+    // A unit change clears the number: the reader must type it in the chosen scale.
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Unit for Platelet Count Range' }),
+      '10*3/uL');
+    await user.type(screen.getByRole('spinbutton'), '150');
+    fireEvent.change(screen.getByLabelText('Result date'), { target: { value: '2026-08-02' } });
+    await user.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    const [, body] = patch.mock.calls.at(-1) ?? [];
+    expect(body).toMatchObject({ platelet_count_units: '10*3/uL' });
+    expect(body?.platelet_count).toMatchObject({ value: 150, date: '2026-08-02' });
+  });
+});

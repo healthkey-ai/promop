@@ -52,7 +52,11 @@ export default function FieldSlots({ runtime, opts, slots }: {
   return <PatientFormRenewContext.Provider value={renew}>{slots.map((slot, index) => createPortal(
     <PatientFieldEditor store={store} name={slot.dataset.promopField!}
       label={slot.dataset.promopLabel}
-      readOnly={opts.readOnly ?? true} infoHref={opts.infoHref} compact />,
+      readOnly={opts.readOnly ?? true} infoHref={opts.infoHref} compact
+      /* A trial row's "Your Value" cell is 200px wide: a value/unit pair (and
+         its result date) is edited in a dialog, and the row keeps the stored
+         value for comparison (#5903). */
+      pairEditor="dialog" />,
     slot, `${index}:${generation}`,
   ))}</PatientFormRenewContext.Provider>;
 }
