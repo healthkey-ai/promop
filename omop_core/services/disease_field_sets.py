@@ -6,6 +6,12 @@ record plus the extension). Both are cut from the field descriptors, which
 carry ``scope`` and ``diseases`` per field from one read of the membership
 rows, so neither costs a query per field or per disease.
 
+Both sets hold only fields a curator can map: a location field and a legacy
+alias have nothing to map (``NOT_MAPPABLE``), the Field Mappings page has never
+listed them, and a set that did would disagree with the page it is read
+beside. An alias a disease's membership rows name is still that disease's
+field; it is only left out of these lists.
+
 The CSV is a review copy for a curator working offline. It is reference data:
 no patient value, and provenance as the curation fixture carries it, with a
 reviewer's name replaced by ``curator``. Nothing loads it back.
@@ -24,6 +30,10 @@ from omop_core.services import disease_profiles
 SET_PROFILE = 'profile'
 SET_EXTENSION = 'extension'
 SETS = (SET_PROFILE, SET_EXTENSION)
+
+# Descriptor categories with nothing to map. The page's own rule is
+# ``isSupportedMapperField`` in ``FieldMappingPage.tsx``; keep the two alike.
+NOT_MAPPABLE = frozenset({'location', 'alias'})
 
 COLUMNS = (
     'field_name', 'label', 'scope', 'diseases', 'tab', 'field_type', 'omop_table',
@@ -49,12 +59,14 @@ def disease_set(descriptors: list[dict], diseases: Iterable[str], which: str = S
     """The descriptors in the named diseases' extension, or in their profile.
 
     ``Other`` names no extension, so its profile is the base record and its
-    extension is empty. Order is the descriptors' own.
+    extension is empty. Location and alias fields are in neither. Order is the
+    descriptors' own.
     """
     return _cut(descriptors, _codes(diseases, which), which)
 
 
 def _cut(descriptors: list[dict], codes: set[str], which: str) -> list[dict]:
+    descriptors = [d for d in descriptors if d['category'] not in NOT_MAPPABLE]
     if which == SET_EXTENSION:
         return [d for d in descriptors if codes & set(d['diseases'])]
     return [d for d in descriptors if disease_profiles.in_profile(d['diseases'], codes)]

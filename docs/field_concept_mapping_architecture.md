@@ -204,12 +204,15 @@ The Field Mappings page is where a curator reads and edits scope (#2332):
   since they decide the profile. The dialog opens only for a mappable field,
   so a computed field's scope is read on the page and set through the API.
 
-The page does not list the location fields or the legacy alias fields (it
-never has: neither can be mapped there), while the list endpoint and the
-CSV include them. A category's disease-specific list therefore matches its
-CSV unless an alias is one of its members, as `absolute_lymphocyte_count`
-is for CLL, and a full-record or base-record CSV holds those 27 further
-rows.
+Location fields and legacy alias fields have nothing to map, so the page has
+never listed them, and neither do the per-disease list
+(`?disease=&set=`) or the CSV (`disease_field_sets.NOT_MAPPABLE`, the same
+rule as the page's `isSupportedMapperField`): for any category and either
+set, the page, the list and the download name the same fields. An alias a
+category's rows name, as `absolute_lymphocyte_count` is for CLL, is still
+that category's field for the patient tab and for relevance; it is only
+left out of these lists. The unfiltered list endpoint returns every
+descriptor, as before.
 
 No patient tab and no patient save consults the rows yet: what the disease
 tab renders (the rest of #2332) and what a PATCH accepts (#2333) are

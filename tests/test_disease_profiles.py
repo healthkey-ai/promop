@@ -557,6 +557,29 @@ def test_the_full_record_csv_is_the_base_record_plus_the_extension(staff):
     assert staff.get(EXPORT, {'disease': 'MM', 'set': 'tab'}).status_code == 400
 
 
+def test_location_and_alias_fields_are_in_no_disease_list_and_no_csv(staff):
+    """They have nothing to map, and the page the lists are read beside hides them."""
+    everything = {d['field_name']: d['category'] for d in staff.get(MAPPINGS).data}
+    unmappable = {name for name, category in everything.items()
+                  if category in disease_field_sets.NOT_MAPPABLE}
+    # Both kinds exist, and CLL's extension names an alias, so the cut is exercised.
+    assert {everything[name] for name in unmappable} == {'location', 'alias'}
+    assert everything['absolute_lymphocyte_count'] == 'alias'
+    assert 'absolute_lymphocyte_count' in disease_profiles.extension_fields('CLL')
+
+    for params in ({'disease': 'CLL', 'set': 'extension'}, {'disease': 'CLL'}, {'disease': 'Other'}):
+        listed = {d['field_name'] for d in staff.get(MAPPINGS, params).data}
+        exported = {row['field_name'] for row in read_csv(staff.get(EXPORT, params))}
+        assert listed == exported, params
+        assert not listed & unmappable, params
+    assert not {row['field_name'] for row in read_csv(staff.get(EXPORT))} & unmappable
+
+    extension = {d['field_name'] for d in staff.get(MAPPINGS, {'disease': 'CLL', 'set': 'extension'}).data}
+    assert extension == disease_profiles.extension_fields('CLL') - unmappable
+    # The unfiltered descriptor is every field, as before: the page and other readers hold it.
+    assert unmappable <= set(everything)
+
+
 def test_a_created_field_is_in_its_diseases_csv_under_its_display_name(staff):
     custom_field(tab='disease')
     disease_profiles.set_field_diseases('frailty_index', ['BC'])
