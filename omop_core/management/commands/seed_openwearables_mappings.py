@@ -11,6 +11,17 @@ row that exists is left exactly as it is. A target that changes here reaches an
 already seeded instance only with ``--update-seeded``, which re-points a row
 whose destination nothing but this command has set (see ``_not_seed_owned``)
 and never clears a destination.
+
+Each metric's unit is seeded too, as the mapping's destination unit: the UCUM
+concept for the unit the proposal names (``UCUM_BY_UNIT``). ``--update-seeded``
+fills a unit that is still blank on a proposed row no curator has saved, and
+never changes one that is set.
+
+The same unit is recorded as the row's source unit (``source_unit_evidence``),
+which is what the list's Units column shows. ``--update-seeded`` fills it on
+any row that has none.
+
+``seed_hl7_phr_mappings`` runs this same command over the HL7 PHR metrics.
 """
 
 import logging
@@ -152,8 +163,52 @@ OPENWEARABLES_METRICS = [
 VOCABULARY_ID = 'OpenWearables'
 SEED_ORIGIN_SYSTEM = 'open-wearables-seed'
 
+# The UCUM code for each display unit the metric lists use (the proposal's
+# "UCUM Unit" column). A unit with no UCUM concept loaded here is left unset.
+UCUM_BY_UNIT = {
+    '%': '%', '/h': '/h', 'L': 'L', 'L/min': 'L/min', 'MET': '[MET]', 'U': '[IU]',
+    'W': 'W', 'bpm': '/min', 'breaths/min': '/min', 'steps/min': '/min', 'rpm': '/min',
+    'cm': 'cm', 'count': '1', 'dB': 'dB', 'g': 'g', 'h': 'h', 'kcal': 'kcal', 'kg': 'kg',
+    'kg/m2': 'kg/m2', 'm': 'm', 'm/s': 'm/s', 'mL': 'mL', 'mL/kg/min': 'mL/min/kg',
+    'mg': 'mg', 'mg/dL': 'mg/dL', 'min': 'min', 'mmHg': 'mm[Hg]', 'ms': 'ms',
+    'score': '{score}', 'years': 'a', '\u00b0': 'deg', '\u00b0C': 'Cel', '\u03bcS': 'uS',
+    # Units only the Apple and Garmin adapters report in.
+    'km': 'km', 'km/hr': 'km/h',
+}
+UCUM_SYSTEM = 'http://unitsofmeasure.org'
 
-def _not_seed_owned(row):
+# Metrics that report a *difference* in temperature. Their source unit is
+# recorded, but they get no destination unit: an approved mapping's unit is a
+# conversion target, and the temperature conversion is for absolute readings
+# (0.5 degF as a reading is -17.5 Cel; as a difference it is 0.28).
+NO_DESTINATION_UNIT = frozenset({
+    'skin_temperature_deviation', 'skin_temperature_trend_deviation',
+    'garmin_skin_temperature',
+})
+
+
+def unit_evidence(unit):
+    """``source_unit_evidence`` for a metric its source reports in *unit*.
+
+    One entry, with the UCUM code where the unit has one. It carries no
+    ``count`` (it is not a sighting, so the approval unit check ignores it) and
+    no ``source`` (so a rebuild from patient data keeps it).
+    """
+    if not unit:
+        return []
+    code = UCUM_BY_UNIT.get(unit)
+    if code:
+        return [{'code': code, 'display': unit, 'system': UCUM_SYSTEM}]
+    return [{'display': unit}]
+
+
+def _curator_saved(row):
+    """Whether a person has saved *row*, whatever they changed on it."""
+    return bool(row.decision_surface or row.updated_by_id or row.reviewer_id
+                or row.curator_note_at)
+
+
+def _not_seed_owned(row, origin_system=SEED_ORIGIN_SYSTEM, seed_unit_ids=()):
     """Why ``--update-seeded`` must leave *row* alone, or '' when it may move it.
 
     A row is the seed's only while nothing else has set its destination or
@@ -161,17 +216,38 @@ def _not_seed_owned(row):
     destination, and every curator save records ``decision_surface`` and
     ``updated_by``. ``copy_reference_data`` clears ``updated_by``, so what only
     a person enters (a note, a unit, LOINC axes, SNOMED attributes) is checked
-    too. A run Suggest declined leaves the destination empty and the row the
-    seed's; ``_repoint`` drops the note that run left.
+    too. A unit the seed itself assigns (*seed_unit_ids*) is not a person's. A run
+    Suggest declined leaves the destination empty and the row the seed's;
+    ``_repoint`` drops the note that run left.
     """
     if row.status != 'proposed':
         return f'status is {row.status}'
-    if row.origin != 'import' or row.origin_system != SEED_ORIGIN_SYSTEM:
+    if row.origin != 'import' or row.origin_system != origin_system:
         return f'destination set by {row.origin_system or row.origin or "another writer"}'
     if row.suggested_target_concept_id or row.suggestion_confidence is not None:
         return 'carries a Suggest answer'
-    if (row.decision_surface or row.updated_by_id or row.reviewer_id or row.curator_note_at
-            or row.destination_unit_concept_id or row.loinc_axes or row.snomed_attributes):
+    curated_unit = (row.destination_unit_concept_id is not None
+                    and row.destination_unit_concept_id not in seed_unit_ids)
+    if _curator_saved(row) or curated_unit or row.loinc_axes or row.snomed_attributes:
+        return 'saved by a curator'
+    return ''
+
+
+def _unit_not_fillable(row):
+    """Why ``--update-seeded`` must not set *row*'s unit, or '' when it may.
+
+    Filling a blank unit overrides nothing, so the row need not be the seed's:
+    a destination Suggest proposed is still a proposal about this metric. A
+    unit that is set is never changed, and neither is a row somebody decided
+    (approved or rejected) or saved. Axes and attributes count as a save for
+    the reason ``_not_seed_owned`` gives: on a copied instance they are the only
+    trace of the curator who entered them.
+    """
+    if row.destination_unit_concept_id is not None:
+        return 'a unit is already set'
+    if row.status != 'proposed':
+        return f'status is {row.status}'
+    if _curator_saved(row) or row.loinc_axes or row.snomed_attributes:
         return 'saved by a curator'
     return ''
 
@@ -193,6 +269,11 @@ def _repoint(row, target):
 class Command(BaseCommand):
     help = 'Seed SourceCodeConceptMapping rows for OpenWearables metrics.'
 
+    # What a run seeds. seed_hl7_phr_mappings overrides these three.
+    vocabulary_id = VOCABULARY_ID
+    origin_system = SEED_ORIGIN_SYSTEM
+    metrics = OPENWEARABLES_METRICS
+
     def add_arguments(self, parser):
         parser.add_argument(
             '--dry-run', action='store_true',
@@ -202,8 +283,9 @@ class Command(BaseCommand):
             '--update-seeded', action='store_true',
             help='Re-point existing rows whose target differs from the seed, '
                  'but only rows nothing but this command has written: proposed, '
-                 'origin import / open-wearables-seed, no curator decision. '
-                 'Never clears a destination.',
+                 'origin import / this seed, no curator decision. Never clears '
+                 'a destination. Also fills a blank unit on a proposed row no '
+                 'curator has saved.',
         )
 
     def handle(self, **options):
@@ -213,7 +295,7 @@ class Command(BaseCommand):
 
         # Collect all target codes that need concept lookup, grouped by vocab.
         vocab_codes: dict[str, set[str]] = {}
-        for _code, _name, _unit, _domain, t_vocab, t_code in OPENWEARABLES_METRICS:
+        for _code, _name, _unit, _domain, t_vocab, t_code in self.metrics:
             if t_vocab and t_code:
                 vocab_codes.setdefault(t_vocab, set()).add(t_code)
 
@@ -226,24 +308,43 @@ class Command(BaseCommand):
             ).only('concept_id', 'concept_code', 'vocabulary_id', 'domain_id',
                    'invalid_reason'):
                 concepts[(vocab, c.concept_code)] = c
-        # A concept a curator holds refuses every write that names it (#2390).
-        locked = set(
-            ConceptMappingLock.objects
-            .filter(concept_id__in=[c.pk for c in concepts.values()])
-            .values_list('concept_id', flat=True)
-        )
-
-        created = existed = unresolved = repointed = kept = 0
+        # The unit each metric is recorded in, as a UCUM concept.
+        ucum_codes = {UCUM_BY_UNIT[unit] for _c, _n, unit, *_rest in self.metrics
+                      if unit in UCUM_BY_UNIT}
+        units = {
+            c.concept_code: c for c in Concept.objects.filter(
+                vocabulary_id='UCUM', concept_code__in=ucum_codes,
+                standard_concept='S', invalid_reason__isnull=True,
+            ).only('concept_id', 'concept_code')
+        }
+        seed_unit_ids = {c.pk for c in units.values()}
+        created = existed = unresolved = repointed = kept = units_filled = 0
+        source_units_filled = fillable = 0
+        without_unit = sorted({unit for _c, _n, unit, *_rest in self.metrics
+                               if unit and UCUM_BY_UNIT.get(unit) not in units})
         left_alone = []  # (source_code, reason): the seed's target was not applied
         with transaction.atomic():
             existing = {
                 row.source_code: row
                 for row in SourceCodeConceptMapping.objects.filter(
-                    organization=None, source_vocabulary_id=VOCABULARY_ID,
+                    organization=None, source_vocabulary_id=self.vocabulary_id,
                 ).select_related('target_concept')
             }
-            for ow_code, display, unit, domain, t_vocab, t_code in OPENWEARABLES_METRICS:
+            # A concept a curator holds refuses every write that names it
+            # (#2390): the seed's targets, and the destinations rows have now.
+            locked = set(
+                ConceptMappingLock.objects
+                .filter(concept_id__in={
+                    *(c.pk for c in concepts.values()),
+                    *(r.target_concept_id for r in existing.values() if r.target_concept_id),
+                })
+                .values_list('concept_id', flat=True)
+            )
+            for ow_code, display, unit, domain, t_vocab, t_code in self.metrics:
                 target = concepts.get((t_vocab, t_code)) if t_vocab else None
+                unit_concept = (None if ow_code in NO_DESTINATION_UNIT
+                                else units.get(UCUM_BY_UNIT.get(unit)))
+                evidence = unit_evidence(unit)
                 desc = f'{display} ({unit})' if unit else display
                 omop_table = DOMAIN_TO_TABLE.get(domain, '')
                 wanted = f'{t_vocab or "-"}:{t_code or "-"}'
@@ -274,17 +375,19 @@ class Command(BaseCommand):
                 if row is None:
                     row, was_created = SourceCodeConceptMapping.objects.get_or_create(
                         organization=None,
-                        source_vocabulary_id=VOCABULARY_ID,
+                        source_vocabulary_id=self.vocabulary_id,
                         source_code=ow_code,
                         defaults={
                             'domain_id': domain,
                             'source_code_description': desc[:255],
                             'target_concept': target,
                             'destination_vocabulary_id': target.vocabulary_id if target else '',
+                            'destination_unit_concept': unit_concept,
+                            'source_unit_evidence': evidence,
                             'omop_table': omop_table,
                             'status': 'proposed',
                             'origin': 'import',
-                            'origin_system': SEED_ORIGIN_SYSTEM,
+                            'origin_system': self.origin_system,
                             'source': 'HealthKey',
                             'occurrence_count': 0,
                         },
@@ -294,6 +397,44 @@ class Command(BaseCommand):
                         continue
 
                 existed += 1
+                if update_seeded and evidence and not row.source_unit_evidence:
+                    # The metric's own unit, on a row that records none: nothing
+                    # is overridden, so status and ownership do not matter. Like
+                    # every sighting it leaves updated_at alone.
+                    if dry_run or SourceCodeConceptMapping.objects.filter(
+                            pk=row.pk, source_unit_evidence=[]).update(
+                                source_unit_evidence=evidence):
+                        source_units_filled += 1
+                        row.source_unit_evidence = evidence
+                        detail(f'  [SOURCE UNIT] {ow_code}: '
+                               f'{evidence[0].get("code") or evidence[0]["display"]}')
+                if (update_seeded and unit_concept is not None
+                        and not _unit_not_fillable(row)
+                        and row.target_concept_id in locked):
+                    detail(f'  [UNIT LEFT ALONE] {ow_code}: its destination is locked by a curator')
+                elif (update_seeded and unit_concept is not None
+                        and not _unit_not_fillable(row)):
+                    if not dry_run:
+                        # Re-read under a lock, as the re-point below does.
+                        locked_row = (SourceCodeConceptMapping.objects
+                                      .select_for_update(of=('self',))
+                                      .select_related('target_concept').filter(pk=row.pk).first())
+                        if (locked_row is None or _unit_not_fillable(locked_row)
+                                or locked_row.target_concept_id != row.target_concept_id):
+                            # Deleted, saved, or moved to a destination whose
+                            # lock was not checked above.
+                            locked_row = None
+                        else:
+                            locked_row.destination_unit_concept = unit_concept
+                            locked_row.save(update_fields=['destination_unit_concept', 'updated_at'])
+                            row = existing[ow_code] = locked_row
+                    if dry_run or locked_row is not None:
+                        units_filled += 1
+                        detail(f'  [UNIT] {ow_code}: {unit_concept.concept_code}')
+                if not update_seeded and (
+                        (evidence and not row.source_unit_evidence)
+                        or (unit_concept is not None and not _unit_not_fillable(row))):
+                    fillable += 1
                 current = row.target_concept
                 if (current.pk if current else None) == (target.pk if target else None):
                     continue
@@ -315,13 +456,14 @@ class Command(BaseCommand):
                 elif target.pk in locked:
                     reason = f'{wanted} is locked by a curator'
                 else:
-                    reason = _not_seed_owned(row)
+                    reason = _not_seed_owned(row, self.origin_system, seed_unit_ids)
                 if not reason and not dry_run:
                     # Re-read under a lock: a curator may have saved or deleted
                     # the row since it was loaded above.
                     row = (SourceCodeConceptMapping.objects
                            .select_for_update().filter(pk=row.pk).first())
-                    reason = _not_seed_owned(row) if row else 'row deleted during the run'
+                    reason = (_not_seed_owned(row, self.origin_system, seed_unit_ids)
+                              if row else 'row deleted during the run')
                 if reason:
                     left_alone.append((ow_code, reason))
                     detail(f'  [LEFT ALONE] {ow_code}: {held}, seed {wanted} ({reason})')
@@ -331,7 +473,13 @@ class Command(BaseCommand):
                 if not dry_run:
                     _repoint(row, target)
 
-        total = len(OPENWEARABLES_METRICS)
+        if without_unit:
+            detail(self.style.WARNING(
+                '  No UCUM concept loaded for: '
+                + ', '.join(f'{unit} ({UCUM_BY_UNIT.get(unit, "no UCUM code")})'
+                            for unit in without_unit)
+                + ' (destination unit left unset)'))
+        total = len(self.metrics)
         prefix = 'DRY RUN: would have ' if dry_run else 'Done: '
         summary = (
             f'{prefix}{created} created, {existed} already existed, '
@@ -341,7 +489,12 @@ class Command(BaseCommand):
             summary += (
                 f' --update-seeded: {repointed} re-pointed, '
                 f'{len(left_alone)} left alone at another destination, '
-                f'{kept} kept where the seed names no target.'
+                f'{kept} kept where the seed names no target, '
+                f'{units_filled} units filled, '
+                f'{source_units_filled} source units filled.'
             )
+        if fillable:
+            summary += (f' {fillable} existing rows have no unit or source unit; '
+                        '--update-seeded would fill them.')
         self.stdout.write(
             self.style.WARNING(summary) if dry_run else self.style.SUCCESS(summary))
