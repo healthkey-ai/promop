@@ -249,8 +249,10 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
 
 The same proposals, to the same audiences, on the other screens.
 
-- **PHR owner reads** (`/api/v1/phr/`, `PhrView.show_provisional`, true). The
-  record read in `PhrView.get` is the overlay copy (`provisional_record.overlay`),
+- **PHR owner reads** (`/api/v1/phr/`). A section opts in with
+  `show_provisional = True` (About me, Diagnoses, Status, Labs, Lab history,
+  Procedures); the default is off, so share options, consent and entries see the
+  approved record. For an opted-in section the record read in `PhrView.get` is the overlay copy (`provisional_record.overlay`),
   so About me and the primary cancer carry `confidence` on a value a proposal
   filled (the lowest confidence among the fields an entry is built from). Labs
   (list, history), Diagnoses and Procedures also list **rows** from proposed

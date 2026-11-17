@@ -49,10 +49,13 @@ GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', '
 
 class PhrView(APIView):
     permission_classes = [IsAuthenticated]
-    # The patient's own reads show proposals from mappings not yet approved
-    # (marked with their confidence) when the site switch is on; a share
-    # recipient's never do (SharedRecordMixin).
-    show_provisional = True
+    # Only the sections that display the record opt in (About me, Diagnoses,
+    # Status, Labs, Lab history, Procedures): with the site switch on they show
+    # proposals from mappings not yet approved, marked with their confidence.
+    # Everything else (share options, export, consent, entries) sees the
+    # approved record, and a share recipient never sees a proposal
+    # (SharedRecordMixin).
+    show_provisional = False
 
     def resolve(self, request):
         """(person, record, None), or (None, None, a 404) when the caller has no record."""
@@ -161,6 +164,8 @@ def patient_name(person) -> str:
 
 
 class AboutView(PhrView):
+    show_provisional = True
+
     def build(self, person, record):
         data = {'name': patient_name(person) or None, 'fields': about_fields(record, person)}
         return {k: v for k, v in data.items() if v is not None}
@@ -314,7 +319,7 @@ def _spread(record) -> str | None:
 def _primary_fields(stage_field, risk) -> tuple[str, ...]:
     """The record fields the primary cancer entry is built from."""
     return ('disease', 'histologic_type', stage_field, *([risk[0]] if risk else []),
-            'metastasis_status', 'bone_only_metastasis_status', 'metastatic_status', 'custom_fields',
+            'metastasis_status', 'bone_only_metastasis_status', 'metastatic_status',
             *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status')
 
 
@@ -690,6 +695,8 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
 
 
 class DiagnosesView(PhrView):
+    show_provisional = True
+
     def build(self, person, record):
         return diagnoses(person, record, log_unresolved=True, provisional=self.show_provisional)
 
@@ -746,6 +753,8 @@ def section_status(person, record: PatientRecord | None, provisional: bool = Fal
 
 
 class StatusView(PhrView):
+    show_provisional = True
+
     def build(self, person, record):
         return {'sections': section_status(person, record, self.show_provisional)}
 
@@ -754,11 +763,15 @@ class StatusView(PhrView):
 
 
 class LabsView(PhrView):
+    show_provisional = True
+
     def build(self, person, record):
         return labs(person, record, provisional=self.show_provisional)
 
 
 class LabHistoryView(PhrView):
+    show_provisional = True
+
     def get(self, request, test_id: int):
         self.test_id = test_id
         return super().get(request)
@@ -785,6 +798,8 @@ class MedicationDetailView(PhrView):
 
 
 class ProceduresView(PhrView):
+    show_provisional = True
+
     def build(self, person, record):
         return procedures(person, record, provisional=self.show_provisional)
 

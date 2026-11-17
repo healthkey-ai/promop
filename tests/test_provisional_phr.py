@@ -147,6 +147,15 @@ def test_the_primary_cancer_carries_the_confidence_of_the_fields_a_proposal_fill
     assert PatientRecord.objects.get(person=record.person).stage in (None, '')   # nothing was written
 
 
+def test_the_share_options_never_offer_a_proposed_cancer(patient):
+    record, client = patient
+    pair(record, disease=('Breast cancer', 80))
+
+    assert client.get('/api/v1/phr/diagnoses/').json()['cancer'][0]['name'] == 'Breast cancer'
+    sections = {s['id'] for s in client.get('/api/v1/phr/shares/options/').json()['sections']}
+    assert 'diagnoses' not in sections
+
+
 def test_a_field_the_record_answers_is_never_overlaid(patient):
     record, client = patient
     record.disease, record.disease_slug, record.stage = 'Breast cancer', 'breast-cancer', 'III'
