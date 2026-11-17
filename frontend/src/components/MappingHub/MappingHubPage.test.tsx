@@ -25,6 +25,23 @@ function renderHub() {
   );
 }
 
+describe("MappingHubPage panel order", () => {
+  it("puts Code Mapping first, and leaves the other panels in their order", async () => {
+    renderHub();
+    await screen.findByText("4 overrides");
+    const panels = screen.getAllByRole("heading", { level: 2 }).map(heading => heading.textContent);
+    expect(panels).toEqual(["Code Mapping", "Field Mapping", "Therapy Mapping", "Disease Mapping", "Survey Mapping"]);
+  });
+
+  it("still opens Code Mapping from its panel", async () => {
+    renderHub();
+    const panel = screen.getByRole("heading", { name: "Code Mapping" }).closest("button")!;
+    expect(panel).toHaveTextContent("Normalize source coding systems into the OMOP vocabulary.");
+    fireEvent.click(panel);
+    expect(await screen.findByText("went to elsewhere")).toBeInTheDocument();
+  });
+});
+
 describe("MappingHubPage Disease Mapping card", () => {
   it("is one card with the three disease functions and their counts", async () => {
     renderHub();

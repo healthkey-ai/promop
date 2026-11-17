@@ -100,6 +100,17 @@ def measurement_input_type(concept_name, suggested_unit):
     return ''
 
 
+def suggested_unit(vocabulary_id, domain_id, concept_code):
+    """The unit a LOINC Measurement code is usually reported in, '' otherwise.
+
+    Takes the three columns rather than a concept so a caller holding only an
+    aggregate (a grouped queue entry) can ask without building a fake concept.
+    """
+    if domain_id != 'Measurement' or vocabulary_id != 'LOINC' or not concept_code:
+        return ''
+    return get_loinc_to_unit().get(concept_code, '')
+
+
 def concept_unit_fields(concept):
     """Return measurement_type/suggested_unit dict for a LOINC Measurement concept.
 
@@ -112,8 +123,7 @@ def concept_unit_fields(concept):
         or getattr(concept, 'vocabulary_id', None) != 'LOINC'
     ):
         return {}
-    loinc_units = get_loinc_to_unit()
-    unit = loinc_units.get(concept.concept_code, '')
+    unit = suggested_unit(concept.vocabulary_id, concept.domain_id, concept.concept_code)
     mtype = measurement_input_type(concept.concept_name, unit)
     result = {}
     examples = get_loinc_example_units().get(concept.concept_code, [])

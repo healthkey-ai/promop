@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import LoincAxesPanel from "./LoincAxesPanel";
 import type { LoincAxesPayload } from "./loincAxes";
@@ -51,7 +51,7 @@ beforeEach(() => {
 describe("LoincAxesPanel", () => {
   it("keeps the shared axes for a flagged code when a curator entry or a hint exists (#2037)", async () => {
     get.mockResolvedValue({ data: variantPayload() });
-    const first = render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    const first = render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove />);
     await screen.findByRole("table", { name: "Axis variants" });
     // variantPayload has a System hint, so the table stays, under its heading, with Save.
     expect(screen.getByTestId("shared-axes")).toHaveTextContent("Axes shared by every variant");
@@ -59,7 +59,7 @@ describe("LoincAxesPanel", () => {
     first.unmount();
     get.mockResolvedValue({ data: payload({ ...variantPayload(), loinc_axes: { component: "Glucose" },
       source_axes: { axes: { component: { value: "Glucose", basis: "curator", evidence: "" } }, hints: {} } }) });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove />);
     await screen.findByRole("table", { name: "Axis variants" });
     expect(screen.getByTestId("axis-why-component")).toHaveTextContent("Set by curator");
     expect(screen.getByRole("button", { name: "Clear Component" })).toBeInTheDocument();
@@ -72,7 +72,7 @@ describe("LoincAxesPanel", () => {
       Promise.resolve({ data: { ...approved, variant_status: body.approve ? "approved" : "proposed",
         variants: approved.variants.map(v => v.axis_key === body.axis_key ? { ...v, target_concept: { ...glucose, concept_id: body.target_concept_id, concept_name: "Chosen" } } : v) } }));
     const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
-    render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove />);
+    render(<LoincAxesPanel defaultOpen ref={handle} mappingId={7} canEdit canApprove />);
     await screen.findByRole("table", { name: "Axis variants" });
     await expect(handle.current!.setVariantDestination("property=MCnc", 99)).resolves.toBe(true);
     expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", { axis_key: "property=MCnc", target_concept_id: 99, approve: true });
@@ -87,7 +87,7 @@ describe("LoincAxesPanel", () => {
     const approved = { ...variantPayload(), variants: variantPayload().variants.map(v => v.id === 1 ? { ...v, status: "approved" as const } : v) };
     get.mockResolvedValue({ data: approved });
     const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
-    render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen ref={handle} mappingId={7} canEdit canApprove={false} />);
     await screen.findByRole("table", { name: "Axis variants" });
     await expect(handle.current!.setVariantDestination("property=MCnc", 99)).resolves.toBe(false);
     expect(post).not.toHaveBeenCalled();
@@ -96,7 +96,7 @@ describe("LoincAxesPanel", () => {
 
   it("shows a flagged code's variants only: no shared axes table and no Save bar (#2037)", async () => {
     get.mockResolvedValue({ data: { ...variantPayload(), source_axes: { axes: {}, hints: {} } } });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove />);
     await screen.findByRole("table", { name: "Axis variants" });
     expect(screen.queryByText("Axes shared by every variant")).not.toBeInTheDocument();
     expect(screen.queryByTestId("axis-value-property")).not.toBeInTheDocument();
@@ -118,7 +118,7 @@ describe("LoincAxesPanel", () => {
           occurrence_count: 3, status: "proposed", target_concept: null, reviewed_at: null },
       ],
     }) });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onSuggestVariant={() => {}} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} onSuggestVariant={() => {}} />);
     const variants = await screen.findByRole("table", { name: "Axis variants" });
     const cell = within(variants).getByText(/Property any of NFr, MFr, AFr, VFr \(\+2 more\) · Scale Qn/);
     expect(cell.closest("td")).toHaveAttribute("title", "Property any of NFr, MFr, AFr, VFr, SFr, CFr · Scale Qn");
@@ -129,13 +129,13 @@ describe("LoincAxesPanel", () => {
     get.mockResolvedValue({ data: payload({
       source_axes: { axes: { property: { value: ["NFr", "MFr", "AFr", "VFr", "SFr", "CFr"], basis: "unit", evidence: "every record unit is %" } }, hints: {} },
     }) });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     expect(await screen.findByTestId("axis-value-property")).toHaveTextContent("any of NFr, MFr, AFr, VFr (+2 more)");
     expect(screen.getByTestId("axis-value-property")).toHaveAttribute("title", "any of NFr, MFr, AFr, VFr, SFr, CFr");
   });
 
   it("shows the axes table on its own for a code with one axis set", async () => {
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     await screen.findByRole("region", { name: "LOINC axes" });
     expect(screen.queryByText("Axes shared by every variant")).not.toBeInTheDocument();
     expect(screen.getByText(/Settled axes are constraints/)).toBeInTheDocument();
@@ -144,7 +144,7 @@ describe("LoincAxesPanel", () => {
   it("reports how many axis variants the code has, so Suggest can fill them in (#2012)", async () => {
     const onVariantsChange = vi.fn();
     get.mockResolvedValue({ data: variantPayload() });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
     await screen.findByRole("table", { name: "Axis variants" });
     expect(onVariantsChange).toHaveBeenLastCalledWith(2, expect.arrayContaining([expect.objectContaining({ axis_key: "property=SCnc" })]));
     expect(screen.getByText(/Suggest fills in a proposed LOINC for each variant/)).toBeInTheDocument();
@@ -152,13 +152,13 @@ describe("LoincAxesPanel", () => {
 
   it("reports zero variants for a code with one axis set", async () => {
     const onVariantsChange = vi.fn();
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
     await screen.findByRole("region", { name: "LOINC axes" });
     expect(onVariantsChange).toHaveBeenLastCalledWith(0, []);
   });
 
   it("shows each axis with its value, basis and evidence, and the metadata hints", async () => {
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     expect(await screen.findByRole("region", { name: "LOINC axes" })).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith("/v1/code-mappings/7/loinc-axes/");
     expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
@@ -176,20 +176,20 @@ describe("LoincAxesPanel", () => {
       loinc_axes: { system: "Ser/Plas" },
       source_axes: { axes: { system: { value: "Ser/Plas", basis: "curator", evidence: "" } }, hints: {} },
     }) });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     expect(await screen.findByTestId("axis-why-system")).toHaveTextContent("Set by curator");
   });
 
   it("renders nothing when the domain has no LOINC", async () => {
     get.mockResolvedValue({ data: payload({ applies: false }) });
-    const { container } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    const { container } = render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     await waitFor(() => expect(container).toBeEmptyDOMElement());
   });
 
   it("says it is loading until the axes arrive, naming the flagged variants, in one section throughout (#2030)", async () => {
     let answer: (value: { data: LoincAxesPayload }) => void = () => {};
     get.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} expectedVariants={3} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} expectedVariants={3} />);
     const section = screen.getByRole("region", { name: "LOINC axes" });
     expect(section).toHaveAttribute("aria-busy", "true");
     const status = within(section).getByRole("status");
@@ -203,22 +203,22 @@ describe("LoincAxesPanel", () => {
 
   it("says it is loading the axes for a code the queue has not flagged", () => {
     get.mockImplementation(() => new Promise(() => {}));
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     expect(screen.getByRole("status")).toHaveTextContent("Loading the LOINC axes this code settles");
   });
 
   it("stays off screen while loading for a row whose domain cannot hold LOINC axes", () => {
     get.mockImplementation(() => new Promise(() => {}));
-    const { container } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} mayApply={false} />);
+    const { container } = render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} mayApply={false} />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it("marks a re-read busy too, keeping the axes on screen", async () => {
-    const { rerender } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    const { rerender } = render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     const section = await screen.findByRole("region", { name: "LOINC axes" });
     expect(section).not.toHaveAttribute("aria-busy");
     get.mockImplementation(() => new Promise(() => {}));
-    rerender(<LoincAxesPanel mappingId={7} canEdit canApprove={false} reloadToken={1} />);
+    rerender(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} reloadToken={1} />);
     expect(section).toHaveAttribute("aria-busy", "true");
     expect(within(section).getByRole("status")).toHaveTextContent("Re-reading the axes and variants…");
     expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
@@ -226,7 +226,7 @@ describe("LoincAxesPanel", () => {
 
   it("reports a failed load inside the section", async () => {
     get.mockRejectedValue(new Error("boom"));
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     const section = screen.getByRole("region", { name: "LOINC axes" });
     expect(await within(section).findByRole("alert")).toHaveTextContent("Could not load the LOINC axes for this code.");
     expect(section).not.toHaveAttribute("aria-busy");
@@ -234,7 +234,7 @@ describe("LoincAxesPanel", () => {
 
   it("reports edits, Clear and Methodless, and saves them as the PUT body", async () => {
     const onAxesChange = vi.fn();
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onAxesChange={onAxesChange} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} onAxesChange={onAxesChange} />);
     await screen.findByRole("region", { name: "LOINC axes" });
     expect(onAxesChange).toHaveBeenLastCalledWith({});
     const system = screen.getByLabelText("System value");
@@ -256,7 +256,7 @@ describe("LoincAxesPanel", () => {
   });
 
   it("hides edit controls when the curator cannot edit", async () => {
-    render(<LoincAxesPanel mappingId={7} canEdit={false} canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit={false} canApprove={false} />);
     await screen.findByRole("region", { name: "LOINC axes" });
     expect(screen.queryByLabelText("System value")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save axes" })).not.toBeInTheDocument();
@@ -266,7 +266,7 @@ describe("LoincAxesPanel", () => {
     get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("/concepts/search/") ? { results: [glucose] } : variantPayload() }));
     post.mockResolvedValue({ data: { ...variantPayload(), variant_status: "approved", repoint: { rows_updated: 40, persons_marked_stale: 5, rows_collapsed: 0 } } });
     const onSuggestVariant = vi.fn();
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove onSuggestVariant={onSuggestVariant} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove onSuggestVariant={onSuggestVariant} />);
     expect(await screen.findByText("2 axis values — this code may need one LOINC per variant")).toBeInTheDocument();
     expect(screen.getByText("Units mg/dL and mmol/L imply different properties.")).toBeInTheDocument();
     const table = screen.getByRole("table", { name: "Axis variants" });
@@ -292,7 +292,7 @@ describe("LoincAxesPanel", () => {
     get.mockResolvedValue({ data: approved });
     post.mockResolvedValue({ data: { ...variantPayload(), variant_status: "proposed",
       repoint: { rows_updated: 40, persons_marked_stale: 5, rows_collapsed: 0 } } });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove />);
     const table = await screen.findByRole("table", { name: "Axis variants" });
     fireEvent.click(within(table).getByRole("button", { name: "Reopen Property MCnc · Scale Qn" }));
     await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {
@@ -305,7 +305,7 @@ describe("LoincAxesPanel", () => {
     const approved = variantPayload();
     approved.variants[0] = { ...approved.variants[0], status: "approved" };
     get.mockResolvedValue({ data: approved });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     const table = await screen.findByRole("table", { name: "Axis variants" });
     expect(within(table).queryByRole("button", { name: "Search destination for Property MCnc · Scale Qn" })).toBeNull();
     expect(within(table).getByRole("button", { name: "Search destination for Property SCnc · Scale Qn" })).toBeInTheDocument();
@@ -314,7 +314,7 @@ describe("LoincAxesPanel", () => {
   it("sets a variant's destination from the concept search", async () => {
     get.mockImplementation((url: string) => Promise.resolve({ data: url.includes("/concepts/search/") ? { results: [glucose] } : variantPayload() }));
     post.mockResolvedValue({ data: variantPayload() });
-    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    render(<LoincAxesPanel defaultOpen mappingId={7} canEdit canApprove={false} />);
     const table = await screen.findByRole("table", { name: "Axis variants" });
     expect(within(table).queryByRole("button", { name: /^Approve/ })).not.toBeInTheDocument();
     fireEvent.click(within(table).getByRole("button", { name: "Search destination for Property SCnc · Scale Qn" }));
@@ -323,5 +323,135 @@ describe("LoincAxesPanel", () => {
     await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {
       axis_key: "property=SCnc", target_concept_id: glucose.concept_id, approve: false,
     }));
+  });
+
+  describe("closed by default", () => {
+    it("loads and reports its axes while closed, and says what it holds on the heading", async () => {
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: "Ser" } }) });
+      const onAxesChange = vi.fn();
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove onAxesChange={onAxesChange} />);
+      const toggle = await screen.findByRole("button", { name: /LOINC axes/ });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      // One curator entry, and the four axes the source settles itself.
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred"));
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Ser" });
+      expect(screen.queryByTestId("axis-value-system")).not.toBeInTheDocument();
+      // One live region throughout: closed, it tells a screen reader what the marker shows.
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent("LOINC axes loaded: 1 set · 4 inferred.");
+      expect(status.className).toBe("sr-only");
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByTestId("axis-value-system")).toHaveTextContent("Ser");
+      expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
+      // The same element, now on the page with the section's own explanation.
+      expect(screen.getByRole("status")).toBe(status);
+      expect(status).toHaveTextContent(/^Settled axes are constraints/);
+      expect(status.className).not.toMatch(/sr-only/);
+    });
+
+    it("counts every curator entry on the heading, one that lifts an axis included", async () => {
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: null } }) });
+      const first = render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent(/^1 cleared · 4 inferred$/));
+      first.unmount();
+      // Clearing an inferred axis takes it out of the inferred count; methodless is a value.
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: "Ser", property: null, method_type: "" } }) });
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent(/^2 set · 1 cleared · 2 inferred$/));
+    });
+
+    it("names the axis variants on the closed heading", async () => {
+      get.mockResolvedValue({ data: variantPayload() });
+      const onVariantsChange = vi.fn();
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove onVariantsChange={onVariantsChange} />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent(/^2 axis values/));
+      expect(onVariantsChange).toHaveBeenLastCalledWith(2, variantPayload().variants);
+      expect(screen.queryByRole("table", { name: "Axis variants" })).not.toBeInTheDocument();
+    });
+
+    it("says it is loading on the closed heading, and shows a load failure without being opened", async () => {
+      get.mockReturnValue(new Promise(() => {}));
+      const first = render(<LoincAxesPanel mappingId={7} canEdit canApprove expectedVariants={3} />);
+      expect(screen.getByTestId("section-marker")).toHaveTextContent("loading 3 axis values…");
+      // The live region is there for a screen reader while the section is closed.
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent("Loading the 3 axis values the queue flagged for this code, and their destinations…");
+      expect(status.className).toBe("sr-only");
+      first.unmount();
+      get.mockRejectedValue(new Error("down"));
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the LOINC axes for this code.");
+      expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
+      // Nothing loaded is nothing to open: a heading, and no control that opens onto nothing.
+      expect(screen.getByRole("heading", { name: "LOINC axes" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /LOINC axes/ })).not.toBeInTheDocument();
+    });
+
+    it("is one live region from loading to loaded, so the change is announced", async () => {
+      let answer: (value: unknown) => void = () => {};
+      get.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent(/^Loading the LOINC axes/);
+      answer({ data: payload() });
+      await waitFor(() => expect(status).toHaveTextContent("LOINC axes loaded: 4 inferred."));
+      expect(screen.getByRole("status")).toBe(status);
+    });
+
+    it("opens when the dialog asks it to", async () => {
+      const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
+      render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove />);
+      const toggle = await screen.findByRole("button", { name: /LOINC axes/ });
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toBeInTheDocument());
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      act(() => handle.current!.open());
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("keeps unsaved entries through a re-read, open or closed, and still sends them to Suggest", async () => {
+      const onAxesChange = vi.fn();
+      const props = { mappingId: 7, canEdit: true, canApprove: true, onAxesChange };
+      const { rerender } = render(<LoincAxesPanel {...props} />);
+      const toggle = await screen.findByRole("button", { name: /LOINC axes/ });
+      fireEvent.click(toggle);
+      fireEvent.change(await screen.findByLabelText("System value"), { target: { value: "Bld" } });
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Bld" });
+      fireEvent.click(toggle);
+      expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred · unsaved");
+      // The dialog re-reads after it fills in the variants; the server still stores nothing.
+      const calls = get.mock.calls.length;
+      rerender(<LoincAxesPanel {...props} reloadToken={1} />);
+      await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls));
+      await waitFor(() => expect(screen.getByRole("region", { name: "LOINC axes" })).not.toHaveAttribute("aria-busy"));
+      expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred · unsaved");
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Bld" });
+      fireEvent.click(toggle);
+      expect(screen.getByLabelText("System value")).toHaveValue("Bld");
+      expect(screen.getByRole("button", { name: "Save axes" })).toBeEnabled();
+    });
+
+    it("takes the stored entries on a re-read when nothing is unsaved", async () => {
+      const onAxesChange = vi.fn();
+      const props = { mappingId: 7, canEdit: true, canApprove: true, onAxesChange };
+      const { rerender } = render(<LoincAxesPanel {...props} />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent("4 inferred"));
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: "Ser" } }) });
+      rerender(<LoincAxesPanel {...props} reloadToken={1} />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred"));
+      expect(screen.getByTestId("section-marker")).not.toHaveTextContent("unsaved");
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Ser" });
+    });
+
+    it("opens when the dialog points a variant at a concept, so the outcome is seen", async () => {
+      get.mockResolvedValue({ data: variantPayload() });
+      post.mockResolvedValue({ data: { ...variantPayload(), variant_status: "proposed" } });
+      const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
+      render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent(/2 axis values/));
+      await expect(handle.current!.setVariantDestination("property=SCnc", 98)).resolves.toBe(true);
+      expect(await screen.findByRole("table", { name: "Axis variants" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /LOINC axes/ })).toHaveAttribute("aria-expanded", "true");
+    });
   });
 });

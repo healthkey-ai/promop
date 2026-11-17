@@ -55,7 +55,7 @@ const EXPORT_COLUMNS: (keyof CodeMappingRow)[] = [
   "organization_slug", "organization_name", "source_vocabulary_id", "source_code", "source_code_description",
   "occurrence_count", "origin_system", "destination_concept_id",
   "destination_concept_name", "destination_concept_code",
-  "destination_vocabulary_id", "destination_domain_id", "status",
+  "destination_vocabulary_id", "destination_domain_id", "destination_unit_code", "status",
   "reviewer", "reviewed_at", "notes",
 ];
 
@@ -180,17 +180,18 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
 /**
  * Which tab a row belongs to — keyed by source vocabulary.
  * Blank source_vocabulary_id ("") means uncoded/free text.
- * Apple and Garmin rows are consolidated under the Wearables tab.
+ * Apple, Garmin and HL7-PHR rows are consolidated under the Wearables tab.
  * ICD10CM rows are merged into the ICD-10 tab (#1028).
  * FHIR OID URIs are merged into their canonical OMOP vocabulary.
  */
 const VOCABULARY_ALIASES: Record<string, string> = {
   Apple: "OpenWearables",
   Garmin: "OpenWearables",
+  "HL7-PHR": "OpenWearables",
   // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-/** The Wearables tab: OpenWearables, Apple and Garmin metrics. */
+/** The Wearables tab: OpenWearables, Apple, Garmin and HL7 PHR metrics. */
 const WEARABLES_TAB = "OpenWearables";
 /**
  * Whether a tab starts grouped by label. A hospital label arrives under
@@ -296,6 +297,12 @@ type GroupEntry = {
   destination_concept_code: string | null;
   destination_vocabulary_id: string | null;
   mixed_destinations: boolean;
+  /** The curated unit every member shares; '' when none or when they differ. */
+  destination_unit_code?: string;
+  destination_unit_name?: string;
+  mixed_destination_units?: boolean;
+  /** LOINC example unit of a unanimous Measurement destination. */
+  suggested_unit?: string;
   status: string | null;
   mixed_statuses: boolean;
   example_quantity?: string;
@@ -306,6 +313,30 @@ type GroupEntry = {
   /** Most LOINC axis variants any member's units imply (the blue flag). */
   axis_variant_count?: number;
 };
+
+/**
+ * The unit a mapping will store values in. The curated destination unit when
+ * the mapping has one; otherwise the destination concept's LOINC example unit,
+ * muted and marked, because nothing converts to it until a curator sets it.
+ */
+function DestinationUnitCell({ code, name, suggested, mixed = false }: {
+  code?: string; name?: string; suggested?: string; mixed?: boolean;
+}) {
+  return (
+    <td className="px-4 py-3 text-xs" data-testid="destination-unit">
+      {mixed ? (
+        <span className="font-medium text-amber-700" title="The codes in this group do not share one destination unit.">Mixed</span>
+      ) : code ? (
+        <span className="font-mono text-slate-900" title={name || undefined}>{code}</span>
+      ) : suggested ? (
+        <span className="text-slate-500"
+          title="LOINC example unit for the destination concept. No destination unit is set on this mapping.">
+          <span className="font-mono">{suggested}</span> <span className="italic">suggested</span>
+        </span>
+      ) : <span className="text-slate-500">—</span>}
+    </td>
+  );
+}
 
 /** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
 const groupKey = (entry: GroupEntry) => entry.group_key ?? entry.label ?? `:${entry.mapping_id}`;
@@ -1105,7 +1136,7 @@ export default function CodeMappingPage() {
   };
 
   const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection) => {
-    const colCount = 7;
+    const colCount = 8;
     const sort = sectionSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
@@ -1187,8 +1218,9 @@ export default function CodeMappingPage() {
                 </>
               ) : <span className="text-xs text-slate-500">—</span>}
               <AxisVariantList variants={row.axis_variants} canApprove={false} />
+              {/* The suggested unit is the Dest. unit column's to show. */}
               {(row.measurement_type || row.suggested_unit) && (
-                <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
+                <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} example_units={row.example_units} />
               )}
               {canWrite && section !== "Approved" && row.mapping_id && <button type="button"
                 aria-label={`Choose destination for ${row.source_code}`}
@@ -1198,6 +1230,7 @@ export default function CodeMappingPage() {
                 <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
               </button>}
             </td>
+            <DestinationUnitCell code={row.destination_unit_code} name={row.destination_unit_name} suggested={row.suggested_unit} />
             <td className="px-4 py-3">
               {canWrite && <>
               <button type="button" onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
@@ -1232,7 +1265,9 @@ export default function CodeMappingPage() {
       </Fragment>
     );
     return (
-    <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
+    // Scrolls sideways instead of clipping the last column where the page is
+    // narrower than the table's columns; at ordinary widths nothing changes.
+    <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
@@ -1242,6 +1277,7 @@ export default function CodeMappingPage() {
             <th className="px-4 py-3 font-semibold">Qty</th>
             <th className="px-4 py-3 font-semibold">Units</th>
             {header("Destination", "destination_concept_name")}
+            <th className="whitespace-nowrap px-4 py-3 font-semibold" aria-label="Destination unit"><abbr title="Destination unit">Dest. unit</abbr></th>
             <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
           </tr>
         </thead>
@@ -1284,6 +1320,8 @@ export default function CodeMappingPage() {
                         </>
                       ) : <span className="text-xs text-slate-500">—</span>}
                     </td>
+                    <DestinationUnitCell code={entry.destination_unit_code} name={entry.destination_unit_name}
+                      suggested={entry.suggested_unit} mixed={entry.mixed_destination_units} />
                     <td className="px-4 py-3">
                       {canWrite && section !== "Approved" && entry.proposed > 0 && (
                         <div className="flex flex-col gap-1">

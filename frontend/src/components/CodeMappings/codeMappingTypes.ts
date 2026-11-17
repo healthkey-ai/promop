@@ -72,6 +72,9 @@ export interface CodeMappingRow {
   example_quantity_override?: string | null;
   source_metadata?: Record<string, unknown>;
   destination_unit_concept_id?: number | null;
+  /** The curated destination unit's UCUM code and name; '' when the mapping has none. */
+  destination_unit_code?: string;
+  destination_unit_name?: string;
   /** 0, or how many LOINC axis sets this code's units imply (>= 2). */
   axis_variant_count?: number;
   /** Per-variant destinations, present when axis_variant_count >= 2. */
@@ -360,8 +363,8 @@ export function buildEditForm(row: CodeMappingRow, reference: Reference): Mappin
       ? Object.entries(row.source_metadata).map(([k, v]) => `${k}: ${v}`).join("\n")
       : "",
     destination_unit_concept_id: row.destination_unit_concept_id ? String(row.destination_unit_concept_id) : "",
-    destination_unit_concept_code: "",
-    destination_unit_concept_name: "",
+    destination_unit_concept_code: row.destination_unit_code || "",
+    destination_unit_concept_name: row.destination_unit_name || "",
     unit_match_type: "",
   };
 }

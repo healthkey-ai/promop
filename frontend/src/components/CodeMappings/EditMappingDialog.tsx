@@ -204,6 +204,16 @@ export default function EditMappingDialog({
   // carry no note at all (the patient page's rows), and sending that back
   // would overwrite the stored note and claim a curator wrote it (#2423).
   const openedNotes = useRef("");
+  // The destination unit as the dialog opened with it, and whether that is
+  // what the mapping stores. A patient page row carries no unit, so the form
+  // opens blank over a mapping that may have one: the mapping's own GET
+  // fills it in while the curator has not touched it, and until that GET has
+  // settled nothing is auto-selected from the source unit. A save whose
+  // baseline never became known leaves the unit out rather than send a blank
+  // the server would store as "no unit".
+  const openedUnitId = useRef("");
+  const rowCarriesUnit = useRef(false);
+  const [unitBaseline, setUnitBaseline] = useState<"loading" | "known" | "unknown">("known");
   // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
   // Keyed by mapping: overrides belong to the code they were made for, and
   // must never ride along with a Suggest for another row or an edited code.
@@ -323,6 +333,8 @@ export default function EditMappingDialog({
         // not have to re-type them.
         const opened = withDefaultDestination(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm });
         openedNotes.current = opened.notes;
+        openedUnitId.current = opened.destination_unit_concept_id;
+        setUnitBaseline("known");
         setForm(opened);
         setSearchVocabulary("");
         setSearchScope(DEFAULT_SEARCH_SCOPE);
@@ -331,6 +343,9 @@ export default function EditMappingDialog({
       } else if (selectedRow) {
         const opened = withDefaultDestination(buildEditForm(selectedRow, reference));
         openedNotes.current = opened.notes;
+        openedUnitId.current = opened.destination_unit_concept_id;
+        rowCarriesUnit.current = selectedRow.destination_unit_concept_id !== undefined;
+        setUnitBaseline(selectedRow.mapping_id ? "loading" : "known");
         setForm(opened);
         setSearchVocabulary(
           reference.destination_vocabularies.some((v) => v.vocabulary_id === selectedRow.destination_vocabulary_id)
@@ -444,6 +459,20 @@ export default function EditMappingDialog({
           openedNotes.current = stored;
           setForm((prev) => prev.notes === openedWith ? { ...prev, notes: stored } : prev);
         }
+        // The stored unit, on the same rule: it replaces what the form opened
+        // with, never a unit the curator picked or cleared since.
+        if ("destination_unit_concept_id" in data) {
+          const storedUnit = data.destination_unit_concept_id ? String(data.destination_unit_concept_id) : "";
+          const openedUnit = openedUnitId.current;
+          openedUnitId.current = storedUnit;
+          setForm((prev) => prev.destination_unit_concept_id === openedUnit ? {
+            ...prev,
+            destination_unit_concept_id: storedUnit,
+            destination_unit_concept_code: storedUnit ? data.destination_unit_code || "" : "",
+            destination_unit_concept_name: storedUnit ? data.destination_unit_name || "" : "",
+          } : prev);
+        }
+        setUnitBaseline("known");
         // Auto-populate source_unit from evidence when the form has none
         // (e.g. opened from Code Mapping browse, where the list omits units).
         const dominant = dominantSourceUnit(evidence?.units);
@@ -461,6 +490,8 @@ export default function EditMappingDialog({
         if (!active) return;
         setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry.");
         setSourceEvidenceError("Could not load source evidence. Close and reopen this mapping to retry.");
+        // Only a row that carried the unit says what the mapping stores.
+        setUnitBaseline(rowCarriesUnit.current ? "known" : "unknown");
       } finally {
         if (active) setLoadingDestinations(false);
       }
@@ -666,6 +697,8 @@ export default function EditMappingDialog({
       const filled = suggestions.filter(s => s.suggested).length;
       const total = result?.variants?.length ?? 0;
       setLoincAxesReload(n => n + 1);
+      // The message below sends the curator to that section; open it.
+      axesPanel.current?.open();
       setVariantMessage(suggestions.length === 0
         ? "Every axis variant already has a destination."
         : `Suggested a LOINC for ${filled} of ${suggestions.length} axis variant${suggestions.length === 1 ? "" : "s"}${total ? ` (${total} in all)` : ""}; approve each under LOINC axes.`);
@@ -813,8 +846,11 @@ export default function EditMappingDialog({
     // Empty stays empty: never send concept 0 as a destination.
     destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
     target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
-    destination_unit_concept_id: form.destination_unit_concept_id
-      ? Number(form.destination_unit_concept_id) : null,
+    // Left out when the stored unit never became known and the curator did
+    // not choose one: the server keeps what it has for a key it is not sent.
+    destination_unit_concept_id: unitBaseline !== "known" && form.destination_unit_concept_id === openedUnitId.current
+      ? undefined
+      : form.destination_unit_concept_id ? Number(form.destination_unit_concept_id) : null,
   });
 
   const saveFailed = (err: unknown, fallback: string) => {
@@ -870,7 +906,14 @@ export default function EditMappingDialog({
     setSaving(true);
     setError("");
     try {
-      const resp = await api.patch(`/v1/code-mappings/${existingMapping.id}/`, savePayload());
+      // This form was not built from that mapping, so its unit is not this
+      // form's to clear, nor to replace with one matched from a source unit:
+      // only a unit the curator chose here goes with the move.
+      const chosenUnit = form.destination_unit_concept_id && !unitSelectionAuto
+        && form.destination_unit_concept_id !== openedUnitId.current
+        ? Number(form.destination_unit_concept_id) : undefined;
+      const resp = await api.patch(`/v1/code-mappings/${existingMapping.id}/`,
+        { ...savePayload(), destination_unit_concept_id: chosenUnit });
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
       setExistingMapping(null);
       onSaved(resp.data, repoint);
@@ -1243,6 +1286,8 @@ export default function EditMappingDialog({
                   key={selectedRow.mapping_id} ref={axesPanel} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
                   reloadToken={loincAxesReload}
                   expectedVariants={selectedRow.axis_variant_count}
+                  // A code the queue flags is the one case with something to do here.
+                  defaultOpen={(selectedRow.axis_variant_count ?? 0) >= 2}
                   mayApply={axesMayApply}
                   onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
                   onVariantsChange={(count, variants) => setVariantCount({ mappingId: selectedRow.mapping_id!, count, variants })}
@@ -1416,13 +1461,30 @@ export default function EditMappingDialog({
                   value={form.standard_concept}
                   testId="standard-concept"
                 />
-                <ReadOnlyField
-                  id="destination_status"
-                  label="Destination Status"
-                  tip="Active concepts can be used as destinations. A retired concept is no longer current; select an active replacement when one is available."
-                  value={form.destination_invalid_reason ? `Retired / invalid (reason ${form.destination_invalid_reason})` : form.destination_concept_id ? "Active" : ""}
-                  testId="destination-status"
-                />
+                {/* A stored unit is saved with the mapping whatever its table,
+                    so it is shown, and can be cleared, whatever its table. */}
+                {(form.omop_table === "measurement" || effectiveSourceUnit || form.destination_unit_concept_id) && (
+                  <DestinationUnitPicker
+                    key={effectiveSourceUnit}
+                    sourceUnit={effectiveSourceUnit}
+                    autoSelect={unitBaseline === "known"}
+                    selectedConceptId={form.destination_unit_concept_id}
+                    selectedConceptCode={form.destination_unit_concept_code}
+                    selectedConceptName={form.destination_unit_concept_name}
+                    matchType={form.unit_match_type}
+                    autoPopulated={unitAutoPopulated}
+                    needsReview={unitSelectionNeedsReview}
+                    onSelect={(unit, auto = false) => {
+                      setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
+                      setField("destination_unit_concept_code", unit?.concept_code || "");
+                      setField("destination_unit_concept_name", unit?.concept_name || "");
+                      setField("unit_match_type", unit?.match || "");
+                      setUnitSelectionAuto(Boolean(unit && auto));
+                      setUnitSelectionNeedsReview(false);
+                    }}
+                    onMintUnit={() => setMintUnitOpen(true)}
+                  />
+                )}
                 <ReadOnlyField
                   id="omop_table"
                   label="Destination Table"
@@ -1442,29 +1504,21 @@ export default function EditMappingDialog({
               </div>
               {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
                 <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
-              {(form.omop_table === "measurement" || effectiveSourceUnit) && (
-                <DestinationUnitPicker
-                  key={effectiveSourceUnit}
-                  sourceUnit={effectiveSourceUnit}
-                  selectedConceptId={form.destination_unit_concept_id}
-                  selectedConceptCode={form.destination_unit_concept_code}
-                  selectedConceptName={form.destination_unit_concept_name}
-                  matchType={form.unit_match_type}
-                  autoPopulated={unitAutoPopulated}
-                  needsReview={unitSelectionNeedsReview}
-                  onSelect={(unit, auto = false) => {
-                    setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
-                    setField("destination_unit_concept_code", unit?.concept_code || "");
-                    setField("destination_unit_concept_name", unit?.concept_name || "");
-                    setField("unit_match_type", unit?.match || "");
-                    setUnitSelectionAuto(Boolean(unit && auto));
-                    setUnitSelectionNeedsReview(false);
-                  }}
-                  onMintUnit={() => setMintUnitOpen(true)}
-                />
-              )}
-              <div className="mt-3 flex justify-end gap-2">
-                <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
+              {/* The destination's standing is a fact about the concept, not
+                  a field: plain text on the line of the mint button. */}
+              <div className="mt-3 flex items-center gap-2">
+                {form.destination_concept_id && (
+                  <p data-testid="destination-status"
+                    title={form.destination_invalid_reason
+                      ? `Retired / invalid (reason ${form.destination_invalid_reason}). A retired concept is no longer current; select an active replacement when one is available.`
+                      : "Active concepts can be used as destinations."}
+                    className={form.destination_invalid_reason ? "text-sm font-semibold text-red-700" : "text-sm text-slate-700"}>
+                    <span className="sr-only">Destination status: </span>
+                    {form.destination_invalid_reason ? "Retired" : "Active"}
+                    {form.destination_invalid_reason && <span className="font-normal"> (reason {form.destination_invalid_reason})</span>}
+                  </p>
+                )}
+                <button type="button" onClick={() => setMintOpen(true)} className="ml-auto rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
               </div>
               {form.destination_invalid_reason && (
                 <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
@@ -1714,6 +1768,8 @@ interface UnitResult {
   match: "exact" | "close";
 }
 
+const DESTINATION_UNIT_TIP = "UCUM concept linked to this mapping. Used for unit conversion during ETL.";
+
 interface DestinationUnitPickerProps {
   sourceUnit: string;
   selectedConceptId: string;
@@ -1722,14 +1778,22 @@ interface DestinationUnitPickerProps {
   matchType: "exact" | "close" | "none" | "";
   autoPopulated?: boolean;
   needsReview?: boolean;
+  /** False while the mapping's stored unit is not known yet: the source unit
+   * is not searched, so nothing is matched over a unit about to arrive. */
+  autoSelect?: boolean;
   onSelect: (unit: UnitResult | null, auto?: boolean) => void;
   onMintUnit: () => void;
 }
 
 function DestinationUnitPicker({
   sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
-  matchType, autoPopulated, needsReview, onSelect, onMintUnit,
+  matchType, autoPopulated, needsReview, autoSelect = true, onSelect, onMintUnit,
 }: DestinationUnitPickerProps) {
+  // A search answers after the selection may have changed (the stored unit
+  // arrived, or the curator clicked a result): it reads the selection as it
+  // is then, not as it was when the search started.
+  const selected = useRef(selectedConceptId);
+  useEffect(() => { selected.current = selectedConceptId; });
   const [query, setQuery] = useState(sourceUnit);
   const [results, setResults] = useState<UnitResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -1752,7 +1816,8 @@ function DestinationUnitPicker({
       setResults(data.results);
       setSearched(true);
       // Auto-select exact match
-      if (!selectedConceptId && data.results.length > 0 && data.results[0].match === "exact") {
+      if (selected.current) return;
+      if (data.results.length > 0 && data.results[0].match === "exact") {
         onSelect(data.results[0], true);
       } else if (data.results.length === 0) {
         onSelect(null);
@@ -1764,16 +1829,16 @@ function DestinationUnitPicker({
     } finally {
       if (request === requestSeq.current) setSearching(false);
     }
-  }, [selectedConceptId, onSelect]);
+  }, [onSelect]);
 
   // The keyed picker remounts when Source Unit changes, dropping the old query
   // and results. Debounce the replacement search while the curator types.
   useEffect(() => {
-    if (sourceUnit && !searched && !selectedConceptId) {
+    if (autoSelect && sourceUnit && !searched && !selectedConceptId) {
       const timer = setTimeout(() => { void doSearch(sourceUnit); }, 300);
       return () => clearTimeout(timer);
     }
-  }, [sourceUnit, searched, selectedConceptId, doSearch]);
+  }, [autoSelect, sourceUnit, searched, selectedConceptId, doSearch]);
 
   const handleQueryChange = (value: string) => {
     setQuery(value);
@@ -1792,11 +1857,14 @@ function DestinationUnitPicker({
           : null;
 
   return (
-    <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+    <div data-testid="destination-unit-field" className="grid content-start gap-1">
       {selectedConceptId ? (
         <>
-          <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Destination Unit</span>
-          <div className="flex items-center gap-2 text-sm">
+          <div className="flex items-center gap-1">
+            <span className="text-sm font-medium text-slate-700">Destination Unit</span>
+            <HelpTip tip={DESTINATION_UNIT_TIP} />
+          </div>
+          <div className="flex min-h-10 items-center gap-2 rounded-md border border-slate-300 px-3 text-sm">
             <span className="font-mono">{selectedConceptCode}</span>
             <span className="text-slate-500">{selectedConceptName}</span>
             {matchIndicator}
@@ -1806,7 +1874,7 @@ function DestinationUnitPicker({
           {needsReview && <p className="mt-2 text-xs text-amber-700">Source unit changed. Review this destination unit before saving the mapping.</p>}
         </>
       ) : (
-        <Field id="destination_unit_search" label="Destination Unit" tip="UCUM concept linked to this mapping. Used for unit conversion during ETL.">
+        <Field id="destination_unit_search" label="Destination Unit" tip={DESTINATION_UNIT_TIP}>
           <div className="flex items-center gap-2">
             <input
               id="destination_unit_search"

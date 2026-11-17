@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api from "@/api/axios";
 import { destinationError, searchDestinationConcepts, type DestinationConcept } from "./destinationSearch";
+import SectionToggle from "./SectionToggle";
 import {
   REFERENCE_BASIS_LABELS, SNOMED_HELP, basisLabel, sameSnomedSettings,
   type SnomedAttributesPayload, type SnomedLaterality, type SnomedSettings,
@@ -19,6 +20,9 @@ type Props = {
   onSettingsChange?: (settings: SnomedSettings) => void;
   /** Bump to re-read the settings. */
   reloadToken?: number;
+  /** The section is closed until its heading is clicked: most codes have no
+   * SNOMED evidence. It still loads and reports to the dialog while closed. */
+  defaultOpen?: boolean;
 };
 
 const BUTTON = "rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-40";
@@ -26,7 +30,8 @@ const SELECT = "h-6 rounded border border-slate-300 bg-white px-1 text-xs";
 const INFERRED = "__inferred__";
 const NONE = "__none__";
 
-export default function SnomedEvidencePanel({ mappingId, canEdit, onSettingsChange, reloadToken = 0 }: Props) {
+export default function SnomedEvidencePanel({ mappingId, canEdit, onSettingsChange, reloadToken = 0, defaultOpen = false }: Props) {
+  const [open, setOpen] = useState(defaultOpen);
   const [payload, setPayload] = useState<SnomedAttributesPayload | null>(null);
   const [settings, setSettings] = useState<SnomedSettings>({});
   const [picked, setPicked] = useState<DestinationConcept | null>(null);
@@ -128,11 +133,26 @@ export default function SnomedEvidencePanel({ mappingId, canEdit, onSettingsChan
 
   const referenceUnsaved = unsaved("reference_concept_id");
   const references = source?.references ?? [];
+  // What the closed heading says the section holds: the curator's entries,
+  // and whether the source brought any SNOMED evidence of its own.
+  // Every curator entry counts, as it does on LOINC axes: one that lifts a
+  // constraint (null) is as much a decision as one that sets a value.
+  const curatorSet = Object.values(settings).filter(value => value !== null).length;
+  const curatorCleared = Object.values(settings).filter(value => value === null).length;
+  const found = references.length > 0 || Boolean(source?.hierarchy || source?.laterality) || (source?.attributes?.length ?? 0) > 0;
+  const marker = [
+    curatorSet ? `${curatorSet} set` : "",
+    curatorCleared ? `${curatorCleared} cleared` : "",
+    found ? "evidence found" : "",
+    dirty ? "unsaved" : "",
+  ].filter(Boolean).join(" · ");
 
   return <section aria-label="SNOMED evidence" className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
-    <h3 className="text-sm font-semibold text-slate-900">SNOMED evidence</h3>
-    <p className="mt-0.5 text-slate-500">{SNOMED_HELP}</p>
+    <SectionToggle title="SNOMED evidence" open={open} onToggle={() => setOpen(value => !value)} marker={marker} />
+    {/* A failure is said whether or not the section is open. */}
     {error && <p role="alert" className="mt-1 text-rose-700">{error}</p>}
+    {open && <>
+    <p className="mt-0.5 text-slate-500">{SNOMED_HELP}</p>
     {message && <p role="status" className="mt-1 text-green-800">{message}</p>}
     <table className="mt-2 w-full text-left">
       <tbody>
@@ -211,6 +231,7 @@ export default function SnomedEvidencePanel({ mappingId, canEdit, onSettingsChan
       </button>
       {dirty && <span className="text-slate-500">Unsaved settings still apply to Suggest from this dialog.</span>}
     </div>}
+    </>}
   </section>;
 }
 

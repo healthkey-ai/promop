@@ -52,6 +52,8 @@ describeLive("LOINC axes against a live backend", () => {
 
     fireEvent.click(row);
     const panel = await screen.findByRole("region", { name: "LOINC axes" }, { timeout: 20000 });
+    // The section opens on its heading; it is closed until asked for.
+    fireEvent.click(within(panel).getByRole("button", { name: /LOINC axes/ }));
 
     // Inferred from the unit in the stored metadata, not typed by anyone.
     const variants = await within(panel).findByRole("table", { name: "Axis variants" });
