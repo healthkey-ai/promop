@@ -146,11 +146,17 @@ def _indicators(codes: set[str]) -> dict[str, int]:
     return found
 
 
-def is_chronic(code: str | None, indicators: dict[str, int]) -> bool:
-    """HealthTree's override first, then AHRQ's indicator; only 1 is chronic."""
-    override = override_for(code)
-    if override is not None:
-        return override.is_chronic
+def is_chronic(code: str | None, indicators: dict[str, int], overrides: dict[str, bool]) -> bool:
+    """HealthTree's override first (the longest code that covers this one), then
+    AHRQ's indicator; only 1 is chronic."""
+    normalized = normalize_icd10cm(code)
+    if normalized:
+        flat = normalized.replace('.', '')
+        for n in range(len(flat), 2, -1):
+            prefix = flat[:n]
+            key = prefix[:3] + ('.' + prefix[3:] if len(prefix) > 3 else '')
+            if key in overrides:
+                return overrides[key]
     return indicators.get(code) == 1
 
 
@@ -175,9 +181,10 @@ def chronic_filter(rows, *, self_reported=frozenset()):
     judged = [row for row in candidates if row.pk not in reasons]
     codes = condition_icd10cm(judged)
     indicators = _indicators({code for code in codes.values() if code})
+    overrides = dict(ChronicConditionOverride.objects.values_list('code', 'is_chronic'))  # a small table
     kept = []
     for row in judged:
-        if is_chronic(codes[row.pk], indicators):
+        if is_chronic(codes[row.pk], indicators, overrides):
             kept.append(row)
         else:
             reasons[row.pk] = NOT_CHRONIC
