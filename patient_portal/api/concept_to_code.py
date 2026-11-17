@@ -1,7 +1,9 @@
 """Concept-first review using the existing SCCM approval semantics."""
+from datetime import timedelta
 from uuid import UUID
 
 from django.db import OperationalError, transaction
+from django.utils import timezone
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
@@ -446,6 +448,53 @@ def concept_to_code_run(request, run_id):
     return Response(_run_payload(get_object_or_404(SuggestRun, pk=run_id, direction='reverse')))
 
 
+#: How old a preview may be and still vouch for a score: a mapping changes, and a score
+#: that is days old no longer describes what the row says.
+PREVIEW_MAX_AGE = timedelta(hours=24)
+
+
+def _preview_score(run, candidate, description):
+    """The score a preview gave a candidate, if it can still be trusted: else ``None``.
+
+    The run's activity was written by the server, so its ``confidence`` needs no token
+    (a client names the run, never the number). It stands only while the run is fresh
+    (``PREVIEW_MAX_AGE``) and the text it scored (the candidate's description) is still
+    what the row says, ignoring case and spacing.
+    """
+    from omop_core.mapping.confidence_token import description_hash
+    if run is None or candidate is None or run.created_at < timezone.now() - PREVIEW_MAX_AGE:
+        return None
+    if description_hash(candidate.get('source_code_description')) != description_hash(description):
+        return None
+    score = candidate.get('confidence')
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0.0 <= score <= 1.0:
+        return None
+    return score
+
+
+def _preview_candidate(run_id, concept, *, mapping_id):
+    """``(run, candidate)``: the candidate a saved Concept to Code preview listed for this
+    concept and source row, or ``(None, None)``.
+
+    ``mapping_id`` selects an existing proposal's candidate; ``None`` finds none.
+    """
+    if run_id in (None, ''):
+        return None, None
+    try:
+        run_id = UUID(str(run_id))
+    except (TypeError, ValueError):
+        raise ValidationError({'run_id': 'Supply the source preview run ID.'})
+    run = SuggestRun.objects.filter(
+        pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE],
+    ).first()
+    if run is None:
+        return None, None
+    return run, next((candidate for event in (run.activity or [])
+                      if event['concept']['concept_id'] == concept.pk
+                      for candidate in event['candidates']
+                      if mapping_id is not None and candidate.get('mapping_id') == mapping_id), None)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
@@ -482,6 +531,8 @@ def concept_to_code_propose(request, concept_id):
         source_vocabulary_id__in=aliases, source_code=fresh['source_code'],
     ).exists():
         return Response({'detail': 'This source already has a mapping. Refresh before reviewing it.'}, status=409)
+    # The preview's own score stands while the preview is fresh and still describes the source.
+    score = _preview_score(run, candidate, fresh['source_code_description'])
     row, _ = _upsert_source_code_mapping(concept, {
         'source_vocabulary_id': fresh['source_vocabulary_id'], 'source_code': fresh['source_code'],
         'source_code_description': fresh['source_code_description'][:255],
@@ -490,12 +541,12 @@ def concept_to_code_propose(request, concept_id):
         'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
         'status': 'proposed',
         # The preview's ranker scored this source against this concept (#2382).
-        'decision_surface': 'concept2code', 'decision_confidence': candidate.get('confidence'),
+        'decision_surface': 'concept2code', 'decision_confidence': score,
     }, request.user)
     # The preview's ranker judged this source against this concept; without a
-    # ranker the candidate carries no confidence and the row keeps none.
-    if candidate.get('confidence') is not None:
-        row.suggestion_confidence = candidate['confidence']
+    # ranker, or with a stale preview, the row keeps none.
+    if score is not None:
+        row.suggestion_confidence = score
         row.save(update_fields=['suggestion_confidence'])
     return Response(source_payload(row), status=201)
 
@@ -528,10 +579,21 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     selected_status = request.data.get('status', 'proposed')
     if selected_status not in ('proposed', 'approved', 'rejected'):
         raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
+    # A proposal moved to this concept carries the score the preview gave it for this
+    # concept (the machine's own number, read from the saved run, never a client's); a
+    # row whose destination stands keeps what it has, and no preview score stores none.
+    moved = row.target_concept_id != concept.pk
+    run, candidate = (_preview_candidate(request.data.get('run_id'), concept, mapping_id=row.pk)
+                      if moved else (None, None))
+    score = _preview_score(run, candidate, row.source_code_description)
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id, 'decision_surface': 'concept2code',
+        **({'decision_confidence': score} if score is not None else {}),
     }, request.user, mapping=row)
+    if score is not None and moved:
+        row.suggestion_confidence = score
+        row.save(update_fields=['suggestion_confidence'])
     return Response({**source_payload(row), 'repoint': repoint})
 
 

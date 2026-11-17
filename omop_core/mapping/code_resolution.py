@@ -1191,14 +1191,39 @@ def provisional_proposal(source_code, omop_table, vocabularies=None):
             qualifying.setdefault(proposal.target_concept_id, []).append(
                 (proposal.target_concept, percent,
                  canonical_source_vocabulary(proposal.source_vocabulary_id)))
-    if len(qualifying) != 1:
+    concepts = {}
+    for target_id, entries in qualifying.items():
+        concepts[target_id] = entries[0][0]
+    chosen = choose_proposal(
+        [(target_id, percent, vocabulary)
+         for target_id, entries in qualifying.items() for _c, percent, vocabulary in entries],
+        vocabularies)
+    if chosen is None:
         return None
-    entries = next(iter(qualifying.values()))
+    return concepts[chosen[0]], chosen[1]
+
+
+def choose_proposal(entries, vocabularies=None):
+    """The one proposal a code resolves to, from its qualifying *entries*, or None.
+
+    *entries* are ``(target_concept_id, percent, canonical_source_vocabulary)``
+    for the code's qualifying proposals. Nothing qualifies when they disagree on
+    the destination, or when a code system the person holds the code under has no
+    proposal; agreeing proposals take the lowest confidence. The pure half of
+    :func:`provisional_proposal`, so a caller holding the entries (the ingest
+    check) decides exactly as the resolver does, with no query.
+    """
+    by_target = {}
+    for target_id, percent, vocabulary in entries:
+        by_target.setdefault(target_id, []).append((percent, vocabulary))
+    if len(by_target) != 1:
+        return None
+    target_id, items = next(iter(by_target.items()))
     if vocabularies:
         held = {canonical_source_vocabulary(vocabulary) for vocabulary in vocabularies}
-        if not held <= {vocabulary for _concept, _percent, vocabulary in entries}:
+        if not held <= {vocabulary for _percent, vocabulary in items}:
             return None
-    return entries[0][0], min(percent for _concept, percent, _vocabulary in entries)
+    return target_id, min(percent for percent, _vocabulary in items)
 
 
 def _collapse_duplicates(model, concept_col, source_col, match,
@@ -1398,7 +1423,9 @@ def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv
     # What an earlier proposal wrote, if it is not what this one says.
     stale = Q(confidence__isnull=False) & ~Q(**{concept_col: concept.pk, 'confidence': percent})
     with transaction.atomic(), suppress_patient_record_refresh():
-        changed = rows.filter(
+        # A row entered in error is nobody's fact, proposed or approved: it is
+        # never made provisional (taking one back, above, still applies).
+        changed = rows.filter(is_erroneous=False).filter(
             (Q(confidence__isnull=True) & unresolved) | stale,
         ).update(**{concept_col: concept.pk, 'confidence': percent})
     if not changed:
@@ -1411,6 +1438,37 @@ def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv
 
 
 def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
+    """Re-resolve clinical rows for *person* with unresolved or prior targets.
+
+    The work is :func:`_resolve_groups`; this wrapper makes the person's record
+    stale and queues the derivation for whatever it **committed**, even when a
+    later group raises: each group commits on its own, so a partial resolve has
+    changed rows the record must be re-derived from. The derivation runs after
+    the commits (on Celery with a broker; inline with a statement_timeout
+    otherwise) and a failure to queue it never masks the error that stopped the
+    resolve.
+    """
+    touched: set[int] = set()
+    failed = False
+    try:
+        return _resolve_groups(person, source_values, omop_tables, touched)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        if touched:
+            try:
+                PatientRecord.objects.filter(person_id__in=touched).update(derivation_version=0)
+                from omop_core.services.derivation_jobs import get_dispatcher
+                get_dispatcher().dispatch(person)
+            except Exception:
+                if not failed:
+                    raise
+                logger.exception('Could not queue the derivation for person %s after a failed resolve.',
+                                 person.person_id)
+
+
+def _resolve_groups(person, source_values, omop_tables, person_ids_touched):
     """Re-resolve clinical rows for *person* with unresolved or prior targets.
 
     Uses the current approved SCCM mappings.  Returns a dict with counts:
@@ -1437,7 +1495,6 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     provisional = 0
     reverted = 0
     code_details: list[dict] = []
-    person_ids_touched: set[int] = set()
 
     # Concept IDs in quarantine vocabularies (HK-*).
     quarantine_concept_ids = frozenset(
@@ -1615,17 +1672,6 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     if rows_created:
         person_ids_touched.add(person.person_id)
     code_details.extend(creation_details)
-
-    # Mark PatientRecord stale and dispatch derivation asynchronously.
-    # The mapping updates above are fast; the derivation (12-32s on bulk-loaded
-    # patients) runs on Celery when a broker is configured, or inline with a
-    # statement_timeout otherwise — either way, outside this request.
-    if person_ids_touched:
-        PatientRecord.objects.filter(
-            person_id__in=person_ids_touched,
-        ).update(derivation_version=0)
-        from omop_core.services.derivation_jobs import get_dispatcher
-        get_dispatcher().dispatch(person)
 
     return {
         'resolved': resolved,

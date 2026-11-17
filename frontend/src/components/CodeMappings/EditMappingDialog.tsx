@@ -37,7 +37,7 @@ import { hospitalContextDetails, hospitalContextText, sourceSystemManagementUrl 
 import api from "@/api/axios";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Search, Sparkles, Trash2, X } from "lucide-react";
+import { Loader2, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import type { CandidateActivity } from "./SuggestCandidates";
 import {
@@ -47,12 +47,16 @@ import {
   type MappingForm,
   type MappingSurface,
   rankedConfidence,
+  signedScore,
+  type ConfidenceScore,
   type Reference,
   type RepointResult,
   type SearchScope,
   type SuggestRunProgress,
   buildEditForm,
+  confidencePercent,
   emptyForm,
+  pollSuggestRun,
   omopTableFor,
   retirementDetail,
   approvalNote,
@@ -216,6 +220,24 @@ export default function EditMappingDialog({
   // True once the source text or table changed after the last Suggest run
   // here, so its scores no longer describe the code being saved (#2382).
   const suggestionStale = useRef(false);
+  // Calc (#2668): a score being computed for the destination chosen now, and the
+  // last one this dialog computed (the ranker's belief about exactly that destination).
+  const [calcing, setCalcing] = useState(false);
+  const [calcNote, setCalcNote] = useState("");
+  const [calcd, setCalcd] = useState<{ destination: string; confidence: number } | null>(null);
+  const calcRequest = useRef(0);
+  // The destination the form holds now, readable from callbacks that must tell a
+  // change from a repeat without depending on the form.
+  const destinationRef = useRef("");
+  // Abandon a Calc in flight, forget what it computed and what it said. Calc
+  // describes one source and one destination: when either changes it is stale.
+  const resetCalc = useCallback(() => {
+    calcRequest.current += 1;
+    setCalcing(false);
+    setCalcNote("");
+    setCalcd(null);
+  }, []);
+  useEffect(() => { destinationRef.current = form.destination_concept_id; }, [form.destination_concept_id]);
   // The note as the dialog opened with it. A save sends the note only when
   // the curator changed it: the row this form was built from may be stale or
   // carry no note at all (the patient page's rows), and sending that back
@@ -291,6 +313,12 @@ export default function EditMappingDialog({
     selectedRow
     && form.source_code === selectedRow.source_code
     && form.source_vocabulary_id === selectedRow.source_vocabulary_id,
+  );
+  // Calc scores an existing mapping on the text the server has stored for it (a score is about
+  // that text), so an unsaved edit to the code, system or description cannot be scored yet.
+  const sourceTextEdited = Boolean(
+    selectedRow?.mapping_id
+    && (!sourceIdentityUnchanged || form.source_code_description !== (selectedRow.source_code_description || "")),
   );
   const sourceSystemContext = sourceIdentityUnchanged
     ? selectedRow?.source_system_context ?? sourceEvidence?.system_context
@@ -418,6 +446,8 @@ export default function EditMappingDialog({
       setSavedSourceQuantity(selectedRow?.example_quantity || "");
       setSavedSourceUnit(selectedRow?.source_unit || "");
       setSourceSaveMessage("");
+      // A score computed for the last row says nothing about this one.
+      resetCalc();
       setUnitSelectionAuto(false);
       setUnitSelectionNeedsReview(false);
       const openedMetric: MetricFields = {
@@ -466,7 +496,7 @@ export default function EditMappingDialog({
         }
       }
     })();
-  }, [open, mode, selectedRow, reference, withDefaultDestination, applyStored]);
+  }, [open, mode, selectedRow, reference, withDefaultDestination, applyStored, resetCalc]);
 
   // ── Example patients for the source code (#1911) ─────────────────
   const exampleVocabulary = selectedRow?.source_vocabulary_id ?? "";
@@ -606,14 +636,24 @@ export default function EditMappingDialog({
   const setField = useCallback((field: keyof MappingForm, value: string) => {
     if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");
     if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
-    if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
+    const sourceEdited = ["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field);
+    if (sourceEdited) {
       dialogRequest.current += 1;
       suggestionStale.current = true;
       setSearchingConcepts(false);
       setError("");
     }
-    setForm((prev) => ({ ...prev, [field]: value }));
-  }, []);
+    // A confidence (and a Calc in flight) describes one source and one destination.
+    const destinationMoved = field === "destination_concept_id" && value !== destinationRef.current;
+    if (sourceEdited || destinationMoved) resetCalc();
+    if (field === "destination_concept_id") destinationRef.current = value;
+    setForm((prev) => ({
+      ...prev,
+      [field]: value,
+      ...(sourceEdited || destinationMoved
+        ? { suggestion_confidence: null, suggestion_confidence_token: null } : {}),
+    }));
+  }, [resetCalc]);
 
   const setDomain = useCallback((domainId: string) => {
     setSuggestionMessage("");
@@ -621,6 +661,7 @@ export default function EditMappingDialog({
     suggestionStale.current = true;
     setSearchingConcepts(false);
     setError("");
+    resetCalc();
     setForm((prev) => {
       const offered = reference.source_code_systems_by_domain[domainId] || [];
       const stillOffered =
@@ -631,14 +672,23 @@ export default function EditMappingDialog({
         domain_id: domainId,
         source_vocabulary_id: stillOffered ? prev.source_vocabulary_id : "",
         omop_table: omopTableFor(reference, domainId),
+        suggestion_confidence: null,
+        suggestion_confidence_token: null,
       };
     });
-  }, [reference]);
+  }, [reference, resetCalc]);
 
-  const applyConcept = useCallback((concept: ConceptResult, adoptDomain = false) => {
+  const applyConcept = useCallback((concept: ConceptResult, adoptDomain = false, score?: ConfidenceScore) => {
     dialogChoice.current = dialogRequest.current;
     setSuggestionMessage("");
+    // A new destination makes a Calc in flight, and what it said, stale; the same one does not.
+    if (destinationRef.current !== String(concept.concept_id)) resetCalc();
+    destinationRef.current = String(concept.concept_id);
     setForm((prev) => {
+      // The confidence described the destination it was computed for. A new
+      // destination carries the one a Suggest run scored it with, else none
+      // until Calc computes it; the same destination keeps what it had.
+      const sameDestination = prev.destination_concept_id === String(concept.concept_id);
       const domainId = (adoptDomain ? concept.domain_id : prev.domain_id) || concept.domain_id || "";
       return {
         ...prev,
@@ -654,9 +704,15 @@ export default function EditMappingDialog({
         measurement_type: concept.measurement_type || "",
         suggested_unit: concept.suggested_unit || "",
         example_units: concept.example_units || [],
+        // A score the run gave this concept, with its signed token; otherwise a repeat keeps
+        // what it had and a different destination has none until Calc computes it.
+        suggestion_confidence: score ? score.confidence
+          : sameDestination ? prev.suggestion_confidence : null,
+        suggestion_confidence_token: score ? score.token
+          : sameDestination ? prev.suggestion_confidence_token : null,
       };
     });
-  }, [reference]);
+  }, [reference, resetCalc]);
 
   const resolveConceptId = useCallback(async (rawId: string) => {
     const id = rawId.trim();
@@ -847,7 +903,10 @@ export default function EditMappingDialog({
         // A variant's winner belongs to the variant, not the mapping's destination.
         setVariantMessage(`Candidates for the ${variantLabel(axisKey)} variant are shown below. Use one to make it that variant's destination.`);
       } else if (result?.suggested && dialogChoice.current !== request) {
-        applyConcept(result.suggested as ConceptResult);
+        applyConcept(
+          result.suggested as ConceptResult, false,
+          signedScore(current.activity ?? [], String((result.suggested as ConceptResult).concept_id)) ?? undefined,
+        );
         setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
       } else if (!result?.suggested && dialogChoice.current !== request) {
         setSuggestionMessage("No winner selected. You can choose a candidate or search below.");
@@ -861,6 +920,65 @@ export default function EditMappingDialog({
       }
     }
   }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings, variantCount, suggestVariants, variantLabel]);
+
+  /**
+   * Calc (#2668): ask the ranker how sure it is of the destination chosen now, with
+   * the same evidence Suggest uses. Fills the number; writes nothing until Save.
+   */
+  const calcConfidence = useCallback(async () => {
+    const destination = form.destination_concept_id;
+    if (!destination) return;
+    const request = ++calcRequest.current;
+    const current = () => request === calcRequest.current;
+    setCalcing(true);
+    setCalcNote("");
+    try {
+      const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
+      const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/score/", {
+        source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
+        source_code_description: form.source_code_description, omop_table: form.omop_table,
+        source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
+        strategies: enabled, ranking_model: rankingModel, async: true,
+        destination_concept_id: Number(destination),
+        ...(sourceIdentityUnchanged && selectedRow?.mapping_id ? { mapping_id: selectedRow.mapping_id } : {}),
+        ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
+          ? { loinc_axes: loincAxes.overrides } : {}),
+        ...(snomedSettings && sourceIdentityUnchanged && snomedSettings.mappingId === selectedRow?.mapping_id
+          ? { snomed_attributes: snomedSettings.settings } : {}),
+      });
+      const finished = await pollSuggestRun(
+        started,
+        async (runId) => (await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${runId}/`, {
+          params: { include_activity: "1" },
+        })).data,
+        current,
+      );
+      if (!finished || !current()) return;
+      if (finished.state === "failure") {
+        setCalcNote(finished.error || "The score could not be computed.");
+        return;
+      }
+      const result = finished.activity?.filter(event => event.stage === "result").at(-1) as
+        { scored?: { confidence: number | null; token?: string; note?: string } } | undefined;
+      const confidence = result?.scored?.confidence;
+      const token = result?.scored?.token;
+      if (typeof confidence === "number" && token) {
+        setForm((prev) => prev.destination_concept_id === destination
+          ? { ...prev, suggestion_confidence: confidence, suggestion_confidence_token: token } : prev);
+        setCalcd({ destination, confidence });
+      } else {
+        setCalcNote(result?.scored?.note || "No confidence could be computed for this destination.");
+      }
+    } catch (failure) {
+      // A destination the server will not score says why (400).
+      const detail = (failure as { response?: { data?: { destination_concept_id?: string } } })?.response?.data?.destination_concept_id;
+      if (current()) setCalcNote(detail || "Could not compute a confidence. Try again.");
+    } finally {
+      if (current()) setCalcing(false);
+    }
+  }, [form.destination_concept_id, form.source_code, form.source_vocabulary_id, form.source_code_description,
+    form.omop_table, strategies, rankingModel, selectedRow?.source_metadata, selectedRow?.mapping_id,
+    sourceIdentityUnchanged, loincAxes, snomedSettings]);
 
   const suggestedVariant = individualSuggestion?.axisKey ? currentVariant(individualSuggestion.axisKey) : undefined;
 
@@ -913,8 +1031,13 @@ export default function EditMappingDialog({
   const suggestedHere = individualSuggestion !== null && !individualSuggestion.axisKey
     && !suggestionStale.current;
 
+  // The number on screen is never sent (the server stores only a confidence it signed):
+  // a token for it goes instead, and null when the dialog cleared it.
+  const { suggestion_confidence: shownConfidence, suggestion_confidence_token: confidenceToken, ...formFields } = form;
   const savePayload = () => ({
-    ...form,
+    ...formFields,
+    ...(shownConfidence != null && confidenceToken ? { suggestion_confidence_token: confidenceToken } : {}),
+    ...(shownConfidence === null ? { suggestion_confidence: null } : {}),
     notes: form.notes !== openedNotes.current ? form.notes : undefined,
     ...(patientId ? { patient_id: Number(patientId) } : {}),
     // The table this code was listed under on the patient page: rows there
@@ -929,6 +1052,8 @@ export default function EditMappingDialog({
     ...(showMetricFields && metric.current.metric_key.trim() !== metric.opened.metric_key
       ? { metric_key: metric.current.metric_key.trim() } : {}),
     ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
+    // A Calc for the destination being saved is the ranker's belief about exactly it.
+    ...(calcd && calcd.destination === form.destination_concept_id ? { decision_confidence: calcd.confidence } : {}),
     source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
     // Empty stays empty: never send concept 0 as a destination.
     destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
@@ -1427,7 +1552,8 @@ export default function EditMappingDialog({
                       void axesPanel.current?.setVariantDestination(axisKey, candidate.concept_id);
                       return;
                     }
-                    applyConcept(candidate as ConceptResult);
+                    applyConcept(candidate as ConceptResult, false, signedScore(
+                      individualSuggestion.activity, String(candidate.concept_id)) ?? undefined);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}
                 {!defaultDestination && (<><div className="flex gap-2">
@@ -1727,6 +1853,34 @@ export default function EditMappingDialog({
                   </option>
                   <option value="rejected">Rejected</option>
                 </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <span
+                  data-testid="mapping-confidence"
+                  role="status"
+                  aria-label="Confidence"
+                  title={confidencePercent(form.suggestion_confidence)
+                    ? `Confidence ${confidencePercent(form.suggestion_confidence)}%`
+                    : "Confidence: not computed yet"}
+                  className="inline-block min-w-[2ch] text-right text-sm font-medium tabular-nums text-slate-800"
+                >
+                  {confidencePercent(form.suggestion_confidence)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void calcConfidence()}
+                  disabled={!form.destination_concept_id || calcing || sourceTextEdited}
+                  title={!form.destination_concept_id
+                    ? "Choose a destination to compute its confidence."
+                    : sourceTextEdited
+                      ? "Save the source change first: a score is about the saved source text."
+                      : "Compute (or recompute) the ranker's confidence in this destination."}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+                >
+                  {calcing && <Loader2 size={13} className="animate-spin" aria-hidden="true" />}
+                  Calc
+                </button>
+                {calcNote && <span role="note" data-testid="calc-note" className="max-w-xs text-xs text-slate-600">{calcNote}</span>}
               </div>
               {selectedRow?.mapping_id && selectedRow?.destination_concept_id && (
                 <button

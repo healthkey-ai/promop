@@ -31,6 +31,8 @@ type Alternative = {
   concept_name?: string;
   confidence: number;
   ranker?: string;
+  /** Signed by the server: the only way this score can be saved on a mapping (#2668). */
+  confidence_token?: string;
 };
 export type CandidateActivity = {
   stage: string;

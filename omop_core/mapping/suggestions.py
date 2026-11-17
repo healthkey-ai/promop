@@ -1649,7 +1649,8 @@ def _axis_note(job):
 
 def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
              strategies, lexical_limit, source_context=None, on_candidates=None,
-             source_axes=None, axis_hints=None, snomed_source=None, lab_reason=None):
+             source_axes=None, axis_hints=None, snomed_source=None, lab_reason=None,
+             extra_candidates=None):
     """Everything for one source code that needs the database, and nothing more.
 
     Split out so the ranking that follows is pure network work and can be run
@@ -1678,6 +1679,12 @@ def _prepare(*, source_code, source_vocabulary_id, source_text, domain_id,
             description=source_text, source_concept=None, umls_name='',
             domain_id=domain_id, omop_table='',
         )
+    # A destination the curator already chose, being scored: it joins the pool
+    # before enrichment and the axis rules, so it is judged exactly as a
+    # retrieved candidate would be (and excluded as one would be).
+    if extra_candidates:
+        present = {c['concept_id'] for c in candidates}
+        candidates = candidates + [dict(c) for c in extra_candidates if c['concept_id'] not in present]
     # Always enrich — even UMLS-only candidates benefit from synonym/
     # relationship data that helps the ranker make an informed choice.
     loaded_source = source_context.get('loaded_source_concept') or {}
@@ -2437,12 +2444,146 @@ def _row_still_open(current, *, selected_target_id, selected_provenance):
     )
 
 
+def selected_candidate(concept):
+    """A concept a curator already chose, in the shape retrieval hands the ranker."""
+    return {
+        'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
+        'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
+        'concept_class_id': concept.concept_class_id, 'domain_id': concept.domain_id,
+        'standard_concept': concept.standard_concept, 'retrieval': 'selected',
+    }
+
+
+def _rank_for_score(job, ranking_model):
+    """Each requested ranker's own verdict on the pool: ``{ranker: (chosen, note, alternatives)}``.
+
+    Run per ranker rather than through the dispatcher, because scoring needs to
+    know which ranker chose what: in dual mode the dispatcher merges both into
+    one winner and one list of alternatives. The rankers read no database, so
+    both run concurrently.
+    """
+    if not job['candidates']:
+        return {}
+    wanted = ['anthropic', 'jev'] if ranking_model == 'both' else [ranking_model]
+    runners = {'anthropic': rank_candidates, 'jev': rank_candidates_jev}
+
+    def run(ranker):
+        try:
+            return runners[ranker](
+                job['source_code'], job['candidates'], job['source_text'],
+                source_context=job.get('source_context'),
+            )
+        except Exception:  # noqa: BLE001 - degrade, never fail
+            logger.warning('Scoring ranker %s failed.', ranker, exc_info=True)
+            return None, f'{ranker} ranking failed.', None
+
+    if len(wanted) == 1:
+        return {wanted[0]: run(wanted[0])}
+    with ThreadPoolExecutor(max_workers=len(wanted)) as pool:
+        futures = {ranker: pool.submit(run, ranker) for ranker in wanted}
+        return {ranker: future.result() for ranker, future in futures.items()}
+
+
+def scored_destination(results, concept, job):
+    """How the rankers judged one named destination.
+
+    ``{concept_id, confidence, ranked, note}``. ``confidence`` (0-1) is returned
+    only when a ranker *chose* the destination, and is that ranker's score for it
+    (the higher, when both chose it). A ranker that preferred another concept or
+    declined gives no number even if it scored every candidate (Jev does): a
+    destination the ranker would not pick is not one it is confident in. It is
+    ``None``, with a note, when the destination conflicts with the source's
+    evidence, the ranking model was unavailable (its retrieval-order stand-in is
+    not a verdict and is never scored), or the rankers declined or preferred
+    another. Never a guess: provisional data reads this number as evidence.
+    """
+    concept_id, name = concept.concept_id, concept.concept_name
+    excluded = next((c for c in job.get('axis_excluded') or [] if c.get('concept_id') == concept_id), None)
+    if excluded is not None:
+        reasons = ', '.join(
+            [loinc_axes.AXIS_LABELS.get(a, a) for a in excluded.get('axis_conflicts', [])]
+            + [f'SNOMED {n}' for n in excluded.get('snomed_conflicts', [])]
+        ) or str(excluded.get('exclusion_reason') or 'the source evidence')
+        return {'concept_id': concept_id, 'confidence': None, 'ranked': False,
+                'note': f'{name} conflicts with the source ({reasons}), so it was not scored.'}
+    scores, preferred, declined, chose_unscored, unavailable = [], None, False, False, []
+    for ranker, (chosen, note, alternatives) in results.items():
+        if chosen is not None and _is_retrieval_fallback(chosen, note):
+            unavailable.append(note)
+        elif chosen is None:
+            if _ranker_answered(None, note):
+                declined = True
+            else:
+                unavailable.append(note)
+        elif chosen.get('concept_id') == concept_id:
+            score = next((
+                a['confidence'] for a in alternatives or []
+                if isinstance(a, dict) and a.get('concept_id') == concept_id
+                and isinstance(a.get('confidence'), (int, float)) and not isinstance(a['confidence'], bool)
+                and 0.0 <= a['confidence'] <= 1.0
+            ), None)
+            if score is None:
+                chose_unscored = True
+            else:
+                scores.append(score)
+        elif preferred is None:
+            preferred = chosen
+    if scores:
+        return {'concept_id': concept_id, 'confidence': max(scores), 'ranked': True, 'note': ''}
+    if chose_unscored:
+        return {'concept_id': concept_id, 'confidence': None, 'ranked': True,
+                'note': 'The ranker chose this concept but gave no score, so none was computed.'}
+    if preferred is not None:
+        return {'concept_id': concept_id, 'confidence': None, 'ranked': True,
+                'note': f"The ranker preferred {preferred.get('concept_name', 'another concept')} "
+                        f"({preferred.get('concept_id')}) over {name}; choose that one or review."}
+    if declined:
+        return {'concept_id': concept_id, 'confidence': None, 'ranked': True,
+                'note': 'The ranker found no suitable concept.'}
+    detail = next((_unavailable_status(n) for n in unavailable if 'Details: ' in (n or '')), 'unavailable')
+    return {'concept_id': concept_id, 'confidence': None, 'ranked': False,
+            'note': f'The ranking model is unavailable, so no confidence was computed ({detail}).'}
+
+
+def signed_alternatives(alternatives, chosen, *, source_vocabulary_id, source_code, omop_table,
+                        source_description):
+    """*alternatives* with a ``confidence_token`` on the chosen concept's own score.
+
+    The dialog saves a Suggest winner's score only through this token (see
+    ``confidence_token``), so only a score a ranker stood behind is signed: the
+    first entry for the concept that was *chosen* (the winner's own ranker lists
+    first). Nothing is signed when no ranker chose a concept, and never an
+    alternative a ranker merely scored (Jev lists every candidate it was shown,
+    declined or not).
+    """
+    from omop_core.mapping import confidence_token
+    signed, done = [], chosen is None
+    for alt in alternatives or []:
+        alt = dict(alt) if isinstance(alt, dict) else alt
+        if (not done and isinstance(alt, dict) and alt.get('concept_id') == chosen.get('concept_id')
+                and isinstance(alt.get('confidence'), (int, float)) and not isinstance(alt['confidence'], bool)
+                and 0.0 <= alt['confidence'] <= 1.0):
+            alt['confidence_token'] = confidence_token.issue(
+                source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+                omop_table=omop_table, destination_concept_id=alt['concept_id'],
+                source_description=source_description, confidence=alt['confidence'],
+            )
+            done = True
+        signed.append(alt)
+    return signed
+
+
 def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                         source_description='', row_metadata=None, strategies=None,
                         lexical_limit=CANDIDATE_LIMIT, activity=None,
                         ranking_model=DEFAULT_RANKING_MODEL, axis_overrides=None,
-                        observed_units=None, snomed_overrides=None):
+                        observed_units=None, snomed_overrides=None, score_concept_id=None):
     """Run the shared retrieval and ranking pipeline for one dialog row.
+
+    With *score_concept_id* the pipeline instead scores that one destination
+    (the dialog's Calc): the concept is guaranteed to be in the pool, the rankers
+    run once with no query-expansion retry, and the result carries ``scored``
+    (see :func:`scored_destination`). Nothing is written either way.
 
     *row_metadata* is the Source Metadata the dialog shows for the row. The
     rankers read it de-identified; the LOINC axes are inferred from it as
@@ -2470,6 +2611,11 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                 "source_vocabulary_id": source_vocabulary_id, **details,
             })
 
+    scored_concept = None
+    if score_concept_id is not None:
+        scored_concept = Concept.objects.filter(concept_id=score_concept_id).first()
+        if scored_concept is None or not scored_concept.concept_id:
+            raise ValueError(f'No concept {score_concept_id!r} to score.')
     emit("retrieving")
     source_axes, axis_hints = source_loinc_axes(
         domain_id=domain_id, source_vocabulary_id=source_vocabulary_id,
@@ -2486,6 +2632,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         ),
         lab_reason=loinc_axes.lab_signal(source_vocabulary_id, metadata, source_axes),
         strategies=strategies, lexical_limit=lexical_limit,
+        extra_candidates=[selected_candidate(scored_concept)] if scored_concept else None,
         on_candidates=lambda strategy, candidates: emit(
             "candidates", strategy=strategy, candidates=candidates,
         ),
@@ -2497,6 +2644,33 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         ),
     )
     emit("ranking")
+    if scored_concept is not None:
+        # One selection per ranker, no expansion retry: a retry would widen the
+        # pool the curator's destination is judged against.
+        results = _rank_for_score(job, ranking_model)
+        scored = scored_destination(results, scored_concept, job)
+        # Only the destination's own score, when a ranker chose it, is signed; the
+        # alternatives (Jev scores every candidate) are shown unsigned.
+        alternatives = [dict(a) for _chosen, _note, alts in results.values() for a in alts or []]
+        if scored['confidence'] is not None:
+            from omop_core.mapping import confidence_token
+            scored['token'] = confidence_token.issue(
+                source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+                omop_table=omop_table, destination_concept_id=scored_concept.concept_id,
+                source_description=source_description, confidence=scored['confidence'],
+            )
+        emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,
+             suggested=None, note=scored['note'], strategy_used=None,
+             candidates=job['candidates'], alternatives=alternatives,
+             scored=scored, **_axis_activity(job))
+        return {
+            'scored': scored, 'suggested': None, 'note': scored['note'],
+            'strategy_used': None, 'umls_cui': job['umls_cui'],
+            'candidates_considered': len(job['candidates']),
+            'candidates': job['candidates'], 'vector_reranked': job['vector_reranked'],
+            'alternatives': alternatives, 'ranking_timings': None,
+            **_axis_activity(job),
+        }
     rank_and_expand_jobs([job], ranking_model=ranking_model)
 
     from omop_core.services.athena_mapping_guard import (
@@ -2507,9 +2681,17 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
                                           chosen['concept_id']):
         chosen, note = None, ATHENA_DUPLICATE_MESSAGE
 
+    # Each scored alternative carries a signed token, the only way the dialog can
+    # save its score on a mapping (see confidence_token).
+    alternatives = (
+        signed_alternatives(job['alternatives'], chosen, source_vocabulary_id=source_vocabulary_id,
+                            source_code=source_code, omop_table=omop_table,
+                            source_description=source_description)
+        if job.get('alternatives') else job.get('alternatives')
+    )
     emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,
          suggested=chosen, note=note, strategy_used=job['strategy_used'],
-         candidates=job['candidates'], alternatives=job.get('alternatives'),
+         candidates=job['candidates'], alternatives=alternatives,
          ranking_timings=job.get('ranking_timings'), **_axis_activity(job))
 
     return {
@@ -2521,7 +2703,7 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         'candidates': job['candidates'],
         'vector_reranked': job['vector_reranked'],
         'query_expansion': job.get('query_expansion'),
-        'alternatives': job.get('alternatives'),
+        'alternatives': alternatives,
         'ranking_timings': job.get('ranking_timings'),
         **_axis_activity(job),
     }

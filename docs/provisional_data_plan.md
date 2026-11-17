@@ -108,6 +108,101 @@ proposals are ranked, and a curator can run it from the patient page today.
 The lookup contract is second: the ETL repository has to change with it. FHIR
 sync is third and is gated per organization.
 
+### As built in #2662: the server makes the rows
+
+The ETL does not propose concepts. Proposals come from Code to Concept and
+Concept to Code, each stored with a confidence on the mapping
+(`suggestion_confidence`). An ETL load leaves the rows for such a code at concept
+0, so the ETL needs no change and the lookup/`confidence` contract above is not
+on HealthTree's path: the server resolves them with the per-person resolver that
+Generate OMOP already uses (`resolve_person_source_codes`), and
+`omop_core/services/provisional_sweep.py` decides for whom and when. Off with
+`PROVISIONAL_DATA_ENABLED`: nothing is queried, queued or written.
+
+- **Sweep.** `manage.py sweep_provisional_rows` (also queued on the worker, and
+  `--dry-run`, `--mapping-id`, `--after-person-id`) resolves, in person-id chunks
+  of 200, every person holding an unresolved row, a provisional row or an
+  inventory code with no row under a qualifying proposal (unscoped, `proposed`, a
+  destination, a confidence at or above the floor); and every holder of any
+  provisional row, so a proposal that stopped qualifying with no hook to say so
+  gets its rows taken back. Idempotent (a person already provisional at the
+  current proposal is "already resolved"), never touches a real row, and the
+  counts land on a `SourceCodeResolveRun`. It is resumed by its cursor, the last
+  person id a chunk finished, which travels in the Celery task arguments (a
+  killed task retries its own chunk) and is printed by the command; no cursor is
+  stored, because the selection shrinks as persons are resolved and the cursor
+  covers the ones that stay candidates (a provisional row is rewritten, never
+  done). A retried chunk can double-count in the run's totals; the rows do not
+  change.
+- **Trigger.** A `pre_save`/`post_save` pair on `SourceCodeConceptMapping`
+  compares what the mapping said before the save with what it says after (does it
+  qualify, its destination, its confidence, its table) and queues a sweep of its
+  code, after commit, when it qualifies now or did before **and** the answer
+  changed. A new or changed proposal reaches patients; a withdrawn one (rejected,
+  destination cleared, confidence below the floor) is taken back; a save that only
+  changed notes, or a proposal with no ranker confidence, queues nothing. Every
+  writer that calls `.save()` is covered (Suggest, group Suggest, reverse
+  Suggest, suggest-one accept, Concept to Code, the dialog and Calc); a
+  `.update()`/`bulk_update()` is not, and the sweep covers it. Approval and
+  rejection are unchanged (#2530): approval promotes, rejection or a moved
+  destination reverts.
+- **Only with a broker, never in a request.** A trigger or the ingest hook below
+  resolves nothing (and so derives no record) inside a request. With no
+  `CELERY_BROKER_URL` they do nothing (logged at debug) and
+  `manage.py sweep_provisional_rows` is the way to run it, which also makes it
+  the path on a developer machine.
+- **Coalesced.** One pending sweep per code and one pending job per person: a
+  cache key is taken when the job is queued and dropped when it starts, so a
+  batch of saves for one code, or twenty ingest POSTs for one patient, queue one
+  job, and a change after the job has started queues another. The key is taken
+  inside the commit callback, so a save that rolls back leaves none. The cache is
+  best effort: an outage means a duplicate job, never a failed save or POST, and a
+  per-process cache (no `CACHE_URL`) is warned about once because coalescing is
+  then not shared between workers.
+- **After ingest.** The bulk OMOP write and the FHIR sync call
+  `queue_person_resolve(person_id)` once per request: a cheap check that this
+  person would change (an unresolved row, an inventory code with no row, or a
+  provisional row that no longer matches its code's proposal), and only then a
+  resolve job after commit. The check is one query per clinical table for the
+  person's own distinct (code, concept, confidence, erroneous) and one for their
+  inventory, compared in Python against a cached index of the qualifying
+  proposals with the resolver's own choice rule (`choose_proposal`), per code
+  system and case-insensitively, so a Cerner-coded person with only an Epic
+  proposal is not queued. A request never builds the index (it loads every
+  proposal): a cold cache queues a warm-up in the worker and the check says "not
+  now"; every sweep chunk refreshes it, which is how a new proposal reaches the
+  check (up to an hour stale otherwise). It counts a write that only **updated**
+  rows too: an ETL replay re-posts a row at concept 0 and the upsert rewrites the
+  provisional row to unresolved, and the queued resolve makes it provisional
+  again (tested end to end). New patients do not wait for a sweep; with the
+  switch off, or no broker, it costs no query.
+- **Safe to run concurrently and for long.** A chunk stops on a 600 s budget and
+  hands its cursor on, saving progress every ten persons; both tasks carry a soft
+  time limit (60 s under `CELERY_TASK_TIME_LIMIT`) so the chunk can save progress
+  and return its cursor before the hard limit, and a sweep whose retries are
+  spent marks its run FAILED, as does an enqueue that fails. The per-person
+  resolve holds a Postgres **session** advisory lock on the person id (bounded
+  wait; a person another worker holds is skipped by the sweep and retried by the
+  job) while the resolver runs its own short per-group transactions. It is
+  deliberately not one outer transaction: that held row locks across code groups
+  and deadlocked with the ETL's keyed bulk write (tested with two threads), and
+  ran an inline derivation inside the lock's transaction so a timeout rolled the
+  whole resolve back. Each group's rows commit before the next, and the
+  derivation runs after them; a derivation failure surfaces as an error on the
+  run but never undoes the rows.
+- **Never made provisional:** a row entered in error. Taking a provisional row
+  back still applies to one.
+- **Only unscoped proposals qualify.** As `provisional_proposal` already
+  required: the per-patient inventory cannot say which hospital a code came from,
+  so **an organization-scoped proposal writes no provisional rows**. A mapping is
+  scoped only when the caller passes an organization for a code system such as
+  Epic or Cerner; staging has none, but HealthTree's ETL may pass
+  `organization_id`, which must be confirmed before enabling on HealthTree.
+  Candidate selection matches the source code exactly (the resolver then matches
+  case-insensitively for the persons it finds). Not guarded: a code whose
+  proposal under one code system was rejected can still fall back to a proposal
+  for the same code under another system, as the resolver already behaves.
+
 ## Approval, rejection and a moved proposal
 
 `repoint_clinical_rows` is the one place rows change concept after the fact,
@@ -301,6 +396,26 @@ The same proposals, to the same audiences, on the other screens.
   filter and sort, which is not flat or cheap at list scale; the simpler rule
   is chosen, pinned by a test, and the provisional picture is the row's display.
 - Tests: `tests/test_provisional_phr.py`.
+
+### As built: a mapping's confidence on the dialog (#2668)
+
+A provisional row needs a proposed mapping with a confidence, and the proposals
+come from Code to Concept and Concept to Code (the ETL proposes no concepts). The
+column is `suggestion_confidence`; it stays on a mapping when it is approved. The
+Edit Mapping dialog shows it as a bare percent to the right of the status
+dropdown, with a **Calc** button that scores the destination chosen now through
+`POST /api/v1/code-mappings/score/` (the rankers, with that concept guaranteed in
+the pool), so a hand-picked destination can reach the floor and yield provisional
+rows. A score is never invented (no ranker answer, or a ranker that preferred
+another concept, means no number and a note), and it is never typed in: the server
+signs what Calc or Suggest computed for a source and destination, and a save stores
+a confidence only through that token, so no mapping writer can manufacture the
+evidence provisional data trusts. The token binds the source, destination and a hash
+of the description scored, covers only a score a ranker stood behind, and a stored
+confidence is cleared when the destination or the source is re-pointed; a Concept to
+Code preview's own score is trusted only while the preview is under a day old and
+still describes the row. Details in the Code Mapping Suggest section of
+`AGENTS.md`.
 
 ### As built in phase 1b (#2530)
 
@@ -663,6 +778,10 @@ existing-mapping view) is the same number and lands with this.
 
 ### Phase 2: the ETL path
 
+Superseded for HealthTree by the server-side sweep, trigger and after-ingest job
+(#2662, above): the ETL does not propose concepts and sends no `confidence`. The
+lookup contract below remains for a caller that does want to write rows itself.
+
 - `code-mappings/lookup/` `include_provisional` and the response fields.
 - ETL repository change to write `confidence` and to re-send after approval.
 - Lab results API and FHIR export handling.
@@ -679,18 +798,25 @@ existing-mapping view) is the same number and lands with this.
 
 ### Gaps before HealthTree can run with provisional data on (2026-11-17)
 
-Phases 0 to 1c are on `dev`: the confidence column, the Generate OMOP writes,
-the two tables, the provisional pass, the PATCH mirror and the overlay on the
-patient-record read, all behind `PROVISIONAL_DATA_ENABLED`. To deploy to
-HealthTree GCP with it on, and have patients see proposals without a click:
+Status as of 2026-11-17, all behind `PROVISIONAL_DATA_ENABLED`. Built and on
+`dev`: the confidence column, the Generate OMOP writes, the two tables, the
+provisional pass, the PATCH mirror, the overlay on the patient-record read, the
+page indicator, the PHR and list overlay, computed fields, the mapping
+confidence on the Edit Mapping dialog (signed Calc score) and the server-side
+sweep. To deploy to HealthTree GCP with it on, and have patients see proposals
+without a click:
 
-| Gap | Issue |
-|---|---|
-| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) |
-| The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) |
-| Computed fields (BMI, scores, stages) use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) |
-| HealthTree's clinical rows come from the ETL: write provisional rows for them (ETL `confidence` or a server sweep) and widen the pass beyond labs, assertions and curated mappings (#2533, #2534) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) |
-| Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) |
+| Gap | Issue | State |
+|---|---|---|
+| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) | done (#2665); controls that bypass `Field` (GELF, FLIPI, treating institution, planned therapies) show no indicator yet |
+| The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) | done (#2667); Genetics and Imaging wait on #2534; list filters and sort stay approved-only |
+| Computed fields use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) | done (#2666, #2672); JSON-input fields, FLC pair, age left |
+| Proposals are stored with a confidence on the mapping, kept on approval, recomputed by Calc | [#2668](https://github.com/healthkey-ai/promop/issues/2668) | done (#2670) |
+| Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
+| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
+| The patient's "Confirm my record" attestation is still offered while proposals are shown | (no issue yet) | open |
+| Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
+| Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | open |
 
 The rule for all of them: with the switch off, no provisional data is computed,
 stored or shown to anyone.

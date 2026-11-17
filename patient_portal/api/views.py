@@ -8793,6 +8793,14 @@ class _OmopBulkCreateMixin:
             if not skip_refresh:
                 refresh_patient_record(person)
 
+        # Rows an ETL just wrote for a code that has a proposal sit at concept 0
+        # until resolved; queue the person's resolve so they are provisional
+        # without waiting for a sweep (#2662). A replay counts too: it rewrites
+        # an existing provisional row back to concept 0, and the resolve puts it
+        # right again. Off, no broker, or nothing covered is free.
+        if new_ids or updated:
+            from omop_core.services.provisional_sweep import queue_person_resolve
+            queue_person_resolve(person.person_id)
         data = {'created': len(new_ids), 'updated': updated,
                 'unattributed_matches': unattributed_matches, 'ids': list(ids)}
         if model_name in _KEYED_MODELS:
@@ -12957,6 +12965,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'suggest_strategy': mapping.suggest_strategy if mapping else '',
             'decision_surface': mapping.decision_surface if mapping else '',
             'decision_confidence': mapping.decision_confidence if mapping else None,
+            'suggestion_confidence': mapping.suggestion_confidence if mapping else None,
             'umls_cui': mapping.umls_cui if mapping else '',
             'created_by': _mapping_author(mapping),
             # Who signed it off, which survives every later edit -- unlike
@@ -13046,6 +13055,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         'suggest_strategy': mapping.suggest_strategy if mapping else '',
         'decision_surface': mapping.decision_surface if mapping else '',
         'decision_confidence': mapping.decision_confidence if mapping else None,
+        'suggestion_confidence': mapping.suggestion_confidence if mapping else None,
         'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
         # Who signed it off, which survives every later edit -- unlike
@@ -13287,6 +13297,34 @@ def _decision_confidence(data, mapping, concept, previous_concept_id):
             })
         return confidence
     return mapping.suggestion_confidence if destination_stands else None
+
+
+def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, concept, source_description):
+    """What a save does to the mapping's ``suggestion_confidence``: ``(set, value)``.
+
+    Provisional data reads this number as evidence, so the server stores only a
+    confidence it produced: the dialog sends the ``suggestion_confidence_token``
+    the score endpoint (Calc) or a Suggest run signed for this source, table,
+    destination and description (``confidence_token``). A token that is forged,
+    expired or for another source, destination or description is a 400, never a
+    silent store. A bare ``suggestion_confidence`` number is ignored; ``null``
+    clears it. Left out entirely, the rules in the caller stand (kept while the
+    destination and source stand, cleared when either moves).
+    """
+    from omop_core.mapping import confidence_token
+    token = data.get('suggestion_confidence_token')
+    if token not in (None, ''):
+        try:
+            return True, confidence_token.verify(
+                token, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+                omop_table=omop_table, destination_concept_id=concept.concept_id if concept else None,
+                source_description=source_description,
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError({'suggestion_confidence_token': str(exc)})
+    if 'suggestion_confidence' in data and data.get('suggestion_confidence') in (None, ''):
+        return True, None
+    return False, None
 
 
 def _table_label(omop_table):
@@ -13659,9 +13697,27 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         values['decision_confidence'] = _decision_confidence(
             data, mapping, concept, previous_concept_id,
         )
-    # The ranker's confidence was in the destination it chose, not this one.
-    if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
+    # The ranker's confidence was in the destination it chose, for the source it was
+    # shown: neither a moved destination nor a re-pointed source (code, system or
+    # table) keeps it.
+    if mapping is not None and (
+        (concept is not None and concept.concept_id != previous_concept_id)
+        or source_vocabulary_id != mapping.source_vocabulary_id
+        or source_code != mapping.source_code
+        or (omop_table and omop_table != mapping.omop_table)
+    ):
         values['suggestion_confidence'] = None
+    # A confidence the server signed for this source and destination (a Calc, or
+    # a Suggest run's score for the destination chosen) is the number to keep,
+    # whether the destination moved or not; null clears it.
+    keep, saved_confidence = _saved_confidence(
+        data, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+        omop_table=omop_table, concept=concept,
+        source_description=(data['source_code_description'] if 'source_code_description' in data
+                            else mapping.source_code_description if mapping else ''),
+    )
+    if keep:
+        values['suggestion_confidence'] = saved_confidence
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
@@ -14915,6 +14971,46 @@ def code_mapping_suggest_run(request, run_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest_one(request):
+    return _suggest_one(request)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_score(request):
+    """Score a chosen destination for a source: the dialog's Calc (#2668).
+
+    Takes suggest-one's body plus ``destination_concept_id`` and runs the same
+    retrieval and ranking with that concept guaranteed in the pool. The result
+    event carries ``scored``: ``{confidence, ranked, note}``, with ``confidence``
+    ``null`` (never a guess) when no ranker scored it. Writes nothing: the
+    curator's save stores the number.
+    """
+    if not _can_manage_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    raw = request.data.get('destination_concept_id')
+    try:
+        destination_id = None if isinstance(raw, bool) else int(raw)
+    except (TypeError, ValueError):
+        destination_id = None
+    if not destination_id or destination_id < 0:
+        return Response({'destination_concept_id': 'Choose a destination concept to score.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    destination = Concept.objects.filter(concept_id=destination_id).first()
+    if destination is None:
+        return Response({'destination_concept_id': 'Concept not found.'}, status=status.HTTP_400_BAD_REQUEST)
+    # Injected into the pool, the destination skips the retrieval filters, so the
+    # same test provisional data applies at read time is made here: a valid
+    # standard concept in the domain of the table the rows go to.
+    from omop_core.mapping.code_resolution import _usable_destination
+    if not _usable_destination(destination, normalize_omop_table(request.data.get('omop_table'))):
+        return Response({'destination_concept_id': (
+            f'{destination.concept_name} cannot be scored here: only a valid standard concept in the '
+            f'domain of the source\'s table is scored.'
+        )}, status=status.HTTP_400_BAD_REQUEST)
+    return _suggest_one(request, score_concept_id=destination_id)
+
+
+def _suggest_one(request, score_concept_id=None):
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     source_code = str(request.data.get('source_code') or '').strip()
@@ -15020,11 +15116,20 @@ def code_mapping_suggest_one(request):
             axis_variants_module.observed_units(axes_mapping, unit_evidence)
             if axes_mapping and omop_table == 'measurement' else None
         ),
-        'source_description': str(request.data.get('source_code_description') or ''),
+        # A score is about the text the stored row says: for an existing mapping the
+        # description and metadata come from the row, whatever the body sends, so a
+        # curator cannot choose the text a score is about. (A new row's are the body's;
+        # the token binds its description, not its metadata.)
+        'source_description': (
+            axes_mapping.source_code_description
+            if score_concept_id is not None and axes_mapping is not None
+            else str(request.data.get('source_code_description') or '')),
         # The dialog's Source Metadata, else this table's mapping's own:
         # ranker context only.
         'row_metadata': (
-            request.data.get('source_metadata')
+            axes_mapping.source_metadata
+            if score_concept_id is not None and axes_mapping is not None
+            else request.data.get('source_metadata')
             if isinstance(request.data.get('source_metadata'), dict)
             and request.data.get('source_metadata')
             else SourceCodeConceptMapping.objects.filter(
@@ -15035,6 +15140,7 @@ def code_mapping_suggest_one(request):
         'strategies': strategies,
         'lexical_limit': lexical_limit,
         'ranking_model': ranking_model,
+        **({'score_concept_id': score_concept_id} if score_concept_id is not None else {}),
     }
     if request.data.get('async') is True:
         from omop_core.services.suggest_jobs import get_dispatcher
@@ -15044,7 +15150,9 @@ def code_mapping_suggest_one(request):
             created_by=request.user,
             selection={
                 'mode': 'individual', 'dry_run': True, 'limit': 1,
-                'order': 'The source code currently open in the mapping dialog.',
+                'order': ('The destination currently chosen in the mapping dialog, scored.'
+                          if score_concept_id is not None
+                          else 'The source code currently open in the mapping dialog.'),
                 'strategies': strategies, 'source_vocabulary_id': params['source_vocabulary_id'],
             },
         )
