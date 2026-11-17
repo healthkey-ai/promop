@@ -109,9 +109,12 @@ def test_every_reviewed_label_is_the_served_label(descriptor):
         assert name in enriched, f'{name} is labelled but not served'
         assert enriched[name]['label'] == label, name
         raw = descriptor.get(name) or {}
-        expected_unit = raw.get('unit') or (
-            None if raw.get('projection') else unit)
-        assert enriched[name].get('unit') == expected_unit, name
+        # One owner: when the mapping already supplies a unit it must be the
+        # reviewed one, and a projection keeps its own unit rather than taking
+        # a display spelling (#2652 review).
+        assert unit is None or raw.get('unit') in (None, unit), name
+        assert enriched[name].get('unit') == (
+            raw.get('unit') or (None if raw.get('projection') else unit)), name
 
 
 def test_a_reviewed_unit_does_not_become_the_projected_fact_unit(descriptor):
@@ -134,27 +137,67 @@ def test_a_reviewed_unit_does_not_become_the_projected_fact_unit(descriptor):
 # spelling.
 ACRONYM_TOKENS = {
     'sct', 'dlbcl', 'pd', 'egfr', 'hba1c', 'inr', 'pt', 'ptt', 'psa', 'flipi',
-    'gelf', 'hrd', 'tnbc', 'btk', 'bcl2', 'anc', 'alc', 'amc', 'rbc', 'ast',
-    'alt', 'bnp', 'cea', 'bmi', 'mrd', 'her2', 'ecog', 'esr', 'esr1', 'uln',
-    'ldh', 'hiv', 'flc',
+    'gelf', 'hrd', 'tnbc', 'hr', 'btk', 'bcl2', 'anc', 'alc', 'amc', 'rbc',
+    'ast', 'alt', 'bnp', 'cea', 'bmi', 'mrd', 'her2', 'ecog', 'esr', 'esr1',
+    'uln', 'ldh', 'hiv', 'flc', 'dx', 'vo2', 'imwg', 'iwcll',
 }
+
+
+def _is_word(text, token):
+    return bool(re.search(
+        rf'(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])', text))
+
+
+def _acronym_residues(label, name):
+    """The fallback spellings a served label still carries, if any."""
+    residues = []
+    for token in set(name.split('_')) & ACRONYM_TOKENS:
+        residues += [spelling for spelling in (token, token.capitalize())
+                     if _is_word(label, spelling)]
+    # A token carrying digits is a symbol or an isoform (BRCA1, TP53, CD20,
+    # t414), never a word to lower-case.
+    for token in name.split('_'):
+        if re.fullmatch(r'[a-z]{2,}[0-9]+[a-z]*', token):
+            residues += [spelling for spelling in (token, token.capitalize())
+                         if _is_word(label, spelling)]
+    return residues
 
 
 def test_no_acronym_is_served_with_the_fallback_spelling(descriptor):
     """A new acronym column must be given a reviewed label, not inherit one.
 
-    The issue names one instance (#2601); this pins the class, so the next
-    `pd_l1_*`-style field fails here instead of reaching a client flattened.
+    The issue names one instance (#2601); this pins the class for the tokens the
+    descriptor serves today and for every symbol carrying a digit, so the next
+    `pd_l1_*` or `brca1`-style field fails here instead of reaching a client
+    flattened.
     """
     enriched = patient_form_descriptors(descriptor)
-    offenders = []
-    for name, entry in enriched.items():
-        label = entry.get('label') or ''
-        for token in set(name.split('_')) & ACRONYM_TOKENS:
-            for residue in (token, token.capitalize()):
-                if re.search(rf'(?<![A-Za-z0-9]){re.escape(residue)}(?![A-Za-z0-9])', label):
-                    offenders.append(f'{name}: {residue!r} served in {label!r}')
+    offenders = [f'{name}: {residues}' for name, entry in enriched.items()
+                 if (residues := _acronym_residues(entry.get('label') or '', name))]
     assert not offenders, offenders
+
+
+def test_every_genomics_finding_carries_a_reviewed_label(descriptor):
+    """The descriptor serves one row per gene or cytogenetic finding.
+
+    The family grows with the genomics catalogue, so the rule is "reviewed, or
+    it fails" rather than a list of symbols whose fallback flattens the name
+    into prose ("Genomics brca1") (#2652 review).
+    """
+    served = sorted(name for name in patient_form_descriptors(descriptor)
+                    if name.startswith('genomics_'))
+    assert served
+    assert not [name for name in served if name not in FORM_LABELS]
+
+
+def test_negated_views_say_no(descriptor):
+    """A negated row asks the opposite question; its label must say so."""
+    negated = {name: entry['label'] for name, entry
+               in patient_form_descriptors(descriptor).items()
+               if name.startswith('no_') and entry.get('kind') == KIND_NEGATED}
+    assert negated
+    assert not {name: label for name, label in negated.items()
+                if not label.startswith('No ')}
 
 
 def test_aliases_are_one_way(descriptor):

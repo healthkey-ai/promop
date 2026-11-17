@@ -283,18 +283,22 @@ All notable changes to PRomop are documented here.
 ### Fixed
 
 - **Acronym fields carry their reviewed labels in the shared form (#2652)** —
-  `capitalize()` only upper-cases the first character, so the descriptor served
-  "Sct eligibility", "Transformed to dlbcl", "Pd l1 assay", "Hba1c percent",
-  "Flipi score", "Esr", "Pt seconds", "No hiv status" and about thirty more.
-  Those fields now carry the reviewed spelling (SCT, DLBCL, PD-L1, eGFR,
-  HbA1c, FLIPI, GELF, HRD, TNBC, BTK, BCL-2, ESR1, ANC/ALC/AMC/RBC, AST/ALT,
-  BNP, CEA, PSA, INR, PT/aPTT and their ULN ratios, MRD, HER2, ECOG, BMI) or
-  the native tab's expanded wording ("Triple negative status", "Prothrombin
-  time"), plus the lab units the tabs show. A descriptor contract test now
-  fails when a served label keeps the fallback spelling, so the next such
-  column cannot repeat #2601 silently. A reviewed unit fills only entries that
-  never project: a label table must not decide a written fact's
-  `unit_source_value`.
+  `capitalize()` only upper-cases the first character, so the shared-form
+  descriptor served to CB and Trial Details (`X-Patient-Form: 1`) read "Sct
+  eligibility", "Transformed to dlbcl", "Pd l1 assay", "Hba1c percent", "Flipi
+  score", "Esr", "Pt seconds", "No hiv status", "Genomics brca1" and about
+  sixty more. Those rows now carry the reviewed spelling (SCT, DLBCL, PD-L1,
+  eGFR, HbA1c, FLIPI, GELF, HR, HRD, TNBC, BTK, BCL-2, ESR1, POD24, TP53,
+  ANC/ALC/AMC/RBC, AST/ALT, BNP, CEA, PSA, INR, PT/aPTT and their ULN ratios,
+  MRD, HER2, ECOG, BMI, VO2), the gene and cytogenetic notation the genomics
+  rows need (`Genomics BRCA1`, `Genomics t(4;14)`, `Genomics del(17p)`), or the
+  native tab's expanded wording ("Triple negative status", "Prothrombin
+  time"), plus the lab units the tabs show. Contract tests now fail when a
+  served label keeps the fallback spelling for the acronym tokens the
+  descriptor serves today and for any symbol carrying a digit, and require
+  every `genomics_*` row and every negated row to be reviewed. A reviewed unit
+  fills only entries that never project: a label table must not decide a
+  written fact's `unit_source_value`.
 - **SCT and DLBCL transformation dates carry reviewed labels (#2601)** — both
   dates and their precision companions were missing from `FORM_LABELS`, so the
   descriptor fell back to the verbose name through `capitalize()` and served

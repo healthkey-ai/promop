@@ -10,6 +10,7 @@ describe('unit presentation (#2610)', () => {
     ['10*9/L', '10⁹/L'],
     ['10*12/L', '10¹²/L'],
     ['mL/min/1.73m2', 'mL/min/1.73m²'],
+    ['mm/h', 'mm/hr'],
     ['g/dL', 'g/dL'],
   ])('shows %s as %s', (stored, shown) => {
     expect(displayUnitLabel(stored)).toBe(shown);
