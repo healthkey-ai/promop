@@ -244,25 +244,30 @@ def ensure_queue_rows(codes, rows_by_key, *, create=True) -> dict:
 
 
 def target_rows(codes, rows_by_key):
-    """The queue rows whose proposals decide *codes*: for each code, those under a system it is held in.
+    """The queue rows whose proposals decide *codes*: for a held code, those under a system it is held in.
 
-    Never a row under a code system the person does not hold the code under: a
-    short Epic code repeats across hospitals' systems, and a proposal for another
-    hospital's "6" says nothing about this patient's (on HealthTree 58,588 rows
-    match one patient's codes by string and 997 are in a system she holds). A
-    system with no row yet is not a reason to fall back to another's: the row is
-    created first. Codes with an approved mapping are left out: the resolver
-    settles those, and Suggest never touches an approved row.
+    Never a row under a code system the person does not hold the code under, when
+    the inventory says which systems it is held under: a short Epic code repeats
+    across hospitals' systems (on HealthTree 58,588 rows match one patient's codes
+    by string and 997 are in a system she holds). A held system with no row yet is
+    not a reason to fall back to another's: the row is created first. A code with
+    unresolved rows but no inventory row (``held`` empty) says nothing about its
+    system, and the resolver itself then looks it up by code alone
+    (``provisional_proposal`` skips the held-system check without systems), so all
+    its unscoped queue rows decide it. Codes with an approved mapping are left
+    out: the resolver settles those, and Suggest never touches an approved row.
     """
     out = {}
     for code in codes:
         rows = rows_by_key.get(code.key, [])
         if not rows or any(row.status == 'approved' for row in rows):
             continue
-        vocabularies = _vocabularies(code) or {canonical_source_vocabulary('')}
+        if code.held:
+            vocabularies = _vocabularies(code)
+            rows = [row for row in rows
+                    if canonical_source_vocabulary(row.source_vocabulary_id) in vocabularies]
         for row in rows:
-            if canonical_source_vocabulary(row.source_vocabulary_id) in vocabularies:
-                out[row.pk] = row
+            out[row.pk] = row
     return out
 
 
@@ -414,6 +419,62 @@ def rederive(person):
             'provisional': PatientRecordProvisional.objects.filter(person=person).first()}
 
 
+def person_state(person) -> dict:
+    """The person's rows as they stand now, one grouped query per clinical table.
+
+    ``{table: {'real', 'provisional', 'unresolved'}, 'total': {...}}``: *provisional*
+    is a row carrying a confidence; *unresolved* a row with no confidence at concept
+    0 (or a quarantine concept); *real* the rest. A state, not a count of what a
+    run changed: a rerun with nothing to do shows the same state.
+    """
+    quarantine = provisional_sweep._quarantine_concept_ids()
+    state = {}
+    total = Counter()
+    for table, (model, concept_col, _source_col) in CLINICAL_TABLES.items():
+        unresolved_q = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+        if quarantine:
+            unresolved_q |= Q(**{f'{concept_col}__in': quarantine})
+        counted = model.objects.filter(person=person).aggregate(
+            all=Count('pk'),
+            provisional=Count('pk', filter=Q(confidence__isnull=False)),
+            unresolved=Count('pk', filter=unresolved_q & Q(confidence__isnull=True)))
+        row = {'real': counted['all'] - counted['provisional'] - counted['unresolved'],
+               'provisional': counted['provisional'], 'unresolved': counted['unresolved']}
+        state[table] = row
+        total.update(row)
+    state['total'] = dict(total)
+    return state
+
+
+def real_row_estimate(codes) -> dict:
+    """What the full resolve will do with approved mappings, counted before it runs.
+
+    ``{'unresolved_rows_to_real': N, 'inventory_rows_to_create': M}``: the person's
+    unresolved rows whose code has an approved mapping with a destination (they
+    become real at that concept, units normalised for a mapping with a destination
+    unit, deferred re-point concepts rewritten), and the inventory entries with an
+    approved mapping and no clinical row (each gets a real row with no value). The
+    resolver looks an approved mapping up by code and table alone, whatever
+    organization it is scoped to, and so does this.
+    """
+    approved: set[tuple] = set()
+    by_table: dict[str, set[str]] = defaultdict(set)
+    for code in codes:
+        by_table[code.table].add(code.value.upper())
+    for table, values in by_table.items():
+        for chunk in _chunks(values):
+            approved.update(
+                (table, upper) for upper in SourceCodeConceptMapping.objects
+                .filter(status='approved', omop_table=table, target_concept__isnull=False)
+                .exclude(target_concept_id=NO_MATCHING_CONCEPT_ID)
+                .annotate(upper_code=Upper('source_code')).filter(upper_code__in=chunk)
+                .values_list('upper_code', flat=True))
+    return {
+        'unresolved_rows_to_real': sum(c.rows for c in codes if c.rows and c.key in approved),
+        'inventory_rows_to_create': sum(1 for c in codes if not c.rows and c.held and c.key in approved),
+    }
+
+
 # ---- 5. what the proposals say about the person's codes --------------------------------
 
 def band(percent, floor):
@@ -502,6 +563,10 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
         f'({len(unresolved)} with unresolved rows, {len(codes) - len(unresolved)} inventory only).')
 
     propose_codes = codes if include_inventory else unresolved
+    # The report is about the codes this run looked at: unresolved ones, and a code
+    # already provisional (no inventory row to say otherwise); never the inventory-only
+    # codes it did not touch, unless they are included.
+    report_codes = codes if include_inventory else [c for c in codes if c.rows or not c.held]
     summary['codes_to_propose'] = len(propose_codes)
     rows_by_key = queue_rows(propose_codes)
     queue = ensure_queue_rows(propose_codes, rows_by_key, create=not (dry_run or skip_propose))
@@ -522,8 +587,16 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
         f'(HK-* source system).')
 
     if dry_run:
-        summary['report'] = proposal_report(codes)
+        summary['report'] = proposal_report(report_codes)
+        summary['estimate'] = real_row_estimate(codes)
+        summary['state'] = person_state(person)
         log(f'Dry run: nothing written. Standing now: {summary["report"]["status"]}')
+        log(f'The full resolve will also, for approved mappings: make '
+            f'{summary["estimate"]["unresolved_rows_to_real"]} unresolved row(s) real at the '
+            f'mapping\'s concept (normalising units where the mapping has a destination unit, rewriting '
+            f'deferred re-point concepts), and create {summary["estimate"]["inventory_rows_to_create"]} '
+            f'real row(s) with no value for inventory entries that have an approved mapping and no '
+            f'clinical row. State now: {summary["state"]["total"]}.')
         return summary
 
     counts = Counter()
@@ -544,6 +617,8 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
     summary['propose'] = dict(counts)
 
     log('Resolving every row against the approved and proposed mappings...')
+    if not connection.in_atomic_block:
+        close_old_connections()     # the last propose batch was a while ago; the resolve holds a lock long
     try:
         resolved = materialise(person)
     except Exception as exc:  # noqa: BLE001
@@ -551,24 +626,29 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
                         f'are written; run the command again.') from exc
     real_created = sum(d.get('rows', 0) for d in resolved.get('code_details', ())
                        if d.get('outcome') == 'created')
+    # What this run CHANGED. A rerun that has nothing to do changes nothing; the state
+    # below is what the person's rows are.
     summary.update(
         rows_real=resolved['resolved'] + real_created, rows_real_created=real_created,
         rows_provisional=resolved['provisional'], rows_created=resolved['created'],
-        rows_reverted=resolved['reverted'], rows_left=resolved['skipped'],
-        rows_already_resolved=resolved['already_resolved'])
-    log(f'  {summary["rows_real"]} row(s) made real by an approved mapping '
+        rows_reverted=resolved['reverted'],
+        rows_unchanged=resolved['skipped'] + resolved['already_resolved'])
+    log(f'  Changed this run: {summary["rows_real"]} row(s) made real by an approved mapping '
         f'({real_created} of them created from inventory); '
         f'{resolved["provisional"]} made provisional by a proposal at or above the floor '
         f'({resolved["created"] - real_created} of them created from inventory); '
-        f'{resolved["reverted"]} provisional row(s) taken back; '
-        f'{resolved["skipped"]} left (no approved mapping and no qualifying proposal); '
-        f'{resolved["already_resolved"]} already resolved.')
+        f'{resolved["reverted"]} provisional row(s) taken back.')
+    log(f'  Unchanged this run: {summary["rows_unchanged"]} row(s) examined and left as they were.')
+    summary['state'] = person_state(person)
+    log(f'  State now: {summary["state"]["total"]}.')
 
-    summary['report'] = proposal_report(codes)
+    summary['report'] = proposal_report(report_codes)
     log(f'Proposals against the floor ({summary["report"]["floor"]}%): '
         f'{summary["report"]["status"]}; below the floor by band: {summary["report"]["bands"]}')
 
     log('Rederiving the record...')
+    if not connection.in_atomic_block:
+        close_old_connections()
     try:
         derived = rederive(person)
     except Exception as exc:  # noqa: BLE001

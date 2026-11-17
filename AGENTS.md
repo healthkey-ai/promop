@@ -1519,10 +1519,30 @@ proposed ones, with the provisional field count and percentages).
 `--tables` and `--limit` narrow only the propose step: every table's rows are
 resolved and the record rederived.
 
+- **The resolve is the Generate OMOP path, not a provisional-only pass.** Beyond
+  provisional rows it makes the patient's existing unresolved rows real at an
+  approved mapping's concept, normalises units for a mapping with a destination
+  unit, rewrites deferred re-point concepts, and creates a real row with no value
+  for every inventory entry that has an approved mapping and no clinical row.
+  `--dry-run` prints an estimate of that (unresolved rows whose code has an
+  approved mapping, inventory entries to create). Pre-existing resolver behaviour,
+  not changed here: the approved-mapping lookup is by code and table alone (it
+  does not filter by organization and takes `.first()` unordered), and axis
+  variants are ignored.
+- **The log separates what this run changed from what the rows are.** "Changed this
+  run" counts rows made real, made provisional, and taken back (and those created
+  from inventory); "Unchanged this run" counts rows examined and left as they were;
+  "State now" is one grouped query per clinical table: real, provisional
+  (carrying a confidence) and unresolved rows. A rerun with nothing to do shows the
+  same state with zero changes. The below-floor report covers the codes the run
+  looked at (unresolved ones, and codes already provisional), not inventory-only
+  codes unless `--include-inventory`.
 - **Only rows under a code system the patient holds are proposed for.** A short
   Epic code repeats across hospitals' systems (on HealthTree 58,588 rows match one
-  patient's codes by string and 997 are in a system she holds), so a row under
-  another system is never proposed for, in a dry run or a real one; a held system
+  patient's codes by string and 997 are in a system she holds), so for a code the inventory holds, a row under
+  another system is never proposed for, in a dry run or a real one (a code with
+  unresolved rows and no inventory row says nothing about its system, and the
+  resolver then looks it up by code alone, so its unscoped queue rows decide it); a held system
   with no row yet gets its row created first (and counted as one to propose for in
   a dry run, so the dry run's count is the real run's).
 - **A code the ranker could not rank is never written.** A ranker that cannot run

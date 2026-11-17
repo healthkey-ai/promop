@@ -8,6 +8,15 @@ mappings (approved makes rows real, a proposal at or above
 patient's record, ``patient_record`` from the approved rows and the provisional
 pair from the proposed ones. See ``omop_core/services/fill_provisional.py``.
 
+The resolve is the full per-person one (the Generate OMOP path), not a provisional-only
+pass, so beyond provisional rows it also makes the patient's existing unresolved rows
+real at an approved mapping's concept, normalises units for a mapping with a
+destination unit, rewrites deferred re-point concepts, and creates a real row with no
+value for every inventory entry that has an approved mapping and no clinical row.
+``--dry-run`` estimates that work. The approved-mapping lookup is by code and table
+alone (whatever organization it is scoped to) and ignores axis variants, as it does
+everywhere.
+
 Resumable: a code the ranker answered (a destination, or a decline) is skipped
 on a rerun (``--retry-declined`` redoes declines); a code it could not rank is
 left untouched and retried. ``--tables`` and ``--limit`` narrow only the propose
@@ -47,7 +56,8 @@ class Command(BaseCommand):
                             help='Only propose for codes held under these clinical tables (the propose step only: '
                                  'every row is resolved and the record rederived for all tables).')
         parser.add_argument('--dry-run', action='store_true',
-                            help='Count what would be proposed; write nothing and call no model.')
+                            help='Count what would be proposed, and estimate the real-row work the full resolve '
+                                'will do for approved mappings; write nothing and call no model.')
         parser.add_argument('--skip-propose', action='store_true',
                             help='Skip Suggest: only resolve the rows against the mappings that exist, and rederive.')
         parser.add_argument('--replace', action='store_true',
