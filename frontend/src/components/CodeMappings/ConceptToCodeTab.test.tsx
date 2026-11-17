@@ -757,6 +757,279 @@ describe('the Wearables domain and the remembered domain (#2656)', () => {
   });
 });
 
+describe('categories on the concept list (#2690)', () => {
+  type Row = typeof concept & { category?: string; priority?: number | null };
+  const listParams = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').map(([, config]) => config.params);
+  const lastListParams = () => listParams().at(-1);
+  const filed = (id: number, name: string, category: string, priority: number | null = null): Row =>
+    ({ ...concept, concept_id: id, concept_name: name, category, priority });
+  const categories = [{ category: 'Activity', count: 2 }, { category: 'Sleep', count: 12 }, { category: '', count: 1 }];
+  const rows = [filed(1, 'Steps', 'Activity', 1), filed(2, 'Distance', 'Activity'), filed(3, 'Sleep duration', 'Sleep'), filed(4, 'Mystery metric', '')];
+  const groupedPage = (results: Row[], extra: Record<string, unknown> = {}) => ({
+    ...page(results), prioritized: 1, order: 'category', grouped: true, group_limit: 5000, categories, ...extra });
+  let respond: (params: Record<string, unknown>) => unknown;
+  beforeEach(() => {
+    respond = () => groupedPage(rows);
+    get.mockImplementation((url: string, config?: { params: Record<string, unknown> }) => Promise.resolve({
+      data: url === '/v1/concept-to-code/' ? respond(config?.params ?? {}) : page([source]) }));
+    post.mockImplementation((_url: string, body: { position: number | null }) => Promise.resolve({ data: { position: body.position } }));
+  });
+  /** A category's header button; a concept's own button can begin with the same word. */
+  const header = (name: RegExp) => {
+    const found = screen.getAllByRole('button', { name }).filter(element => element.closest('th[scope="rowgroup"]'));
+    expect(found).toHaveLength(1);
+    return found[0];
+  };
+  const shownRows = () => screen.queryAllByTestId(/^concept-row-/).map(row => row.getAttribute('data-testid'));
+  const stored = (userId: number) => JSON.parse(localStorage.getItem(`promop-concept-to-code:${userId}`) || '{}');
+
+  it('shows Category as the first column and the first cell of every row', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    const table = await screen.findByRole('table', { name: 'Standard concept coverage' });
+    await screen.findByTestId('concept-row-1');
+    const head = table.querySelector('thead') as HTMLElement;
+    expect(within(head).getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([
+      'Category', 'Priority', 'Standard concept', 'Patient fields', 'Approved', 'Proposed', 'Rejected']);
+    expect(within(screen.getByTestId('concept-row-1')).getAllByRole('cell')[0]).toHaveTextContent('Activity');
+    expect(within(screen.getByTestId('concept-row-3')).getAllByRole('cell')[0]).toHaveTextContent('Sleep');
+    // No category is a muted dash, not an empty cell.
+    expect(within(screen.getByTestId('concept-row-4')).getAllByRole('cell')[0]).toHaveTextContent('—');
+    // Every row has as many cells as the header has columns, and a header row spans them all.
+    expect(within(screen.getByTestId('concept-row-1')).getAllByRole('cell')).toHaveLength(7);
+    expect(header(/^Activity/).closest('th')).toHaveAttribute('colspan', '7');
+  });
+
+  it('tolerates a response without categories: a plain list with a blank Category', async () => {
+    respond = () => page([concept]);
+    render(<ConceptToCodeTab canWrite canApprove />);
+    const row = await screen.findByTestId('concept-row-123');
+    expect(within(row).getAllByRole('cell')[0]).toHaveTextContent('—');
+    expect(screen.getByRole('columnheader', { name: 'Category' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Collapse all' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/too many to group/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole('rowgroup')).toHaveLength(2);
+  });
+
+  it('puts each category under a header with its size across every page', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-row-1');
+    expect(header(/^Activity/)).toHaveTextContent('Activity 2 concepts');
+    // Twelve in the whole list, one of them on this page.
+    expect(header(/^Sleep/)).toHaveTextContent('Sleep 12 concepts, 1 on this page');
+    expect(header(/^Uncategorized/)).toHaveTextContent('Uncategorized 1 concept');
+    for (const name of [/^Activity/, /^Sleep/, /^Uncategorized/]) expect(header(name)).toHaveAttribute('aria-expanded', 'true');
+    expect(header(/^Sleep/)).toHaveAccessibleName('Sleep 12 concepts, 1 on this page');
+    // Headers and rows alternate in the order the server sent them.
+    expect(within(screen.getByTestId('concept-group-Activity')).getAllByTestId(/^concept-row-/)).toHaveLength(2);
+    expect(within(screen.getByTestId('concept-group-none')).getByTestId('concept-row-4')).toBeInTheDocument();
+    expect(screen.queryByText(/continued/)).not.toBeInTheDocument();
+  });
+
+  it('folds and unfolds one category, and all of them', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByRole('button', { name: 'Expand all' })).toBeDisabled();
+
+    fireEvent.click(header(/^Activity/));
+    expect(header(/^Activity/)).toHaveAttribute('aria-expanded', 'false');
+    expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']);
+    // Its header and count stay.
+    expect(header(/^Activity/)).toHaveTextContent('2 concepts');
+    fireEvent.click(header(/^Activity/));
+    expect(shownRows()).toHaveLength(4);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }));
+    expect(shownRows()).toEqual([]);
+    for (const name of [/^Activity/, /^Sleep/, /^Uncategorized/]) expect(header(name)).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: 'Collapse all' })).toBeDisabled();
+    fireEvent.click(header(/^Uncategorized/));
+    expect(shownRows()).toEqual(['concept-row-4']);
+    expect(screen.getByRole('button', { name: 'Collapse all' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    expect(shownRows()).toHaveLength(4);
+    expect(screen.getByRole('button', { name: 'Expand all' })).toBeDisabled();
+    // Folding asks the server for nothing.
+    expect(listParams()).toHaveLength(1);
+  });
+
+  it('says a category is continued when it began on an earlier page', async () => {
+    const sleep = Array.from({ length: 12 }, (_, index) => filed(10 + index, `Sleep metric ${index}`, 'Sleep'));
+    const all = [rows[0], rows[1], ...sleep, rows[3]];
+    let size = 3;
+    respond = params => {
+      const number = Number(params.page);
+      return groupedPage(all.slice((number - 1) * size, number * size), { page: number, page_size: size, total: all.length });
+    };
+    const view = render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-row-10');
+    expect(header(/^Sleep/)).toHaveTextContent('Sleep 12 concepts, 1 on this page');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByTestId('concept-row-11');
+    expect(header(/^Sleep/)).toHaveTextContent('Sleep (continued) 12 concepts, 3 on this page');
+    view.unmount();
+
+    // A category that starts exactly where the page does is not continued.
+    size = 2;
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-row-1');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findByTestId('concept-row-10');
+    expect(header(/^Sleep/)).toHaveTextContent('Sleep 12 concepts, 2 on this page');
+    expect(screen.queryByText(/continued/)).not.toBeInTheDocument();
+  });
+
+  it('remembers the folded categories per account and per domain', async () => {
+    const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables' }));
+    fireEvent.click(header(/^Sleep/));
+    fireEvent.click(header(/^Uncategorized/));
+    expect(stored(7)).toEqual({ domain: 'wearables', collapsed: { wearables: ['Sleep', ''] } });
+    first.unmount();
+
+    const again = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    expect(header(/^Sleep/)).toHaveAttribute('aria-expanded', 'false');
+    expect(shownRows()).toEqual(['concept-row-1', 'concept-row-2']);
+    // Another domain has its own set, and coming back restores this one.
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    expect(header(/^Sleep/)).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(header(/^Activity/));
+    expect(stored(7)).toEqual({ domain: 'measurement', collapsed: { wearables: ['Sleep', ''], measurement: ['Activity'] } });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    expect(shownRows()).toEqual(['concept-row-1', 'concept-row-2']);
+    // Expanding everything leaves nothing to remember for the domain.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    expect(stored(7)).toEqual({ domain: 'wearables', collapsed: { measurement: ['Activity'] } });
+    again.unmount();
+
+    render(<ConceptToCodeTab canWrite canApprove userId={8} />);
+    await screen.findByTestId('concept-row-1');
+    expect(shownRows()).toHaveLength(4);
+  });
+
+  it('sends the order only when it is Priority, and remembers it per account', async () => {
+    respond = params => groupedPage(rows, { total: 200, page: Number(params.page) });
+    const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    const order = screen.getByLabelText('Concept order') as HTMLSelectElement;
+    expect(Array.from(order.options).map(option => option.textContent)).toEqual(['Category, then priority', 'Priority']);
+    expect(order).toHaveValue('category');
+    expect(lastListParams()).not.toHaveProperty('order');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(lastListParams()).toMatchObject({ page: 2 }));
+    fireEvent.change(order, { target: { value: 'priority' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ order: 'priority', page: 1 }));
+    expect(stored(7)).toEqual({ domain: '', order: 'priority' });
+    first.unmount();
+
+    get.mockClear();
+    const again = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
+    expect(listParams()[0]).toMatchObject({ order: 'priority' });
+    fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'category' } });
+    await waitFor(() => expect(lastListParams()).not.toHaveProperty('order'));
+    expect(stored(7)).toEqual({ domain: '' });
+    again.unmount();
+
+    get.mockClear();
+    render(<ConceptToCodeTab canWrite canApprove userId={8} />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByLabelText('Concept order')).toHaveValue('category');
+    expect(listParams()[0]).not.toHaveProperty('order');
+  });
+
+  it('ignores a stored order or folded set of the wrong shape, keeping what is well formed', async () => {
+    const key = 'promop-concept-to-code:7';
+    localStorage.setItem(key, JSON.stringify({ domain: 'wearables', order: 'sideways', collapsed: ['Sleep'] }));
+    const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByLabelText('Concept domain')).toHaveValue('wearables');
+    expect(screen.getByLabelText('Concept order')).toHaveValue('category');
+    expect(shownRows()).toHaveLength(4);
+    first.unmount();
+
+    // One domain's entry is a string, another's holds a number, a third is no domain.
+    localStorage.setItem(key, JSON.stringify({ domain: 'wearables', order: 'priority', collapsed: {
+      wearables: 'Sleep', measurement: [1], sideways: ['Activity'], condition: ['Activity'] } }));
+    const second = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
+    expect(shownRows()).toHaveLength(4);
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'condition' } });
+    expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']);
+    // The next save writes only what was understood.
+    expect(stored(7)).toEqual({ domain: 'condition', order: 'priority', collapsed: { condition: ['Activity'] } });
+    second.unmount();
+
+    for (const broken of ['null', '[]', '"wearables"', '{broken']) {
+      localStorage.setItem(key, broken);
+      const view = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+      expect(screen.getByLabelText('Concept domain')).toHaveValue('');
+      expect(screen.getByLabelText('Concept order')).toHaveValue('category');
+      view.unmount();
+    }
+  });
+
+  it('says so when the list is too long to group, and still shows each Category', async () => {
+    respond = params => ({ ...page(rows), total: 2700000, prioritized: 1, order: 'priority', grouped: false,
+      group_limit: 5000, categories: null, ...(params.order === 'priority' ? { total: 4 } : {}) });
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-row-1');
+    const note = screen.getByText(/too\s+many to group by category/);
+    expect(note).toHaveTextContent('This list has 2,700,000 concepts');
+    expect(note).toHaveTextContent('the limit is 5,000');
+    expect(note).toHaveTextContent(/domain or a disease, or search/);
+    expect(screen.queryByRole('button', { name: /^Activity/ })).not.toBeInTheDocument();
+    expect(document.querySelector('th[scope="rowgroup"]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Collapse all' })).not.toBeInTheDocument();
+    expect(within(screen.getByTestId('concept-row-3')).getAllByRole('cell')[0]).toHaveTextContent('Sleep');
+    expect(shownRows()).toHaveLength(4);
+
+    // A list the curator asked for in priority order is not "too long": no note.
+    fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'priority' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ order: 'priority' }));
+    await waitFor(() => expect(screen.queryByText(/too\s+many to group by category/)).not.toBeInTheDocument());
+    expect(shownRows()).toHaveLength(4);
+  });
+
+  it('keeps opening, ranking and dragging working inside groups, across categories', async () => {
+    const moved = () => post.mock.calls.filter(([url]) => url === '/v1/concept-to-code/priority/').map(([, body]) => body);
+    render(<ConceptToCodeTab canWrite canApprove />);
+    const distance = await screen.findByLabelText('Priority for Distance');
+    expect(screen.getByLabelText('Priority for Steps')).toHaveValue(1);
+    fireEvent.change(distance, { target: { value: '1' } });
+    fireEvent.keyDown(distance, { key: 'Enter' });
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 2, position: 1 }]));
+    expect(await screen.findByText('Moved Distance to priority 1.')).toBeInTheDocument();
+
+    // A drop on a row of another category still sets the one global position.
+    const mystery = screen.getByTestId('concept-row-4');
+    const steps = screen.getByTestId('concept-row-1');
+    await waitFor(() => expect(mystery).toHaveAttribute('draggable', 'true'));
+    fireEvent.dragStart(mystery);
+    fireEvent.dragOver(steps);
+    fireEvent.drop(steps);
+    await waitFor(() => expect(moved()).toEqual([{ concept_id: 2, position: 1 }, { concept_id: 4, position: 1 }]));
+    // Onto an unranked row of another category: the end of the list.
+    await waitFor(() => expect(screen.getByTestId('concept-row-1')).toHaveAttribute('draggable', 'true'));
+    fireEvent.dragStart(screen.getByTestId('concept-row-1'));
+    fireEvent.drop(screen.getByTestId('concept-row-3'));
+    await waitFor(() => expect(moved()).toHaveLength(3));
+    expect(moved()[2]).toEqual({ concept_id: 1, position: 2 });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Lock Sleep duration/ }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/3/lock/'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Steps' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Steps' }));
+    expect(screen.getByRole('dialog', { name: 'Source codes for Steps' })).toBeInTheDocument();
+  });
+});
+
 describe('suggest accumulation (#2274)', () => {
   it('sends exclude_keys from a completed inline run on the second Suggest click', async () => {
     const first = { ...source, mapping_id: null, source_code: 'A1', source_vocabulary_id: 'V1',
