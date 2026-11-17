@@ -167,6 +167,75 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Circular field dependency');
   });
 
+  it('honours a date field\'s precision companion, not just DOB (#2688)', async () => {
+    const { store } = await setup({
+      sct_date: {
+        writable: true, target: 'patient_record', control: 'date', label: 'SCT date',
+        value_kind: 'date',
+      },
+      sct_date_precision: { writable: true, target: 'patient_record', control: 'select' },
+    }, { sct_date: '2018-01-01', sct_date_precision: 'year' });
+    render(<PatientFieldEditor store={store} name="sct_date" />);
+
+    // DateControl renders a year box for `precision: 'year'`; a calendar input
+    // means the companion never reached it.
+    expect(await screen.findByPlaceholderText('YYYY')).toBeVisible();
+    expect(screen.queryByDisplayValue('2018-01-01')).not.toBeInTheDocument();
+  });
+
+  it('does not label a unit-normalised lab column as computed (#2688)', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: {
+        writable: false, kind: 'computed', label: 'Hemoglobin (g/dL)',
+        normalised_read_model: true, inputs: ['hemoglobin_level'],
+        reason: 'Normalised from hemoglobin_level in the default unit (g/dL).',
+      },
+      hemoglobin_level: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Hemoglobin level',
+      },
+    }, { hemoglobin_g_dl: 14.2, hemoglobin_level: 14.2 });
+
+    const { unmount } = render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+    expect(await screen.findByText(/Hemoglobin \(g\/dL\)/)).toBeVisible();
+    expect(screen.queryByText('(computed)')).not.toBeInTheDocument();
+    unmount();
+
+    render(<PatientFieldEditor store={store} name="bmi" />);
+    expect(await screen.findByText('(computed)')).toBeVisible();
+  });
+
+  it('shows the recorded result date as the calendar day it names (#2684)', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: {
+        writable: false, kind: 'computed', label: 'Hemoglobin (g/dL)',
+        inputs: ['hemoglobin_level'], latest_date: '2026-11-10',
+      },
+      hemoglobin_level: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Hemoglobin level',
+      },
+    }, { hemoglobin_g_dl: 14.2, hemoglobin_level: 14.2 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    const date = await screen.findByText(/Result date/);
+    expect(date).toBeVisible();
+    // West of UTC a UTC-midnight parse would print the 9th; the recorded day is
+    // the 10th in every zone.
+    expect(date.textContent).toMatch(/\b10\b/);
+    expect(date.textContent).not.toMatch(/\b9\b/);
+    // The date is display-only: the row still edits through its inputs.
+    expect(screen.getByRole('button', { name: 'Edit Hemoglobin (g/dL) inputs' })).toBeVisible();
+  });
+
+  it('prints no result date on a computed row without a recorded result', async () => {
+    const { store } = await setup({
+      bmi: { writable: false, kind: 'computed', label: 'BMI', inputs: ['height', 'weight'] },
+    }, { bmi: 20.76 });
+    render(<PatientFieldEditor store={store} name="bmi" />);
+
+    expect(await screen.findByText(/BMI/)).toBeVisible();
+    expect(screen.queryByText(/Result date/)).not.toBeInTheDocument();
+  });
+
   it('renders a computed value read-only when the host withholds its only source', async () => {
     // No Active Infection / No Other Active Malignancies depend on condition
     // facts this host does not expose; an empty "inputs below" dialog was the

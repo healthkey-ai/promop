@@ -6,6 +6,7 @@ import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormCo
 import ExplicitAnswerActions from '@/components/PatientInfo/ExplicitAnswerActions';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 import { displayUnitLabel, labelNamesUnit } from './unitPresentation';
+import { formatDate } from '@/utils/date';
 
 interface Props {
   store: PatientFormStore;
@@ -247,10 +248,15 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const pendingValue = pending && typeof pending === 'object' && !Array.isArray(pending) && 'value' in pending
     ? (pending as { value: unknown }).value : pending;
   const value = hasDraft(canonical) ? pendingValue : state.values[canonical];
-  const dobPrecision = draftOf('date_of_birth_precision') ?? state.values.date_of_birth_precision;
-  const precision = canonical === 'date_of_birth'
-    && (dobPrecision === 'day' || dobPrecision === 'month' || dobPrecision === 'year')
-    ? dobPrecision : undefined;
+  // A date field's precision companion (`<field>_precision`) drives its control:
+  // "Year only" must show a year box here exactly as the native tab's DateControl
+  // does. DOB was the only companion when this was written; the SCT and DLBCL
+  // transformation dates carry one too, and keying on `date_of_birth` left their
+  // control a calendar whatever the picker said.
+  const precisionField = `${canonical}_precision`;
+  const rawPrecision = draftOf(precisionField) ?? state.values[precisionField];
+  const precision = (rawPrecision === 'day' || rawPrecision === 'month' || rawPrecision === 'year')
+    ? rawPrecision : undefined;
   // An alias descriptor points at the field it mirrors. A field the server says
   // is directly writable is edited in place: drilling into its own canonical
   // would show a pencil for a plain select (#5605 Refractory Status).
@@ -360,6 +366,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // native app marks it "(computed)" and prints the descriptor's explanation,
   // and the federated row must not look like an ordinary empty input.
   const derived = field.kind === 'computed';
+  // A unit-normalised lab column is the participant's own entry in canonical
+  // units, derived from a source pair — not a verdict over other facts. Calling
+  // it "(computed)" reads as "you cannot enter this", which is false: the pencil
+  // edits the pair. Keep the marker for real verdicts (BMI, MIPI, ratios).
+  const showComputed = derived && field.normalised_read_model !== true;
   // The inputs' own labels read better than the descriptor's snake_case reason,
   // and name where a dedicated source is authored (#2614).
   const inputLabels = inputs.map((input) => {
@@ -544,9 +555,16 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   return <div className={ROW_CLASS} data-field={canonical}>
     {inputs.length && !inputsUnavailable && editPath ? <>
       {!compact && <div className="text-sm font-medium">{shownLabel}
-        {derived && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
+        {showComputed && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
       </div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
+        {/* A derived row shows the recorded result date beside its value so the
+            date is visible without opening the dialog that edits the pair. The
+            date is display-only here: the write still goes through the inputs,
+            where the pair's own date control lives. */}
+        {derived && field.latest_date && !compact && <span className="whitespace-nowrap text-xs text-muted-foreground">
+          Result date {formatDate(field.latest_date)}
+        </span>}
         <Dialog.Root open={open} onOpenChange={setOpen}>
           {/* A pencil, not an "Edit inputs" label: the row already shows the
               value, and the label widened the column enough to wrap "Your Value"
@@ -562,7 +580,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed inset-0 z-[61] m-auto h-fit max-h-[85vh] w-[min(32rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
               <Dialog.Title className="font-semibold">{shownLabel}
-                {derived && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
+                {showComputed && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
               </Dialog.Title>
               <Dialog.Description className="text-sm text-muted-foreground">{readOnly || !state.writable
                 ? 'These inputs are read-only in this view.'
@@ -657,7 +675,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
         </p>}
     </>
-      : <><div>{!compact && <span className="text-sm font-medium">{shownLabel}{derived ? ' (computed)' : ''}: </span>}{formatted}</div>
+      : <><div>{!compact && <span className="text-sm font-medium">{shownLabel}{showComputed ? ' (computed)' : ''}: </span>}{formatted}</div>
         {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
