@@ -13277,27 +13277,31 @@ def _decision_confidence(data, mapping, concept, previous_concept_id):
     return mapping.suggestion_confidence if destination_stands else None
 
 
-def _saved_confidence(data):
-    """The confidence the dialog sends to keep on the mapping (``suggestion_confidence``).
+def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, concept):
+    """What a save does to the mapping's ``suggestion_confidence``: ``(set, value)``.
 
-    0-1, ``None`` to clear. Unlike ``decision_confidence`` (the ranker's belief
-    when the curator saved, for the accuracy analytics) this is the number the
-    mapping carries: it stays when the mapping is approved and is what
-    provisional data reads. Raises a 400 for anything else.
+    Provisional data reads this number as evidence, so the server stores only a
+    confidence it produced: the dialog sends the ``suggestion_confidence_token``
+    the score endpoint (Calc) or a Suggest run signed for this source, table and
+    destination (``confidence_token``). A token that is forged, expired or for
+    another source or destination is a 400, never a silent store. A bare
+    ``suggestion_confidence`` number is ignored; ``null`` clears it. Left out
+    entirely, the rules in the caller stand (kept while the destination stands,
+    cleared when it moves).
     """
-    raw = data.get('suggestion_confidence')
-    if raw in (None, ''):
-        return None
-    try:
-        # float(True) is 1.0: a boolean is not a score.
-        value = None if isinstance(raw, bool) else float(raw)
-    except (TypeError, ValueError):
-        value = None
-    if value is None or not 0.0 <= value <= 1.0:
-        raise serializers.ValidationError({
-            'suggestion_confidence': 'Confidence must be a number between 0 and 1.',
-        })
-    return value
+    from omop_core.mapping import confidence_token
+    token = data.get('suggestion_confidence_token')
+    if token not in (None, ''):
+        try:
+            return True, confidence_token.verify(
+                token, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+                omop_table=omop_table, destination_concept_id=concept.concept_id if concept else None,
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError({'suggestion_confidence_token': str(exc)})
+    if 'suggestion_confidence' in data and data.get('suggestion_confidence') in (None, ''):
+        return True, None
+    return False, None
 
 
 def _table_label(omop_table):
@@ -13673,11 +13677,15 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     # The ranker's confidence was in the destination it chose, not this one.
     if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
         values['suggestion_confidence'] = None
-    # The dialog shows the mapping's confidence and sends what it shows (a
-    # Suggest run's score, or a Calc): that is the number to keep, whether the
-    # destination moved or not. Left out, the rules above stand.
-    if 'suggestion_confidence' in data:
-        values['suggestion_confidence'] = _saved_confidence(data)
+    # A confidence the server signed for this source and destination (a Calc, or
+    # a Suggest run's score for the destination chosen) is the number to keep,
+    # whether the destination moved or not; null clears it.
+    keep, saved_confidence = _saved_confidence(
+        data, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+        omop_table=omop_table, concept=concept,
+    )
+    if keep:
+        values['suggestion_confidence'] = saved_confidence
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
@@ -14949,8 +14957,18 @@ def code_mapping_score(request):
     if not destination_id or destination_id < 0:
         return Response({'destination_concept_id': 'Choose a destination concept to score.'},
                         status=status.HTTP_400_BAD_REQUEST)
-    if not Concept.objects.filter(concept_id=destination_id).exists():
+    destination = Concept.objects.filter(concept_id=destination_id).first()
+    if destination is None:
         return Response({'destination_concept_id': 'Concept not found.'}, status=status.HTTP_400_BAD_REQUEST)
+    # Injected into the pool, the destination skips the retrieval filters, so the
+    # same test provisional data applies at read time is made here: a valid
+    # standard concept in the domain of the table the rows go to.
+    from omop_core.mapping.code_resolution import _usable_destination
+    if not _usable_destination(destination, normalize_omop_table(request.data.get('omop_table'))):
+        return Response({'destination_concept_id': (
+            f'{destination.concept_name} cannot be scored here: only a valid standard concept in the '
+            f'domain of the source\'s table is scored.'
+        )}, status=status.HTTP_400_BAD_REQUEST)
     return _suggest_one(request, score_concept_id=destination_id)
 
 
