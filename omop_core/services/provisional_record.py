@@ -211,22 +211,48 @@ def _storable(name, value) -> bool:
     return not (width and isinstance(value, str) and len(value) > width)
 
 
-# The vitals reader takes a weight as kilograms and a height as centimetres
-# (or metres). A real row has been converted to the mapping's unit; a proposal
-# has not, so it is read only when it says it is already in one of those.
+# The vitals reader takes a weight as kilograms, a height as centimetres (or
+# metres), a blood pressure as mmHg and a heart rate per minute. A real row has
+# been converted to the mapping's unit; a proposal has not, so it is read only
+# when it says it is already in one of those.
 _VITAL_UNITS = {
     '29463-7': frozenset({'kg', 'kilogram', 'kilograms'}),
     '8302-2': frozenset({'cm', 'centimeter', 'centimeters', 'centimetre', 'centimetres',
                          'm', 'meter', 'meters', 'metre', 'metres'}),
+    '8480-6': frozenset({'mm[hg]', 'mmhg', 'mm hg'}),
+    '8462-4': frozenset({'mm[hg]', 'mmhg', 'mm hg'}),
+    '8867-4': frozenset({'/min', 'bpm', 'beats/min', 'per minute', '{beats}/min'}),
 }
 
 
-def _vital_unit_ok(row) -> bool:
+def _vital_code(row):
+    """The vital-sign code a measurement is, or None for any other measurement."""
     codes = {row.measurement_source_value, getattr(row.measurement_concept, 'concept_code', None)}
-    for code in codes & _VITAL_UNITS.keys():
-        if (row.unit_source_value or '').strip().lower() not in _VITAL_UNITS[code]:
-            return False
-    return True
+    found = codes & _VITAL_UNITS.keys()
+    return next(iter(found), None)
+
+
+def _usable_vitals(measurements):
+    """The measurements, without a vital sign whose newest proposal is in the wrong unit.
+
+    A wrong-unit proposal cannot be read, and an unshowable newest result
+    blocks the older ones, as it does on the real path
+    (``_read_values_in_source_units``): showing last year's weight as the
+    current one would be worse than showing none. So the whole code goes, not
+    just the one row. Rows arrive newest first.
+    """
+    newest_ok = {}
+    for row in measurements:
+        code = _vital_code(row)
+        if code is not None and code not in newest_ok:
+            newest_ok[code] = (row.unit_source_value or '').strip().lower() in _VITAL_UNITS[code]
+    return [row for row in measurements
+            if _vital_code(row) is None or newest_ok[_vital_code(row)]]
+
+
+# A proposed value is laid beside the record's own unit for it. When the record
+# already says it is in another unit, the number would be mislabelled.
+_VALUE_UNITS = {'weight': 'weight_units', 'height': 'height_units'}
 
 
 def _after_clears(snapshot, provisional_rows, target):
@@ -254,8 +280,7 @@ def _after_clears(snapshot, provisional_rows, target):
 def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name."""
     from omop_core.services.patient_record_service import _is_empty
-    measurements = [row for row in _after_clears(snapshot, snapshot.provisional_measurements, 'measurement')
-                    if _vital_unit_ok(row)]
+    measurements = _usable_vitals(_after_clears(snapshot, snapshot.provisional_measurements, 'measurement'))
     observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
     if not (measurements or observations):
         return {}, {}
@@ -271,6 +296,14 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
         and not _is_empty(value) and _is_empty(getattr(record, field, None))
         and _storable(field, value)
     }
+    # A proposed weight or height is dropped when the record's own unit for it
+    # differs from the unit the proposal is in: laid together, the number would
+    # read as the wrong unit (70 kg shown as 70 lb).
+    for field, units_field in _VALUE_UNITS.items():
+        own = (getattr(record, units_field, None) or '').strip().lower()
+        proposed = str(values.get(units_field) or '').strip().lower()
+        if field in kept and own and proposed and own != proposed:
+            del kept[field]
     if not kept:
         return {}, {}
     confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
@@ -341,7 +374,12 @@ def mirror_user_edit(record, edited_fields) -> None:
                         setattr(confidence, field.name, None)
                         cleared.append(field.name)
             if confidence is not None:
-                cleared += _settle_computed(record, provisional, confidence, edited)
+                try:
+                    with transaction.atomic():
+                        cleared += _settle_computed(record, provisional, confidence, edited)
+                except Exception:  # noqa: BLE001 -- a calculation must not cost the edit's own mirror
+                    logger.exception('Provisional recalculation failed for person_id=%s.',
+                                     record.person_id)
             provisional.save()
             if cleared:
                 confidence.save(update_fields=cleared)

@@ -387,8 +387,13 @@ the field and the mark goes. The PATCH mirror recalculates a field still on a
 proposal after an edit to one of its inputs, and drops it when the edit leaves
 it nothing to calculate from. The vitals reader joins the provisional readers
 so a proposed weight and height exist; a proposal is read only when its unit
-is already kilograms for weight or centimetres or metres for height, because a
-proposal is not unit-converted on write. Left for later: fields calculated from
+is already the one the reader assumes (kilograms, centimetres or metres,
+mmHg, per minute), because a proposal is not unit-converted on write. A vital
+whose newest proposal is in another unit is dropped whole, so an older reading
+never stands in as the current one, and a proposed weight or height is dropped
+when the record's own unit for it differs, so a number is never shown with the
+wrong unit. A failing recalculation in the PATCH mirror costs only the
+calculated fields, not the edit's own mirror. Left for later: fields calculated from
 a JSON input (`no_other_active_malignancies`, FLIPI, GELF), the free light chain
 ratio and `measurable_disease_imwg` (they read one lab event's pair), age,
 `last_treatment`, and fields owned by a formula.
