@@ -144,8 +144,10 @@ describe('GeneralTab', () => {
         </PatientFormContext.Provider>,
       );
     });
+    // The row asks the question; the answers name the fact (#2608). A row
+    // labelled "HIV Positive" would render "HIV Positive: HIV Positive".
     for (const label of [
-      'HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive',
+      'HIV status', 'Hepatitis B status', 'Hepatitis C status',
     ]) {
       expect(screen.getByText(new RegExp(`^${label}:?$`))).toBeVisible();
     }
@@ -249,11 +251,12 @@ describe('GeneralTab', () => {
   it('answers each viral status with its own pair and never a second row (#5601)', async () => {
     await renderTab({ hiv_status: false, hepatitis_b_status: true, hepatitis_c_status: null });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    // One row per condition: the question is the positive label. A true answer
-    // repeats it as the selected value, hence `getAllByText`.
-    for (const label of ['HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive']) {
+    // One row per condition, and the answers name the fact: the row label is a
+    // question, the selected value is the reviewed wording (#2608).
+    for (const label of ['HIV status', 'Hepatitis B status', 'Hepatitis C status']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
+    expect(screen.getAllByText('Hepatitis B Positive').length).toBeGreaterThan(0);
     const section = screen.getByText('Infection Status').closest('div')?.parentElement;
     expect(section).not.toBeNull();
     expect(within(section as HTMLElement).getAllByRole('combobox')).toHaveLength(3);

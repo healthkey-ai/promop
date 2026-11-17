@@ -140,6 +140,9 @@ function controlName(control: HTMLElement): string {
  *  none of them writes. */
 const NON_EDITING = [
   /^View$/,
+  // A disclosure that reads the recorded answer; the checkboxes and the save
+  // actions inside it are disabled and are swept as controls in their own right.
+  /^Choose conditions( \(\d+ selected\))?[▴▾]?$/,
   /^View trend chart for /,
   /^Labs tab$/,
   /^Apple ?export\.zip/,

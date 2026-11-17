@@ -7,7 +7,7 @@
  * host's write permission, not on a descriptor entry that is absent by design
  * (#5599).
  */
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -59,12 +59,13 @@ describe('GeneralTab pre-existing conditions', () => {
           editedName="Alishia Howell"
           onNameChange={vi.fn()}
           onZipcodeChange={vi.fn()}
-          onConditionsSaved={vi.fn()}
+          onServerValues={vi.fn()}
         />,
       );
     });
 
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: /Choose conditions/ }));
     expect(await screen.findByLabelText('Infections')).toBeEnabled();
     expect(screen.getByRole('button', { name: /Save categories/ })).toBeEnabled();
   });

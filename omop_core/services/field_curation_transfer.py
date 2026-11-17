@@ -422,6 +422,10 @@ def _apply_mappings(rows: list[dict], stats: TransferStats) -> None:
     for row in rows:
         values = {name: row.get(name, '') if name in _OPTIONAL_MAPPING_FIELDS else row[name]
                   for name in _MAPPING_FIELDS}
+        # A payload written before #2605 may carry a `{score}`-style marker;
+        # it must not put one back into storage on the target instance.
+        from omop_core.services.mappings import physical_unit
+        values['unit'] = physical_unit(values.get('unit')) or ''
         values['concept'] = _resolve_concept(row, stats)
         # Attribution does not cross instances, see module docstring.
         values['reviewer'] = None

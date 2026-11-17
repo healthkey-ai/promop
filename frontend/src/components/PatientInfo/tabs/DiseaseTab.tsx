@@ -169,7 +169,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         </div>
       </Section>
 
-      <Section title="Transformation to DLBCL">
+      <Section title="Transformation">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Transformed to DLBCL" name="transformed_to_dlbcl" descriptor={descriptors.transformed_to_dlbcl} type="boolean" value={formData?.transformed_to_dlbcl} onChange={onChange} />
           <ClinicalField label="Transformation Date" name="dlbcl_transformation_date" descriptor={descriptors.dlbcl_transformation_date} type="date" value={formData?.dlbcl_transformation_date} onChange={onChange} precision={(formData?.dlbcl_transformation_date_precision as 'day' | 'month' | 'year') ?? 'day'} />

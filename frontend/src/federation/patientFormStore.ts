@@ -74,6 +74,11 @@ export interface PatientFormSnapshot {
    *  in flight. Snapshot consumers that gate navigation must treat this as
    *  pending. */
   bypassing: boolean;
+  /** Counts answers applied through `applyServerValues` (explicit answers,
+   *  therapy lines, genomics). A row that caches its own attestation snapshot
+   *  re-reads it when this moves, so two mounted editors of the same answer do
+   *  not disagree after one of them writes (#2606 review). */
+  answersRevision: number;
   /** The last bypass write (therapy/attestation/genomics) failed. Cleared when
    *  the next bypass write starts. */
   bypassError?: string;
@@ -163,7 +168,7 @@ export interface PatientFormResult {
 export class PatientFormStore {
   private snapshot: PatientFormSnapshot = {
     values: {}, fields: {}, pending: {}, failed: {}, errors: {}, loading: true, saving: false,
-    bypassing: false, writable: false,
+    bypassing: false, writable: false, answersRevision: 0,
   };
   private listeners = new Set<() => void>();
   /** Listener -> the registration that owns it. A later registration with the
@@ -245,7 +250,34 @@ export class PatientFormStore {
   /** Merge an explicit server acknowledgement that did not go through the queue. */
   applyServerValues(values: Record<string, unknown>) {
     ++this.explicitRevision;
-    this.publish({ values: { ...this.snapshot.values, ...values } });
+    this.publish({
+      values: { ...this.snapshot.values, ...values },
+      answersRevision: this.explicitRevision,
+    });
+  }
+  /** Read an explicit answer's snapshot through this store's own connection.
+   *
+   * A federated host injects its authenticated client and base path into the
+   * store, and `PatientFieldEditorSlot` deliberately does not configure the
+   * module-level transport. Going through the store keeps the request on the
+   * connection that speaks for this patient (#2606 review). */
+  async explicitAnswerState(
+    personId: number, endpoint: string, field: string,
+  ): Promise<Record<string, unknown>> {
+    const { data } = await this.client.get<Record<string, unknown>>(
+      `${this.base}/v1/patient-records/${personId}/${endpoint}/`,
+      { params: { field } },
+    );
+    return data;
+  }
+  /** Post an explicit answer on the same connection. */
+  async explicitAnswer(
+    personId: number, endpoint: string, payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const { data } = await this.client.post<Record<string, unknown>>(
+      `${this.base}/v1/patient-records/${personId}/${endpoint}/`, payload,
+    );
+    return data;
   }
   /** Hold the host's listeners while a write outside the PATCH queue runs. */
   private bypassError?: string;

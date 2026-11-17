@@ -13,8 +13,8 @@ export default function FlipiAssessment({ value, recordedScore, descriptor, onCh
   const risk = score == null ? null : score <= 1 ? 'Low' : score === 2 ? 'Intermediate' : 'High';
   const write = (keys: string[] | null) => onChange('flipi_score_options', keys == null ? null : keys.join(','));
   return (
-    <fieldset className="space-y-3 rounded-md border p-4" disabled={locked || !descriptor?.writable}>
-      <legend className="px-1 font-medium">FLIPI-1 assessment</legend>
+    <fieldset className="space-y-3" disabled={locked || !descriptor?.writable}>
+      <legend className="text-sm font-medium text-portal-text-primary">FLIPI-1 assessment</legend>
       <p className="text-sm text-muted-foreground">Select the risk factors present at diagnosis. Each selected factor adds 1 point.</p>
       {FLIPI_FACTORS.map(([key, label]) => (
         <label key={key} className="flex items-center gap-3 text-sm">
@@ -23,7 +23,7 @@ export default function FlipiAssessment({ value, recordedScore, descriptor, onCh
           <span>{label}</span><span className="ml-auto">{selected?.includes(key) ? '+1' : '+0'}</span>
         </label>
       ))}
-      <div className="rounded bg-muted p-3" aria-live="polite">
+      <div className="space-y-1" aria-live="polite">
         <p className="font-medium">FLIPI Score: {score == null ? (recordedScore == null ? 'Not assessed' : `${String(recordedScore)} / 5 — historical`) : `${score} / 5 — ${risk} risk`}</p>
         {score == null && recordedScore != null && (
           <p className="text-sm">Factor checklist unavailable; the historical score has not been recalculated.</p>
