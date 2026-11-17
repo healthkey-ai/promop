@@ -240,112 +240,148 @@ def test_an_edit_with_no_provisional_row_writes_none(snomed, record, staff):
     assert not PatientRecordProvisional.objects.exists()
 
 
-# --- the endpoint ---------------------------------------------------------------------
+# --- the overlay on the normal patient-record read -------------------------------------
 
-def test_detail_serves_the_provisional_picture_with_confidence(snomed, record, staff):
+URL = '/api/v1/patient-records/{}/'
+
+
+def _read(client, record):
+    return client.get(URL.format(record.person_id)).json()['patient_info']
+
+
+def _derive_a_proposal(record):
     with suppress_patient_record_refresh():
         _add_measurement(record.person, 82)
     refresh_patient_record(record.person)
 
-    body = staff.get(f'/api/v1/patient-records-provisional/{record.person_id}/').json()
-    real = staff.get(f'/api/v1/patient-records/{record.person_id}/').json()['patient_info']
 
-    assert float(body['hemoglobin_g_dl']) == 11.5
-    # The value and its aliases (hemoglobin_level and its unit) are one proposal.
-    assert body['confidence']['hemoglobin_g_dl'] == 82
-    assert set(body['confidence'].values()) == {82}
-    assert real['hemoglobin_g_dl'] is None
-    assert set(real) <= set(body)                 # the same fields, plus confidence
-
-
-def test_a_person_not_yet_derived_gets_the_real_record_and_no_confidence(snomed, record, staff):
-    body = staff.get(f'/api/v1/patient-records-provisional/{record.person_id}/').json()
-
-    assert body['confidence'] == {} and body['disease'] == record.disease
-
-
-def test_list_serves_every_visible_record(snomed, record, staff):
-    other = PatientRecordFactory()
-    with suppress_patient_record_refresh():
-        _add_measurement(record.person, 82)
-    refresh_patient_record(record.person)
-
-    body = staff.get('/api/v1/patient-records-provisional/').json()
-
-    rows = {row['person_id']: row for row in body['results']}
-    assert set(rows) == {record.person_id, other.person_id}
-    assert rows[record.person_id]['confidence']['hemoglobin_g_dl'] == 82
-    assert rows[other.person_id]['confidence'] == {}
-
-
-def test_the_patient_role_is_refused(snomed, record):
-    identity = Identity.objects.create_user(email='prov-patient@example.test')
-    PatientUser.objects.create(identity=identity, person=record.person)
+def _as(identity):
     client = APIClient()
     client.force_authenticate(identity)
-
-    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 403
-    assert client.get('/api/v1/patient-records-provisional/').status_code == 403
-    # Their own real record is unaffected.
-    assert client.get(f'/api/v1/patient-records/{record.person_id}/').status_code == 200
+    return client
 
 
-def test_a_stranger_is_refused_and_another_orgs_doctor_finds_nothing(snomed, record):
-    stranger = Identity.objects.create_user(email='prov-stranger@example.test')
-    client = APIClient()
-    client.force_authenticate(stranger)
-    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 403
+def test_the_record_read_lays_a_proposal_over_an_empty_field_and_says_so(snomed, record, staff):
+    _derive_a_proposal(record)
+
+    shown = _read(staff, record)
+
+    assert float(shown['hemoglobin_g_dl']) == 11.5
+    # The value and its aliases (hemoglobin_level and its unit) are one proposal.
+    assert shown['provisional_fields']['hemoglobin_g_dl'] == 82
+    assert set(shown['provisional_fields'].values()) == {82}
+    # The stored record is untouched: an overlay is a view, never a write.
+    assert PatientRecord.objects.get(person=record.person).hemoglobin_g_dl is None
+
+
+def test_a_person_not_yet_derived_reads_the_real_record_with_no_marks(snomed, record, staff):
+    shown = _read(staff, record)
+
+    assert shown['provisional_fields'] == {} and shown['disease'] == record.disease
+
+
+def test_with_the_switch_off_nothing_is_computed_stored_or_mirrored(snomed, record, staff, settings):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    settings.PROVISIONAL_DATA_ENABLED = False
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+
+    refresh_patient_record(record.person)
+    response = staff.patch(URL.format(record.person_id), {'hemoglobin_g_dl': '13.0'}, format='json')
+
+    assert response.status_code == 200, response.content
+    assert not PatientRecordProvisional.objects.exists()
+    assert not PatientRecordConfidence.objects.exists()
+    assert 'provisional_fields' in _read(staff, record) and _read(staff, record)['provisional_fields'] == {}
+
+
+def test_nothing_is_overlaid_with_the_switch_off(snomed, record, staff, settings):
+    _derive_a_proposal(record)
+    settings.PROVISIONAL_DATA_ENABLED = False
+
+    shown = _read(staff, record)
+
+    assert shown['hemoglobin_g_dl'] is None and shown['provisional_fields'] == {}
+
+
+def test_a_patient_sees_their_own_proposals_marked(snomed, record):
+    _derive_a_proposal(record)
+    identity = Identity.objects.create_user(email='prov-patient@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = _as(identity)
+
+    mine = client.get('/api/v1/patient-records/me/').json()['patient_info']
+    by_id = _read(client, record)
+
+    for shown in (mine, by_id):
+        assert float(shown['hemoglobin_g_dl']) == 11.5
+        assert shown['provisional_fields']['hemoglobin_g_dl'] == 82
+
+
+def test_a_verified_representative_sees_it(snomed, record):
+    from omop_core.models import PersonalRepresentative
+    _derive_a_proposal(record)
+    caregiver = Identity.objects.create_user(email='prov-caregiver@example.test')
+    PersonalRepresentative.objects.create(
+        representative=caregiver, person_id=record.person_id, relationship='caregiver',
+        verification_status='VERIFIED')
+
+    assert _read(_as(caregiver), record)['provisional_fields']['hemoglobin_g_dl'] == 82
+
+
+def test_a_doctor_with_access_sees_it_and_another_orgs_doctor_finds_nothing(snomed, record):
+    _derive_a_proposal(record)
+    doctor = Identity.objects.create_user(email='prov-doctor@example.test')
+    GroupAccess.objects.create(identity=doctor, org=record.organization, role='doctor')
+    assert _read(_as(doctor), record)['provisional_fields']['hemoglobin_g_dl'] == 82
 
     elsewhere = Identity.objects.create_user(email='prov-elsewhere@example.test')
     GroupAccess.objects.create(identity=elsewhere, org=OrganizationFactory(), role='doctor')
-    client.force_authenticate(elsewhere)
-    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 404
+    assert _as(elsewhere).get(URL.format(record.person_id)).status_code == 404
 
 
-def test_the_endpoint_does_not_exist_with_the_switch_off(snomed, record, staff, settings):
-    settings.PROVISIONAL_DATA_ENABLED = False
-
-    assert staff.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 404
-    assert staff.get('/api/v1/patient-records-provisional/').status_code == 404
-
-
-def test_the_endpoint_is_read_only(snomed, record, staff):
-    url = f'/api/v1/patient-records-provisional/{record.person_id}/'
-
-    assert staff.patch(url, {'disease': 'x'}, format='json').status_code == 405
-    assert staff.delete(url).status_code == 405
-
-
-# --- review findings (#2628) ------------------------------------------------------------
-
-def test_a_reader_with_no_curation_access_gets_nothing(snomed):
-    """The demo-org browse lists sample patients to an analyst, de-identified (#2460).
-    A provisional row is a whole record: the endpoint refuses such a reader."""
+def test_an_analyst_never_reads_a_patient_so_never_a_proposal(snomed):
+    """Analysts have no individual patient's data (#2398), at a demo org included."""
     demo = OrganizationFactory(allows_patient_signup=True)
     sample = PatientRecordFactory(organization=demo)
+    _derive_a_proposal(sample)
     analyst = Identity.objects.create_user(email='prov-analyst@example.test')
     GroupAccess.objects.create(identity=analyst, org=demo, role='analyst')
-    client = APIClient()
-    client.force_authenticate(analyst)
 
-    assert client.get('/api/v1/patient-records-provisional/').status_code == 403
-    assert client.get(f'/api/v1/patient-records-provisional/{sample.person_id}/').status_code == 403
+    assert _as(analyst).get(URL.format(sample.person_id)).status_code == 404
 
 
-def test_the_endpoint_never_lets_a_stale_row_override_the_live_record(snomed, record, staff):
-    with suppress_patient_record_refresh():
-        _add_measurement(record.person, 82)
-    refresh_patient_record(record.person)
+def test_a_stale_row_never_overrides_the_live_record(snomed, record, staff):
+    _derive_a_proposal(record)
     other = OrganizationFactory()
     # Changed outside any derivation, after the provisional row was written.
     PatientRecord.objects.filter(person=record.person).update(
         organization=other, hemoglobin_g_dl=9, hemoglobin_level=9, hemoglobin_level_units='g/dL')
 
-    body = staff.get(f'/api/v1/patient-records-provisional/{record.person_id}/').json()
+    shown = _read(staff, record)
 
-    assert body['organization'] == other.pk
-    assert float(body['hemoglobin_g_dl']) == 9
-    assert 'hemoglobin_g_dl' not in body['confidence']          # approved now, so no mark
+    assert shown['organization'] == other.pk
+    assert float(shown['hemoglobin_g_dl']) == 9
+    assert 'hemoglobin_g_dl' not in shown['provisional_fields']      # approved now, so no mark
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# --- review findings (#2628) ------------------------------------------------------------
+
+
+
 
 
 def test_an_edit_also_settles_the_aliases_it_fills(snomed, record, staff):
@@ -379,26 +415,8 @@ def test_a_users_clear_is_not_refilled_by_an_older_proposal(snomed, record, staf
     assert confidence(record.person).hemoglobin_g_dl is None
 
 
-def test_a_verified_representative_is_refused(snomed, record):
-    from omop_core.models import PersonalRepresentative
-    caregiver = Identity.objects.create_user(email='prov-caregiver@example.test')
-    PersonalRepresentative.objects.create(
-        representative=caregiver, person_id=record.person_id, relationship='caregiver',
-        verification_status='VERIFIED')
-    client = APIClient()
-    client.force_authenticate(caregiver)
-
-    assert client.get(f'/api/v1/patient-records/{record.person_id}/').status_code == 200   # control
-    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 403
 
 
-def test_a_doctor_with_access_reads_it(snomed, record):
-    doctor = Identity.objects.create_user(email='prov-doctor@example.test')
-    GroupAccess.objects.create(identity=doctor, org=record.organization, role='doctor')
-    client = APIClient()
-    client.force_authenticate(doctor)
-
-    assert client.get(f'/api/v1/patient-records-provisional/{record.person_id}/').status_code == 200
 
 
 def test_a_failing_mirror_does_not_lose_the_users_edit(snomed, record, staff, monkeypatch):

@@ -225,19 +225,22 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
   refill it (matched on concept and source value, as derivation does); a
   proposed number or text that does not fit its column is dropped alone, as the
   real refresh drops it, and does not cost the person's other proposals.
-- **Endpoint** `GET /api/v1/patient-records-provisional/{person_id}/` and the
-  list, read-only, v1 only. Tenancy is `PatientRecordViewSet.get_queryset` and
-  its person lookup; the body is `PatientRecordSerializer` run over the real
-  record with a proposal laid over each field that has a confidence mark and
-  that the live record still leaves empty, so a stale row can never override
-  approved data, and the shape is the real one's plus `confidence` (the marks
-  that were applied). Access is an allow-list (`NotPatientRolePermission`):
-  service tokens, org-scoped credentials, staff and readers with curation
-  access. A patient, a verified representative and an analyst (including at a
-  public demo org, whose sample patients the real list shows de-identified) are
-  refused with 403, list and detail alike. A person without a pair is served the
-  real record with `confidence: {}`; with the switch off the resource is 404.
-  The list pages 25 at a time, because each row runs the full-width serializer.
+- **Read: an overlay on the normal record read.** There is no separate
+  endpoint and no role gate. `patient-records/{id}/` and `patient-records/me/`
+  run the serializer over the record with a proposal laid over each field that
+  has a confidence mark and that the live record still leaves empty
+  (`provisional_record.overlay`), so a stale row can never override approved
+  data, and add `provisional_fields` to `patient_info`: field to confidence
+  percentage, `{}` when nothing is proposed. Access is exactly the real
+  record's: a patient reads their own, a verified representative and a doctor
+  the patient's, with the same demo-org de-identification; an analyst reads no
+  patient, so no proposal either. Nothing is written: the overlay is a copy.
+  The list view is not overlaid yet.
+- **Switch off means nothing:** with `PROVISIONAL_DATA_ENABLED` off no pair is
+  written or mirrored, no provisional measurement is unit-read, the overlay is
+  the record itself and `provisional_fields` is `{}`. A pair stored while the
+  switch was on is simply never served; `backfill_patient_records --all` after
+  turning it on refreshes one that has gone stale.
 - **Not done:** the frontend (badge, show-provisional toggle, the untouched-form
   PATCH test), and the per-organization/domain floor. HealthTree's
   `patient_record` row count is still unread, so full-versus-sparse stays open.
@@ -448,29 +451,30 @@ concept) but never put a number on a real row.
 
 ## API
 
-The provisional picture is a separate read-only resource, so the current
-`/api/v1/patient-records/` contract does not change and the legacy path is not
-touched:
+The provisional picture is not a separate resource. The existing read
+(`/api/v1/patient-records/{person_id}/` and `/me/`, v1 only) lays each proposal
+over a field the record leaves empty and adds the marks, so every audience that
+may read a patient reads what is proposed for them, with no toggle:
 
 ```
-GET /api/v1/patient-records-provisional/{person_id}/
-GET /api/v1/patient-records-provisional/            (list, same tenancy as the real one)
-  200 {<every patient_record field, from the provisional row>,
-       "confidence": {"hemoglobin_g_dl": 82, "her2_status": 91}}
+GET /api/v1/patient-records/{person_id}/
+  200 {"patient_info": {<every field, a proposal where only a proposal answers>,
+                        "provisional_fields": {"hemoglobin_g_dl": 82, "her2_status": 91}},
+       "user": ...}
 ```
 
-`confidence` lists only the fields with a number, so a fully approved person
-returns an empty object. Tenancy and role checks reuse
-`PatientRecordViewSet.get_queryset`; the patient role is refused (403) in
-phase 1. A person not yet derived returns the real record with an empty
-`confidence`. Foundations that need it in bulk read the two tables by column
-name through the same endpoint's list form, or directly, joined on `person`.
+`provisional_fields` lists only the fields shown from a proposal, so a fully
+approved person returns an empty object, and so does every read with the switch
+off. A person not yet derived reads as the real record. A client must not send
+the overlaid values back as edits: diff against the real record, or send only
+what the user changed. Foundations that need it in bulk read the two tables by
+column name, joined on `person`.
 
 ## Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served |
+| `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served, and a record read carries no overlay |
 | `PROVISIONAL_CONFIDENCE_FLOOR` | `70` | least confidence a provisional row is written at |
 | `Organization.accepts_provisional_data` | `False` | FHIR sync for this organization passes `accept_proposed` |
 
@@ -558,7 +562,7 @@ existing-mapping view) is the same number and lands with this.
   rejection and on a moved proposal, wired into `_upsert_source_code_mapping`
   and Suggest's re-point.
 - The provisional pass, the two table writes, the PATCH mirror, and the
-  `patient-records-provisional` endpoint.
+  overlay on the patient-record read.
 - Frontend: badge on `ClinicalField`/`Field`, real record as PATCH baseline,
   show-provisional toggle, PHR labs skip, Source Codes tab outcome.
 - Tests: `patient_record` unchanged by a provisional row; derivation

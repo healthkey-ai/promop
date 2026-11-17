@@ -825,8 +825,10 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     measurements, provisional_measurements = _split_provisional(measurements)
     _read_values_in_source_units(person, measurements)
     # Provisional rows are not unit-converted on write, but read them the same
-    # way, so a consumer never has to prove the unit itself (#2249).
-    _read_values_in_source_units(person, provisional_measurements)
+    # way, so a consumer never has to prove the unit itself (#2249). With the
+    # switch off nothing reads them, so no work is spent on them.
+    if settings.PROVISIONAL_DATA_ENABLED:
+        _read_values_in_source_units(person, provisional_measurements)
     observations = list(
         Observation.objects
         .filter(person=person, is_erroneous=False)

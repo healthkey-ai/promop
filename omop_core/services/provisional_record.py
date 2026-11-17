@@ -15,6 +15,10 @@ The pass runs after the real record is saved, in the same transaction:
 4. Record the confidence of each kept value: the lowest confidence among the
    source codes that decide it.
 
+A reader sees the picture through ``overlay``: the normal patient-record read lays
+each proposed value over the field the real record leaves empty and says which
+fields those are, so no one asks for it separately.
+
 Readers that combine many rows (therapy lines, staging, genomics, ...) are not
 run: those columns equal ``patient_record``. Computed fields (BMI, scores) are
 not recomputed from a provisional input either, so they equal the real record.
@@ -194,7 +198,7 @@ def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
     """Write the person's provisional and confidence rows from the saved real *record*.
 
     A person with no provisional clinical rows and no pair already stored has
-    nothing to say, so nothing is written (the endpoint serves the real record for them);
+    nothing to say, so nothing is written (a reader gets the real record for them);
     one who has a stored pair gets it rewritten, which is how an approval or a
     revert takes a proposal back out. A failure is logged and leaves both rows
     as they were: the approved record is never lost to this pass.
@@ -253,3 +257,40 @@ def mirror_user_edit(record, edited_fields) -> None:
                 confidence.save(update_fields=cleared)
     except Exception:  # noqa: BLE001 -- the user's edit is already saved; this is the side picture
         logger.exception('Provisional mirror failed for person_id=%s; the edit is saved.', record.person_id)
+
+
+def overlay(record):
+    """The record as a reader sees it: ``(record, marks)``.
+
+    With ``PROVISIONAL_DATA_ENABLED`` on, a field the live record leaves empty
+    takes its proposed value from ``patient_record_provisional``, and ``marks``
+    maps each such field to its confidence (a percentage). Everything else is the
+    record's own. Only a field with a confidence mark is taken, and only while the
+    live record still has no answer for it, so a stale provisional row can never
+    override approved data. The record itself is not changed or saved: the caller
+    gets a copy to serialize. With the switch off, or no provisional row, it is
+    ``(record, {})``.
+
+    Access is the real record's: whoever may read this patient may read what is
+    proposed for them, so this adds no check of its own.
+    """
+    if not settings.PROVISIONAL_DATA_ENABLED:
+        return record, {}
+    import copy
+    from django.core.exceptions import ObjectDoesNotExist
+    from omop_core.services.patient_record_service import _is_empty
+    person = record.person
+    try:
+        provisional = person.patient_record_provisional
+        confidence = person.patient_record_confidence
+    except ObjectDoesNotExist:
+        return record, {}
+    view, marks = copy.copy(record), {}
+    for field in PatientRecordConfidence._meta.concrete_fields:
+        if field.name == 'person':
+            continue
+        mark = getattr(confidence, field.name)
+        if mark is not None and _is_empty(getattr(record, field.attname, None)):
+            setattr(view, field.attname, getattr(provisional, field.attname))
+            marks[field.name] = mark
+    return view, marks

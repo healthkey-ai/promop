@@ -7,8 +7,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
-from django.core.exceptions import ObjectDoesNotExist
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import CursorPagination, PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -34,7 +33,7 @@ from omop_core.services.source_fhir_context import based_on_labels as _source_ba
 from omop_core.services.provisional import is_real_row as _is_real_row
 from omop_core.models import (
     Organization,
-    Person, PatientRecord, PatientRecordProvisional, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
+    Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
     SourceCodeConceptMapping, SourceVocabulary, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
@@ -149,8 +148,7 @@ from patient_portal.api.bulk_upload import (
 from .permissions import (
     EtlDeletePermission, EtlPatientCrudPermission, EtlWritePermission,
     PatientCrudPermission, GenomicsCrudPermission,
-    NotPatientRolePermission, PatientDeletePermission, PatientSelfScopePermission,
-    ScopedTokenPermission,
+    PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
 )
@@ -1200,10 +1198,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         # Pass request in context so PH.1.2#05 demographic redaction can
         # identify whether the reader is the account holder.
-        patient_serializer = PatientRecordSerializer(patient_info, context={'request': request})
+        from omop_core.services.provisional_record import overlay
+        shown, provisional_fields = overlay(patient_info)
+        patient_serializer = PatientRecordSerializer(shown, context={'request': request})
 
         return Response({
-            'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
+            # legacy wire format — preserved for frontend/federation host compatibility
+            'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
             'user': user_data
         })
 
@@ -1779,10 +1780,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         if request.method == 'GET':
             user_serializer = UserSerializer(request.user)
-            patient_serializer = PatientRecordSerializer(patient_info)
+            from omop_core.services.provisional_record import overlay
+            shown, provisional_fields = overlay(patient_info)
+            patient_serializer = PatientRecordSerializer(shown)
             full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
             return Response({
-                'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
+                # legacy wire format — preserved for frontend/federation host compatibility
+                'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
                 'user': user_serializer.data,
                 'patient_name': full_name,
             })
@@ -6345,88 +6349,6 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             {'run_id': str(run.id), 'total': run.total},
             status=status.HTTP_202_ACCEPTED,
         )
-
-
-class ProvisionalRecordPagination(PatientRecordPagination):
-    page_size = 25
-    max_page_size = 25
-
-
-class PatientRecordProvisionalViewSet(viewsets.ReadOnlyModelViewSet):
-    """The provisional picture of a patient record (phase 1c, #2531).
-
-    The real record's every field, with a proposal's value where only a
-    proposal answers, plus ``confidence``: a percentage for each such field
-    and nothing for an approved one. Same tenancy as ``patient-records``; the
-    patient role is refused. A person not yet derived is served the real
-    record with an empty ``confidence``. Off, with ``PROVISIONAL_DATA_ENABLED``,
-    it does not exist.
-    """
-    serializer_class = PatientRecordSerializer
-    permission_classes = [ScopedTokenPermission, NotPatientRolePermission, PatientSelfScopePermission]
-    # Each row runs the full-width record serializer, which does per-row queries.
-    pagination_class = ProvisionalRecordPagination
-
-    # Tenancy and the person lookup are the real resource's own.
-    get_queryset = PatientRecordViewSet.get_queryset
-    _resolve_patient_with_auth = PatientRecordViewSet._resolve_patient_with_auth
-
-    def initial(self, request, *args, **kwargs):
-        if not settings.PROVISIONAL_DATA_ENABLED:
-            raise NotFound('Provisional data is not enabled.')
-        super().initial(request, *args, **kwargs)
-
-    @staticmethod
-    def _optional(person, relation):
-        try:
-            return getattr(person, relation)
-        except ObjectDoesNotExist:
-            return None
-
-    def _body(self, request, record, provisional, confidence):
-        """The real record with each proposal laid over a field the record leaves empty.
-
-        Only a field with a confidence mark is taken from the provisional row,
-        and only while the live record still has no answer for it: everything
-        else, and any value the record has gained since the pass ran, is the
-        record's own. So a stale provisional row can never override approved data.
-        """
-        import copy
-        from omop_core.models import PatientRecordConfidence
-        from omop_core.services.patient_record_service import _is_empty
-        view = copy.copy(record)
-        marks = {}
-        if provisional is not None and confidence is not None:
-            for field in PatientRecordConfidence._meta.concrete_fields:
-                mark = getattr(confidence, field.name) if field.name != 'person' else None
-                if mark is not None and _is_empty(getattr(record, field.attname, None)):
-                    setattr(view, field.attname, getattr(provisional, field.attname))
-                    marks[field.name] = mark
-        return {**PatientRecordSerializer(view, context={'request': request}).data, 'confidence': marks}
-
-    def retrieve(self, request, pk=None):
-        person, record, err = self._resolve_patient_with_auth(request, pk)
-        if err:
-            return err
-        return Response(self._body(
-            request, record,
-            self._optional(person, 'patient_record_provisional'),
-            self._optional(person, 'patient_record_confidence'),
-        ))
-
-    def list(self, request):
-        queryset = self.filter_queryset(self.get_queryset()).select_related(
-            'person__patient_record_provisional', 'person__patient_record_confidence',
-        ).order_by('person_id')
-        page = self.paginate_queryset(queryset)
-        rows = [self._body(
-            request, record,
-            self._optional(record.person, 'patient_record_provisional'),
-            self._optional(record.person, 'patient_record_confidence'),
-        ) for record in (page if page is not None else queryset)]
-        if page is not None:
-            return self.get_paginated_response(rows)
-        return Response(rows)
 
 
 @api_view(['GET'])

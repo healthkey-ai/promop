@@ -455,32 +455,6 @@ class PatientSelfScopePermission(BasePermission):
         return obj_person_id == patient_person.person_id
 
 
-class NotPatientRolePermission(BasePermission):
-    """Only a clinician, staff or a machine credential reads the provisional record.
-
-    A proposed value is a guess a patient (or the caregiver acting for one)
-    would read as a finding, and an analyst may never read patient data
-    (docs/provisional_data_plan.md, open decision 3). So this is an allow-list,
-    not a refusal of the patient role alone: service tokens, org-scoped
-    credentials, staff, and a session reader with curation access (a doctor or
-    org admin) pass. A patient, a verified representative with no provider
-    grant, and an analyst-only grant at a public demo org do not.
-    """
-
-    message = 'The provisional record needs curation access.'
-
-    def has_permission(self, request, view):
-        if is_service_token(request) or get_request_org(request) is not None:
-            return True
-        user = request.user
-        if not (user and user.is_authenticated):
-            return False
-        if getattr(user, 'is_staff', False):
-            return True
-        from omop_core.services.access import has_curation_access
-        return has_curation_access(user)
-
-
 class PatientDeletePermission(ScopedTokenPermission):
     """ScopedTokenPermission that also allows DELETE for patient account deletion.
 

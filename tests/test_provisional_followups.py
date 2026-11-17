@@ -92,7 +92,8 @@ def _measurement(person, source_unit, stored_unit, value, sent, confidence):
         unit_concept=_ucum_concept(stored_unit) if stored_unit else None, confidence=confidence)
 
 
-def test_provisional_measurements_are_read_in_their_source_unit(setup_units):  # noqa: F811
+def test_provisional_measurements_are_read_in_their_source_unit(setup_units, settings):  # noqa: F811
+    settings.PROVISIONAL_DATA_ENABLED = True
     person = PersonFactory()
     PatientRecordFactory(person=person)
     # Stored in g/L but sent as mg/dL, and the sent number proves neither unit.
