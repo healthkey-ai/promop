@@ -18,8 +18,8 @@ from omop_core.mapping import suggestions
 from omop_core.mapping.suggestions import suggestable_queryset
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
 from omop_core.models import (
-    Measurement, PatientRecord, PatientRecordConfidence, PatientSourceCode,
-    SourceCodeConceptMapping,
+    Measurement, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
+    PatientSourceCode, SourceCodeConceptMapping,
 )
 from omop_core.services import fill_provisional
 from tests.factories import (
@@ -314,15 +314,16 @@ def test_rows_become_provisional_at_or_above_the_floor_and_the_report_counts_the
     assert summary['report']['floor'] == 70
 
 
-def test_an_inventory_only_code_gets_a_provisional_row(world):
+def test_an_inventory_only_code_gets_a_provisional_row_when_inventory_is_included(world):
     person = _person(code='INV-1', with_row=False)
     _queue_row('INV-1')
 
-    summary = fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+    summary = fill_provisional.run(person.person_id, strategies=['umls'], include_inventory=True,
+                                   log=lambda m: None)
 
     row = _row(person, 'INV-1')
     assert (row.measurement_concept_id, row.confidence) == (world.concept.concept_id, 90)
-    assert summary['rows_created'] == 1
+    assert summary['rows_created'] == 1 and summary['rows_provisional'] == 1
 
 
 def test_skip_propose_only_materialises_the_proposals_that_exist(world):
@@ -333,6 +334,169 @@ def test_skip_propose_only_materialises_the_proposals_that_exist(world):
 
     assert world.calls == [] and summary['propose'] == {}
     assert _row(person).confidence == 85
+
+
+# --- propose is for unresolved codes; materialise uses every mapping ------------------------
+
+def _inventory_only(person, code, vocabulary='Local'):
+    PatientSourceCode.objects.create(
+        person=person, source_value=code, omop_table='measurement', source_vocabulary_id=vocabulary)
+
+
+def test_only_codes_with_unresolved_rows_are_proposed_for_unless_inventory_is_included(world):
+    person = _person(code='UNRES-1')
+    _inventory_only(person, 'INV-1')
+    unresolved, inventory = _queue_row('UNRES-1'), _queue_row('INV-1')
+
+    summary = fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+
+    assert world.calls == ['UNRES-1']
+    assert summary['codes_considered'] == 2 and summary['codes_to_propose'] == 1
+    inventory.refresh_from_db()
+    assert inventory.target_concept_id is None and inventory.last_suggest_attempt == ''
+    assert not Measurement.objects.filter(person=person, measurement_source_value='INV-1').exists()
+
+    again = fill_provisional.run(person.person_id, strategies=['umls'], include_inventory=True,
+                                 log=lambda m: None)
+
+    assert world.calls == ['UNRES-1', 'INV-1']
+    assert again['codes_to_propose'] == 2
+    inventory.refresh_from_db()
+    assert inventory.target_concept_id == world.concept.concept_id
+    assert _row(person, 'INV-1').confidence == 90
+
+
+def test_the_command_defaults_to_unresolved_only_and_the_two_flags_exclude_each_other(world):
+    person = _person(code='UNRES-1')
+    _inventory_only(person, 'INV-1')
+    _queue_row('UNRES-1'), _queue_row('INV-1')
+
+    out = _fill(person)
+    assert 'unresolved rows only' in out and world.calls == ['UNRES-1']
+    out = _fill(person, '--include-inventory')
+    assert 'unresolved rows and inventory' in out and world.calls == ['UNRES-1', 'INV-1']
+    assert 'unresolved rows only' in _fill(person, '--unresolved-only')
+    with pytest.raises(CommandError):
+        _fill(person, '--unresolved-only', '--include-inventory')
+
+
+def test_no_queue_row_is_created_for_an_inventory_only_code_unless_it_is_included(world):
+    person = _person(code='UNRES-1')
+    _inventory_only(person, 'INV-NEW')
+
+    summary = fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+    assert not SourceCodeConceptMapping.objects.filter(source_code='INV-NEW').exists()
+    assert summary['queue_rows']['created'] == 1          # UNRES-1's own row
+
+    fill_provisional.run(person.person_id, strategies=['umls'], include_inventory=True,
+                         log=lambda m: None)
+    assert SourceCodeConceptMapping.objects.filter(source_code='INV-NEW').exists()
+
+
+def test_materialise_uses_every_mapping_in_one_run(world):
+    """Approved makes rows real (an inventory-only code gets a row), a proposal at or above the
+    floor makes them provisional, a proposal below it leaves them alone."""
+    approved_target = ConceptFactory(concept_name='Approved target')
+    person = _person(code='APP-UNRES')                       # an unresolved row, approved mapping
+    for code in ('PROP-HI', 'PROP-LO'):                      # unresolved rows, proposals only
+        _inventory_only(person, code)
+        MeasurementFactory(
+            person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID, measurement_source_value=code,
+            measurement_date=date(2026, 1, 1), confidence=None)
+    _inventory_only(person, 'APP-INV')                       # inventory only, approved mapping
+    _inventory_only(person, 'PROP-INV')                      # inventory only, proposal at the floor
+    _inventory_only(person, 'LOW-INV')                       # inventory only, proposal below it
+    _queue_row('APP-UNRES', status='approved', target_concept=approved_target)
+    _queue_row('APP-INV', status='approved', target_concept=approved_target)
+    _queue_row('PROP-HI', target_concept=world.concept, suggestion_confidence=0.9)
+    _queue_row('PROP-LO', target_concept=world.concept, suggestion_confidence=0.55)
+    _queue_row('PROP-INV', target_concept=world.concept, suggestion_confidence=0.8)
+    _queue_row('LOW-INV', target_concept=world.concept, suggestion_confidence=0.4)
+
+    summary = fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+
+    assert world.calls == [], 'nothing needed proposing: every queue row already had a destination'
+    real = _row(person, 'APP-UNRES')
+    assert (real.measurement_concept_id, real.confidence) == (approved_target.concept_id, None)
+    created_real = _row(person, 'APP-INV')
+    assert (created_real.measurement_concept_id, created_real.confidence) == (
+        approved_target.concept_id, None)
+    assert (_row(person, 'PROP-HI').measurement_concept_id, _row(person, 'PROP-HI').confidence) == (
+        world.concept.concept_id, 90)
+    assert (_row(person, 'PROP-INV').measurement_concept_id, _row(person, 'PROP-INV').confidence) == (
+        world.concept.concept_id, 80)
+    low = _row(person, 'PROP-LO')
+    assert (low.measurement_concept_id, low.confidence) == (NO_MATCHING_CONCEPT_ID, None)
+    assert not Measurement.objects.filter(person=person, measurement_source_value='LOW-INV').exists()
+    # Real, provisional and left are counted apart.
+    assert summary['rows_real'] == 2 and summary['rows_real_created'] == 1
+    assert summary['rows_provisional'] == 2 and summary['rows_created'] == 2
+    assert summary['rows_left'] == 1 and summary['rows_reverted'] == 0
+
+
+def test_both_records_are_derived_and_the_provisional_value_never_reaches_patient_record(world):
+    loinc = world.concept.vocabulary
+    albumin = ConceptFactory(
+        concept_id=3024561, concept_code='1751-7', vocabulary=loinc, standard_concept='S',
+        concept_name='Albumin [Mass/volume] in Serum or Plasma')
+    person = _person(code='ALB-REAL', value=4.1)
+    _inventory_only(person, 'HGB-LOCAL')
+    MeasurementFactory(
+        person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+        measurement_source_value='HGB-LOCAL', measurement_date=date(2026, 1, 1), confidence=None,
+        value_as_number=11.5, value_source_value='11.5', unit_source_value='g/dL')
+    _queue_row('ALB-REAL', status='approved', target_concept=albumin)
+    _queue_row('HGB-LOCAL', target_concept=world.concept, suggestion_confidence=0.9)
+
+    summary = fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+
+    record = PatientRecord.objects.get(person=person)
+    assert float(record.albumin_g_dl) == pytest.approx(4.1), 'the approved mapping feeds patient_record'
+    assert record.hemoglobin_g_dl is None, 'a proposal never reaches patient_record'
+    provisional = PatientRecordProvisional.objects.get(person=person)
+    assert float(provisional.hemoglobin_g_dl) == pytest.approx(11.5)
+    marks = PatientRecordConfidence.objects.get(person=person)
+    assert marks.hemoglobin_g_dl == 90 and marks.albumin_g_dl is None
+    assert 'albumin_g_dl' in summary['record_fields_changed_names']
+    assert 'hemoglobin_g_dl' not in summary['record_fields_changed_names']
+    assert summary['record_fields_changed'] == len(summary['record_fields_changed_names']) >= 1
+    assert summary['provisional_fields'] >= 1
+    # Field names only: no value of the record is printed.
+    out = _fill(person, '--skip-propose')
+    assert 'patient_record (approved rows only)' in out and '4.1' not in out and '11.5' not in out
+
+
+def test_a_dry_run_counts_exactly_what_the_real_run_proposes(world):
+    person = _person(code='HAS-ROW')
+    _person_code_without_queue_row = 'NEEDS-ROW'
+    _inventory_only(person, _person_code_without_queue_row)
+    MeasurementFactory(
+        person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+        measurement_source_value=_person_code_without_queue_row, measurement_date=date(2026, 1, 1),
+        confidence=None)
+    _queue_row('HAS-ROW')
+
+    dry = fill_provisional.run(person.person_id, dry_run=True, log=lambda m: None)
+    real = fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+
+    assert dry['proposable_rows'] == 2 == real['propose']['considered']
+    assert dry['queue_rows']['missing'] == 1 and real['queue_rows']['created'] == 1
+
+
+def test_a_row_under_a_system_the_patient_does_not_hold_is_never_proposed_for(world):
+    person = _person(code='SHORT-6', vocabulary='Cerner')
+    other_hospital = _queue_row('SHORT-6', source_vocabulary_id='Epic')
+
+    dry = fill_provisional.run(person.person_id, dry_run=True, log=lambda m: None)
+    assert dry['proposable_rows'] == 1, 'only the Cerner row the real run would create'
+
+    fill_provisional.run(person.person_id, strategies=['umls'], log=lambda m: None)
+
+    other_hospital.refresh_from_db()
+    assert other_hospital.target_concept_id is None and other_hospital.last_suggest_attempt == ''
+    mine = SourceCodeConceptMapping.objects.get(source_code='SHORT-6', source_vocabulary_id='Cerner')
+    assert mine.target_concept_id == world.concept.concept_id
+    assert world.calls == ['SHORT-6']
 
 
 # --- rederive -------------------------------------------------------------------------------

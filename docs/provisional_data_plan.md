@@ -120,9 +120,14 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
 `PROVISIONAL_DATA_ENABLED`: nothing is queried, queued or written.
 
 - **One patient at a time.** `manage.py fill_provisional_record <person_id>`
-  (#2696) proposes for one patient's codes with Suggest (Jev by default), makes
-  their rows provisional through the same per-person resolve, and rederives their
-  record inline; see AGENTS.md. It never writes a code the ranker could not rank
+  (#2696) proposes with Suggest (Jev by default) for the codes the patient has
+  unresolved rows under (`--include-inventory` adds the slow inventory-only ones),
+  never for a row under a code system the patient does not hold; resolves **every**
+  row against **every** mapping with the full per-person resolve (approved makes
+  rows real and creates the rows an inventory code lacks, a proposal at or above
+  the floor makes them provisional, below it leaves them); and rederives their
+  record inline, `patient_record` from approved rows and the provisional pair from
+  proposed ones; see AGENTS.md. It never writes a code the ranker could not rank
   (the run stops, exits non-zero, and a rerun retries it), and `--tables` and
   `--limit` narrow only the propose step. It does not override the floor: the
   report says how many of their proposals fell below it, by band of the real floor,
