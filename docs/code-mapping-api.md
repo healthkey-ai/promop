@@ -295,6 +295,62 @@ and DELETE still require a professional session, so every change to a mapping
 has a reviewer and a history. A credential needs `system/etl.write` as well to
 call the lookup above; one token may hold both scopes.
 
+## Downloading the Wearables tab
+
+```
+GET /api/v1/code-mappings/wearables-export/?file_format=csv
+GET /api/v1/code-mappings/wearables-export/?file_format=docx
+```
+
+Every mapping on the Wearables tab (the Apple HealthKit, Health Connect, Garmin,
+OpenWearables and HL7 PHR source vocabularies) as one file, for use outside the
+app. Rejected mappings and a hospital's own override of a code are left out.
+The Word document is refused with a 400 above 5,000 mappings; the CSV is not
+limited. Send `Accept: */*` (or none): DRF negotiates content before the view
+runs, and `Accept: text/csv` alone is answered 406. On the
+Code Mapping page it is "Download all wearable mappings" on the Wearables tab.
+It needs a session with a role that reads the mapping pages (staff, org admin,
+doctor or analyst); anyone else gets 403.
+
+| `file_format` | Response |
+|---|---|
+| `csv` (the default) | `text/csv; charset=utf-8`, one line per mapping under a header row |
+| `docx` | a Word document with one table per category, for reading and sharing |
+| anything else | 400 |
+
+The parameter is `file_format` because the API framework reserves `format`.
+The response is an attachment named `wearable-mappings-YYYY-MM-DD.csv` or
+`.docx` and is not cached.
+
+The file holds every row of the tab in every section, proposed and approved,
+mapped and not yet mapped, **without rejected rows**. Rows are ordered by
+category, then metric key, then source (HealthKit, Health Connect, Garmin,
+OpenWearables, HL7 PHR), then source code, so the codes that report one metric
+sit together.
+
+CSV columns:
+
+| Column | Holds |
+|---|---|
+| Category, Measure class, Metric key | what the row says about the source metric (`category`, `measure_class`, `metric_key`) |
+| Source | the source vocabulary by name: HealthKit for `Apple`, Health Connect, Garmin, OpenWearables, HL7 PHR |
+| Source code, Description | the code as it arrives and its description |
+| Source unit | the units the source reports, joined with "; " |
+| Destination vocabulary, Destination code, Destination concept, OMOP concept ID | the destination concept; all blank while the code has none |
+| Domain | the destination's OMOP domain, or the domain the code is filed under while it has no destination |
+| Destination unit | the curated unit values are stored in (a UCUM code), blank when none is set |
+| Status | `proposed` or `approved`. Consume only `approved` rows with a destination as a vocabulary |
+| Provenance | what wrote the mapping (`origin_system`) |
+
+The file carries no patient value, reviewer or note. A cell that begins with
+`=`, `+`, `-`, `@`, a tab or a carriage return is written with a leading
+apostrophe, so a spreadsheet shows it as text; strip that apostrophe when
+reading the file with a program. For a program, the list endpoint above is
+the better read: it is paged, filterable and carries `updated_at`.
+
+In the Word document long identifiers wrap at invisible zero-width spaces.
+Copy exact codes from the CSV, not from the document.
+
 ## Uploading a source-code inventory
 
 Users with Code Mapping access can select **Upload** on the Code Mapping page,

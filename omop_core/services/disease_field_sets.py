@@ -84,7 +84,7 @@ def _labels() -> dict[str, str]:
     return labels
 
 
-def _cell(value) -> str:
+def csv_cell(value) -> str:
     """One value as CSV text; text a spreadsheet would run as a formula is quoted.
 
     Field names and concept names are curated, but a display name or a
@@ -108,7 +108,7 @@ def rows(descriptors: list[dict]) -> list[dict[str, str]]:
     for d in sorted(descriptors, key=lambda d: (
             d['scope'] != disease_profiles.SCOPE_DISEASE, d['tab'] or '', d['field_name'])):
         mapping = d.get('mapping') or {}
-        result.append({name: _cell(value) for name, value in {
+        result.append({name: csv_cell(value) for name, value in {
             'field_name': d['field_name'],
             'label': labels.get(d['field_name'], ''),
             'scope': d['scope'],

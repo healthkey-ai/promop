@@ -1837,6 +1837,69 @@ algorithmic estimate from another, under different vendor codes.
   columns leaves a target row's values alone and creates rows with blanks
   (`_CODE_MAPPING_NOT_CARRIED_WHEN_ABSENT`).
 
+## Code Mapping — Downloading the Wearables Tab
+
+`GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx` returns
+every mapping on the Wearables tab as one file, built on the server
+(`omop_core/services/wearable_mapping_export.py`). On the Wearables tab only,
+the page offers it as "Download all wearable mappings": CSV or Word document
+(`WearableMappingsDownload.tsx`). The section Download menus are a different
+thing and are unchanged: they write, in the browser, the rows a section has
+loaded.
+
+- **The parameter is `file_format`, not `format`.** DRF reads `format` itself
+  (`URL_FORMAT_OVERRIDE`) and answers 404 for a name it has no renderer for,
+  before the view runs. No value means `csv`; any other value is a 400.
+- **Who.** Whoever may read the mapping pages (`_can_view_mappings`), a
+  read-only doctor included. It is reference data: no patient value, no
+  reviewer, and no `notes`, which hold Suggest's rationale and curators' text.
+- **Which rows.** The tab's own, through `mapping_browse.tab_queryset`: every
+  vocabulary in `WEARABLE_SOURCE_VOCABULARIES`, in every section, **without
+  `rejected` rows and without a hospital's own override of a code** (the file
+  is for use outside the app, where that row would read as an unexplained
+  second line). No search, provenance or Seen filter applies. One query,
+  whatever the row count. The Word document is refused with a 400 above
+  `DOCX_MAX_ROWS` (5,000): it is built in memory in the request at about
+  1.4 ms a row; the CSV has no limit. Characters XML cannot hold are dropped
+  from the Word text, since one in any stored code would fail the file.
+- **Order.** Category in `WEARABLE_METRIC_CATEGORIES` order, blank last; then
+  metric key, blank last; then source (HealthKit, Health Connect, Garmin,
+  OpenWearables, HL7 PHR, then any other vocabulary by id); then source code.
+  The labels and that order are `SOURCE_LABELS` in the service: a vocabulary
+  added to the tab shows under its id, after the others, until it is listed
+  there.
+- **CSV.** UTF-8 with a byte order mark (descriptions carry "°C" and "μS",
+  which Excel misreads without one) and `\n` line ends. A header row, then one line per mapping: Category, Measure class, Metric
+  key, Source, Source code, Description, Source unit (the codes in
+  `source_unit_evidence`, joined with "; "), Destination vocabulary,
+  Destination code, Destination concept, OMOP concept ID, Domain (the
+  destination's, or the one the code is filed under while it has none),
+  Destination unit, Status, Provenance (`origin_system`). Text a spreadsheet
+  would run as a formula gets a leading apostrophe
+  (`disease_field_sets.csv_cell`).
+- **Word document.** `python-docx`. Landscape Letter; a title, a line of
+  counts, a legend, then a Heading 1 and one table per category that has
+  rows ("Uncategorized" last), each heading with its row count. Columns:
+  Metric, Source, Source code, Destination, Unit, Status. The table layout is
+  fixed at `DOCX_COLUMNS`' widths, so a long HealthKit identifier wraps
+  inside its cell at zero-width spaces (`wrappable`); those are in the Word
+  text only, never the CSV. A metric's rows read as one Metric cell: the text
+  is on the first row and the rules between them are not drawn. That is cell
+  borders, not a vertical merge, because the rows are also kept on one page
+  (keep-with-next) and LibreOffice misdraws a merged cell under that. The
+  header row repeats on each page, no row splits across pages, and the
+  footer numbers the pages.
+- **The same rows on the same day give the same bytes.** The document
+  properties are fixed strings and the archive's member times are the day's,
+  so a test can compare two downloads.
+- **It is built in the request.** About 1.4 ms a row for the Word document
+  (1,000 rows in 1.4 s), far inside gunicorn's 30 s at the tab's size. A tab
+  of tens of thousands of rows would need a queued job instead.
+
+Tests: `tests/test_wearable_mapping_export.py`,
+`WearableMappingsDownload.test.tsx` and
+`CodeMappingPage.wearablesDownload.test.tsx`.
+
 ## Code Mapping Lookup — Unit Conversion
 
 `POST /api/v1/code-mappings/lookup/` accepts optional unit fields per code entry
