@@ -23,6 +23,8 @@ export interface CodeMappingRow {
   measure_class?: string;
   /** Vendor-neutral key of the wearable metric, shared across its source codes. */
   metric_key?: string;
+  /** Confirmed public votes on the row's current destination (#2678); on list rows only. */
+  votes?: import("./voteCounts").VoteCounts;
   organization_id?: number | null;
   organization_slug?: string;
   organization_name?: string;

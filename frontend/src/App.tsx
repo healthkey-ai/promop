@@ -39,6 +39,8 @@ import VerifyEmailBanner from "@/components/Auth/VerifyEmailBanner";
 import UserProfilePage from "@/components/User/UserProfilePage";
 import RolesPage from "@/components/Roles/RolesPage";
 import { useAuth } from "@/hooks/useAuth";
+import PublicVotePage from "@/components/MappingVotes/PublicVotePage";
+import ConfirmVotesPage from "@/components/MappingVotes/ConfirmVotesPage";
 
 function OrgHome({
   currentUser,
@@ -202,7 +204,35 @@ function AppRoutes() {
   );
 }
 
+/**
+ * The public voting pages (#2678): `/vote/<token>` and the emailed
+ * `/vote/confirm/<token>`. Their visitors have no account, so these routes
+ * are chosen before anything reads the session: `AppRoutes` calls `useAuth`,
+ * which asks the server who is signed in and sends a stranger to the login
+ * page. Nothing here redirects into the app either.
+ */
+const isPublicVotePath = (path: string) => path === "/vote" || path.startsWith("/vote/");
+
+function PublicVoteRoutes() {
+  return (
+    <Routes>
+      <Route path="/vote/confirm/:confirmToken" element={<ConfirmVotesPage />} />
+      <Route path="/vote/:token" element={<PublicVotePage />} />
+      <Route
+        path="*"
+        element={
+          <div className="flex min-h-dvh items-start justify-center bg-slate-50 px-4 py-12">
+            <h1 className="text-xl font-semibold text-slate-900">This link is not available</h1>
+          </div>
+        }
+      />
+    </Routes>
+  );
+}
+
 export default function App() {
+  const location = useLocation();
+  if (isPublicVotePath(location.pathname)) return <PublicVoteRoutes />;
   return (
     <div className="min-h-dvh">
       <div className="app-page-content">

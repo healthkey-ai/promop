@@ -30,6 +30,8 @@ vi.mock("@/components/Auth/VerifyEmailBanner", () => ({ default: () => <div>VERI
 vi.mock("@/components/Auth/ChangePassword", () => ({ default: () => <div>CHANGE_PASSWORD</div> }));
 vi.mock("@/components/Auth/OrgLogin", () => ({ default: () => <div>ORG_LOGIN</div> }));
 vi.mock("@/components/Auth/OrgSignup", () => ({ default: () => <div>ORG_SIGNUP</div> }));
+vi.mock("@/components/MappingVotes/PublicVotePage", () => ({ default: () => <div>PUBLIC_VOTE</div> }));
+vi.mock("@/components/MappingVotes/ConfirmVotesPage", () => ({ default: () => <div>CONFIRM_VOTES</div> }));
 
 const baseAuth = { loading: false, refresh: vi.fn(), logout: vi.fn(), login: vi.fn() };
 
@@ -346,5 +348,43 @@ describe("retired OAuth callback", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
     renderAt("/auth/callback?code=old-code&state=old-state");
     expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+});
+
+describe("the public voting pages", () => {
+  // A stranger with a link: nothing may read the session, which would send
+  // them to the login page.
+  it.each([
+    ["/vote/some-share-token", "PUBLIC_VOTE"],
+    ["/vote/confirm/some-confirm-token", "CONFIRM_VOTES"],
+  ])("renders %s without asking who is signed in", (path, marker) => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, loading: true, currentUser: null });
+    renderAt(path);
+    expect(screen.getByText(marker)).toBeInTheDocument();
+    expect(mockUseAuth).not.toHaveBeenCalled();
+    expect(screen.queryByText("LOGIN")).not.toBeInTheDocument();
+  });
+
+  it("renders them the same for someone who is signed in, without the app around them", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true, email_verified: false } });
+    renderAt("/vote/some-share-token");
+    expect(screen.getByText("PUBLIC_VOTE")).toBeInTheDocument();
+    expect(screen.queryByText("VERIFY_BANNER")).not.toBeInTheDocument();
+    expect(mockUseAuth).not.toHaveBeenCalled();
+  });
+
+  it.each(["/vote", "/vote/", "/vote/confirm", "/vote/a/b/c"])(
+    "shows a neutral page at %s instead of redirecting into the app", (path) => {
+      mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+      renderAt(path);
+      expect(screen.queryByText("LOGIN")).not.toBeInTheDocument();
+      expect(mockUseAuth).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not capture paths that merely begin with the same letters", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/voters");
+    expect(screen.getByText("LOGIN")).toBeInTheDocument();
   });
 });

@@ -17,6 +17,8 @@ import { CuratorNoteMark } from "./CuratorNoteMark";
 import { saveBlob } from "@/utils/download";
 import { AxisVariantFlag, AxisVariantList } from "./LoincAxisChips";
 import WearableMappingsDownload from "./WearableMappingsDownload";
+import WearableVoteShare from "./WearableVoteShare";
+import VoteTally from "./VoteTally";
 import {
   type CodeMappingRow,
   type Reference,
@@ -1286,6 +1288,7 @@ export default function CodeMappingPage() {
                 </>
               ) : <span className="text-xs text-slate-500">—</span>}
               <AxisVariantList variants={row.axis_variants} canApprove={false} />
+              <VoteTally votes={row.votes} />
               {/* The suggested unit is the Dest. unit column's to show. */}
               {(row.measurement_type || row.suggested_unit) && (
                 <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} example_units={row.example_units} />
@@ -1881,6 +1884,8 @@ export default function CodeMappingPage() {
           {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
           {/* The whole tab, built by the server, where the menus write loaded rows. */}
           {selectedVocabulary === WEARABLES_TAB && <WearableMappingsDownload />}
+          {/* Sharing the proposals for a public vote is a mapping write (#2678). */}
+          {selectedVocabulary === WEARABLES_TAB && canWrite && <WearableVoteShare />}
         </div>
 
         {sectionNames.map((section) => {
