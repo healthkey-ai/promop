@@ -913,71 +913,53 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     )
 
 
-def _get_custom_patient_field_data(snapshot: OmopSnapshot) -> dict[str, object]:
+def _get_custom_patient_field_data(snapshot: OmopSnapshot, person: Person = None) -> dict[str, object]:
     """Project approved editable custom mappings from the latest OMOP facts.
 
-    A selected concept is sufficient for imported data; the generated source key
-    makes user-authored corrections unambiguous when concepts are shared.
+    A selected concept is sufficient for imported data; the field's own source
+    key (``custom:<name>``) marks a value entered in the record editor, which
+    is read back as entered (``custom_field_values.read_value``). The latest
+    fact answers the field, so a newer import replaces an entered value, and
+    on one day the entered value wins. With ``person``, a value cleared in the
+    editor stays cleared against facts of that day or before. Values are
+    JSON-ready.
     """
     from omop_core.models import CustomPatientField
+    from omop_core.services import custom_field_values
 
     values: dict[str, object] = {}
-    fields = CustomPatientField.objects.filter(
+    fields = list(CustomPatientField.objects.filter(
         mode='editable', mapping__status='approved',
-    ).select_related('mapping__concept')
+    ).select_related('mapping__concept'))
+    cleared = custom_field_values.cleared_days(person, fields) if person is not None else {}
     for field in fields:
         mapping = field.mapping
-        table = mapping.omop_table.strip().lower()
+        target = custom_field_values.target_for(mapping.omop_table)
         source = mapping.source_value
         concept_id = mapping.concept_id
-        rows = []
-        if table == 'measurement':
+        entered: list = []
+        imported: list = []
+        if target in ('measurement', 'observation'):
+            by_source = snapshot.meas_by_source if target == 'measurement' else snapshot.obs_by_source
+            rows = snapshot.measurements if target == 'measurement' else snapshot.observations
+            concept_attr = f'{target}_concept_id'
             if source:
-                rows = list(snapshot.meas_by_source.get(source, ()))
+                entered = list(by_source.get(source, ()))
             if concept_id:
-                seen_ids = {r.measurement_id for r in rows}
-                rows.extend(r for r in snapshot.measurements
-                            if r.measurement_concept_id == concept_id
-                            and r.measurement_id not in seen_ids)
-        elif table == 'observation':
-            if source:
-                rows = list(snapshot.obs_by_source.get(source, ()))
-            if concept_id:
-                seen_ids = {r.observation_id for r in rows}
-                rows.extend(r for r in snapshot.observations
-                            if r.observation_concept_id == concept_id
-                            and r.observation_id not in seen_ids)
-        elif table == 'conditionoccurrence':
-            rows = [row for row in snapshot.conditions if row.condition_concept_id == concept_id]
-        elif table == 'drugexposure':
-            rows = [row for row in snapshot.drug_exposures if row.drug_concept_id == concept_id]
-        elif table == 'procedureoccurrence':
-            rows = [row for row in snapshot.procedures if row.procedure_concept_id == concept_id]
-        if not rows:
+                seen_ids = {row.pk for row in entered}
+                imported = [row for row in rows
+                            if getattr(row, concept_attr) == concept_id and row.pk not in seen_ids]
+        elif target == 'condition':
+            imported = [row for row in snapshot.conditions if row.condition_concept_id == concept_id]
+        elif target == 'drug_exposure':
+            imported = [row for row in snapshot.drug_exposures if row.drug_concept_id == concept_id]
+        elif target == 'procedure':
+            imported = [row for row in snapshot.procedures if row.procedure_concept_id == concept_id]
+        row, was_entered = custom_field_values.latest_row(
+            entered, imported, cleared.get((target, source)))
+        if row is None:
             continue
-        row = rows[0]
-        if field.field_type == 'number':
-            value = getattr(row, 'value_as_number', None)
-        elif field.field_type == 'boolean':
-            value = True
-        elif field.field_type == 'date':
-            value = (
-                getattr(row, 'measurement_date', None)
-                or getattr(row, 'observation_date', None)
-                or getattr(row, 'condition_start_date', None)
-                or getattr(row, 'drug_exposure_start_date', None)
-                or getattr(row, 'procedure_date', None)
-            )
-        else:
-            value = (
-                getattr(row, 'value_as_string', None)
-                or getattr(getattr(row, 'value_as_concept', None), 'concept_name', None)
-                or getattr(getattr(row, 'measurement_concept', None), 'concept_name', None)
-                or getattr(getattr(row, 'observation_concept', None), 'concept_name', None)
-                or getattr(getattr(row, 'condition_concept', None), 'concept_name', None)
-                or getattr(getattr(row, 'drug_concept', None), 'concept_name', None)
-                or getattr(getattr(row, 'procedure_concept', None), 'concept_name', None)
-            )
+        value = custom_field_values.read_value(field.field_type, row, entered=was_entered)
         if value is not None:
             values[field.field_name] = value
     return values
@@ -1094,6 +1076,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field in user_edited:
             if hasattr(patient_info, field):
                 preserved[field] = getattr(patient_info, field)
+        # Created fields have no column: their pending edits are named
+        # ``custom_fields.<name>`` and held in the custom_fields object.
+        from omop_core.services import custom_field_values
+        pending_custom = custom_field_values.pending_values(patient_info)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -1119,7 +1105,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             for field, value in section_values.items():
                 setattr(patient_info, field, value)
 
-        patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
+        # A pending created-field edit wins until derivation represents it,
+        # and is put back before any formula reads these values.
+        patient_info.custom_fields, pending_custom_keys = custom_field_values.restore_pending(
+            _get_custom_patient_field_data(snapshot, person), pending_custom)
         confirmed_inputs = set()
         for field, value in _curated_values(
             patient_info, snapshot, lab_derived_fields, confirmed_inputs,
@@ -1165,7 +1154,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         course_values = supportive_course_summary(person)
         for field, value in course_values.items():
             setattr(patient_info, field, value)
-        patient_info.user_edited_fields = sorted(set(still_orphaned) - course_values.keys())
+        patient_info.user_edited_fields = sorted(
+            (set(still_orphaned) - course_values.keys()) | pending_custom_keys)
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()

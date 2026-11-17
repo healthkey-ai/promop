@@ -4,7 +4,7 @@ import { Check, AlertCircle } from "lucide-react";
 import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { fetchWritableFields, useWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
 import { marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
@@ -111,6 +111,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
+  // Which of them this caller may edit on this patient (#2669).
+  const { descriptors: writableFields } = useWritableFields(
+    editedInfo.person_id as number | string | undefined,
+  );
   const { categoryForDisease } = useAllDiseaseMappings();
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -290,6 +294,14 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     setEditedInfo(updated);
     scheduleAutoSave(updated);
   }, [scheduleAutoSave, readOnly]);
+
+  // An added field has no column: its value is a key of custom_fields, which
+  // rides the record PATCH whole and is diffed by key on the server (#2669).
+  const handleAddedFieldChange = useCallback((fieldName: string, value: unknown) => {
+    const base = pendingDataRef.current ?? editedInfoRef.current;
+    const current = (base.custom_fields ?? {}) as Record<string, unknown>;
+    handleFieldChange("custom_fields", { ...current, [fieldName]: value });
+  }, [handleFieldChange]);
 
   const handleNameChange = useCallback((name: string) => {
     if (readOnly) return;
@@ -496,6 +508,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
               tabs={addedFieldTabs(tabKeys[activeTab])}
               diseases={diseaseCode ? [diseaseCode] : []}
               formData={editedInfo}
+              descriptors={writableFields}
+              onChange={readOnly ? undefined : handleAddedFieldChange}
             />
           )}
         </div>

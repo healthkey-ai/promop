@@ -393,6 +393,9 @@ export default function PatientDetail({
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
+  // Which of them this caller may edit on this patient; the tabs read the
+  // same cached answer for their own fields.
+  const { descriptors: writableFields } = useWritableFields(personId);
   const { categoryForDisease } = useAllDiseaseMappings();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
@@ -720,6 +723,14 @@ export default function PatientDetail({
     scheduleAutoSave(updated, editedNameRef.current);
   }, [scheduleAutoSave]);
 
+
+  // An added field has no column: its value is a key of custom_fields, which
+  // rides the record PATCH whole and is diffed by key on the server (#2669).
+  const handleAddedFieldChange = useCallback((fieldName: string, value: unknown) => {
+    const base = pendingDataRef.current?.info ?? editedInfoRef.current;
+    const current = (base.custom_fields ?? {}) as Record<string, unknown>;
+    handleFieldChange("custom_fields", { ...current, [fieldName]: value });
+  }, [handleFieldChange]);
 
   const handleNameChange = useCallback((name: string) => {
     setEditedName(name);
@@ -1154,6 +1165,8 @@ export default function PatientDetail({
                     tabs={addedFieldTabs(fieldTab)}
                     diseases={diseaseCode ? [diseaseCode] : []}
                     formData={editedInfo}
+                    descriptors={writableFields}
+                    onChange={handleAddedFieldChange}
                   />
                 )}
                 {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}

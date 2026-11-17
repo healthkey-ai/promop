@@ -136,12 +136,17 @@ base record only. Two limits remain with #2332: a record with several
 cancers is read by its primary disease, and a field placed on the disease
 tab shows only for a record the editor has a disease tab for.
 
-Created fields are read-only on the tab. A value is derived from the
-patient's OMOP facts for the field's concept (`_get_custom_patient_field_data`)
-when the record is next derived, or computed from its formula at creation,
-so a field added just now reads "Not recorded" on a record until then;
-`manage.py backfill_patient_records --all` derives every record. The patient
-editor has no write path for a created field yet.
+A created field takes a value on the tab (#2669), along the
+[PatientRecord-first path](patient-record-first-writes.md#created-fields):
+the record PATCH carries it under `custom_fields`, it lands in
+`PatientRecord.custom_fields`, and it is projected into OMOP through the
+field's own mapping. The section renders an input for each field the
+writable-fields descriptor lists as writable for this caller and this
+patient, and a read-only box with the reason otherwise; a computed field
+shows its formula's result. A value already in a patient's OMOP data for the
+field's concept (`_get_custom_patient_field_data`) appears when the record
+is next derived, so a field added just now is empty on a record until then;
+`manage.py backfill_patient_records --all` derives every record.
 
 ### Whose record a field is part of: `FieldDiseaseMembership`
 
