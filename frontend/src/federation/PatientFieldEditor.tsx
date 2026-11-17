@@ -34,6 +34,10 @@ interface Props {
    * are supported — see #2574. Booleans, dates and curated options keep the
    * descriptor's control. */
   controlType?: 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'date' | 'email';
+  /** A trial row edits a value/unit pair (and its result date) in a dialog. The
+   *  "Your Value" cell is 200px wide, so an inline form there crowds out the
+   *  comparison against the trial's threshold (#5903). */
+  pairEditor?: 'inline' | 'dialog';
 }
 
 /** A value/unit pair is one clinical fact, so the two controls share one height
@@ -145,7 +149,7 @@ function dedicatedSurface(
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
-export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions, controlType }: Props) {
+export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions, controlType, pairEditor = 'inline' }: Props) {
   const state = usePatientFormSnapshot(store);
   const renew = useContext(PatientFormRenewContext);
   const [open, setOpen] = useState(false);
@@ -354,6 +358,21 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     || Boolean(unitFieldName && unitFieldName in state.pending);
   const pairFailed = canonical in state.failed
     || Boolean(unitFieldName && unitFieldName in state.failed);
+  // A trial row shows the stored value and opens the pair editor in a dialog.
+  const pairDialog = pairEditor === 'dialog' && writable && Boolean(showUnitPicker || dated);
+  // The sentence that explains a normalised pair belongs to the derived column
+  // ("Normalised from hemoglobin_level …"). The row binds to the source now, so
+  // the explanation is looked up through that projection and shown where there
+  // is room for it: inside the dialog (#5903).
+  const normalisedProjection = showUnitPicker
+    ? Object.keys(state.fields).find((key) => {
+        const candidate = state.fields[key];
+        return candidate.normalised_read_model === true
+          && (candidate.inputs ?? []).some((input) => store.resolve(input) === canonical);
+      })
+    : undefined;
+  const pairExplanation = field.reason
+    ?? (normalisedProjection ? state.fields[normalisedProjection].reason : undefined);
   // A field the record would accept, shown in a read-only mount or to a caller
   // without write access, is not derived: it is only locked here. It keeps the
   // descriptor's own explanation if it has one and otherwise claims nothing.
@@ -471,6 +490,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     }
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
+    if (pairDialog) setOpen(false);
   };
   const valueControl = field.value_kind === 'number' ? 'number'
     : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text';
@@ -552,6 +572,70 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     triState={field.tri_state === true} answerLabels={field.answer_labels}
     precision={precision}
     onChange={onChangeValue} />;
+  const unitPickerNode = showUnitPicker ? <><div className="flex items-end gap-2">
+        <div className="min-w-0 flex-1">{controlNode}</div>
+        <label className="flex shrink-0 flex-col gap-1 text-xs text-muted-foreground">
+          <span className="sr-only">Unit for {shownLabel}</span>
+          <select aria-label={`Unit for ${shownLabel}`} value={chosenUnit}
+            onChange={(event) => {
+              const nextUnit = event.target.value;
+              setUnitDraft(nextUnit);
+              // A dated row commits only through "Save result": queueing the
+              // pair here would attach the current value to today's date. Clear
+              // the stored number too, so the reader types it in the chosen
+              // unit instead of keeping it under the new scale.
+              if (dated) {
+                setUnitRequiresValue(true);
+                setValueDraft({ set: true, value: '' });
+                return;
+              }
+              // A unit change with a value is a real edit of the same pair, not
+              // a formatting change; a unit alone cannot be written.
+              if (value != null && value !== '' && unitFieldName
+                  && store.enqueuePair(canonical, value, unitFieldName, nextUnit)) {
+                // A rejected save restores the server pair; the selector must
+                // follow it rather than keep the rejected unit.
+                setUnitDraft(null);
+              }
+            }}
+            className="h-9 rounded-md border border-input px-2 text-sm">
+            {unitOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {displayUnitLabel(option.label ?? option.value)}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div></> : controlNode;
+  const datedControls = <>
+      {dated && <div className="mt-1 flex flex-wrap items-center gap-2">
+        <label htmlFor={`${canonical}-result-date`} className="text-xs text-muted-foreground whitespace-nowrap">
+          Result date
+        </label>
+        <input id={`${canonical}-result-date`} type="date" value={resultDate} max={todayIso()}
+          onChange={(event) => setResultDateOverride(event.target.value)}
+          className="rounded-md border border-input px-2 py-1 text-xs" />
+        <button type="button" disabled={!datedDirty || datesStale || !resultDate} onClick={commitDated}
+          className="rounded-md border border-input px-2 py-1 text-xs disabled:opacity-50">
+          Save result
+        </button>
+      </div>}
+      {dated && datesStale && <p role="alert" className="text-xs text-red-600">
+        The latest result date could not be refreshed, so the correction target may be out of date.
+        {' '}<button type="button" className="underline" onClick={() => void store.reloadDates()}>Retry</button>
+      </p>}
+      {dated && field.latest_date && resultDate && resultDate < field.latest_date
+        // A dated row without its own projection is a source pair, retained
+        // until an explicit canonical event; see _SOURCE_PAIR_FIELDS.
+        && <p role="status" className="text-xs text-muted-foreground">
+          {field.projection
+            // PatientRecord-first: the shared write sets the record to this
+            // value now, and only the next rebuild from the dated facts puts
+            // the newer result back (tests/test_dated_patient_form_writes.py).
+            ? 'Older than the latest recorded result. It is saved with this date and may show as the current value until the record is next rebuilt from your results; the newer result then becomes current again.'
+            : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
+        </p>}
+</>;
   return <div className={ROW_CLASS} data-field={canonical}>
     {inputs.length && !inputsUnavailable && editPath ? <>
       {!compact && <div className="text-sm font-medium">{shownLabel}
@@ -611,81 +695,52 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           store.applyServerValues(values);
           store.announceUpdated();
         }} />}
-    </> : writable ? <>
-      {showUnitPicker ? <div className="flex items-end gap-2">
-        <div className="min-w-0 flex-1">{controlNode}</div>
-        <label className="flex shrink-0 flex-col gap-1 text-xs text-muted-foreground">
-          <span className="sr-only">Unit for {shownLabel}</span>
-          <select aria-label={`Unit for ${shownLabel}`} value={chosenUnit}
-            onChange={(event) => {
-              const nextUnit = event.target.value;
-              setUnitDraft(nextUnit);
-              // A dated row commits only through "Save result": queueing the
-              // pair here would attach the current value to today's date. Clear
-              // the stored number too, so the reader types it in the chosen
-              // unit instead of keeping it under the new scale.
-              if (dated) {
-                setUnitRequiresValue(true);
-                setValueDraft({ set: true, value: '' });
-                return;
-              }
-              // A unit change with a value is a real edit of the same pair, not
-              // a formatting change; a unit alone cannot be written.
-              if (value != null && value !== '' && unitFieldName
-                  && store.enqueuePair(canonical, value, unitFieldName, nextUnit)) {
-                // A rejected save restores the server pair; the selector must
-                // follow it rather than keep the rejected unit.
-                setUnitDraft(null);
-              }
-            }}
-            className="h-9 rounded-md border border-input px-2 text-sm">
-            {unitOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {displayUnitLabel(option.label ?? option.value)}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div> : controlNode}
-      {dated && <div className="mt-1 flex flex-wrap items-center gap-2">
-        <label htmlFor={`${canonical}-result-date`} className="text-xs text-muted-foreground whitespace-nowrap">
-          Result date
-        </label>
-        <input id={`${canonical}-result-date`} type="date" value={resultDate} max={todayIso()}
-          onChange={(event) => setResultDateOverride(event.target.value)}
-          className="rounded-md border border-input px-2 py-1 text-xs" />
-        <button type="button" disabled={!datedDirty || datesStale || !resultDate} onClick={commitDated}
-          className="rounded-md border border-input px-2 py-1 text-xs disabled:opacity-50">
-          Save result
-        </button>
-      </div>}
-      {dated && datesStale && <p role="alert" className="text-xs text-red-600">
-        The latest result date could not be refreshed, so the correction target may be out of date.
-        {' '}<button type="button" className="underline" onClick={() => void store.reloadDates()}>Retry</button>
-      </p>}
-      {dated && field.latest_date && resultDate && resultDate < field.latest_date
-        // A dated row without its own projection is a source pair, retained
-        // until an explicit canonical event; see _SOURCE_PAIR_FIELDS.
-        && <p role="status" className="text-xs text-muted-foreground">
-          {field.projection
-            // PatientRecord-first: the shared write sets the record to this
-            // value now, and only the next rebuild from the dated facts puts
-            // the newer result back (tests/test_dated_patient_form_writes.py).
-            ? 'Older than the latest recorded result. It is saved with this date and may show as the current value until the record is next rebuilt from your results; the newer result then becomes current again.'
-            : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
-        </p>}
+    </> : pairDialog ? <>
+      <div className="flex items-center gap-2">
+        <span className="min-w-0 truncate">{formatted}</span>
+        {displayUnit && <span className="whitespace-nowrap text-xs text-muted-foreground">{displayUnit}</span>}
+        <Dialog.Root open={open} onOpenChange={setOpen}>
+          <Dialog.Trigger asChild><button type="button"
+            className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
+            aria-label={`Edit ${shownLabel}`} title={`Edit ${shownLabel}`}>
+            <Pencil className="h-4 w-4" strokeWidth={1.67} />
+          </button></Dialog.Trigger>
+          <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
+            <Dialog.Content className="promop-root fixed inset-0 z-[61] m-auto h-fit max-h-[85vh] w-[min(32rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
+              <Dialog.Title className="font-semibold">{shownLabel}</Dialog.Title>
+              <Dialog.Description className="text-sm text-muted-foreground">
+                {dated
+                  ? 'The value, its unit and the result date are one result. Nothing is saved until you choose Save result.'
+                  : 'The value is saved with the unit you choose.'}
+              </Dialog.Description>
+              {unitPickerNode}
+              {datedControls}
+              {pairExplanation && <p className="text-xs text-muted-foreground">{pairExplanation}</p>}
+              {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
+              {pairPending && <span role="status" className="text-xs">Saving…</span>}
+              {pairError && <p role="alert" className="text-xs text-red-600">{pairError}
+                {pairFailed && <>{' '}<button type="button" className="underline"
+                  onClick={() => store.retryFailed([canonical])}>Retry</button></>}</p>}
+              <Dialog.Close asChild><button type="button" className="rounded border px-3 py-1">Close</button></Dialog.Close>
+            </Dialog.Content></Dialog.Portal>
+        </Dialog.Root>
+      </div>
+    </>
+      : writable ? <>
+      {unitPickerNode}
+      {datedControls}
     </>
       : <><div>{!compact && <span className="text-sm font-medium">{shownLabel}{showComputed ? ' (computed)' : ''}: </span>}{formatted}</div>
         {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
-    {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
-    {!showUnitPicker && !labelIncludesUnit && !labelNamesUnit(label, unitInPlay)
+    {!pairDialog && field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
+    {!pairDialog && !showUnitPicker && !labelIncludesUnit && !labelNamesUnit(label, unitInPlay)
       && displayUnit
       && <span className="text-xs text-muted-foreground">{displayUnit}</span>}
-    {writable && field.projection?.omop_table === 'measurement' && !dated
+    {!pairDialog && writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
-    {pairPending && <span role="status" className="text-xs">Saving…</span>}
-    {pairError && <p role="alert" className="text-xs text-red-600">{pairError}
+    {(!pairDialog || !open) && pairPending && <span role="status" className="text-xs">Saving…</span>}
+    {(!pairDialog || !open) && pairError && <p role="alert" className="text-xs text-red-600">{pairError}
       {pairFailed && writable && <>{' '}<button type="button" className="underline"
         onClick={() => store.retryFailed([canonical])}>Retry</button></>}</p>}
   </div>;
