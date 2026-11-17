@@ -85,8 +85,63 @@ unplaced: it keeps its mapping and derivation, no tab renders a control for
 it, and it is listed on the mapping page's OMOP (unplaced) tab so it is seen
 rather than lost. The column travels with the mapping through
 `copy_reference_data` and the curation fixture, and a payload written before
-it existed reads as blank. Rendering placed fields on the patient tabs and the
-curation control are #2330 and #2329.
+it existed reads as blank. Rendering placed built-in fields on the patient
+tabs and the tab control for an existing field are #2330 and #2329.
+
+### Adding a field from a patient tab
+
+Staff and org admins, outside patient mode, see an **Add Field** link at the
+top and bottom of each patient tab that holds PatientRecord fields
+(`AddFieldLink.tsx`, shown under the same context as the fields' globes;
+General, the disease tab, Treatment, Labs, Genomics, Behavior and Wearables).
+It is a link, not a dialog on the patient page (#721):
+
+```
+/field-mappings?new=1&tab=<tab>[&disease=<Disease Category code>]
+```
+
+The disease tab adds the record's Disease Category
+(`PatientDetail.tsx::DISEASE_CATEGORY_CODES`, the codes
+`disease_profiles.SEED_DISEASE_FIELDS` uses). The URL names a tab and a
+category and nothing about the patient; the page and tab to come back to
+travel as router state, followed only to a `/patient/<id>` path.
+
+The Field Mappings page opens `ConceptAssignDialog` in **create mode** on
+that tab and scope: display name, field name, value type, editable or
+computed (with its formula), tab, the concept search, OMOP table and unit
+the dialog already has, the scope control, and the PatientRecord
+confirmation. Every default can be changed; disease-specific with no
+category ticked is refused. Saving is one `POST
+/api/v1/custom-patient-fields/`, which writes the `CustomPatientField`, its
+**approved** mapping, the tab and the membership rows in one transaction.
+Because the field arrives approved, creating one is gated by
+`_can_approve_mappings`: an analyst or a doctor gets 403, and neither the
+link nor the page's own Add field button is offered to them. Saving or
+cancelling a dialog the link opened returns to the patient tab.
+
+`CustomPatientFields.tsx` renders created fields last on their tab, for
+every reader of the record, in the app's patient page and in the federated
+editor (which offers no Add Field: the host has no Field Mappings page):
+those placed on the tab (a field placed on Blood shows on Labs, where the
+editor has blood counts) that are base or name the record's Disease
+Category. The definitions are read once per page
+(`useCustomPatientFields`). They are reference data, not an organization's:
+a field one instance's admin adds is part of every record it is scoped to.
+
+The record's Disease Category is what Disease Category management maps its
+disease to (`useAllDiseaseMappings`), with the editor's own disease-type
+match as the fallback for a name that mapping does not hold
+(`fieldScope.recordDiseaseCategory`); a disease mapped to `Other` has the
+base record only. Two limits remain with #2332: a record with several
+cancers is read by its primary disease, and a field placed on the disease
+tab shows only for a record the editor has a disease tab for.
+
+Created fields are read-only on the tab. A value is derived from the
+patient's OMOP facts for the field's concept (`_get_custom_patient_field_data`)
+when the record is next derived, or computed from its formula at creation,
+so a field added just now reads "Not recorded" on a record until then;
+`manage.py backfill_patient_records --all` derives every record. The patient
+editor has no write path for a created field yet.
 
 ### Whose record a field is part of: `FieldDiseaseMembership`
 
@@ -128,7 +183,8 @@ is not a scope, and relevance still reads them from the catalog.
 | `GET /api/v1/custom-patient-fields/` | `scope` and `diseases` on each created field |
 | `disease_relevance` | A disease's `disease` tier is its extension; `common` is the base clinical fields |
 
-Writers, all following mapping write access:
+Writers, following mapping write access except the last, which creates an
+approved mapping and so follows approval (staff and org admins, #721):
 
 - `PUT /api/v1/field-mappings/<field_name>/diseases/` sets a field's scope by
   name (`GET` reads it). It needs no mapping row, so a field with no concept

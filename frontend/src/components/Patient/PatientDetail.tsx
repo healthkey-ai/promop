@@ -1,6 +1,6 @@
 import BrandLogo from '@/components/Branding/BrandLogo';
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
@@ -26,7 +26,12 @@ import PatientOmopTab from "./PatientOmopTab";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
-import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
+import { FieldMappingLinksProvider, returnedTab } from "@/components/PatientInfo/fieldMappingLinks";
+import AddFieldLink from "@/components/PatientInfo/AddFieldLink";
+import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
+import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
+import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
+import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -337,7 +342,14 @@ export default function PatientDetail({
   const [editedInfo, setEditedInfo] = useState<Record<string, unknown>>({});
   const [patientName, setPatientName] = useState("");
   const [editedName, setEditedName] = useState("");
-  const [activeTab, setActiveTab] = useState(0);
+  const [chosenTab, setChosenTab] = useState(0);
+  // Coming back from Field Concept Mapping after Add field (#721): the tab
+  // the admin left, by its field-tab key, until another tab is chosen.
+  const location = useLocation();
+  const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
+  // Fields added through Field Concept Mapping, read once for every tab.
+  const addedFields = useCustomPatientFields();
+  const { categoryForDisease } = useAllDiseaseMappings();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
 
@@ -768,6 +780,42 @@ export default function PatientDetail({
   const sourceCodesIdx = canViewOmop ? tabLabels.length - 2 : -1;
   const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
 
+  // The field tab each patient tab shows (#2328): where an added field is
+  // placed, and what Add field passes to Field Concept Mapping. History,
+  // Allergies, Surveys, Source Codes and OMOP hold no PatientRecord fields.
+  const fieldTabs: Record<number, string> = {
+    0: "general",
+    ...(diseaseIdx >= 0 ? { [diseaseIdx]: "disease" } : {}),
+    [treatmentIdx]: "treatment",
+    [labsIdx]: "labs",
+    [genomicsIdx]: "genomics",
+    [behaviorIdx]: "behavior",
+    [wearablesIdx]: "wearable",
+  };
+  const returnIdx = returnTab === null
+    ? -1
+    : Object.keys(fieldTabs).map(Number).find((i) => fieldTabs[i] === returnTab) ?? -1;
+  const activeTab = returnIdx >= 0 ? returnIdx : chosenTab;
+  const setActiveTab = (index: number) => {
+    setReturnTab(null);
+    setChosenTab(index);
+  };
+  const fieldTab = fieldTabs[activeTab];
+  // The record's Disease Category, which scopes a field added from the
+  // disease tab and decides which disease-specific added fields it shows.
+  const diseaseCode = recordDiseaseCategory(
+    typeof editedInfo.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
+    diseaseType,
+  );
+  // Offered to whoever sees the fields' globes; nobody else gets its markup.
+  const addFieldLink = canViewOmop && fieldTab && personId ? (
+    <AddFieldLink
+      tab={fieldTab}
+      disease={fieldTab === "disease" ? diseaseCode : undefined}
+      returnPath={`/patient/${personId}`}
+    />
+  ) : null;
+
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Staging and disease-specific clinical information." } : {}),
@@ -905,9 +953,12 @@ export default function PatientDetail({
             </div>
 
             <div className="rounded-2xl bg-background shadow-[0_1px_3px_rgba(0,0,0,0.06),0_6px_24px_rgba(0,0,0,0.06)]">
-              <div className="px-8 pb-6 pt-8">
-                <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
-                <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
+              <div className="flex items-start justify-between gap-4 px-8 pb-6 pt-8">
+                <div>
+                  <h2 className="text-xl font-bold text-foreground">{tabLabels[activeTab]}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
+                </div>
+                {addFieldLink}
               </div>
 
               <div key={activeTab} className="animate-tab-in px-8 pb-10">
@@ -980,6 +1031,17 @@ export default function PatientDetail({
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
+                {/* Fields added through Field Concept Mapping render last on
+                    their tab, then the tab's second Add Field (#721). */}
+                {fieldTab && (
+                  <CustomPatientFields
+                    fields={addedFields}
+                    tabs={addedFieldTabs(fieldTab)}
+                    diseases={diseaseCode ? [diseaseCode] : []}
+                    formData={editedInfo}
+                  />
+                )}
+                {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
               </div>
             </div>
           </>

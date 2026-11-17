@@ -12728,11 +12728,12 @@ def _can_manage_mappings(user):
     """Whether a user may create or change a mapping (#2398, #2416).
 
     Creating, editing, proposing and uploading code and field mappings,
-    synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis
-    variants, LOINC axes, SNOMED attributes, concept minting and source-system
-    facility review. Staff, org admins and analysts; a doctor needs an analyst
-    grant as well, since roles are additive and mapping is the analyst's.
-    Approval is narrower still: ``_can_approve_mappings``.
+    synonyms and choices, Suggest, Lock, Done, priority, axis variants, LOINC
+    axes, SNOMED attributes, concept minting and source-system facility
+    review. Staff, org admins and analysts; a doctor needs an analyst grant
+    as well, since roles are additive and mapping is the analyst's. Approval
+    is narrower still, ``_can_approve_mappings``, and so is adding a field to
+    PatientRecord, which creates an approved mapping (#721).
     """
     return bool(getattr(user, 'is_staff', False) or has_mapping_write_access(user))
 
@@ -15744,7 +15745,10 @@ def custom_patient_field_list(request):
     """List runtime PatientRecord fields or atomically add one with its mapping.
 
     Definitions are visible to every signed-in user because Patient Info needs
-    them to render values.  Creation remains limited to mapping administrators.
+    them to render values.  Creating one is an approval: the field arrives with
+    an approved mapping, so only staff and org admins may (#721). An analyst
+    proposes and remaps existing fields and is refused here, as on any other
+    approval.
     """
     from .serializers import CustomPatientFieldCreateSerializer, CustomPatientFieldSerializer
 
@@ -15757,7 +15761,7 @@ def custom_patient_field_list(request):
             fields, many=True, context={'field_diseases': disease_profiles.memberships()},
         ).data)
 
-    if not _can_manage_mappings(request.user):
+    if not _can_approve_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = CustomPatientFieldCreateSerializer(

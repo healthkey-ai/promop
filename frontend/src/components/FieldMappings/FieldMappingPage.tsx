@@ -1,6 +1,6 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
 import api from "@/api/axios";
 import { fetchDiseaseCategories } from "@/api/mappingHub";
@@ -10,7 +10,7 @@ import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { FormulaEditDialog } from "./FormulaEditDialog";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
-import { AddCustomFieldDialog } from "@/components/PatientInfo/CustomPatientFields";
+import { addFieldReturn, type AddFieldReturn } from "@/components/PatientInfo/fieldMappingLinks";
 import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
 import {
@@ -132,6 +132,32 @@ const getDisplayCategory = (d: FieldDescriptor): string => {
 const diseaseSetParam = (value: string | null): DiseaseSet =>
   value === "profile" ? "profile" : "extension";
 
+/**
+ * The scope a new field's dialog opens on. A disease the categories do not
+ * list is kept as written: the dialog shows it ticked and the server says
+ * why it is refused, rather than the field silently becoming base.
+ */
+const newFieldDiseases = (disease: string, options: DiseaseCategoryOption[]): string[] => {
+  if (!disease) return [];
+  const resolved = resolveDiseaseFilter(disease, options);
+  if (resolved === BASE_FILTER) return [];
+  return [resolved ?? disease];
+};
+
+/**
+ * A field being created (#721): the tab and scope its dialog opens on, and,
+ * when a patient tab's Add field link opened it, where to go back to.
+ */
+interface NewField {
+  tab: string;
+  /** A Disease Category, as its code or as a link spelled it; "" is the base record. */
+  disease: string;
+  returnTo: AddFieldReturn | null;
+}
+
+/** The tabs a new field can be placed on, in the page's order. */
+const TAB_OPTIONS = TAB_ORDER.map((value) => ({ value, label: TAB_LABELS[value] }));
+
 /** Which download is in flight, for the button that started it. */
 type Download = DiseaseSet | "base";
 
@@ -148,7 +174,8 @@ const provenanceLabel = (mapping: FieldDescriptor["mapping"]): string => {
 
 export default function FieldMappingPage() {
   const navigate = useNavigate();
-  const { currentUser } = useAuth();
+  const location = useLocation();
+  const { currentUser, loading: userLoading } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
   // A doctor without the analyst grant reads every mapping but writes none
   // (#2416): the API answers 403 on every write, so the page offers none.
@@ -158,7 +185,23 @@ export default function FieldMappingPage() {
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
-  const [activeTab, setActiveTab] = useState("general");
+  // ?field=<name>, from a patient-editor field's globe: open that field once,
+  // on the first load. Later reloads (after a save) must not reopen it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const linkedField = useRef(searchParams.get("field"));
+  // ?new=1&tab=<tab>[&disease=<code>], from a patient tab's Add field link
+  // (#721): open the dialog in create mode on that tab and scope. Read once,
+  // like ?field=; the link's router state says where to go back to.
+  const [newField, setNewField] = useState<NewField | null>(() => {
+    if (searchParams.get("new") !== "1") return null;
+    const tab = searchParams.get("tab") || "";
+    return {
+      tab: TAB_ORDER.includes(tab) ? tab : "general",
+      disease: (searchParams.get("disease") || "").trim(),
+      returnTo: addFieldReturn(location.state),
+    };
+  });
+  const [activeTab, setActiveTab] = useState(() => newField?.tab ?? "general");
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
     new Set(["computed"])
   );
@@ -169,11 +212,6 @@ export default function FieldMappingPage() {
   const [choiceEditorField, setChoiceEditorField] = useState<FieldDescriptor | null>(null);
   const [formulaEditorField, setFormulaEditorField] = useState<FieldDescriptor | null>(null);
   const [derivationInfoField, setDerivationInfoField] = useState<FieldDescriptor | null>(null);
-  const [addFieldDialogOpen, setAddFieldDialogOpen] = useState(false);
-  // ?field=<name>, from a patient-editor field's globe: open that field once,
-  // on the first load. Later reloads (after a save) must not reopen it.
-  const [searchParams] = useSearchParams();
-  const linkedField = useRef(searchParams.get("field"));
   // Whose fields are listed (#2332): every field, the base record, or one
   // Disease Category's; for a category, its disease-specific fields (the
   // extension) or its full record (base + extension). Applied to the
@@ -387,6 +425,33 @@ export default function FieldMappingPage() {
 
   /** The Disease Category the filter names, or "" for All and Base record. */
   const selectedDisease = diseaseFilter && diseaseFilter !== BASE_FILTER ? diseaseFilter : "";
+
+  /**
+   * Leave create mode: back to the patient tab the link came from, which
+   * reloads and shows a field just added, or on this page with the list
+   * reloaded when the page's own button opened it.
+   */
+  const closeNewField = (created: boolean) => {
+    const returnTo = newField?.returnTo;
+    setNewField(null);
+    if (returnTo) {
+      // Replacing this entry: Back from the patient page must not reopen
+      // the dialog on a field already added or abandoned.
+      navigate(returnTo.path, { state: { tab: returnTo.tab }, replace: true });
+      return;
+    }
+    // Nowhere to go back to, so the link's request is spent: a reload must
+    // not ask again. `disease` stays, as the page's own filter parameter.
+    if (searchParams.has("new")) {
+      setSearchParams((previous) => {
+        const next = new URLSearchParams(previous);
+        next.delete("new");
+        next.delete("tab");
+        return next;
+      }, { replace: true });
+    }
+    if (created) void fetchDescriptors();
+  };
 
   /**
    * Save one of the review CSVs (#2331): a disease's full record or its
@@ -823,15 +888,21 @@ export default function FieldMappingPage() {
           Back
         </button>
         <PageTitle className="text-xl font-semibold">Field Concept Mappings</PageTitle>
-        {canWrite && (
+        {canApprove && (
           <button
-            onClick={() => setAddFieldDialogOpen(true)}
+            onClick={() => setNewField({ tab: shownTab, disease: selectedDisease, returnTo: null })}
             className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
           >
             <Plus size={15} /> Add field
           </button>
         )}
       </div>
+
+      {newField && !userLoading && !canApprove && (
+        <div role="alert" className="mb-4 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          Only org admins and staff can add a field to PatientRecord.
+        </div>
+      )}
 
       {!canWrite && (
         <p role="status" className="mb-4 text-sm text-gray-600">Read-only: mapping codes needs the analyst role.</p>
@@ -1084,11 +1155,21 @@ export default function FieldMappingPage() {
         />
       )}
 
-      {addFieldDialogOpen && canWrite && (
-        <AddCustomFieldDialog
-          tab={shownTab}
-          onClose={() => setAddFieldDialogOpen(false)}
-          onCreated={() => { void fetchDescriptors(); }}
+      {/* The same dialog in create mode. A scope names a category by its
+          code, so one a link spelled is resolved once the categories load. */}
+      {newField && canApprove && categoriesState !== "loading" && (
+        <ConceptAssignDialog
+          fieldName=""
+          fieldType=""
+          create={{ tab: newField.tab, tabOptions: TAB_OPTIONS }}
+          fieldScope={{
+            diseases: newFieldDiseases(newField.disease, diseaseOptions),
+            options: diseaseOptions,
+            optionsIncomplete: categoriesState === "failed",
+          }}
+          canApprove={canApprove}
+          onClose={() => closeNewField(false)}
+          onSaved={() => closeNewField(true)}
         />
       )}
 

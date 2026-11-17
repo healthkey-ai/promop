@@ -67,7 +67,27 @@ interface Props {
     /** The categories could not be loaded; `options` are those already in use. */
     optionsIncomplete?: boolean;
   };
+  /**
+   * Create a field instead of mapping one (#721): the dialog also asks for
+   * the field's definition and the tab it renders on, and saving the chosen
+   * concept creates the field with its approved mapping in one request.
+   * `fieldName` and `fieldType` are not read. Only someone who may approve
+   * mappings is offered this; the server refuses anyone else.
+   */
+  create?: {
+    /** The tab the new field starts on. */
+    tab: string;
+    tabOptions: { value: string; label: string }[];
+  };
 }
+
+type ValueType = "text" | "number" | "date" | "boolean";
+type FieldMode = "editable" | "computed";
+
+/** A display name as the field name it suggests: lower_snake_case. */
+const nameFromLabel = (label: string) => (
+  label.toLowerCase().trim().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "")
+);
 
 const NO_DISEASES: string[] = [];
 
@@ -97,6 +117,18 @@ const TIP = {
     "The OMOP clinical table this field's data is stored in. Measurement for labs, Observation for clinical findings, etc.",
   search:
     "Search OMOP concepts by name or code. Suggest seeds the search from the field name.",
+  display_name:
+    "The label the field is shown under on the patient tab.",
+  field_name:
+    "The field's key in PatientRecord: lower_snake_case, unique, and not changed after the field is created.",
+  value_type:
+    "What kind of value the field holds.",
+  field_mode:
+    "From OMOP data: the value is read from the patient's OMOP facts for the concept. Computed: the value comes from a formula over other fields. Either way the field is read-only on the patient tab.",
+  formula:
+    "An expression over other PatientRecord fields, e.g. weight / (height / 100) ^ 2.",
+  tab:
+    "The patient tab the field renders on, after the tab's other fields.",
   unit:
     "The unit of measurement for this field, e.g. mg/dL, cells/uL.",
   notes:
@@ -112,8 +144,9 @@ export function ConceptAssignDialog({
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
   existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
   choices, onEditChoices, canApprove = true,
-  storedUnit, storedOmopTable, fieldScope,
+  storedUnit, storedOmopTable, fieldScope, create,
 }: Props) {
+  const creating = create !== undefined;
   const canEditScope = fieldScope !== undefined;
   const initialDiseases = fieldScope?.diseases ?? NO_DISEASES;
   const initialScope: FieldScope = initialDiseases.length ? "disease" : "base";
@@ -146,6 +179,14 @@ export function ConceptAssignDialog({
   const [scope, setScope] = useState<FieldScope>(initialScope);
   const [diseases, setDiseases] = useState<string[]>(initialDiseases);
   const [scopeError, setScopeError] = useState("");
+  // The definition of a field being created; unused when mapping one.
+  const [displayName, setDisplayName] = useState("");
+  const [newFieldName, setNewFieldName] = useState("");
+  const [valueType, setValueType] = useState<ValueType>("text");
+  const [fieldMode, setFieldMode] = useState<FieldMode>("editable");
+  const [formula, setFormula] = useState("");
+  const [tab, setTab] = useState(create?.tab ?? "");
+  const [confirmed, setConfirmed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -195,7 +236,11 @@ export function ConceptAssignDialog({
   }, [vocabFilter]);
 
   const handleSuggest = () => {
-    setSearchQuery(suggestQuery || fieldName.replace(/_/g, " "));
+    setSearchQuery(
+      creating
+        ? displayName.trim() || newFieldName.replace(/_/g, " ")
+        : suggestQuery || fieldName.replace(/_/g, " "),
+    );
   };
 
   useEffect(() => {
@@ -229,11 +274,22 @@ export function ConceptAssignDialog({
   // rule about mappings can refuse it.
   const scopeSave = scopeDirty && (scopeOnly || !mappingDirty);
 
+  // What a new field needs before it can be created: its definition, a
+  // concept, and the confirmation the create endpoint requires.
+  const createMissing = [
+    !displayName.trim() && "a display name",
+    !newFieldName.trim() && "a field name",
+    fieldMode === "computed" && !formula.trim() && "a formula",
+    !selected && "a concept",
+    !confirmed && "the confirmation",
+  ].filter(Boolean).join(", ");
+  const createReady = !createMissing;
+
   const handleSubmit = async () => {
-    if (scopeOnly && !scopeDirty) return;
+    if (creating ? !createReady : scopeOnly && !scopeDirty) return;
     // Disease-specific with no category is not an answer: saved as sent it
     // would make the field base, which is the other choice.
-    if (scopeDirty && scope === "disease" && scopedDiseases.length === 0) {
+    if ((creating || scopeDirty) && scope === "disease" && scopedDiseases.length === 0) {
       setScopeError("Choose at least one Disease Category, or make the field part of the base record.");
       return;
     }
@@ -241,6 +297,26 @@ export function ConceptAssignDialog({
     setError("");
     setScopeError("");
     try {
+      if (creating) {
+        // The definition, its approved mapping, its tab and its scope, in
+        // one transaction on the server.
+        await api.post("/v1/custom-patient-fields/", {
+          confirm_patient_record: true,
+          display_name: displayName.trim(),
+          field_name: newFieldName.trim(),
+          field_type: valueType,
+          mode: fieldMode,
+          formula: fieldMode === "computed" ? formula.trim() : undefined,
+          tab,
+          concept: selected?.concept_id,
+          omop_table: omopTable,
+          unit: effectiveUnit,
+          notes,
+          diseases: scopedDiseases,
+        });
+        onSaved();
+        return;
+      }
       if (scopeSave) {
         await api.put(`/v1/field-mappings/${encodeURIComponent(fieldName)}/diseases/`, {
           diseases: scopedDiseases,
@@ -287,6 +363,11 @@ export function ConceptAssignDialog({
         const { diseases: refused, ...rest } = data;
         setScopeError(errorText(refused) || "This scope was refused.");
         if (Object.keys(rest).length) setError(JSON.stringify(rest));
+      } else if (creating && data && typeof data === "object" && !Array.isArray(data)) {
+        // A refused definition names the input it is about.
+        setError(Object.entries(data).map(([key, value]) => (
+          key === "detail" || key === "non_field_errors" ? errorText(value) : `${key}: ${errorText(value)}`
+        )).join(" "));
       } else {
         setError(JSON.stringify(data));
       }
@@ -295,14 +376,20 @@ export function ConceptAssignDialog({
     }
   };
 
+  // A create request cannot be taken back once sent: closing then would
+  // read as cancelling a field that is added all the same, so the dialog
+  // stays until the server answers.
+  const closeBlocked = creating && saving;
+
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && !closeBlocked) onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, closeBlocked]);
 
   const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === overlayRef.current) onClose();
+    // A stray click beside a half-filled definition must not discard it.
+    if (!creating && e.target === overlayRef.current) onClose();
   };
 
   const handleUnitDropdownChange = (value: string) => {
@@ -338,21 +425,112 @@ export function ConceptAssignDialog({
         <div className="border-b border-slate-200 px-5 py-4">
           <button
             onClick={onClose}
-            className="absolute right-3 top-3 rounded p-1 text-slate-400 hover:text-slate-600"
+            disabled={closeBlocked}
+            className="absolute right-3 top-3 rounded p-1 text-slate-400 hover:text-slate-600 disabled:opacity-50"
           >
             <X size={16} />
           </button>
 
           <h2 id="concept-assign-dialog-title" className="text-lg font-semibold text-slate-900">
-            {isEditing ? "Edit Concept Mapping" : "Assign Concept"}
+            {creating ? "Add Field" : isEditing ? "Edit Concept Mapping" : "Assign Concept"}
           </h2>
-          <p className="mt-1 text-sm text-slate-500">
-            Field: <span className="font-mono">{fieldName}</span> ({fieldType})
-          </p>
+          {creating ? (
+            <p className="mt-1 text-sm text-slate-500">
+              A new PatientRecord field. Choosing its concept and saving creates the field with an approved
+              mapping. A patient shows a value for it once their record is next derived from their OMOP data.
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-slate-500">
+              Field: <span className="font-mono">{fieldName}</span> ({fieldType})
+            </p>
+          )}
         </div>
 
         {/* Body */}
         <div className="max-h-[calc(100vh-12rem)] overflow-y-auto px-5 py-4">
+          {/* ── NEW FIELD ──────────────────────────────────────────── */}
+          {create && (
+            <fieldset className="mb-4 rounded-md border border-slate-200 p-4">
+              <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                New field — what is added to PatientRecord
+              </legend>
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field id="new_field_display_name" label="Display name" tip={TIP.display_name}>
+                  <input
+                    id="new_field_display_name"
+                    type="text"
+                    value={displayName}
+                    onChange={(e) => {
+                      // The field name follows the label until it is typed over.
+                      if (newFieldName === nameFromLabel(displayName)) setNewFieldName(nameFromLabel(e.target.value));
+                      setDisplayName(e.target.value);
+                    }}
+                    className={`${INPUT_CLASS} w-full`}
+                    autoFocus
+                  />
+                </Field>
+                <Field id="new_field_name" label="Field name" tip={TIP.field_name}>
+                  <input
+                    id="new_field_name"
+                    type="text"
+                    value={newFieldName}
+                    onChange={(e) => setNewFieldName(e.target.value)}
+                    placeholder="lower_snake_case"
+                    className={`${INPUT_CLASS} w-full font-mono`}
+                  />
+                </Field>
+                <Field id="new_field_type" label="Value type" tip={TIP.value_type}>
+                  <select
+                    id="new_field_type"
+                    value={valueType}
+                    onChange={(e) => setValueType(e.target.value as ValueType)}
+                    className={`${INPUT_CLASS} w-full`}
+                  >
+                    <option value="text">Text</option>
+                    <option value="number">Number</option>
+                    <option value="date">Date</option>
+                    <option value="boolean">Boolean</option>
+                  </select>
+                </Field>
+                <Field id="new_field_tab" label="Tab" tip={TIP.tab}>
+                  <select
+                    id="new_field_tab"
+                    value={tab}
+                    onChange={(e) => setTab(e.target.value)}
+                    className={`${INPUT_CLASS} w-full`}
+                  >
+                    {create.tabOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field id="new_field_mode" label="Field mode" tip={TIP.field_mode}>
+                  <select
+                    id="new_field_mode"
+                    value={fieldMode}
+                    onChange={(e) => setFieldMode(e.target.value as FieldMode)}
+                    className={`${INPUT_CLASS} w-full`}
+                  >
+                    <option value="editable">From OMOP data</option>
+                    <option value="computed">Computed from a formula</option>
+                  </select>
+                </Field>
+                {fieldMode === "computed" && (
+                  <Field id="new_field_formula" label="Formula" tip={TIP.formula}>
+                    <textarea
+                      id="new_field_formula"
+                      value={formula}
+                      onChange={(e) => setFormula(e.target.value)}
+                      rows={2}
+                      placeholder="e.g. weight / (height / 100) ^ 2"
+                      className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-sm font-normal text-slate-950"
+                    />
+                  </Field>
+                )}
+              </div>
+            </fieldset>
+          )}
+
           {/* ── SOURCE CONCEPT ─────────────────────────────────────── */}
           <fieldset className="mb-4 rounded-md border border-slate-200 p-4">
             <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -388,7 +566,7 @@ export function ConceptAssignDialog({
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
-                    autoFocus
+                    autoFocus={!creating}
                   />
                 </div>
                 <select
@@ -636,11 +814,31 @@ export function ConceptAssignDialog({
             </div>
           )}
 
-          {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
+          {creating && (
+            <label className="mb-4 flex items-start gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={confirmed}
+                disabled={saving}
+                onChange={(e) => setConfirmed(e.target.checked)}
+                className="mt-0.5"
+              />
+              I confirm that I want to add this field to PatientRecord.
+            </label>
+          )}
+
+          {error && <div role={creating ? "alert" : undefined} className="mb-3 text-sm text-red-600">{error}</div>}
         </div>
 
         {/* Footer — status at bottom-left, buttons at bottom-right */}
         <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-5 py-4">
+          {creating ? (
+            <p id="add-field-status" className="text-sm text-slate-600">
+              {createMissing
+                ? `Still needed: ${createMissing}.`
+                : <>Status: <span className="font-medium text-slate-900">Approved</span> when the field is added</>}
+            </p>
+          ) : (
           <div className="flex items-center gap-2">
             <label className="text-sm font-medium text-slate-700" htmlFor="mapping-status">Status</label>
             <HelpTip tip={isNewMapping ? TIP.status_new : TIP.status} />
@@ -661,22 +859,27 @@ export function ConceptAssignDialog({
               </option>
             </select>
           </div>
+          )}
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              disabled={closeBlocked}
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={handleSubmit}
-              disabled={(scopeOnly && !scopeDirty) || saving}
+              disabled={(creating ? !createReady : scopeOnly && !scopeDirty) || saving}
+              aria-describedby={creating ? "add-field-status" : undefined}
               className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
-              title={canApprove ? undefined : "Only org admins and staff can approve mappings. This will be saved as a proposal for review."}
+              title={creating || canApprove ? undefined : "Only org admins and staff can approve mappings. This will be saved as a proposal for review."}
             >
               {saving
                 ? "Saving..."
-                : scopeSave
+                : creating
+                  ? "Add Field"
+                  : scopeSave
                   ? "Save Scope"
                   : isEditing
                     ? "Update Mapping"
