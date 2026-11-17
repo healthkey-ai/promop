@@ -9,6 +9,8 @@ import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
 import { CuratorNoteMark } from './CuratorNoteMark';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
+import WearableMappingsDownload from './WearableMappingsDownload';
+import WearableVoteShare from './WearableVoteShare';
 import type { AxisVariant, LoincAxesPayload } from './loincAxes';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
@@ -62,43 +64,19 @@ type Source = {
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type ConceptOrder = 'category' | 'priority';
-/** The concept list. `grouped` says its rows are in category order, and then
- * `categories` holds every category of the whole filtered list with its size,
- * in that order. A list too long to group, and one asked for in priority
- * order, has neither (#2690). */
+/** The concept list. `grouped` says the list is shown under one header per
+ * category: `categories` then holds every category of the whole filtered list
+ * with its size, in order, and `results` is empty until a category is asked for
+ * by name (`view=categories`, then `category=`). A list too long to group, and
+ * one asked for in priority order, has no categories and its rows are the page
+ * (#2690, #2699). */
 type ConceptPage = Page<Concept> & {
   prioritized?: number; order?: ConceptOrder; grouped?: boolean; group_limit?: number;
   categories?: { category: string; count: number }[] | null;
 };
-/** The rows of one category on this page. */
-type ConceptGroup = {
-  category: string; rows: Concept[];
-  /** Concepts in the category across every page; null when the server did not count it. */
-  total: number | null;
-  /** The category began on an earlier page. */
-  continued: boolean;
-};
-/** The page's rows under one header per category, in the order they came.
- * A category's place in the whole list is the sum of the counts before it,
- * so the first header can say whether it began on an earlier page. */
-function groupByCategory(data: ConceptPage): ConceptGroup[] {
-  const groups: ConceptGroup[] = [];
-  const pageStart = (data.page - 1) * data.page_size;
-  for (const concept of data.results) {
-    const category = concept.category ?? '';
-    const last = groups.at(-1);
-    if (last && last.category === category) { last.rows.push(concept); continue; }
-    let before = 0;
-    let total: number | null = null;
-    for (const entry of data.categories ?? []) {
-      if (entry.category === category) { total = entry.count; break; }
-      before += entry.count;
-    }
-    groups.push({ category, rows: [concept], total, continued: !groups.length && total !== null && before < pageStart });
-  }
-  return groups;
-}
 const categoryLabel = (category: string) => category || 'Uncategorized';
+/** What `category=` sends for the concepts that have no category. */
+const NO_CATEGORY = '__none__';
 type Run = {
   run_id: string; state: string; error: string; done: number; total: number; destinations: number;
   selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string; auto_propose_threshold?: number | null };
@@ -150,6 +128,32 @@ function savePreferences(key: string, { domain, order, expanded }: Preferences) 
     }));
   } catch { /* Storage may be disabled. */ }
 }
+/** Open categories ask for their rows independently; no more than this many requests are in flight. */
+const MAX_CATEGORY_REQUESTS = 6;
+/** "Expand all" opens every category, one request each, so it is offered only for a short list. */
+const EXPAND_ALL_LIMIT = 12;
+const DEBOUNCE_MS = 250;
+
+/** Runs at most `max` tasks at once, the rest waiting in order. A task whose
+ * signal is aborted before its turn is rejected without running. */
+function createLimiter(max: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const drain = () => {
+    while (active < max && waiting.length) { active += 1; waiting.shift()!(); }
+  };
+  return function run<T>(signal: AbortSignal, task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      waiting.push(() => {
+        const finish = () => { active -= 1; drain(); };
+        if (signal.aborted) { finish(); reject(new DOMException('Aborted', 'AbortError')); return; }
+        task().then(resolve, reject).finally(finish);
+      });
+      drain();
+    });
+  };
+}
+type Limiter = ReturnType<typeof createLimiter>;
 /** Category, Priority, Standard concept, Patient fields and the three counts. */
 const CONCEPT_COLUMNS = 7;
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
@@ -166,11 +170,11 @@ const byConfidence = (order: ConfidenceOrder) => (a: Source, b: Source) => {
   return order === 'confidence' ? left - right : right - left;
 };
 
-function Pagination({ data, change, disabled = false }: {
-  data: Page<unknown>; change: (page: number) => void; disabled?: boolean;
+function Pagination({ data, change, disabled = false, label = 'Result pages' }: {
+  data: Page<unknown>; change: (page: number) => void; disabled?: boolean; label?: string;
 }) {
   if (data.total <= data.page_size) return null;
-  return <nav aria-label="Result pages" className="flex items-center justify-end gap-3 py-3 text-sm">
+  return <nav aria-label={label} className="flex items-center justify-end gap-3 py-3 text-sm">
     <button className={button} disabled={disabled || data.page === 1} onClick={() => change(data.page - 1)}>Previous</button>
     <span>Page {data.page} of {Math.ceil(data.total / data.page_size)}</span>
     <button className={button} disabled={disabled || data.page * data.page_size >= data.total} onClick={() => change(data.page + 1)}>Next</button>
@@ -235,6 +239,10 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   // The cache lives for the lifetime of the tab, which is the natural scope.
   // useState (not useRef) so the identity is stable and accessible during render.
   const [suggestCache] = useState(() => new Map<number, { run: Run | null; previousCandidates: Source[] }>());
+  // The opened categories fetch their own rows: a shared limit on requests in
+  // flight, and each one's way to patch a row it holds (a saved note, #2699).
+  const [limiter] = useState(() => createLimiter(MAX_CATEGORY_REQUESTS));
+  const [rowPatchers] = useState(() => new Set<(change: (concept: Concept) => Concept) => void>());
 
   useEffect(() => {
     let active = true;
@@ -256,16 +264,19 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       setLoading(true); setError('');
       try {
         const response = await api.get<ConceptPage>('/v1/concept-to-code/', {
-          // Category order is the server's default, so only the other choice is sent.
+          // Category order is the server's default, so only the other choice is
+          // sent. In it the list asks for the category headers alone: the rows
+          // of a category are fetched when it is opened (#2699). A list too
+          // long to group comes back with its page of rows instead.
           params: { domain, scope, search, page, page_size: pageSize, ...(disease ? { disease } : {}),
-            ...(rankedOnly ? { prioritized: '1' } : {}), ...(order === 'priority' ? { order } : {}) },
+            ...(rankedOnly ? { prioritized: '1' } : {}), ...(order === 'priority' ? { order } : { view: 'categories' }) },
           signal: controller.signal,
         });
         if (active) setData(response.data);
       } catch {
         if (active) setError('Could not load concepts. Change the search or refresh to retry.');
       } finally { if (active) setLoading(false); }
-    }, 250);
+    }, DEBOUNCE_MS);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
   }, [domain, disease, scope, search, page, pageSize, rankedOnly, order, revision]);
 
@@ -306,8 +317,9 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   // replaces any list request that began before the save and would bring the
   // old note back (#2411).
   const noteSaved = (concept: Concept, note: ConceptNote | null) => {
-    setData(previous => previous && { ...previous, results: previous.results.map(
-      row => row.concept_id === concept.concept_id ? { ...row, note } : row) });
+    const withNote = (row: Concept) => row.concept_id === concept.concept_id ? { ...row, note } : row;
+    setData(previous => previous && { ...previous, results: previous.results.map(withNote) });
+    rowPatchers.forEach(patch => patch(withNote));
     setRevision(value => value + 1);
     setMoveStatus(note ? `Saved the note for ${concept.concept_name}.` : `Cleared the note for ${concept.concept_name}.`);
   };
@@ -334,11 +346,12 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   };
   const lastPosition = data?.prioritized ?? 0;
 
-  // Rows sit under a header per category only when the server sent them in
-  // category order with the categories' sizes; an older or longer response
-  // is a plain list. Folding changes what is drawn of this page's rows (#2690).
-  const groups = data?.grouped === true && Array.isArray(data.categories) ? groupByCategory(data) : null;
-  const listCategories = groups ? (data?.categories ?? []).map(entry => entry.category) : [];
+  // The list sits under a header per category only when the server grouped it
+  // and sent the categories' sizes; an older or longer response is a plain list.
+  // Folded, a category holds no rows: opening one asks the server for them (#2699).
+  const groups = data?.grouped === true && Array.isArray(data.categories) ? data.categories : null;
+  const listCategories = (groups ?? []).map(entry => entry.category);
+  const tooManyToExpand = listCategories.length > EXPAND_ALL_LIMIT;
   // A category is folded until the curator opens it; what they opened is
   // remembered per domain, so a category never seen starts folded.
   const expanded = new Set(preferences.expanded[domain] ?? []);
@@ -454,10 +467,17 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
         <option value="category">Category, then priority</option><option value="priority">Priority</option>
       </select>
       {groups && <div role="group" aria-label="Categories" className="flex items-center gap-2">
-        <button type="button" className={button} disabled={listCategories.every(name => expanded.has(name))}
+        <button type="button" className={button} disabled={tooManyToExpand || listCategories.every(name => expanded.has(name))}
+          title={tooManyToExpand ? `Expand all is offered for ${EXPAND_ALL_LIMIT} categories or fewer: this list has ${listCategories.length}. Open the categories you need.` : undefined}
           onClick={() => setExpanded([...expanded, ...listCategories])}>Expand all</button>
         <button type="button" className={button} disabled={!listCategories.some(name => expanded.has(name))}
           onClick={() => setExpanded([...expanded].filter(name => !listCategories.includes(name)))}>Collapse all</button>
+      </div>}
+      {/* The whole Wearables tab as a file, and the public vote: the same
+          controls as the Source Code to Concept direction's Wearables tab. */}
+      {domain === WEARABLES_DOMAIN && <div role="group" aria-label="Wearable mappings" className="flex flex-wrap items-center gap-2">
+        <WearableMappingsDownload />
+        {canApprove && <WearableVoteShare />}
       </div>}
     </div>
     <p className="text-xs text-slate-500">{order === 'category'
@@ -466,7 +486,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       its priority (1 is first; clear it to unrank). Click a Priority cell for Done once a concept's codes are mapped; Done
       concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.
       {groups && ' Categories start folded; dragging reorders the rows of the categories you have opened.'}</p>
-    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts, or Expand all.</p>}
+    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts{tooManyToExpand ? '.' : ', or Expand all.'}</p>}
     {tooLongToGroup && data && <p className="text-xs text-slate-500">This list has {data.total.toLocaleString()} concepts, too
       many to group by category (the limit is {data.group_limit?.toLocaleString()}), so it is in priority order. Choose a
       domain or a disease, or search, to narrow it.</p>}
@@ -481,33 +501,15 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
           <th scope="col" className="p-3">Standard concept</th><th scope="col" className="p-3">Patient fields</th>
           <th scope="col" className="p-3 text-right">Approved</th><th scope="col" className="p-3 text-right">Proposed</th><th scope="col" className="p-3 text-right">Rejected</th>
         </tr></thead>
-        {groups ? groups.map((group, index) => {
-          const open = expanded.has(group.category);
-          const shown = group.rows.length;
-          return <tbody key={`${index}:${group.category}`} data-testid={`concept-group-${group.category || 'none'}`}>
-            <tr className="border-t border-slate-200 bg-slate-50">
-              <th scope="rowgroup" colSpan={CONCEPT_COLUMNS} className="px-3 py-2 text-left font-normal">
-                <button type="button" aria-expanded={open} onClick={() => toggleCategory(group.category)}
-                  className="inline-flex items-center gap-2 rounded text-sm font-semibold text-slate-900 hover:underline">
-                  {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
-                  {/* The spaces are for the button's name: the gap is only visual. */}
-                  <span className={group.category ? '' : 'italic text-slate-600'}>{categoryLabel(group.category)}</span>{' '}
-                  {group.continued && <span className="font-normal text-slate-500">(continued) </span>}
-                  <span className="font-normal tabular-nums text-slate-500">
-                    {(group.total ?? shown).toLocaleString()} {(group.total ?? shown) === 1 ? 'concept' : 'concepts'}
-                    {group.total !== null && shown < group.total ? `, ${shown.toLocaleString()} on this page` : ''}
-                  </span>
-                </button>
-              </th>
-            </tr>
-            {open && group.rows.map(conceptRow)}
-          </tbody>;
-        }) : <tbody>{data?.results.map(conceptRow)}</tbody>}
+        {groups ? groups.map(entry => <CategoryGroup key={entry.category} category={entry.category} total={entry.count}
+          open={expanded.has(entry.category)} onToggle={() => toggleCategory(entry.category)}
+          query={{ domain, scope, search, disease, rankedOnly, pageSize, revision }} limiter={limiter}
+          patchers={rowPatchers} renderRow={conceptRow} />) : <tbody>{data?.results.map(conceptRow)}</tbody>}
       </table>
-      {data && !data.results.length && <p className="p-5 text-sm text-slate-500">No matching standard concepts. Try another search or All standard concepts.</p>}
+      {data && !data.results.length && !groups?.length && <p className="p-5 text-sm text-slate-500">No matching standard concepts. Try another search or All standard concepts.</p>}
     </div>
     <p className="text-xs text-slate-500">Coverage counts every mapped source code, whatever its Seen count; a concept's Mapped Codes lists the same ones.</p>
-    {data && <Pagination data={data} disabled={loading || writing} change={setPage} />}
+    {data && !groups && <Pagination data={data} disabled={loading || writing} change={setPage} />}
     </section>
     {selected && <Dialog.Portal>
       <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
@@ -531,6 +533,94 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
+}
+
+type CategoryQuery = {
+  domain: string; scope: string; search: string; disease: string; rankedOnly: boolean; pageSize: number; revision: number;
+};
+
+/** One category of the grouped list: its header always, its rows only while it
+ * is open. Folding unmounts the rows, which discards them and their page. */
+function CategoryGroup({ category, total, open, onToggle, query, limiter, patchers, renderRow }: {
+  category: string; total: number; open: boolean; onToggle: () => void; query: CategoryQuery; limiter: Limiter;
+  patchers: Set<(change: (concept: Concept) => Concept) => void>; renderRow: (concept: Concept) => React.ReactNode;
+}) {
+  return <tbody data-testid={`concept-group-${category || 'none'}`}>
+    <tr className="border-t border-slate-200 bg-slate-50">
+      <th scope="rowgroup" colSpan={CONCEPT_COLUMNS} className="px-3 py-2 text-left font-normal">
+        <button type="button" aria-expanded={open} onClick={onToggle}
+          className="inline-flex items-center gap-2 rounded text-sm font-semibold text-slate-900 hover:underline">
+          {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+          {/* The spaces are for the button's name: the gap is only visual. */}
+          <span className={category ? '' : 'italic text-slate-600'}>{categoryLabel(category)}</span>{' '}
+          <span className="font-normal tabular-nums text-slate-500">
+            {total.toLocaleString()} {total === 1 ? 'concept' : 'concepts'}
+          </span>
+        </button>
+      </th>
+    </tr>
+    {open && <CategoryRows category={category} query={query} limiter={limiter} patchers={patchers} renderRow={renderRow} />}
+  </tbody>;
+}
+
+/** The concepts of one opened category, paged within it by the list's page size.
+ * Each opened category has its own page, and asks again when a filter, the page
+ * size or a write (`revision`) changes. Its pagination is drawn only when the
+ * category holds more than one page. */
+function CategoryRows({ category, query, limiter, patchers, renderRow }: {
+  category: string; query: CategoryQuery; limiter: Limiter;
+  patchers: Set<(change: (concept: Concept) => Concept) => void>; renderRow: (concept: Concept) => React.ReactNode;
+}) {
+  const { domain, scope, search, disease, rankedOnly, pageSize, revision } = query;
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<ConceptPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  // A different filter or page size starts the category over at its first page.
+  const filterKey = JSON.stringify([domain, scope, search, disease, rankedOnly, pageSize]);
+  const [pagedFor, setPagedFor] = useState(filterKey);
+  if (pagedFor !== filterKey) { setPagedFor(filterKey); setPage(1); }
+  // Opening answers at once; a filter typed after that waits, as the list does.
+  const delay = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      delay.current = DEBOUNCE_MS;
+      setLoading(true); setFailed(false);
+      try {
+        const response = await limiter(controller.signal, () => api.get<ConceptPage>('/v1/concept-to-code/', {
+          params: { domain, scope, search, page, page_size: pageSize, category: category || NO_CATEGORY,
+            ...(disease ? { disease } : {}), ...(rankedOnly ? { prioritized: '1' } : {}) },
+          signal: controller.signal,
+        }));
+        if (active) setData(response.data);
+      } catch {
+        if (active) setFailed(true);
+      } finally { if (active) setLoading(false); }
+    }, delay.current);
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [category, domain, scope, search, disease, rankedOnly, pageSize, page, revision, limiter]);
+
+  // A note saved elsewhere on the page shows here at once, before the reload.
+  useEffect(() => {
+    const patch = (change: (concept: Concept) => Concept) =>
+      setData(previous => previous && { ...previous, results: previous.results.map(change) });
+    patchers.add(patch);
+    return () => { patchers.delete(patch); };
+  }, [patchers]);
+
+  return <>
+    {failed && <tr><td colSpan={CONCEPT_COLUMNS} role="alert" className="px-3 py-2 text-sm text-rose-700">
+      Could not load the concepts of {categoryLabel(category)}. Close and open the category to retry.</td></tr>}
+    {loading && !data && !failed && <tr><td colSpan={CONCEPT_COLUMNS} className="px-3 py-2 text-sm text-slate-500">
+      Loading {categoryLabel(category)} concepts…</td></tr>}
+    {data?.results.map(renderRow)}
+    {data && data.total > data.page_size && <tr><td colSpan={CONCEPT_COLUMNS}>
+      <Pagination data={data} disabled={loading} change={setPage} label={`Pages of ${categoryLabel(category)}`} />
+    </td></tr>}
+  </>;
 }
 
 /** The concept's note: an outlined icon while there is none, a filled one

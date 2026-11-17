@@ -1609,18 +1609,29 @@ has its `concept_class_id`. It is a string, `''` for none.
 - **Filter.** `category=<value>` narrows to one category under the same
   definition (`__none__` for none) and combines with every other filter; an
   unknown value matches nothing.
-- **The page.** A grouped list shows one header row per category: a button
-  with the category ("Uncategorized" for none), its size across every page and,
-  when fewer, how many are on this page, and "(continued)" when the category
-  began on an earlier page (worked out from the counts before it). **Every
-  category starts folded**: only its header is drawn until the curator opens
-  it, and a one-line hint says so while all of them are folded. Folded rows
-  still belong to the page, so opening or folding changes what is drawn and
-  asks the server for nothing. Expand all and Collapse all act on the
-  categories of the filtered list. Drag-to-reorder needs visible rows, so it
-  works among the categories that are open (the help text says so); a drop on
-  a row of another open category still sets the global position. A list too
-  long to group says so and how to narrow it.
+- **The page.** A grouped list is one list of headers with no pagination: a
+  button per category ("Uncategorized" for none) with its size across the
+  whole filtered list. The page asks for it with `view=categories` (#2699): the
+  same envelope with `results: []`, no row, field, lock or note read (4 queries,
+  against 8 with rows), every filter applied to the counts; a list that is not
+  grouped returns its page of rows instead, so one request serves both; absent
+  or empty is today's list, anything else a 400. **Every category starts
+  folded and no concept row is fetched until one is opened**: opening asks for
+  `category=<name>` with the current filters, paged within the category by the
+  page-size selector, with its own "Pages of <category>" control drawn only when
+  the category holds more than a page. Each open category keeps its own page
+  (reset by a filter or page-size change), at most six of these requests are in
+  flight at once, folding discards the rows, and a write (`revision`) asks
+  again for the headers and the open categories only. Collapse all folds all;
+  Expand all opens every category, one request each, so it is offered only for
+  12 categories or fewer. Remembered open categories are fetched after the
+  headers on load, and no others. Drag-to-reorder works among the open
+  categories; a drop on a row of another open category still sets the global
+  position. A list too long to group says so and how to narrow it.
+  Under the Wearables domain the controls row also carries the
+  "Download all wearable mappings" CSV/Word buttons (everyone who reads the tab)
+  and Share (`canApprove` only), the same components as the Source Code to
+  Concept direction's Wearables tab.
 - **Remembered.** The per-account object that holds the domain
   (`promop-concept-to-code:<user id>`) is `{"domain", "order"?, "expanded"?}`:
   `order` only when it is `priority`, and `expanded`, the categories the
@@ -1902,8 +1913,9 @@ algorithmic estimate from another, under different vendor codes.
 
 `GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx` returns
 every mapping on the Wearables tab as one file, built on the server
-(`omop_core/services/wearable_mapping_export.py`). On the Wearables tab only,
-the page offers it as "Download all wearable mappings": CSV or Word document
+(`omop_core/services/wearable_mapping_export.py`). On the Wearables tab, and on the Concept
+to Code direction under the Wearables domain (#2699), the page offers it as
+"Download all wearable mappings": CSV or Word document
 (`WearableMappingsDownload.tsx`). The section Download menus are a different
 thing and are unchanged: they write, in the browser, the rows a section has
 loaded.

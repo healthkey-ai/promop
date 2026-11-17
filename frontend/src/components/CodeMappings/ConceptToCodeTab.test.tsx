@@ -188,7 +188,7 @@ describe('concept-first curation', () => {
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'drug_exposure' } });
     fireEvent.change(screen.getByLabelText('Search standard concepts'), { target: { value: 'codeine' } });
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({ params: {
-      domain: 'drug_exposure', scope: 'all', search: 'codeine', page: 1, page_size: 50,
+      domain: 'drug_exposure', scope: 'all', search: 'codeine', page: 1, page_size: 50, view: 'categories',
     } })));
   });
 
@@ -757,19 +757,43 @@ describe('the Wearables domain and the remembered domain (#2656)', () => {
   });
 });
 
-describe('categories on the concept list (#2690)', () => {
+describe('categories on the concept list (#2690, #2699)', () => {
   type Row = typeof concept & { category?: string; priority?: number | null };
-  const listParams = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').map(([, config]) => config.params);
+  const listCalls = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').map(([, config]) => config.params as Record<string, unknown>);
+  /** The requests for the headers (and for a plain list). */
+  const listParams = () => listCalls().filter(params => !('category' in params));
+  /** The requests for the rows of one category. */
+  const categoryParams = (name?: string) => listCalls().filter(params => 'category' in params && (name === undefined || params.category === name));
   const lastListParams = () => listParams().at(-1);
   const filed = (id: number, name: string, category: string, priority: number | null = null): Row =>
     ({ ...concept, concept_id: id, concept_name: name, category, priority });
-  const categories = [{ category: 'Activity', count: 2 }, { category: 'Sleep', count: 12 }, { category: '', count: 1 }];
   const rows = [filed(1, 'Steps', 'Activity', 1), filed(2, 'Distance', 'Activity'), filed(3, 'Sleep duration', 'Sleep'), filed(4, 'Mystery metric', '')];
-  const groupedPage = (results: Row[], extra: Record<string, unknown> = {}) => ({
-    ...page(results), prioritized: 1, order: 'category', grouped: true, group_limit: 5000, categories, ...extra });
+  let dataset: Row[];
+  const categoriesOf = (list: Row[]) => {
+    const counts = new Map<string, number>();
+    for (const row of list) counts.set(row.category ?? '', (counts.get(row.category ?? '') ?? 0) + 1);
+    return [...counts].map(([category, count]) => ({ category, count }));
+  };
+  /** What the server answers: the headers for view=categories, one category's page for category=, else the plain list. */
+  const serve = (params: Record<string, unknown>) => {
+    const base = { prioritized: 1, group_limit: 5000 };
+    if (params.category !== undefined) {
+      const wanted = params.category === '__none__' ? '' : params.category;
+      const own = dataset.filter(row => (row.category ?? '') === wanted);
+      const size = Number(params.page_size);
+      const number = Number(params.page);
+      return { ...page(own.slice((number - 1) * size, number * size)), ...base, total: own.length, page: number, page_size: size,
+        order: 'category', grouped: true, categories: [{ category: wanted, count: own.length }] };
+    }
+    if (params.view === 'categories') {
+      return { ...page([]), ...base, total: dataset.length, order: 'category', grouped: true, categories: categoriesOf(dataset) };
+    }
+    return { ...page(dataset), ...base, order: 'priority', grouped: false, categories: null };
+  };
   let respond: (params: Record<string, unknown>) => unknown;
   beforeEach(() => {
-    respond = () => groupedPage(rows);
+    dataset = rows;
+    respond = serve;
     get.mockImplementation((url: string, config?: { params: Record<string, unknown> }) => Promise.resolve({
       data: url === '/v1/concept-to-code/' ? respond(config?.params ?? {}) : page([source]) }));
     post.mockImplementation((_url: string, body: { position: number | null }) => Promise.resolve({ data: { position: body.position } }));
@@ -782,8 +806,13 @@ describe('categories on the concept list (#2690)', () => {
   };
   /** The grouped list has loaded: every header is there, and every category starts folded. */
   const loaded = () => screen.findByTestId('concept-group-Activity');
-  const expandAll = async () => { await loaded(); fireEvent.click(screen.getByRole('button', { name: 'Expand all' })); };
   const shownRows = () => screen.queryAllByTestId(/^concept-row-/).map(row => row.getAttribute('data-testid'));
+  /** Opens every category (the list is short) and waits for their rows. */
+  const expandAll = async (count = rows.length) => {
+    await loaded();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    await waitFor(() => expect(shownRows()).toHaveLength(count));
+  };
   const stored = (userId: number) => JSON.parse(localStorage.getItem(`promop-concept-to-code:${userId}`) || '{}');
 
   it('shows Category as the first column and the first cell of every row', async () => {
@@ -813,16 +842,22 @@ describe('categories on the concept list (#2690)', () => {
     expect(screen.getAllByRole('rowgroup')).toHaveLength(2);
   });
 
-  it('starts every category folded: only headers with their sizes, and a hint', async () => {
+  it('first loads the headers alone, in one request that fetches no concept rows', async () => {
     render(<ConceptToCodeTab canWrite canApprove />);
     await loaded();
     expect(header(/^Activity/)).toHaveTextContent('Activity 2 concepts');
-    // Twelve in the whole list, one of them on this page.
-    expect(header(/^Sleep/)).toHaveTextContent('Sleep 12 concepts, 1 on this page');
+    expect(header(/^Sleep/)).toHaveTextContent('Sleep 1 concept');
     expect(header(/^Uncategorized/)).toHaveTextContent('Uncategorized 1 concept');
+    expect(header(/^Sleep/)).toHaveAccessibleName('Sleep 1 concept');
     for (const name of [/^Activity/, /^Sleep/, /^Uncategorized/]) expect(header(name)).toHaveAttribute('aria-expanded', 'false');
-    expect(header(/^Sleep/)).toHaveAccessibleName('Sleep 12 concepts, 1 on this page');
+    // One request, for the headers; no category was asked for and no page of rows.
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(listCalls()).toHaveLength(1);
+    expect(listCalls()[0]).toMatchObject({ view: 'categories', page: 1, page_size: 50 });
+    expect(listCalls()[0]).not.toHaveProperty('category');
     expect(shownRows()).toEqual([]);
+    // All the headers are on the one list: no pagination, however many concepts they hold.
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
     expect(screen.getByText('Categories are folded: open one to see its concepts, or Expand all.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Collapse all' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Expand all' })).toBeEnabled();
@@ -831,29 +866,109 @@ describe('categories on the concept list (#2690)', () => {
     expect(localStorage.getItem('promop-concept-to-code:session')).toBeNull();
   });
 
-  it('opens one category without opening another, and folds it again', async () => {
+  it('draws every header on one page however many concepts the list holds', async () => {
+    dataset = Array.from({ length: 400 }, (_, index) => filed(1000 + index, `Metric ${index}`, index < 300 ? 'Sleep' : 'Activity'));
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await loaded();
+    expect(header(/^Sleep/)).toHaveTextContent('Sleep 300 concepts');
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument();
+  });
+
+  it('opens one category by asking for its rows, with the filters, and folds it again', async () => {
     render(<ConceptToCodeTab canWrite canApprove />);
     await loaded();
     fireEvent.click(header(/^Activity/));
     expect(header(/^Activity/)).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(shownRows()).toEqual(['concept-row-1', 'concept-row-2']));
     expect(header(/^Sleep/)).toHaveAttribute('aria-expanded', 'false');
     expect(header(/^Uncategorized/)).toHaveAttribute('aria-expanded', 'false');
-    expect(shownRows()).toEqual(['concept-row-1', 'concept-row-2']);
+    expect(categoryParams()).toEqual([{ domain: '', scope: 'fields', search: '', page: 1, page_size: 50, category: 'Activity' }]);
     expect(within(screen.getByTestId('concept-group-Activity')).getAllByTestId(/^concept-row-/)).toHaveLength(2);
     // Its header and count stay, and the hint goes while anything is open.
     expect(header(/^Activity/)).toHaveTextContent('2 concepts');
     expect(screen.queryByText(/Categories are folded/)).not.toBeInTheDocument();
+    // No pagination for a category that fits on one page.
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument();
+
+    // Folding discards the rows; opening again asks again.
     fireEvent.click(header(/^Activity/));
     expect(shownRows()).toEqual([]);
     expect(screen.getByText(/Categories are folded/)).toBeInTheDocument();
+    fireEvent.click(header(/^Activity/));
+    await waitFor(() => expect(shownRows()).toHaveLength(2));
+    expect(categoryParams('Activity')).toHaveLength(2);
+    expect(categoryParams('Sleep')).toHaveLength(0);
   });
 
-  it('opens and folds every category with Expand all and Collapse all', async () => {
+  it('asks for the concepts with no category as __none__', async () => {
     render(<ConceptToCodeTab canWrite canApprove />);
     await loaded();
-    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
-    expect(shownRows()).toHaveLength(4);
+    fireEvent.click(header(/^Uncategorized/));
+    expect(await screen.findByTestId('concept-row-4')).toBeInTheDocument();
+    expect(categoryParams().map(params => params.category)).toEqual(['__none__']);
+  });
+
+  it('sends the filters to the headers and to the opened rows alike', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await loaded();
+    fireEvent.click(header(/^Activity/));
+    await screen.findByTestId('concept-row-1');
+    fireEvent.change(screen.getByLabelText('Concept scope'), { target: { value: 'all' } });
+    fireEvent.change(screen.getByLabelText('Search standard concepts'), { target: { value: 'step' } });
+    fireEvent.click(screen.getByLabelText(/Ranked only/));
+    const filters = { scope: 'all', search: 'step', prioritized: '1' };
+    await waitFor(() => expect(lastListParams()).toMatchObject({ ...filters, view: 'categories' }));
+    await waitFor(() => expect(categoryParams('Activity').at(-1)).toMatchObject({ ...filters, category: 'Activity', page: 1 }));
+    expect(categoryParams('Activity').at(-1)).not.toHaveProperty('view');
+  });
+
+  it('pages inside a category only when it holds more than one page, each with its own page', async () => {
+    dataset = [...rows.slice(0, 2), ...Array.from({ length: 120 }, (_, index) => filed(100 + index, `Sleep metric ${index}`, 'Sleep'))];
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await loaded();
+    fireEvent.click(header(/^Activity/));
+    fireEvent.click(header(/^Sleep/));
+    await waitFor(() => expect(shownRows()).toHaveLength(52));
+    const sleepPages = within(screen.getByTestId('concept-group-Sleep')).getByRole('navigation', { name: 'Pages of Sleep' });
+    expect(sleepPages).toHaveTextContent('Page 1 of 3');
+    // Activity fits one page, so it has none.
+    expect(within(screen.getByTestId('concept-group-Activity')).queryByRole('navigation')).not.toBeInTheDocument();
+    expect(screen.getAllByRole('navigation')).toHaveLength(1);
+
+    fireEvent.click(within(sleepPages).getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(within(screen.getByTestId('concept-group-Sleep')).getByRole('navigation')).toHaveTextContent('Page 2 of 3'));
+    expect(categoryParams('Sleep').at(-1)).toMatchObject({ category: 'Sleep', page: 2, page_size: 50 });
+    // The other category did not move and was not asked again.
+    expect(categoryParams('Activity')).toHaveLength(1);
+    expect(within(screen.getByTestId('concept-group-Sleep')).getAllByTestId(/^concept-row-/)[0]).toHaveAttribute('data-testid', 'concept-row-150');
+
+    // A bigger page size starts every opened category over, at its first page.
+    fireEvent.change(screen.getByLabelText('Concepts per page'), { target: { value: '100' } });
+    await waitFor(() => expect(categoryParams('Sleep').at(-1)).toMatchObject({ page: 1, page_size: 100 }));
+    await waitFor(() => expect(within(screen.getByTestId('concept-group-Sleep')).getByRole('navigation')).toHaveTextContent('Page 1 of 2'));
+    // The headers did not ask for more than the one page they never paged through.
+    expect(listParams().every(params => params.page === 1)).toBe(true);
+  });
+
+  it('fetches each remembered open category on load, and nothing else', async () => {
+    localStorage.setItem('promop-concept-to-code:7', JSON.stringify({ domain: '', expanded: { '': ['Sleep', 'Gone'], wearables: ['Activity'] } }));
+    render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await loaded();
+    await waitFor(() => expect(shownRows()).toEqual(['concept-row-3']));
+    expect(header(/^Sleep/)).toHaveAttribute('aria-expanded', 'true');
+    expect(header(/^Activity/)).toHaveAttribute('aria-expanded', 'false');
+    await new Promise(resolve => setTimeout(resolve, 400));
+    // The headers once; Sleep's rows once; not Activity (another domain's) nor a category that is gone.
+    expect(listParams()).toHaveLength(1);
+    expect(categoryParams().map(params => params.category)).toEqual(['Sleep']);
+  });
+
+  it('opens every category with Expand all, one request each, and folds them with Collapse all', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await expandAll();
     for (const name of [/^Activity/, /^Sleep/, /^Uncategorized/]) expect(header(name)).toHaveAttribute('aria-expanded', 'true');
+    expect(categoryParams().map(params => params.category).sort()).toEqual(['Activity', 'Sleep', '__none__']);
     expect(screen.getByRole('button', { name: 'Expand all' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Collapse all' })).toBeEnabled();
     expect(within(screen.getByTestId('concept-group-none')).getByTestId('concept-row-4')).toBeInTheDocument();
@@ -864,35 +979,71 @@ describe('categories on the concept list (#2690)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }));
     expect(shownRows()).toEqual([]);
     expect(screen.getByRole('button', { name: 'Collapse all' })).toBeDisabled();
-    // Opening and folding asks the server for nothing.
+    // Folding asks the server for nothing.
+    expect(categoryParams()).toHaveLength(3);
     expect(listParams()).toHaveLength(1);
   });
 
-  it('says a category is continued when it began on an earlier page', async () => {
-    const sleep = Array.from({ length: 12 }, (_, index) => filed(10 + index, `Sleep metric ${index}`, 'Sleep'));
-    const all = [rows[0], rows[1], ...sleep, rows[3]];
-    let size = 3;
-    respond = params => {
-      const number = Number(params.page);
-      return groupedPage(all.slice((number - 1) * size, number * size), { page: number, page_size: size, total: all.length });
-    };
-    const view = render(<ConceptToCodeTab canWrite canApprove />);
-    await loaded();
-    expect(header(/^Sleep/)).toHaveTextContent('Sleep 12 concepts, 1 on this page');
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-    await waitFor(() => expect(header(/^Sleep/)).toHaveTextContent('(continued)'));
-    expect(header(/^Sleep/)).toHaveTextContent('Sleep (continued) 12 concepts, 3 on this page');
-    // A folded continued category still draws no rows; its header says what it holds.
-    expect(shownRows()).toEqual([]);
-    view.unmount();
+  it('offers Expand all only for twelve categories or fewer', async () => {
+    const many = (count: number) => Array.from({ length: count }, (_, index) => filed(500 + index, `Metric ${index}`, `Class ${String(index).padStart(2, '0')}`));
+    dataset = many(12);
+    const first = render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-group-Class 00');
+    expect(screen.getByRole('button', { name: 'Expand all' })).toBeEnabled();
+    first.unmount();
 
-    // A category that starts exactly where the page does is not continued.
-    size = 2;
+    dataset = many(13);
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByTestId('concept-group-Class 00');
+    const expand = screen.getByRole('button', { name: 'Expand all' });
+    expect(expand).toBeDisabled();
+    expect(expand).toHaveAttribute('title', expect.stringMatching(/12 categories or fewer: this list has 13/));
+    expect(screen.getByText('Categories are folded: open one to see its concepts.')).toBeInTheDocument();
+    // Opening one by one still works.
+    fireEvent.click(header(/^Class 03/));
+    expect(await screen.findByTestId('concept-row-503')).toBeInTheDocument();
+  });
+
+  it('keeps no more than six category requests in flight, and answers the rest in turn', async () => {
+    dataset = Array.from({ length: 10 }, (_, index) => filed(600 + index, `Metric ${index}`, `Class ${String(index).padStart(2, '0')}`));
+    localStorage.setItem('promop-concept-to-code:7', JSON.stringify({ domain: '', expanded: { '': dataset.map(row => row.category) } }));
+    let flying = 0;
+    let peak = 0;
+    const waiting: (() => void)[] = [];
+    get.mockImplementation((url: string, config?: { params: Record<string, unknown> }) => {
+      if (url !== '/v1/concept-to-code/' || config?.params.category === undefined) {
+        return Promise.resolve({ data: url === '/v1/concept-to-code/' ? serve(config?.params ?? {}) : page([source]) });
+      }
+      flying += 1; peak = Math.max(peak, flying);
+      return new Promise(resolve => waiting.push(() => { flying -= 1; resolve({ data: serve(config!.params) }); }));
+    });
+    render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-group-Class 00');
+    await waitFor(() => expect(waiting).toHaveLength(6));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(waiting).toHaveLength(6);
+    expect(peak).toBe(6);
+    // As each answers, the next starts.
+    while (shownRows().length < 10) {
+      await act(async () => { waiting.splice(0).forEach(release => release()); await new Promise(resolve => setTimeout(resolve, 20)); });
+    }
+    expect(peak).toBe(6);
+    expect(categoryParams()).toHaveLength(10);
+  });
+
+  it('asks again after a write, for the headers and the opened categories only', async () => {
     render(<ConceptToCodeTab canWrite canApprove />);
     await loaded();
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-    await waitFor(() => expect(header(/^Sleep/)).toHaveTextContent('Sleep 12 concepts, 2 on this page'));
-    expect(screen.queryByText(/continued/)).not.toBeInTheDocument();
+    fireEvent.click(header(/^Activity/));
+    const distance = await screen.findByLabelText('Priority for Distance');
+    fireEvent.change(distance, { target: { value: '1' } });
+    fireEvent.keyDown(distance, { key: 'Enter' });
+    expect(await screen.findByText('Moved Distance to priority 1.')).toBeInTheDocument();
+    await waitFor(() => expect(listParams()).toHaveLength(2));
+    await waitFor(() => expect(categoryParams('Activity')).toHaveLength(2));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    expect(categoryParams('Sleep')).toHaveLength(0);
+    expect(categoryParams()).toHaveLength(2);
   });
 
   it('remembers the categories a curator opened per account and per domain', async () => {
@@ -913,14 +1064,14 @@ describe('categories on the concept list (#2690)', () => {
     await loaded();
     expect(header(/^Sleep/)).toHaveAttribute('aria-expanded', 'true');
     expect(header(/^Activity/)).toHaveAttribute('aria-expanded', 'false');
-    expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']);
+    await waitFor(() => expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']));
     // Another domain has its own set, and coming back restores this one.
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
     expect(header(/^Sleep/)).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(header(/^Activity/));
     expect(stored(7)).toEqual({ domain: 'measurement', expanded: { wearables: ['Sleep', ''], measurement: ['Activity'] } });
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
-    expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']);
+    await waitFor(() => expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']));
     // Folding everything leaves nothing to remember for the domain.
     fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }));
     expect(stored(7)).toEqual({ domain: 'wearables', expanded: { measurement: ['Activity'] } });
@@ -932,28 +1083,30 @@ describe('categories on the concept list (#2690)', () => {
   });
 
   it('sends the order only when it is Priority, and remembers it per account', async () => {
-    respond = params => groupedPage(rows, { total: 200, page: Number(params.page) });
     const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
     await loaded();
     const order = screen.getByLabelText('Concept order') as HTMLSelectElement;
     expect(Array.from(order.options).map(option => option.textContent)).toEqual(['Category, then priority', 'Priority']);
     expect(order).toHaveValue('category');
     expect(lastListParams()).not.toHaveProperty('order');
+    expect(lastListParams()).toMatchObject({ view: 'categories' });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-    await waitFor(() => expect(lastListParams()).toMatchObject({ page: 2 }));
     fireEvent.change(order, { target: { value: 'priority' } });
+    // The priority list is the plain paged list: rows, and no headers view.
     await waitFor(() => expect(lastListParams()).toMatchObject({ order: 'priority', page: 1 }));
+    expect(lastListParams()).not.toHaveProperty('view');
+    await screen.findByTestId('concept-row-1');
     expect(stored(7)).toEqual({ domain: '', order: 'priority' });
     first.unmount();
 
     get.mockClear();
     const again = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
-    await loaded();
+    await screen.findByTestId('concept-row-1');
     expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
     expect(listParams()[0]).toMatchObject({ order: 'priority' });
     fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'category' } });
     await waitFor(() => expect(lastListParams()).not.toHaveProperty('order'));
+    expect(lastListParams()).toMatchObject({ view: 'categories' });
     expect(stored(7)).toEqual({ domain: '' });
     again.unmount();
 
@@ -978,14 +1131,16 @@ describe('categories on the concept list (#2690)', () => {
     localStorage.setItem(key, JSON.stringify({ domain: 'wearables', order: 'priority', expanded: {
       wearables: 'Sleep', measurement: [1], sideways: ['Activity'], condition: ['Activity'] } }));
     const second = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
-    await loaded();
+    await screen.findByTestId('concept-row-1');
     expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
+    fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'category' } });
+    await loaded();
     expect(shownRows()).toEqual([]);
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'condition' } });
-    expect(shownRows()).toEqual(['concept-row-1', 'concept-row-2']);
+    await waitFor(() => expect(shownRows()).toEqual(['concept-row-1', 'concept-row-2']));
     // The next save writes only what was understood.
     fireEvent.click(header(/^Sleep/));
-    expect(stored(7)).toEqual({ domain: 'condition', order: 'priority', expanded: { condition: ['Activity', 'Sleep'] } });
+    expect(stored(7)).toEqual({ domain: 'condition', expanded: { condition: ['Activity', 'Sleep'] } });
     second.unmount();
 
     for (const broken of ['null', '[]', '"wearables"', '{broken']) {
@@ -1010,7 +1165,7 @@ describe('categories on the concept list (#2690)', () => {
     expect(stored(7)).toEqual({ domain: 'wearables', expanded: { wearables: ['Activity'] } });
   });
 
-  it('says so when the list is too long to group, and still shows each Category', async () => {
+  it('says so when the list is too long to group, and then shows its rows from the one request', async () => {
     respond = params => ({ ...page(rows), total: 2700000, prioritized: 1, order: 'priority', grouped: false,
       group_limit: 5000, categories: null, ...(params.order === 'priority' ? { total: 4 } : {}) });
     render(<ConceptToCodeTab canWrite canApprove />);
@@ -1024,6 +1179,8 @@ describe('categories on the concept list (#2690)', () => {
     expect(screen.queryByRole('button', { name: 'Collapse all' })).not.toBeInTheDocument();
     expect(within(screen.getByTestId('concept-row-3')).getAllByRole('cell')[0]).toHaveTextContent('Sleep');
     expect(shownRows()).toHaveLength(4);
+    // It is paged as it always was.
+    expect(listCalls()).toHaveLength(1);
 
     // A list the curator asked for in priority order is not "too long": no note.
     fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'priority' } });
@@ -1069,6 +1226,80 @@ describe('categories on the concept list (#2690)', () => {
     render(<ConceptToCodeTab canWrite canApprove />);
     await loaded();
     expect(screen.getByText(/Categories start folded; dragging reorders the rows of the categories you have opened/)).toBeInTheDocument();
+  });
+
+  it('shows a note saved on a row of an opened category at once', async () => {
+    const view = render(<ConceptToCodeTab canWrite canApprove />);
+    await loaded();
+    fireEvent.click(header(/^Sleep/));
+    await screen.findByTestId('concept-row-3');
+    // The reload that follows the save is held back: the row shows the note before it.
+    const held: (() => void)[] = [];
+    const answer = get.getMockImplementation()!;
+    put.mockResolvedValue({ data: { note: { text: 'Check units', updated_by: 'me' } } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add a note for Sleep duration' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Note for Sleep duration' }), { target: { value: 'Check units' } });
+    get.mockImplementation((...args: [string, { params: Record<string, unknown> }]) => new Promise(resolve => {
+      held.push(() => resolve(answer(...args)));
+    }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit the note for Sleep duration' })).toHaveAttribute('data-has-note', 'true'));
+    await waitFor(() => expect(held.length).toBeGreaterThan(0));
+    view.unmount();
+  });
+});
+
+describe('Download and Share on the Concept tab under Wearables', () => {
+  beforeEach(() => {
+    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => Promise.resolve({
+      data: url === '/v1/concept-to-code/' ? { ...page([]), order: 'category', grouped: true, group_limit: 5000, categories: [], prioritized: 0 }
+        : url === '/v1/code-mappings/vote-shares/' ? { results: [], email_configured: true, base_url_configured: true }
+          : config ? page([]) : page([]) }));
+  });
+  const chooseDomain = async (value: string) => {
+    fireEvent.change(await screen.findByLabelText('Concept domain'), { target: { value } });
+  };
+
+  it('offers the download to a reader and the share to an approver, under Wearables only', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByLabelText('Concept domain');
+    expect(screen.queryByRole('group', { name: 'Download all wearable mappings' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+
+    await chooseDomain('wearables');
+    const download = await screen.findByRole('group', { name: 'Download all wearable mappings' });
+    expect(within(download).getAllByRole('button')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
+
+    await chooseDomain('measurement');
+    expect(screen.queryByRole('group', { name: 'Download all wearable mappings' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+  });
+
+  it('shows a reader who cannot approve the download but not the share', async () => {
+    render(<ConceptToCodeTab canWrite={false} canApprove={false} />);
+    await chooseDomain('wearables');
+    expect(await screen.findByRole('group', { name: 'Download all wearable mappings' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Share' })).not.toBeInTheDocument();
+  });
+
+  it('downloads the whole tab from the Concept tab through the same endpoint', async () => {
+    URL.createObjectURL = vi.fn(() => 'blob:x'); URL.revokeObjectURL = vi.fn();
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await chooseDomain('wearables');
+    await screen.findByRole('group', { name: 'Download all wearable mappings' });
+    get.mockClear();
+    get.mockResolvedValue({ data: new Blob(['a']), headers: {} });
+    fireEvent.click(screen.getByRole('button', { name: /CSV/ }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/code-mappings/wearables-export/', expect.objectContaining({
+      params: { file_format: 'csv' } })));
+  });
+
+  it('opens the share dialog from the Concept tab', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await chooseDomain('wearables');
+    fireEvent.click(await screen.findByRole('button', { name: 'Share' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 });
 
