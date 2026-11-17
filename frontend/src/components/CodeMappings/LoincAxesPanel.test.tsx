@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import LoincAxesPanel from "./LoincAxesPanel";
 import type { LoincAxesPayload } from "./loincAxes";
@@ -336,10 +336,29 @@ describe("LoincAxesPanel", () => {
       await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred"));
       expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Ser" });
       expect(screen.queryByTestId("axis-value-system")).not.toBeInTheDocument();
+      // One live region throughout: closed, it tells a screen reader what the marker shows.
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent("LOINC axes loaded: 1 set · 4 inferred.");
+      expect(status.className).toBe("sr-only");
       fireEvent.click(toggle);
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByTestId("axis-value-system")).toHaveTextContent("Ser");
       expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
+      // The same element, now on the page with the section's own explanation.
+      expect(screen.getByRole("status")).toBe(status);
+      expect(status).toHaveTextContent(/^Settled axes are constraints/);
+      expect(status.className).not.toMatch(/sr-only/);
+    });
+
+    it("counts every curator entry on the heading, one that lifts an axis included", async () => {
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: null } }) });
+      const first = render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent(/^1 cleared · 4 inferred$/));
+      first.unmount();
+      // Clearing an inferred axis takes it out of the inferred count; methodless is a value.
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: "Ser", property: null, method_type: "" } }) });
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent(/^2 set · 1 cleared · 2 inferred$/));
     });
 
     it("names the axis variants on the closed heading", async () => {
@@ -355,12 +374,73 @@ describe("LoincAxesPanel", () => {
       get.mockReturnValue(new Promise(() => {}));
       const first = render(<LoincAxesPanel mappingId={7} canEdit canApprove expectedVariants={3} />);
       expect(screen.getByTestId("section-marker")).toHaveTextContent("loading 3 axis values…");
-      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      // The live region is there for a screen reader while the section is closed.
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent("Loading the 3 axis values the queue flagged for this code, and their destinations…");
+      expect(status.className).toBe("sr-only");
       first.unmount();
       get.mockRejectedValue(new Error("down"));
       render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
       expect(await screen.findByRole("alert")).toHaveTextContent("Could not load the LOINC axes for this code.");
       expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
+      // Nothing loaded is nothing to open: a heading, and no control that opens onto nothing.
+      expect(screen.getByRole("heading", { name: "LOINC axes" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /LOINC axes/ })).not.toBeInTheDocument();
+    });
+
+    it("is one live region from loading to loaded, so the change is announced", async () => {
+      let answer: (value: unknown) => void = () => {};
+      get.mockReturnValue(new Promise(resolve => { answer = resolve; }));
+      render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent(/^Loading the LOINC axes/);
+      answer({ data: payload() });
+      await waitFor(() => expect(status).toHaveTextContent("LOINC axes loaded: 4 inferred."));
+      expect(screen.getByRole("status")).toBe(status);
+    });
+
+    it("opens when the dialog asks it to", async () => {
+      const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
+      render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove />);
+      const toggle = await screen.findByRole("button", { name: /LOINC axes/ });
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toBeInTheDocument());
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      act(() => handle.current!.open());
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("keeps unsaved entries through a re-read, open or closed, and still sends them to Suggest", async () => {
+      const onAxesChange = vi.fn();
+      const props = { mappingId: 7, canEdit: true, canApprove: true, onAxesChange };
+      const { rerender } = render(<LoincAxesPanel {...props} />);
+      const toggle = await screen.findByRole("button", { name: /LOINC axes/ });
+      fireEvent.click(toggle);
+      fireEvent.change(await screen.findByLabelText("System value"), { target: { value: "Bld" } });
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Bld" });
+      fireEvent.click(toggle);
+      expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred · unsaved");
+      // The dialog re-reads after it fills in the variants; the server still stores nothing.
+      const calls = get.mock.calls.length;
+      rerender(<LoincAxesPanel {...props} reloadToken={1} />);
+      await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(calls));
+      await waitFor(() => expect(screen.getByRole("region", { name: "LOINC axes" })).not.toHaveAttribute("aria-busy"));
+      expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred · unsaved");
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Bld" });
+      fireEvent.click(toggle);
+      expect(screen.getByLabelText("System value")).toHaveValue("Bld");
+      expect(screen.getByRole("button", { name: "Save axes" })).toBeEnabled();
+    });
+
+    it("takes the stored entries on a re-read when nothing is unsaved", async () => {
+      const onAxesChange = vi.fn();
+      const props = { mappingId: 7, canEdit: true, canApprove: true, onAxesChange };
+      const { rerender } = render(<LoincAxesPanel {...props} />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent("4 inferred"));
+      get.mockResolvedValue({ data: payload({ loinc_axes: { system: "Ser" } }) });
+      rerender(<LoincAxesPanel {...props} reloadToken={1} />);
+      await waitFor(() => expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · 4 inferred"));
+      expect(screen.getByTestId("section-marker")).not.toHaveTextContent("unsaved");
+      expect(onAxesChange).toHaveBeenLastCalledWith({ system: "Ser" });
     });
 
     it("opens when the dialog points a variant at a concept, so the outcome is seen", async () => {

@@ -75,9 +75,10 @@ def _grouped(queryset):
             destination_domain=Max('target_concept__domain_id'),
             # The curated unit follows the destination's rule: "no unit"
             # against "this unit" is a disagreement, so NULL folds onto 0.
+            # Only the id is aggregated: its code and name are read for the
+            # page's own groups afterwards, not joined across the section.
             destination_units=Count(Coalesce('destination_unit_concept_id', Value(0)), distinct=True),
-            destination_unit_code=Max('destination_unit_concept__concept_code'),
-            destination_unit_name=Max('destination_unit_concept__concept_name'),
+            destination_unit=Max('destination_unit_concept_id'),
             statuses=Count('status', distinct=True),
             # Not named `status`: an annotation shadows the column of the same
             # name, so Q(status='proposed') below would resolve against
@@ -122,10 +123,18 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
                 else F(field).asc(nulls_last=True))
     grouped = _grouped(queryset).order_by(ordering, 'group_key')
     start = (page - 1) * page_size
+    from omop_core.models import Concept
     from omop_core.services.concept_unit_info import suggested_unit
 
-    def unanimous_unit(entry, key):
-        return (entry[key] or '') if entry['destination_units'] == 1 else ''
+    page_entries = list(grouped[start:start + page_size])
+    # One query for the page's unanimous units, whatever the number of groups.
+    # An id whose concept is not loaded has no entry and reads as no unit.
+    unit_ids = {entry['destination_unit'] for entry in page_entries
+                if entry['destination_units'] == 1 and entry['destination_unit']}
+    units = Concept.objects.only('concept_code', 'concept_name').in_bulk(unit_ids) if unit_ids else {}
+
+    def unanimous_unit(entry):
+        return units.get(entry['destination_unit']) if entry['destination_units'] == 1 else None
 
     return [
         {
@@ -143,8 +152,8 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
             'destination_vocabulary_id': entry['destination_vocabulary'] if entry['destinations'] == 1 else None,
             'mixed_destinations': entry['destinations'] > 1,
             # The unit the members' values will be stored in, when they agree.
-            'destination_unit_code': unanimous_unit(entry, 'destination_unit_code'),
-            'destination_unit_name': unanimous_unit(entry, 'destination_unit_name'),
+            'destination_unit_code': getattr(unanimous_unit(entry), 'concept_code', ''),
+            'destination_unit_name': getattr(unanimous_unit(entry), 'concept_name', ''),
             'mixed_destination_units': entry['destination_units'] > 1,
             # What a unanimous LOINC Measurement destination is usually
             # reported in; shown only where no unit is curated.
@@ -160,7 +169,7 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
             'mapping_id': entry['max_id'] if entry['members'] == 1 else None,
             'axis_variant_count': entry['axis_variant_count'] or 0,
         }
-        for entry in grouped[start:start + page_size]
+        for entry in page_entries
     ]
 
 

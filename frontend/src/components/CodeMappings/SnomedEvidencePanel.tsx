@@ -135,10 +135,14 @@ export default function SnomedEvidencePanel({ mappingId, canEdit, onSettingsChan
   const references = source?.references ?? [];
   // What the closed heading says the section holds: the curator's entries,
   // and whether the source brought any SNOMED evidence of its own.
-  const curatorSet = Object.keys(settings).length;
+  // Every curator entry counts, as it does on LOINC axes: one that lifts a
+  // constraint (null) is as much a decision as one that sets a value.
+  const curatorSet = Object.values(settings).filter(value => value !== null).length;
+  const curatorCleared = Object.values(settings).filter(value => value === null).length;
   const found = references.length > 0 || Boolean(source?.hierarchy || source?.laterality) || (source?.attributes?.length ?? 0) > 0;
   const marker = [
     curatorSet ? `${curatorSet} set` : "",
+    curatorCleared ? `${curatorCleared} cleared` : "",
     found ? "evidence found" : "",
     dirty ? "unsaved" : "",
   ].filter(Boolean).join(" · ");

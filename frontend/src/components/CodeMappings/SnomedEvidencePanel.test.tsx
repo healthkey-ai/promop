@@ -123,6 +123,13 @@ describe("SnomedEvidencePanel", () => {
       expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
     });
 
+    it("counts every curator entry on the heading, one that lifts a constraint included", async () => {
+      get.mockResolvedValue({ data: payload({ snomed_attributes: { laterality: "Left", hierarchy: null }, source: null }) });
+      render(<SnomedEvidencePanel mappingId={7} canEdit />);
+      await screen.findByRole("button", { name: /SNOMED evidence/ });
+      expect(screen.getByTestId("section-marker")).toHaveTextContent(/^1 set · 1 cleared$/);
+    });
+
     it("shows no marker when the source brought no evidence and the curator set nothing", async () => {
       get.mockResolvedValue({ data: payload({ source: null }) });
       render(<SnomedEvidencePanel mappingId={7} canEdit />);

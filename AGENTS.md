@@ -1712,14 +1712,30 @@ dash. A grouped row names a unit only when every member has the same one
 disagreement) and says "Mixed" otherwise (`mixed_destination_units`); its
 `suggested_unit` is that of a unanimous LOINC Measurement destination
 (`concept_unit_info.suggested_unit`). List querysets join
-`destination_unit_concept`, so the column costs no query per row. In the Edit
-Mapping dialog, Destination Unit sits among the destination fields where
-Destination Status was, and the status is plain text ("Active" or "Retired",
-the reason on hover) on the line of the Mint new concept button. The dialog's
-LOINC axes and SNOMED evidence sections open closed (`SectionToggle`), with a
-marker on the heading for what they hold; they load and report to the dialog
-either way, so Suggest sends the same axes and settings whether or not they
-were opened.
+`destination_unit_concept`, so the column costs no query per row; the grouped
+query aggregates only the unit's id and reads the page's units in one query
+afterwards. The table scrolls sideways rather than clip a column.
+
+In the Edit Mapping dialog, Destination Unit sits among the destination fields
+where Destination Status was, and is shown for any row that has a stored unit,
+whatever its table. The status is plain text ("Active", or "Retired (reason
+U)") on the line of the Mint new concept button. The form's unit is the
+mapping's own: the dialog's GET of the mapping replaces what the form opened
+with (a patient page row carries no unit) unless the curator has picked or
+cleared one since, nothing is matched from the source unit until that GET has
+settled, and a save whose GET failed leaves `destination_unit_concept_id` out
+rather than send a blank, which the server stores as no unit. Moving an
+existing mapping from the conflict offer sends a unit only when the curator
+chose one in that dialog.
+
+The dialog's LOINC axes and SNOMED evidence sections open closed
+(`SectionToggle`), with a marker on the heading for what they hold (curator
+entries as "n set" and "n cleared", on one rule for both). They load and
+report to the dialog either way, so Suggest sends the same axes and settings
+whether or not they were opened. LOINC axes starts open for a code the queue
+flags with axis variants, and opens when the dialog writes into it (the
+variants' Suggest, Use on a variant's candidate); a re-read keeps axes typed
+and not yet saved.
 
 ### Write-time conversion of stored rows
 
