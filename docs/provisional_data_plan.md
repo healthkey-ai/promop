@@ -302,6 +302,26 @@ The same proposals, to the same audiences, on the other screens.
   is chosen, pinned by a test, and the provisional picture is the row's display.
 - Tests: `tests/test_provisional_phr.py`.
 
+### As built: a mapping's confidence on the dialog (#2668)
+
+A provisional row needs a proposed mapping with a confidence, and the proposals
+come from Code to Concept and Concept to Code (the ETL proposes no concepts). The
+column is `suggestion_confidence`; it stays on a mapping when it is approved. The
+Edit Mapping dialog shows it as a bare percent to the right of the status
+dropdown, with a **Calc** button that scores the destination chosen now through
+`POST /api/v1/code-mappings/score/` (the rankers, with that concept guaranteed in
+the pool), so a hand-picked destination can reach the floor and yield provisional
+rows. A score is never invented (no ranker answer, or a ranker that preferred
+another concept, means no number and a note), and it is never typed in: the server
+signs what Calc or Suggest computed for a source and destination, and a save stores
+a confidence only through that token, so no mapping writer can manufacture the
+evidence provisional data trusts. The token binds the source, destination and a hash
+of the description scored, covers only a score a ranker stood behind, and a stored
+confidence is cleared when the destination or the source is re-pointed; a Concept to
+Code preview's own score is trusted only while the preview is under a day old and
+still describes the row. Details in the Code Mapping Suggest section of
+`AGENTS.md`.
+
 ### As built in phase 1b (#2530)
 
 Generate OMOP is the writer built so far; the lookup contract and FHIR sync

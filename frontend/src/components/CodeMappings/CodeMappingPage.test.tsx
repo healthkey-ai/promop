@@ -155,6 +155,7 @@ type TestMappingRow = Omit<typeof proposedRow, "status"> & {
   source_retirement_evidence?: string[];
   source_evidence?: Record<string, unknown>;
   source_system_context?: SourceSystemContext;
+  suggestion_confidence?: number | null;
 };
 
 /** A /suggest-runs/<id>/ payload, defaulted to a finished run. */
@@ -790,6 +791,181 @@ describe("CodeMappingPage", () => {
       await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ decision_surface: "code2concept" })));
       const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
       expect(payload).not.toHaveProperty("decision_confidence");
+    });
+
+    describe("confidence and Calc (#2668)", () => {
+      const open = async (rows: TestMappingRow[]) => {
+        renderPage(rows);
+        const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+        fireEvent.click(cell.closest("tr")!);
+        return within(await screen.findByRole("dialog"));
+      };
+      const calcRun = (scored: Record<string, unknown>) => ({
+        data: suggestRun({ state: "success", activity: [{ stage: "result", suggested: null, scored }] }),
+      });
+
+      it("shows the stored confidence as a bare percent beside the status, and never sends the number", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.82 }]);
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^82$/);
+        expect(dialog.getByTestId("mapping-confidence")).toHaveAttribute("aria-label", "Confidence");
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+        // The server stores only a confidence it signed, so the shown number is not a field.
+        const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+        expect(payload).not.toHaveProperty("suggestion_confidence");
+        expect(payload).not.toHaveProperty("suggestion_confidence_token");
+      });
+
+      it("computes it with Calc for the destination chosen, and saves its signed token", async () => {
+        const dialog = await open([proposedRow]);
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+        mockPost.mockResolvedValue(calcRun({
+          concept_id: proposedRow.destination_concept_id, confidence: 0.64, ranked: true, note: "", token: "signed-calc",
+        }));
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        await waitFor(() => expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^64$/));
+        expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/score/", expect.objectContaining({
+          async: true, destination_concept_id: proposedRow.destination_concept_id, mapping_id: 7,
+        }));
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/",
+          expect.objectContaining({ suggestion_confidence_token: "signed-calc", decision_confidence: 0.64 })));
+        const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+        expect(payload).not.toHaveProperty("suggestion_confidence");
+      });
+
+      it("says why when the ranker gives no number, and leaves the confidence empty", async () => {
+        const dialog = await open([proposedRow]);
+        mockPost.mockResolvedValue(calcRun({ concept_id: 1, confidence: null, ranked: false, note: "The ranking model is unavailable." }));
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        expect(await dialog.findByTestId("calc-note")).toHaveTextContent("The ranking model is unavailable.");
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+      });
+
+      it("shows the server's reason when it refuses to score the destination", async () => {
+        const dialog = await open([proposedRow]);
+        mockPost.mockRejectedValue({ response: { status: 400, data: { destination_concept_id: "Brand name cannot be scored here." } } });
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        expect(await dialog.findByTestId("calc-note")).toHaveTextContent("Brand name cannot be scored here.");
+      });
+
+      it("recomputes over a stored number", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.5 }]);
+        mockPost.mockResolvedValue(calcRun({
+          concept_id: proposedRow.destination_concept_id, confidence: 0.9, ranked: true, note: "", token: "t",
+        }));
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        await waitFor(() => expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^90$/));
+      });
+
+      it("disables Calc, with a reason, until there is a destination", async () => {
+        const dialog = await open([{ ...proposedRow, destination_concept_id: 0, destination_concept_name: "" }]);
+        const calc = dialog.getByRole("button", { name: "Calc" });
+        expect(calc).toBeDisabled();
+        expect(calc).toHaveAttribute("title", expect.stringMatching(/Choose a destination/));
+      });
+
+      it("clears the number when the destination changes, and saves it as cleared", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.82 }]);
+        fireEvent.change(dialog.getByLabelText("Destination Concept ID"), { target: { value: "555" } });
+
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/",
+          expect.objectContaining({ suggestion_confidence: null })));
+      });
+
+      it("takes the score a Suggest run gave the winner, with its signed token", async () => {
+        const dialog = await open([proposedRow]);
+        mockPost.mockResolvedValue({ data: suggestRun({ state: "success", activity: [{
+          stage: "result", suggested: loincHit, candidates: [loincHit],
+          alternatives: [{ concept_id: loincHit.concept_id, confidence: 0.9, confidence_token: "signed-suggest" }],
+        }] }) });
+
+        fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+
+        await waitFor(() => expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^90$/));
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/",
+          expect.objectContaining({ suggestion_confidence_token: "signed-suggest" })));
+      });
+
+      it("keeps the stored confidence when Suggest fills in the destination already chosen, unscored", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.82 }]);
+        mockPost.mockResolvedValue({ data: suggestRun({ state: "success", activity: [{
+          stage: "result",
+          suggested: { ...loincHit, concept_id: proposedRow.destination_concept_id },
+          candidates: [], alternatives: [],
+        }] }) });
+
+        fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+
+        await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.anything()));
+        await waitFor(() => expect(dialog.getByRole("button", { name: "Suggest", exact: true })).not.toBeDisabled());
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^82$/);
+      });
+
+      it("drops a Calc in flight, its note and its number when the source is edited", async () => {
+        const dialog = await open([proposedRow]);
+        let finish: (value: unknown) => void = () => {};
+        mockPost.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+        await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).toBeDisabled());
+
+        fireEvent.change(dialog.getByLabelText("Source Description"), { target: { value: "Something else" } });
+        // The run is abandoned, and Calc stays off until the change is saved: a score is about
+        // the text the server has stored.
+        await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).toHaveAttribute(
+          "title", expect.stringMatching(/Save the source change first/)));
+        expect(dialog.getByRole("button", { name: "Calc" })).toBeDisabled();
+        finish(calcRun({
+          concept_id: proposedRow.destination_concept_id, confidence: 0.64, ranked: true, note: "", token: "stale",
+        }));
+
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+        const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+        expect(payload).not.toHaveProperty("suggestion_confidence_token");
+      });
+
+      it("lets Calc run for the new destination after one changed mid-Calc, with the old note gone", async () => {
+        const dialog = await open([proposedRow]);
+        mockPost.mockResolvedValueOnce(calcRun({ concept_id: 1, confidence: null, ranked: false, note: "Old note." }));
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+        expect(await dialog.findByTestId("calc-note")).toHaveTextContent("Old note.");
+
+        let finish: (value: unknown) => void = () => {};
+        mockPost.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+        await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).toBeDisabled());
+
+        fireEvent.change(dialog.getByLabelText("Destination Concept ID"), { target: { value: "555" } });
+
+        await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).not.toBeDisabled());
+        expect(dialog.queryByTestId("calc-note")).not.toBeInTheDocument();
+        finish(calcRun({ concept_id: 1, confidence: 0.3, ranked: true, note: "", token: "stale" }));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+      });
+
+      it("leaves the stored confidence alone for a row that did not carry one", async () => {
+        // The Concept to Code tab's rows say nothing about it: a save must not clear it.
+        const dialog = await open([proposedRow]);
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+        const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+        expect(payload.suggestion_confidence).toBeUndefined();
+      });
     });
 
     it("sends the note only when the curator changed it, against the stored one (#2423)", async () => {
