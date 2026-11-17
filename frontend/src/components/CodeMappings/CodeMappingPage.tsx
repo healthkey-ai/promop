@@ -1884,8 +1884,10 @@ export default function CodeMappingPage() {
           {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
           {/* The whole tab, built by the server, where the menus write loaded rows. */}
           {selectedVocabulary === WEARABLES_TAB && <WearableMappingsDownload />}
-          {/* Sharing the proposals for a public vote is a mapping write (#2678). */}
-          {selectedVocabulary === WEARABLES_TAB && canWrite && <WearableVoteShare />}
+          {/* Sharing the proposals for a public vote sends mail from this
+              deployment and gathers voters' addresses: for those who approve
+              mappings, staff and org admins (#2678). */}
+          {selectedVocabulary === WEARABLES_TAB && canApprove && <WearableVoteShare />}
         </div>
 
         {sectionNames.map((section) => {

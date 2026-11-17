@@ -14,8 +14,16 @@ interface VoteShare {
   /** Addresses that confirmed at least one vote. */
   voters: number;
   votes: number;
-  /** The public link; the server sends it only to those who may write mappings. */
+  /** The public link; the server sends it only to a mapping administrator. */
   url?: string;
+}
+
+interface ShareList {
+  results: VoteShare[];
+  /** No real mail backend: voters would wait for a link that is never sent. */
+  email_configured?: boolean;
+  /** The links point at this machine, not at an address a voter can open. */
+  base_url_configured?: boolean;
 }
 
 const SHARES = "/v1/code-mappings/vote-shares/";
@@ -33,8 +41,8 @@ function status(share: VoteShare): string {
 /**
  * Share on the Wearables tab (#2678): makes a public link to a page where
  * people without an account vote Yes or No, or comment, on the wearable
- * mapping proposals. Shown only to those who may write mappings; the server
- * refuses everyone else.
+ * mapping proposals. Shown only to mapping administrators (staff and org
+ * admins); the server refuses everyone else.
  *
  * A vote is advice. It is recorded only after the voter confirms by email,
  * and it never changes a mapping.
@@ -65,12 +73,18 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
   const [created, setCreated] = useState<VoteShare | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
   const [working, setWorking] = useState<number | null>(null);
+  const [setup, setSetup] = useState({ email: true, baseUrl: true });
   const titleInput = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
-      const response = await api.get<{ results: VoteShare[] }>(SHARES);
+      const response = await api.get<ShareList>(SHARES);
       setShares(response.data.results);
+      // Only an explicit false is a warning: an older server says nothing.
+      setSetup({
+        email: response.data.email_configured !== false,
+        baseUrl: response.data.base_url_configured !== false,
+      });
     } catch (err) {
       setShares([]);
       setError(detailOf(err) ?? "The shares could not be loaded.");
@@ -137,6 +151,24 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const remove = async (share: VoteShare) => {
+    const votes = share.votes === 1 ? "1 vote" : `${share.votes} votes`;
+    if (!window.confirm(
+      `Delete "${share.title}" with its ${votes} and the voters' email addresses? This cannot be undone. `
+      + "To stop the link and keep the votes, use Revoke.")) return;
+    setWorking(share.id);
+    setError(null);
+    try {
+      await api.delete(`${SHARES}${share.id}/`);
+      if (created?.id === share.id) setCreated(null);
+      await load();
+    } catch (err) {
+      setError(detailOf(err) ?? "The share could not be deleted. Try again.");
+    } finally {
+      setWorking(null);
+    }
+  };
+
   const downloadVotes = async (share: VoteShare) => {
     setWorking(share.id);
     setError(null);
@@ -166,8 +198,28 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
           Anyone with the link sees the proposed wearable mappings, without an account, and can vote Yes
           or No or comment on each, giving an email address. A vote is recorded only after the voter
           confirms it from an email. Votes are advice: they never change a mapping, and approval stays
-          with you.
+          with you. Revoke stops a link and keeps its votes; Delete erases a share with its votes and
+          the voters' addresses, which is also how a voter's request to be removed is met.
         </p>
+
+        {(!setup.email || !setup.baseUrl) && (
+          <div role="alert" data-testid="vote-setup-warning"
+            className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <p className="font-semibold">Voting cannot work on this deployment yet.</p>
+            {!setup.email && (
+              <p className="mt-1">
+                No mail service is configured, so voters will not receive a confirmation link and no vote
+                can be recorded.
+              </p>
+            )}
+            {!setup.baseUrl && (
+              <p className="mt-1">
+                The links are built for this machine (the application's public address is not set), so
+                nobody else can open them.
+              </p>
+            )}
+          </div>
+        )}
 
         <form onSubmit={create} noValidate className="mt-4 space-y-3 rounded-md border border-slate-200 bg-slate-50 p-3">
           <div>
@@ -250,6 +302,11 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
                     Revoke
                   </button>
                 )}
+                <button type="button" disabled={working === share.id} onClick={() => { void remove(share); }}
+                  title="Erase this share with its votes and the voters' addresses"
+                  className={`${linkButton} text-red-700`} aria-label={`Delete ${share.title} and its votes`}>
+                  Delete
+                </button>
               </li>
             ))}
           </ul>

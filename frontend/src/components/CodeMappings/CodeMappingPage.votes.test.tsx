@@ -57,13 +57,16 @@ function renderOn(opensOn: string) {
 const share = () => screen.queryByRole("button", { name: "Share" });
 const download = () => screen.queryByRole("group", { name: "Download all wearable mappings" });
 
+/** An org admin as the server describes one: the grant, and the flag it sets. */
+const orgAdmin = () => ({ currentUser: { ...role("org_admin").currentUser, is_org_admin: true } });
+
 beforeEach(() => {
   mockGet.mockReset();
-  mockUseAuth.mockReturnValue(role("analyst"));
+  mockUseAuth.mockReturnValue(orgAdmin());
 });
 
 describe("Share on the Wearables tab", () => {
-  it("is offered beside the download to someone who can write mappings", async () => {
+  it("is offered beside the download to a mapping administrator", async () => {
     renderOn("OpenWearables");
     await waitFor(() => expect(share()).toBeInTheDocument());
     expect(download()).toBeInTheDocument();
@@ -72,8 +75,16 @@ describe("Share on the Wearables tab", () => {
     expect(download()!.compareDocumentPosition(share()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("is hidden from a read-only role, who still gets the download", async () => {
-    mockUseAuth.mockReturnValue(role("doctor"));
+  it("is offered to staff", async () => {
+    mockUseAuth.mockReturnValue({ currentUser: { id: 1, is_staff: true } });
+    renderOn("OpenWearables");
+    await waitFor(() => expect(share()).toBeInTheDocument());
+  });
+
+  // A share sends mail and gathers voters' addresses: writing mappings is
+  // not enough, and reading them certainly is not.
+  it.each(["analyst", "doctor"])("is hidden from a %s, who still gets the download", async (name) => {
+    mockUseAuth.mockReturnValue(role(name));
     renderOn("OpenWearables");
     await waitFor(() => expect(download()).toBeInTheDocument());
     expect(share()).not.toBeInTheDocument();
@@ -100,8 +111,8 @@ describe("the votes indicator on a mapping row", () => {
     expect(screen.getAllByTestId("vote-tally")).toHaveLength(1);
   });
 
-  it("is read by a read-only role too", async () => {
-    mockUseAuth.mockReturnValue(role("doctor"));
+  it.each(["analyst", "doctor"])("is read by a %s too", async (name) => {
+    mockUseAuth.mockReturnValue(role(name));
     renderOn("OpenWearables");
     expect(await screen.findByTestId("vote-tally")).toHaveTextContent("3 yes · 1 no · 2 comments");
   });

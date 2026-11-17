@@ -10,14 +10,19 @@ import ConfirmVotesPage from "./ConfirmVotesPage";
 import type { PendingVotes } from "./voteTypes";
 
 const mockGet = vi.fn();
+const mockPreview = vi.fn();
 const mockPost = vi.fn();
+const PREVIEW_URL = "/v1/public/mapping-votes/confirm/preview/";
+const CONFIRM_URL = "/v1/public/mapping-votes/confirm/";
 vi.mock("@/api/publicAxios", () => ({
-  publicApi: { get: (...args: unknown[]) => mockGet(...args), post: (...args: unknown[]) => mockPost(...args) },
+  publicApi: {
+    get: (...args: unknown[]) => mockGet(...args),
+    post: (url: string, ...rest: unknown[]) => (url === PREVIEW_URL ? mockPreview(url, ...rest) : mockPost(url, ...rest)),
+  },
 }));
 const mockPrivate = vi.fn();
 vi.mock("@/api/axios", () => ({ default: { get: mockPrivate, post: mockPrivate, patch: mockPrivate, delete: mockPrivate } }));
 
-const URL_PATH = "/v1/public/mapping-votes/confirm/confirm-token/";
 const PENDING: PendingVotes = {
   title: "HL7 PHR working group review", email: "voter@example.test", expires_at: "2026-11-19T10:00:00+00:00",
   votes: [
@@ -36,18 +41,18 @@ const PENDING: PendingVotes = {
 };
 const failure = (status: number) => ({ response: { status, data: { detail: "This confirmation link is no longer valid." } } });
 
-function renderPage() {
+function renderPage(location = "/vote/confirm#confirm-token") {
   return render(
-    <MemoryRouter initialEntries={["/vote/confirm/confirm-token"]}>
-      <Routes><Route path="/vote/confirm/:confirmToken" element={<ConfirmVotesPage />} /></Routes>
+    <MemoryRouter initialEntries={[location]}>
+      <Routes><Route path="/vote/confirm" element={<ConfirmVotesPage />} /></Routes>
     </MemoryRouter>,
   );
 }
 const INVALID = "This confirmation link is no longer valid";
 
 beforeEach(() => {
-  mockGet.mockReset(); mockPost.mockReset(); mockPrivate.mockReset();
-  mockGet.mockResolvedValue({ data: PENDING });
+  [mockGet, mockPreview, mockPost, mockPrivate].forEach((mock) => mock.mockReset());
+  mockPreview.mockResolvedValue({ data: PENDING });
   mockPost.mockResolvedValue({ data: { recorded: 2, skipped: 1 } });
 });
 
@@ -55,7 +60,10 @@ describe("ConfirmVotesPage", () => {
   it("shows the submitted votes and confirms nothing by opening", async () => {
     renderPage();
     expect(await screen.findByRole("heading", { name: "Confirm your votes" })).toBeInTheDocument();
-    expect(mockGet).toHaveBeenCalledWith(URL_PATH);
+    // The token is the URL fragment; it leaves only in the body of a POST
+    // that previews. Opening the page records nothing.
+    expect(mockPreview.mock.calls).toEqual([[PREVIEW_URL, { token: "confirm-token" }]]);
+    expect(mockGet).not.toHaveBeenCalled();
     expect(screen.getByText("voter@example.test")).toBeInTheDocument();
     expect(screen.getByText(/Nothing is recorded until you confirm/)).toBeInTheDocument();
     const items = screen.getAllByRole("listitem");
@@ -77,7 +85,8 @@ describe("ConfirmVotesPage", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Confirm my votes" }));
 
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
-    expect(mockPost).toHaveBeenCalledWith(URL_PATH);
+    expect(mockPost).toHaveBeenCalledWith(CONFIRM_URL, { token: "confirm-token" });
+    expect(mockPreview).toHaveBeenCalledTimes(1);
     expect(await screen.findByRole("heading", { name: "Thank you" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("2 votes recorded for HL7 PHR working group review.");
     expect(screen.getByTestId("skipped-votes")).toHaveTextContent(/^1 proposal was skipped/);
@@ -101,10 +110,18 @@ describe("ConfirmVotesPage", () => {
   });
 
   it("shows one neutral state for a link that is used, expired or unknown", async () => {
-    mockGet.mockRejectedValue(failure(404));
+    mockPreview.mockRejectedValue(failure(404));
     renderPage();
     expect(await screen.findByRole("heading", { name: INVALID })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Confirm my votes" })).not.toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it("shows the same state, without asking the server, for a link with no token", async () => {
+    renderPage("/vote/confirm");
+    expect(await screen.findByRole("heading", { name: INVALID })).toBeInTheDocument();
+    expect(mockPreview).not.toHaveBeenCalled();
+    expect(mockPost).not.toHaveBeenCalled();
   });
 
   it("goes to the same state when the link was used in another tab meanwhile", async () => {
@@ -125,14 +142,14 @@ describe("ConfirmVotesPage", () => {
   });
 
   it("reports a failed load apart from an invalid link", async () => {
-    mockGet.mockRejectedValue(failure(503));
+    mockPreview.mockRejectedValue(failure(503));
     renderPage();
     expect(await screen.findByRole("alert")).toHaveTextContent(/could not be loaded/);
     expect(screen.queryByText(INVALID)).not.toBeInTheDocument();
   });
 
   it("renders a comment as text", async () => {
-    mockGet.mockResolvedValue({ data: {
+    mockPreview.mockResolvedValue({ data: {
       ...PENDING, votes: [{ ...PENDING.votes[0], comment: "<img src=x onerror=alert(1)>" }],
     } });
     const { container } = renderPage();

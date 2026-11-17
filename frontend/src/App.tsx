@@ -205,19 +205,20 @@ function AppRoutes() {
 }
 
 /**
- * The public voting pages (#2678): `/vote/<token>` and the emailed
- * `/vote/confirm/<token>`. Their visitors have no account, so these routes
- * are chosen before anything reads the session: `AppRoutes` calls `useAuth`,
- * which asks the server who is signed in and sends a stranger to the login
- * page. Nothing here redirects into the app either.
+ * The public voting pages (#2678): `/vote#<token>` and the emailed
+ * `/vote/confirm#<token>`. The token is the URL fragment, so it never reaches
+ * a server log. Their visitors have no account, so these routes are chosen
+ * before anything reads the session: `AppRoutes` calls `useAuth`, which asks
+ * the server who is signed in and sends a stranger to the login page.
+ * Nothing here redirects into the app either.
  */
 const isPublicVotePath = (path: string) => path === "/vote" || path.startsWith("/vote/");
 
 function PublicVoteRoutes() {
   return (
     <Routes>
-      <Route path="/vote/confirm/:confirmToken" element={<ConfirmVotesPage />} />
-      <Route path="/vote/:token" element={<PublicVotePage />} />
+      <Route path="/vote" element={<PublicVotePage />} />
+      <Route path="/vote/confirm" element={<ConfirmVotesPage />} />
       <Route
         path="*"
         element={

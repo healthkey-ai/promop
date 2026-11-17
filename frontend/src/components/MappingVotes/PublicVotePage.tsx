@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { publicApi } from "@/api/publicAxios";
 import { ProposalDestination, ProposalSource } from "./ProposalSummary";
 import {
-  counted, errorDetail, errorStatus,
+  counted, errorDetail, errorStatus, tokenFromHash,
   type VoteChoice, type VotePage, type VoteProposal,
 } from "./voteTypes";
 
@@ -23,10 +23,11 @@ const UNCATEGORIZED = "Uncategorized";
  * A visitor marks Yes or No, or writes a comment, on any of the proposals,
  * gives an email address and submits. Nothing is recorded by that: the
  * server emails a confirmation link, and this page says so in the same words
- * whoever the address belongs to. It calls only the public endpoints.
+ * whoever the address belongs to. It calls only the public endpoints, and
+ * the link's token (the URL fragment) only ever leaves in a request body.
  */
 export default function PublicVotePage() {
-  const { token = "" } = useParams();
+  const token = tokenFromHash(useLocation().hash);
   const [load, setLoad] = useState<Load>({ state: "loading" });
   const [drafts, setDrafts] = useState<Record<number, Draft>>({});
   const [email, setEmail] = useState("");
@@ -37,8 +38,13 @@ export default function PublicVotePage() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      if (!token) {
+        if (!cancelled) setLoad({ state: "unavailable" });
+        return;
+      }
       try {
-        const response = await publicApi.get<VotePage>(`/v1/public/mapping-votes/${encodeURIComponent(token)}/`);
+        // A read, sent as a POST: the token goes in the body, never the URL.
+        const response = await publicApi.post<VotePage>("/v1/public/mapping-votes/", { token });
         if (!cancelled) setLoad({ state: "ready", page: response.data });
       } catch (err) {
         if (!cancelled) setLoad({ state: errorStatus(err) === 404 ? "unavailable" : "error" });
@@ -75,14 +81,14 @@ export default function PublicVotePage() {
     setError(null);
     try {
       const response = await publicApi.post<{ detail: string }>(
-        `/v1/public/mapping-votes/${encodeURIComponent(token)}/submit/`,
-        { email: email.trim(), votes: acted },
+        "/v1/public/mapping-votes/submit/", { token, email: email.trim(), votes: acted },
       );
       setSent(response.data.detail);
     } catch (err) {
       const status = errorStatus(err);
       if (status === 404) setLoad({ state: "unavailable" });
       else if (status === 429) setError("Too many attempts from this network. Wait a while and try again.");
+      else if (status === 503) setError(errorDetail(err) ?? "Voting is temporarily unavailable. Please try again later.");
       else setError(errorDetail(err) ?? "Your votes could not be sent. Try again.");
     } finally {
       setBusy(false);
@@ -129,7 +135,7 @@ export default function PublicVotePage() {
 
   const total = page.groups.reduce((sum, group) => sum + group.proposals.length, 0);
   return (
-    <form onSubmit={submit} noValidate className="min-h-dvh bg-slate-50 pb-60 sm:pb-36">
+    <form onSubmit={submit} noValidate className="min-h-dvh bg-slate-50 pb-64 sm:pb-40">
       <div className="mx-auto max-w-4xl px-4 py-6">
         <h1 className="text-2xl font-semibold text-slate-900">{page.title}</h1>
         {page.note && <p className="mt-2 whitespace-pre-line text-sm text-slate-700">{page.note}</p>}
@@ -176,9 +182,10 @@ export default function PublicVotePage() {
               aria-describedby="voter-email-help"
               className="mt-1 rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:outline-2 focus:outline-slate-700"
             />
-            {/* Said to everyone, not only to a screen reader: the address is kept. */}
+            {/* Said to everyone, in view: what is kept, and who reads it. */}
             <span id="voter-email-help" className="mt-1 text-xs text-slate-500">
-              Used to send you the confirmation link, and shown to the curators beside your votes.
+              Your address and comments are stored and shown to this organisation's mapping
+              administrators. Votes are advisory.
             </span>
           </div>
           <button

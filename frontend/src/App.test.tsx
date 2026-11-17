@@ -355,8 +355,10 @@ describe("the public voting pages", () => {
   // A stranger with a link: nothing may read the session, which would send
   // them to the login page.
   it.each([
-    ["/vote/some-share-token", "PUBLIC_VOTE"],
-    ["/vote/confirm/some-confirm-token", "CONFIRM_VOTES"],
+    ["/vote#some-share-token", "PUBLIC_VOTE"],
+    ["/vote/confirm#some-confirm-token", "CONFIRM_VOTES"],
+    ["/vote", "PUBLIC_VOTE"],
+    ["/vote/confirm", "CONFIRM_VOTES"],
   ])("renders %s without asking who is signed in", (path, marker) => {
     mockUseAuth.mockReturnValue({ ...baseAuth, loading: true, currentUser: null });
     renderAt(path);
@@ -367,16 +369,21 @@ describe("the public voting pages", () => {
 
   it("renders them the same for someone who is signed in, without the app around them", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true, email_verified: false } });
-    renderAt("/vote/some-share-token");
+    renderAt("/vote#some-share-token");
     expect(screen.getByText("PUBLIC_VOTE")).toBeInTheDocument();
     expect(screen.queryByText("VERIFY_BANNER")).not.toBeInTheDocument();
     expect(mockUseAuth).not.toHaveBeenCalled();
   });
 
-  it.each(["/vote", "/vote/", "/vote/confirm", "/vote/a/b/c"])(
+  // A token belongs in the fragment. One in the path is an old or mistyped
+  // link: it gets the neutral page, and is never read.
+  it.each(["/vote/some-share-token", "/vote/confirm/some-confirm-token", "/vote/a/b/c"])(
     "shows a neutral page at %s instead of redirecting into the app", (path) => {
       mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
       renderAt(path);
+      expect(screen.getByRole("heading", { name: "This link is not available" })).toBeInTheDocument();
+      expect(screen.queryByText("PUBLIC_VOTE")).not.toBeInTheDocument();
+      expect(screen.queryByText("CONFIRM_VOTES")).not.toBeInTheDocument();
       expect(screen.queryByText("LOGIN")).not.toBeInTheDocument();
       expect(mockUseAuth).not.toHaveBeenCalled();
     },

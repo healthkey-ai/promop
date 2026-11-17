@@ -10,9 +10,15 @@ import PublicVotePage from "./PublicVotePage";
 import type { VotePage } from "./voteTypes";
 
 const mockGet = vi.fn();
-const mockPost = vi.fn();
+const mockPage = vi.fn();
+const mockSubmit = vi.fn();
+const PAGE_URL = "/v1/public/mapping-votes/";
+const SUBMIT_URL = "/v1/public/mapping-votes/submit/";
 vi.mock("@/api/publicAxios", () => ({
-  publicApi: { get: (...args: unknown[]) => mockGet(...args), post: (...args: unknown[]) => mockPost(...args) },
+  publicApi: {
+    get: (...args: unknown[]) => mockGet(...args),
+    post: (url: string, ...rest: unknown[]) => (url === SUBMIT_URL ? mockSubmit(url, ...rest) : mockPage(url, ...rest)),
+  },
 }));
 // The signed-in client must never be touched from a public page.
 const mockPrivate = vi.fn();
@@ -33,10 +39,10 @@ const PAGE: VotePage = {
 const SENT = "Check your email to confirm your votes. They are not recorded until you confirm.";
 const failure = (status: number, detail?: string) => ({ response: { status, data: detail ? { detail } : {} } });
 
-function renderPage(token = "share-token") {
+function renderPage(location = "/vote#share-token") {
   return render(
-    <MemoryRouter initialEntries={[`/vote/${token}`]}>
-      <Routes><Route path="/vote/:token" element={<PublicVotePage />} /></Routes>
+    <MemoryRouter initialEntries={[location]}>
+      <Routes><Route path="/vote" element={<PublicVotePage />} /></Routes>
     </MemoryRouter>,
   );
 }
@@ -44,16 +50,15 @@ const button = (name: string) => screen.getByRole("button", { name });
 const counts = () => screen.getByTestId("vote-counts").textContent;
 
 beforeEach(() => {
-  mockGet.mockReset(); mockPost.mockReset(); mockPrivate.mockReset();
-  mockGet.mockResolvedValue({ data: PAGE });
-  mockPost.mockResolvedValue({ data: { detail: SENT } });
+  [mockGet, mockPage, mockSubmit, mockPrivate].forEach((mock) => mock.mockReset());
+  mockPage.mockResolvedValue({ data: PAGE });
+  mockSubmit.mockResolvedValue({ data: { detail: SENT } });
 });
 
 describe("PublicVotePage", () => {
   it("shows the title, the note and the proposals by category", async () => {
     renderPage();
     expect(await screen.findByRole("heading", { level: 1, name: PAGE.title })).toBeInTheDocument();
-    expect(mockGet).toHaveBeenCalledWith("/v1/public/mapping-votes/share-token/");
     expect(screen.getByText("Please vote by Friday.")).toBeInTheDocument();
     expect(screen.getByText(/not recorded until you confirm/)).toBeInTheDocument();
     const activity = screen.getByRole("region", { name: "Activity" });
@@ -65,11 +70,33 @@ describe("PublicVotePage", () => {
     const sleep = screen.getByRole("region", { name: "Sleep" });
     expect(within(sleep).getByText("Unit: none set")).toBeInTheDocument();
     expect(counts()).toBe("0 votes, 0 comments");
-    // The voter is told, in view, what the address is for and who sees it.
-    expect(screen.getByLabelText("Your email address")).toHaveAccessibleDescription(
-      /shown to the curators beside your votes/);
-    expect(screen.getByText(/shown to the curators beside your votes/)).not.toHaveClass("sr-only");
     expect(mockPrivate).not.toHaveBeenCalled();
+  });
+
+  it("takes the token from the URL fragment and sends it only in a request body", async () => {
+    renderPage("/vote#share-token");
+    await screen.findByRole("heading", { level: 1, name: PAGE.title });
+    // No GET at all, and no URL that carries the token: a token in a path
+    // or a query string is in every server log.
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockPage.mock.calls).toEqual([[PAGE_URL, { token: "share-token" }]]);
+    await userEvent.click(button("Yes to HealthKit HKSteps"));
+    await userEvent.type(screen.getByLabelText("Your email address"), "voter@example.test");
+    await userEvent.click(button("Submit votes"));
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+    for (const [url] of [...mockPage.mock.calls, ...mockSubmit.mock.calls]) {
+      expect(url).not.toContain("share-token");
+    }
+  });
+
+  it("tells the voter, in view, what is stored and that votes are advisory", async () => {
+    renderPage();
+    const email = await screen.findByLabelText("Your email address");
+    expect(email).toHaveAccessibleDescription(
+      /address and comments are stored and shown to this organisation's mapping administrators/);
+    const notice = screen.getByText(/stored and shown to this organisation's mapping administrators/);
+    expect(notice).toHaveTextContent("Votes are advisory.");
+    expect(notice).not.toHaveClass("sr-only");
   });
 
   it("toggles Yes and No as a two-state choice that a second click clears", async () => {
@@ -111,7 +138,7 @@ describe("PublicVotePage", () => {
     expect(counts()).toBe("0 votes, 0 comments");
   });
 
-  it("submits the email and only the proposals the visitor acted on", async () => {
+  it("submits the token, the email and only the proposals the visitor acted on", async () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Yes to HealthKit HKSteps" }));
     await userEvent.click(button("Comment on HealthKit HKSteps"));
@@ -126,8 +153,9 @@ describe("PublicVotePage", () => {
 
     await userEvent.click(button("Submit votes"));
 
-    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
-    expect(mockPost).toHaveBeenCalledWith("/v1/public/mapping-votes/share-token/submit/", {
+    await waitFor(() => expect(mockSubmit).toHaveBeenCalledTimes(1));
+    expect(mockSubmit).toHaveBeenCalledWith(SUBMIT_URL, {
+      token: "share-token",
       email: "voter@example.test",
       votes: [
         { mapping: 11, choice: "yes", comment: "Agree" },
@@ -148,11 +176,11 @@ describe("PublicVotePage", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     await userEvent.click(button("Submit votes"));
     expect(screen.getByRole("alert")).toHaveTextContent("Enter your email address.");
-    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockSubmit).not.toHaveBeenCalled();
   });
 
   it("shows the server's reason for a refused submission and keeps the votes", async () => {
-    mockPost.mockRejectedValue(failure(400, "Enter a valid email address."));
+    mockSubmit.mockRejectedValue(failure(400, "Enter a valid email address."));
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Yes to HealthKit HKSteps" }));
     await userEvent.type(screen.getByLabelText("Your email address"), "not-an-address");
@@ -163,27 +191,40 @@ describe("PublicVotePage", () => {
     expect(button("Submit votes")).toBeEnabled();
   });
 
-  it("says so when the network is throttled or the request fails", async () => {
-    mockPost.mockRejectedValueOnce(failure(429)).mockRejectedValueOnce(new Error("offline"));
+  it("says so when voting is unavailable, throttled or the request fails, and never says check your email", async () => {
+    mockSubmit
+      .mockRejectedValueOnce(failure(503, "Voting is temporarily unavailable. Please try again later."))
+      .mockRejectedValueOnce(failure(429))
+      .mockRejectedValueOnce(new Error("offline"));
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Yes to HealthKit HKSteps" }));
     await userEvent.type(screen.getByLabelText("Your email address"), "voter@example.test");
 
     await userEvent.click(button("Submit votes"));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/Too many attempts/);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Voting is temporarily unavailable. Please try again later.");
+    expect(screen.queryByText(SENT)).not.toBeInTheDocument();
+    await userEvent.click(button("Submit votes"));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent(/Too many attempts/));
     await userEvent.click(button("Submit votes"));
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Your votes could not be sent. Try again."));
+    expect(button("Yes to HealthKit HKSteps")).toHaveAttribute("aria-pressed", "true");
   });
 
   it("shows one neutral state for a link that is unknown, revoked or expired", async () => {
-    mockGet.mockRejectedValue(failure(404, "This link is not available."));
-    renderPage("gone");
+    mockPage.mockRejectedValue(failure(404, "This link is not available."));
+    renderPage("/vote#gone");
     expect(await screen.findByRole("heading", { name: "This link is not available" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Submit votes" })).not.toBeInTheDocument();
   });
 
+  it("shows the same state, without asking the server, for a link with no token", async () => {
+    renderPage("/vote");
+    expect(await screen.findByRole("heading", { name: "This link is not available" })).toBeInTheDocument();
+    expect(mockPage).not.toHaveBeenCalled();
+  });
+
   it("goes to the same state when the link is withdrawn before the votes are sent", async () => {
-    mockPost.mockRejectedValue(failure(404, "This link is not available."));
+    mockSubmit.mockRejectedValue(failure(404, "This link is not available."));
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "Yes to HealthKit HKSteps" }));
     await userEvent.type(screen.getByLabelText("Your email address"), "voter@example.test");
@@ -192,20 +233,20 @@ describe("PublicVotePage", () => {
   });
 
   it("reports a failed load apart from an unavailable link", async () => {
-    mockGet.mockRejectedValue(failure(500));
+    mockPage.mockRejectedValue(failure(500));
     renderPage();
     expect(await screen.findByRole("alert")).toHaveTextContent(/could not be loaded/);
     expect(screen.queryByText("This link is not available")).not.toBeInTheDocument();
   });
 
   it("says when nothing is open for voting", async () => {
-    mockGet.mockResolvedValue({ data: { ...PAGE, groups: [] } });
+    mockPage.mockResolvedValue({ data: { ...PAGE, groups: [] } });
     renderPage();
     expect(await screen.findByText(/no proposals open for voting/)).toBeInTheDocument();
   });
 
   it("renders what it is given as text, never as markup", async () => {
-    mockGet.mockResolvedValue({ data: {
+    mockPage.mockResolvedValue({ data: {
       ...PAGE, title: "<img src=x onerror=alert(1)>", note: "<script>alert(2)</script>",
       groups: [{ category: "<b>Activity</b>", proposals: [proposal(11, "<i>code</i>", { description: "<a href='x'>d</a>" })] }],
     } });

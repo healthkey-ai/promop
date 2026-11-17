@@ -9,9 +9,13 @@ import WearableVoteShare from "./WearableVoteShare";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
+const mockDelete = vi.fn();
 const mockSaveBlob = vi.fn();
 vi.mock("@/api/axios", () => ({
-  default: { get: (...args: unknown[]) => mockGet(...args), post: (...args: unknown[]) => mockPost(...args) },
+  default: {
+    get: (...args: unknown[]) => mockGet(...args), post: (...args: unknown[]) => mockPost(...args),
+    delete: (...args: unknown[]) => mockDelete(...args),
+  },
 }));
 vi.mock("@/utils/download", async (original) => ({
   ...(await original<typeof import("@/utils/download")>()),
@@ -21,9 +25,10 @@ vi.mock("@/utils/download", async (original) => ({
 const SHARES = "/v1/code-mappings/vote-shares/";
 const share = (id: number, extra: Record<string, unknown> = {}) => ({
   id, title: `Review ${id}`, note: "", created_at: "2026-11-01T10:00:00+00:00", expires_at: null,
-  revoked_at: null, active: true, voters: 0, votes: 0, url: `https://promop.example.test/vote/token-${id}`, ...extra,
+  revoked_at: null, active: true, voters: 0, votes: 0, url: `https://promop.example.test/vote#token-${id}`, ...extra,
 });
 let listed: ReturnType<typeof share>[];
+let flags: { email_configured?: boolean; base_url_configured?: boolean };
 const writeText = vi.fn();
 
 async function openDialog() {
@@ -34,10 +39,11 @@ async function openDialog() {
 const rows = () => screen.queryAllByTestId("vote-share");
 
 beforeEach(() => {
-  mockGet.mockReset(); mockPost.mockReset(); mockSaveBlob.mockReset(); writeText.mockReset();
+  [mockGet, mockPost, mockDelete, mockSaveBlob, writeText].forEach((mock) => mock.mockReset());
   listed = [];
+  flags = { email_configured: true, base_url_configured: true };
   mockGet.mockImplementation((url: string) => (
-    url === SHARES ? Promise.resolve({ data: { results: listed } }) : Promise.reject(new Error(url))
+    url === SHARES ? Promise.resolve({ data: { results: listed, can_manage: true, ...flags } }) : Promise.reject(new Error(url))
   ));
   writeText.mockResolvedValue(undefined);
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
@@ -58,6 +64,7 @@ describe("WearableVoteShare", () => {
     expect(mockGet).toHaveBeenCalledWith(SHARES);
     expect(dialog).toHaveTextContent(/never change a mapping, and approval stays with you/);
     expect(dialog).toHaveTextContent(/only after the voter confirms it from an email/);
+    expect(dialog).toHaveTextContent(/Delete erases a share with its votes and the voters' addresses/);
     expect(await screen.findByText("No link has been created yet.")).toBeInTheDocument();
     expect(screen.getByLabelText("Title (shown to voters)")).toHaveFocus();
   });
@@ -75,14 +82,14 @@ describe("WearableVoteShare", () => {
       title: "HL7 PHR working group review", note: "Vote by Friday.", expires_at: "2027-01-31",
     }));
     const link = await screen.findByLabelText("Public link for HL7 PHR working group review");
-    expect(link).toHaveValue("https://promop.example.test/vote/token-5");
+    expect(link).toHaveValue("https://promop.example.test/vote#token-5");
     expect(link).toHaveAttribute("readonly");
     await waitFor(() => expect(rows()).toHaveLength(1));
     expect(screen.getByLabelText("Title (shown to voters)")).toHaveValue("");
 
     const created = screen.getByRole("status");
     await userEvent.click(within(created).getByRole("button", { name: "Copy the link for HL7 PHR working group review" }));
-    expect(writeText).toHaveBeenCalledWith("https://promop.example.test/vote/token-5");
+    expect(writeText).toHaveBeenCalledWith("https://promop.example.test/vote#token-5");
     expect(within(created).getByRole("button")).toHaveTextContent("Copied");
   });
 
@@ -137,7 +144,7 @@ describe("WearableVoteShare", () => {
     listed = [share(3)];
     await openDialog();
     await userEvent.click(await screen.findByRole("button", { name: "Copy the link for Review 3" }));
-    expect(writeText).toHaveBeenCalledWith("https://promop.example.test/vote/token-3");
+    expect(writeText).toHaveBeenCalledWith("https://promop.example.test/vote#token-3");
     expect(screen.getByRole("button", { name: "Copy the link for Review 3" })).toHaveTextContent("Copied");
   });
 
@@ -172,11 +179,57 @@ describe("WearableVoteShare", () => {
     expect(mockPost).not.toHaveBeenCalled();
   });
 
+  it("deletes a share with its votes after spelling out what goes", async () => {
+    listed = [share(3, { voters: 2, votes: 5 }), share(2)];
+    mockDelete.mockImplementation(() => { listed = [share(2)]; return Promise.resolve({ status: 204 }); });
+    await openDialog();
+    await userEvent.click(await screen.findByRole("button", { name: "Delete Review 3 and its votes" }));
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/5 votes and the voters' email addresses.*cannot be undone/));
+    expect(mockDelete).toHaveBeenCalledWith(`${SHARES}3/`);
+    await waitFor(() => expect(rows()).toHaveLength(1));
+    expect(rows()[0]).toHaveTextContent("Review 2");
+  });
+
+  it("deletes nothing when the curator declines, and offers Delete on a revoked share too", async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+    listed = [share(2, { active: false, revoked_at: "2026-11-02T10:00:00+00:00", voters: 1, votes: 1 })];
+    await openDialog();
+    await userEvent.click(await screen.findByRole("button", { name: "Delete Review 2 and its votes" }));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("1 vote and"));
+    expect(mockDelete).not.toHaveBeenCalled();
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("warns when no mail service is configured: voters would never get a link", async () => {
+    flags = { email_configured: false, base_url_configured: true };
+    await openDialog();
+    const warning = await screen.findByTestId("vote-setup-warning");
+    expect(warning).toHaveAttribute("role", "alert");
+    expect(warning).toHaveTextContent("Voting cannot work on this deployment yet.");
+    expect(warning).toHaveTextContent(/voters will not receive a confirmation link/);
+    expect(warning).not.toHaveTextContent(/public address/);
+  });
+
+  it("warns when the links point at this machine", async () => {
+    flags = { email_configured: true, base_url_configured: false };
+    await openDialog();
+    const warning = await screen.findByTestId("vote-setup-warning");
+    expect(warning).toHaveTextContent(/public address is not set/);
+    expect(warning).not.toHaveTextContent(/confirmation link/);
+  });
+
+  it("shows no warning when the deployment is set up, or says nothing about it", async () => {
+    await openDialog();
+    await screen.findByText("No link has been created yet.");
+    expect(screen.queryByTestId("vote-setup-warning")).not.toBeInTheDocument();
+  });
+
   it("downloads a share's votes as the server's CSV file", async () => {
     listed = [share(3, { voters: 2, votes: 5 })];
     const file = new Blob(["x"], { type: "text/csv" });
     mockGet.mockImplementation((url: string) => (url === SHARES
-      ? Promise.resolve({ data: { results: listed } })
+      ? Promise.resolve({ data: { results: listed, ...flags } })
       : Promise.resolve({ data: file, headers: { "content-disposition": 'attachment; filename="mapping-votes-share-3.csv"' } })));
     await openDialog();
     await userEvent.click(await screen.findByRole("button", { name: "Download votes (CSV) for Review 3" }));

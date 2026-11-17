@@ -46,3 +46,11 @@ export const errorDetail = (error: unknown): string | undefined => {
 
 /** "1 vote", "2 votes". */
 export const counted = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
+
+/**
+ * The token of a public voting link. It is the URL's fragment
+ * (`/vote#<token>`), which a browser never sends to a server: it is in no
+ * request line, access log or Referer. The pages read it here and send it
+ * in a request body.
+ */
+export const tokenFromHash = (hash: string): string => hash.replace(/^#/, "").trim();

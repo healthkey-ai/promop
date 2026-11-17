@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 import { publicApi } from "@/api/publicAxios";
 import { ProposalDestination, ProposalSource } from "./ProposalSummary";
-import { counted, errorStatus, type PendingVotes } from "./voteTypes";
+import { counted, errorStatus, tokenFromHash, type PendingVotes } from "./voteTypes";
 
 type State =
   | { state: "loading" }
@@ -12,37 +12,44 @@ type State =
   | { state: "confirmed"; title: string; recorded: number; skipped: number };
 
 const CHOICE_LABEL = { yes: "Yes", no: "No", "": "Comment only" } as const;
+const PREVIEW = "/v1/public/mapping-votes/confirm/preview/";
+const CONFIRM = "/v1/public/mapping-votes/confirm/";
 
 /**
- * Where the emailed confirmation link lands. Opening it only shows what was
- * submitted: a mail scanner that follows the link records nothing. The votes
- * are recorded by the button, once.
+ * Where the emailed confirmation link lands (`/vote/confirm#<token>`).
+ * Opening it only asks for a preview of what was submitted: whatever follows
+ * the link records nothing. The votes are recorded by the button, once. The
+ * token is the URL fragment and only ever leaves in a request body.
  */
 export default function ConfirmVotesPage() {
-  const { confirmToken = "" } = useParams();
+  const token = tokenFromHash(useLocation().hash);
   const [view, setView] = useState<State>({ state: "loading" });
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const url = `/v1/public/mapping-votes/confirm/${encodeURIComponent(confirmToken)}/`;
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      if (!token) {
+        if (!cancelled) setView({ state: "invalid" });
+        return;
+      }
       try {
-        const response = await publicApi.get<PendingVotes>(url);
+        // The preview: it shows what was submitted and records nothing.
+        const response = await publicApi.post<PendingVotes>(PREVIEW, { token });
         if (!cancelled) setView({ state: "ready", pending: response.data });
       } catch (err) {
         if (!cancelled) setView({ state: errorStatus(err) === 404 ? "invalid" : "error" });
       }
     })();
     return () => { cancelled = true; };
-  }, [url]);
+  }, [token]);
 
   const confirm = async (title: string) => {
     setBusy(true);
     setFailed(false);
     try {
-      const response = await publicApi.post<{ recorded: number; skipped: number }>(url);
+      const response = await publicApi.post<{ recorded: number; skipped: number }>(CONFIRM, { token });
       setView({ state: "confirmed", title, ...response.data });
     } catch (err) {
       if (errorStatus(err) === 404) setView({ state: "invalid" });
