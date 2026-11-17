@@ -5,22 +5,29 @@ whole provisional chain in one resumable command, for the patient whose page
 should show as much as the proposals can say while the codes are still being
 mapped:
 
-1. **Propose.** The person's unresolved and inventory codes are found, their
+1. **Propose.** The person's codes with unresolved clinical rows are found (the
+   inventory-only codes too with ``include_inventory``: they are slow, about four
+   seconds each, and only matter for creating rows from the inventory), their
    organization-unscoped queue rows are located (or created, the way
    ``enqueue_unmapped_source_codes`` does), and the normal Suggest pipeline runs
    on those that are ``proposed`` with no destination, with the ranker the
-   caller chose (Jev by default). Destinations, confidences, provenance and notes
-   are written exactly as a Suggest run writes them; the rows stay ``proposed``.
-   A code the ranker could not rank is never written (not even as the first
-   retrieval hit) and not stamped as attempted, so a rerun retries it.
-2. **Materialise.** The person's rows are resolved with the sweep's own scope
-   (:func:`omop_core.services.provisional_sweep.person_scope`), so a row becomes
-   provisional at a proposal at or above ``PROVISIONAL_CONFIDENCE_FLOOR`` and a
-   row is created for an inventory code that has none. The floor is a site
-   setting and is never overridden here: a later sweep would take back anything
-   below it. What fell below is reported, by band.
-3. **Rederive.** The person's ``PatientRecord`` is rebuilt inline, which writes
-   ``patient_record_provisional`` and ``patient_record_confidence``.
+   caller chose (Jev by default). Only rows under a code system the person holds
+   the code under are proposed for. Destinations, confidences, provenance and
+   notes are written exactly as a Suggest run writes them; the rows stay
+   ``proposed``. A code the ranker could not rank is never written (not even as
+   the first retrieval hit) and not stamped as attempted, so a rerun retries it.
+2. **Materialise.** Every one of the person's rows is resolved against *all* the
+   mappings there are, with the full per-person resolve (a single patient can
+   afford the walk): an approved mapping makes its rows real (and creates rows for
+   inventory codes that have none), a proposal at or above
+   ``PROVISIONAL_CONFIDENCE_FLOOR`` makes them provisional, and a proposal below
+   it, or unscored, leaves them alone. The floor is a site setting and is never
+   overridden here: a later sweep would take back anything below it. What fell
+   below is reported, by band, and the rows are counted as real, provisional or
+   left.
+3. **Rederive.** The person's ``PatientRecord`` is rebuilt inline: ``patient_record``
+   from the approved rows only, and ``patient_record_provisional`` and
+   ``patient_record_confidence`` from the provisional ones. Both are reported.
 
 Nothing here reimplements Suggest, the resolver or the derivation; it chooses
 which rows they run on. With ``PROVISIONAL_DATA_ENABLED`` off nothing is written.
@@ -58,6 +65,8 @@ _IN_CHUNK = 500            # codes per IN list
 # The note a code carries when its ranking raised (anything else unanswered is the
 # ranker's retrieval-order stand-in).
 _RANKING_FAILED = 'Ranking failed'
+# Derived bookkeeping on the record, not a value a rederive can be said to have changed.
+_RECORD_NOISE = frozenset({'id', 'derivation_version'})
 
 
 class FillError(Exception):
@@ -235,21 +244,29 @@ def ensure_queue_rows(codes, rows_by_key, *, create=True) -> dict:
 
 
 def target_rows(codes, rows_by_key):
-    """The queue rows whose proposals decide *codes*: for each code, those under a system it is held in.
+    """The queue rows whose proposals decide *codes*: for a held code, those under a system it is held in.
 
-    A code held under no system the queue has a row for falls back to all its
-    rows. Codes with an approved mapping are left out: the resolver settles
-    those, and Suggest never touches an approved row.
+    Never a row under a code system the person does not hold the code under, when
+    the inventory says which systems it is held under: a short Epic code repeats
+    across hospitals' systems (on HealthTree 58,588 rows match one patient's codes
+    by string and 997 are in a system she holds). A held system with no row yet is
+    not a reason to fall back to another's: the row is created first. A code with
+    unresolved rows but no inventory row (``held`` empty) says nothing about its
+    system, and the resolver itself then looks it up by code alone
+    (``provisional_proposal`` skips the held-system check without systems), so all
+    its unscoped queue rows decide it. Codes with an approved mapping are left
+    out: the resolver settles those, and Suggest never touches an approved row.
     """
     out = {}
     for code in codes:
         rows = rows_by_key.get(code.key, [])
         if not rows or any(row.status == 'approved' for row in rows):
             continue
-        vocabularies = _vocabularies(code)
-        chosen = [row for row in rows
-                  if canonical_source_vocabulary(row.source_vocabulary_id) in vocabularies]
-        for row in chosen or rows:
+        if code.held:
+            vocabularies = _vocabularies(code)
+            rows = [row for row in rows
+                    if canonical_source_vocabulary(row.source_vocabulary_id) in vocabularies]
+        for row in rows:
             out[row.pk] = row
     return out
 
@@ -349,27 +366,48 @@ def propose(ids, *, ranker, counts, replace=False, strategies=None, batch_size=D
 # ---- 4. materialise and rederive -------------------------------------------------------
 
 def materialise(person):
-    """Resolve *person* against the current proposals, in the sweep's scope. Returns the resolver's counts.
+    """Resolve *person* against every mapping there is. Returns the resolver's counts.
 
-    The derivation the resolver would queue is swallowed: :func:`rederive` runs
-    it inline next, so the command's output is true when it ends.
+    The full per-person resolve, not the sweep's narrowed scope: this is one
+    patient, so the walk over every code is affordable (minutes on a 24,000-row
+    chart) and it does everything a mapping can do for the rows. An approved
+    mapping makes its rows real and creates the rows an inventory code lacks;
+    a proposal at or above the floor makes rows provisional; one below the floor
+    (or unscored) leaves them as they are; a provisional row whose proposal no
+    longer qualifies goes back to unresolved. The derivation the resolver would
+    queue is swallowed: :func:`rederive` runs it inline next, so the command's
+    output is true when it ends.
     """
-    index = provisional_sweep.qualifying_index(refresh=True)
-    source_values, tables = provisional_sweep.person_scope(
-        person.person_id, provisional_sweep.qualifying_codes(index))
-    if not source_values:
-        return {'resolved': 0, 'created': 0, 'provisional': 0, 'reverted': 0, 'skipped': 0,
-                'already_resolved': 0, 'code_details': []}
     with use_dispatcher(FakeDispatcher()):
-        return provisional_sweep.locked_resolve(person, source_values=source_values, omop_tables=tables)
+        return provisional_sweep.locked_resolve(person)
+
+
+def _record_values(person) -> dict:
+    """The derived fields of the person's ``PatientRecord``, to tell what a rederive changed."""
+    from omop_core.models import PatientRecord
+
+    record = PatientRecord.objects.filter(person=person).first()
+    if record is None:
+        return {}
+    return {f.name: getattr(record, f.attname) for f in record._meta.concrete_fields
+            if f.name not in _RECORD_NOISE and not f.name.endswith('_at')}
 
 
 def rederive(person):
-    """Rebuild the person's record inline. Returns ``(provisional_fields, marks)``."""
+    """Rebuild the person's record inline.
+
+    Returns ``{'provisional_fields': {name: percent}, 'provisional': the provisional
+    row or None, 'changed': [names]}``: the fields the provisional overlay holds
+    (with the confidence), and the fields of the approved-only ``patient_record``
+    that differ from before the rederive. Field names only, no values.
+    """
     from omop_core.services.patient_record_service import refresh_patient_record
     from omop_core.services.provisional_record import NEVER_OVERLAID
 
+    before = _record_values(person)
     refresh_patient_record(person)
+    after = _record_values(person)
+    changed = sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
     marks = PatientRecordConfidence.objects.filter(person=person).first()
     fields = {}
     if marks is not None:
@@ -377,7 +415,64 @@ def rederive(person):
             value = getattr(marks, name, None)
             if value is not None and name not in NEVER_OVERLAID:
                 fields[name] = value
-    return fields, PatientRecordProvisional.objects.filter(person=person).first()
+    return {'provisional_fields': fields, 'changed': changed,
+            'provisional': PatientRecordProvisional.objects.filter(person=person).first()}
+
+
+def person_state(person) -> dict:
+    """The person's rows as they stand now, one grouped query per clinical table.
+
+    ``{table: {'real', 'provisional', 'unresolved'}, 'total': {...}}``: *provisional*
+    is a row carrying a confidence; *unresolved* a row with no confidence at concept
+    0 (or a quarantine concept); *real* the rest. A state, not a count of what a
+    run changed: a rerun with nothing to do shows the same state.
+    """
+    quarantine = provisional_sweep._quarantine_concept_ids()
+    state = {}
+    total = Counter()
+    for table, (model, concept_col, _source_col) in CLINICAL_TABLES.items():
+        unresolved_q = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+        if quarantine:
+            unresolved_q |= Q(**{f'{concept_col}__in': quarantine})
+        counted = model.objects.filter(person=person).aggregate(
+            all=Count('pk'),
+            provisional=Count('pk', filter=Q(confidence__isnull=False)),
+            unresolved=Count('pk', filter=unresolved_q & Q(confidence__isnull=True)))
+        row = {'real': counted['all'] - counted['provisional'] - counted['unresolved'],
+               'provisional': counted['provisional'], 'unresolved': counted['unresolved']}
+        state[table] = row
+        total.update(row)
+    state['total'] = dict(total)
+    return state
+
+
+def real_row_estimate(codes) -> dict:
+    """What the full resolve will do with approved mappings, counted before it runs.
+
+    ``{'unresolved_rows_to_real': N, 'inventory_rows_to_create': M}``: the person's
+    unresolved rows whose code has an approved mapping with a destination (they
+    become real at that concept, units normalised for a mapping with a destination
+    unit, deferred re-point concepts rewritten), and the inventory entries with an
+    approved mapping and no clinical row (each gets a real row with no value). The
+    resolver looks an approved mapping up by code and table alone, whatever
+    organization it is scoped to, and so does this.
+    """
+    approved: set[tuple] = set()
+    by_table: dict[str, set[str]] = defaultdict(set)
+    for code in codes:
+        by_table[code.table].add(code.value.upper())
+    for table, values in by_table.items():
+        for chunk in _chunks(values):
+            approved.update(
+                (table, upper) for upper in SourceCodeConceptMapping.objects
+                .filter(status='approved', omop_table=table, target_concept__isnull=False)
+                .exclude(target_concept_id=NO_MATCHING_CONCEPT_ID)
+                .annotate(upper_code=Upper('source_code')).filter(upper_code__in=chunk)
+                .values_list('upper_code', flat=True))
+    return {
+        'unresolved_rows_to_real': sum(c.rows for c in codes if c.rows and c.key in approved),
+        'inventory_rows_to_create': sum(1 for c in codes if not c.rows and c.held and c.key in approved),
+    }
 
 
 # ---- 5. what the proposals say about the person's codes --------------------------------
@@ -439,11 +534,14 @@ def proposal_report(codes) -> dict:
 
 def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip_propose=False,
         replace=False, retry=False, strategies=None, batch_size=DEFAULT_BATCH,
-        show_values=False, log=print) -> dict:
+        show_values=False, include_inventory=False, log=print) -> dict:
     """Propose, materialise and rederive for one person. Returns a summary dict.
 
-    ``tables`` and ``limit`` narrow only the propose step: the person's rows are
-    made provisional, and their record rederived, for every proposal there is.
+    Proposing is for the codes the person has unresolved rows under; with
+    *include_inventory* the inventory-only codes (no clinical row yet) too, which
+    is slow and only matters for creating rows from the inventory. ``tables`` and
+    ``limit`` narrow only the propose step: the person's rows are resolved against
+    every mapping there is, approved and proposed, and their record rederived.
     Raises :class:`FillError` when the switch is off (nothing written) or a step
     fails and leaves the person half-done. Messages carry the step and the
     exception's class, never its text, which can quote key values.
@@ -460,26 +558,45 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
 
     codes = person_codes(person, tables)
     summary['codes_considered'] = len(codes)
+    unresolved = [c for c in codes if c.rows]
     log(f'Person {person_id}: {len(codes)} code(s) to consider '
-        f'({sum(1 for c in codes if c.rows)} with unresolved rows, '
-        f'{sum(1 for c in codes if not c.rows)} inventory only).')
+        f'({len(unresolved)} with unresolved rows, {len(codes) - len(unresolved)} inventory only).')
 
-    rows_by_key = queue_rows(codes)
-    queue = ensure_queue_rows(codes, rows_by_key, create=not (dry_run or skip_propose))
+    propose_codes = codes if include_inventory else unresolved
+    # The report is about the codes this run looked at: unresolved ones, and a code
+    # already provisional (no inventory row to say otherwise); never the inventory-only
+    # codes it did not touch, unless they are included.
+    report_codes = codes if include_inventory else [c for c in codes if c.rows or not c.held]
+    summary['codes_to_propose'] = len(propose_codes)
+    rows_by_key = queue_rows(propose_codes)
+    queue = ensure_queue_rows(propose_codes, rows_by_key, create=not (dry_run or skip_propose))
     summary['queue_rows'] = queue
-    rows = target_rows(codes, rows_by_key)
+    rows = target_rows(propose_codes, rows_by_key)
     ids = candidate_ids(rows.values(), ranker=ranker, replace=replace, retry=retry) if rows else []
+    if dry_run:
+        # A row the real run would create is proposed for like any other: count it.
+        ids = ids + [None] * queue['missing']
     if limit:
         ids = ids[:limit]
     summary['proposable_rows'] = len(ids)
-    log(f'{len(rows)} queue row(s) decide these codes; {len(ids)} to propose for. Queue rows: '
+    log(f'{len(propose_codes)} code(s) to propose for '
+        f'({"unresolved rows and inventory" if include_inventory else "unresolved rows only"}); '
+        f'{len(rows)} queue row(s) decide them; {len(ids)} to propose for. Queue rows: '
         f'{queue["created"]} created, {queue["missing"] if dry_run or skip_propose else 0} would be '
         f'created, {queue["collisions"]} skipped (already exist), {queue["hk_skipped"]} skipped '
         f'(HK-* source system).')
 
     if dry_run:
-        summary['report'] = proposal_report(codes)
+        summary['report'] = proposal_report(report_codes)
+        summary['estimate'] = real_row_estimate(codes)
+        summary['state'] = person_state(person)
         log(f'Dry run: nothing written. Standing now: {summary["report"]["status"]}')
+        log(f'The full resolve will also, for approved mappings: make '
+            f'{summary["estimate"]["unresolved_rows_to_real"]} unresolved row(s) real at the '
+            f'mapping\'s concept (normalising units where the mapping has a destination unit, rewriting '
+            f'deferred re-point concepts), and create {summary["estimate"]["inventory_rows_to_create"]} '
+            f'real row(s) with no value for inventory entries that have an approved mapping and no '
+            f'clinical row. State now: {summary["state"]["total"]}.')
         return summary
 
     counts = Counter()
@@ -499,30 +616,51 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
                 f'again to resume.') from exc
     summary['propose'] = dict(counts)
 
-    log('Making rows provisional...')
+    log('Resolving every row against the approved and proposed mappings...')
+    if not connection.in_atomic_block:
+        close_old_connections()     # the last propose batch was a while ago; the resolve holds a lock long
     try:
         resolved = materialise(person)
     except Exception as exc:  # noqa: BLE001
-        raise FillError(f'Making the rows provisional failed ({type(exc).__name__}). The proposals '
+        raise FillError(f'Resolving the rows failed ({type(exc).__name__}). The proposals '
                         f'are written; run the command again.') from exc
-    summary['rows_provisional'] = resolved['provisional']
-    summary['rows_created'] = resolved['created']
-    summary['rows_reverted'] = resolved['reverted']
-    log(f'  {resolved["provisional"]} row(s) provisional (of which {resolved["created"]} created '
-        f'from inventory), {resolved["reverted"]} taken back.')
+    real_created = sum(d.get('rows', 0) for d in resolved.get('code_details', ())
+                       if d.get('outcome') == 'created')
+    # What this run CHANGED. A rerun that has nothing to do changes nothing; the state
+    # below is what the person's rows are.
+    summary.update(
+        rows_real=resolved['resolved'] + real_created, rows_real_created=real_created,
+        rows_provisional=resolved['provisional'], rows_created=resolved['created'],
+        rows_reverted=resolved['reverted'],
+        rows_unchanged=resolved['skipped'] + resolved['already_resolved'])
+    log(f'  Changed this run: {summary["rows_real"]} row(s) made real by an approved mapping '
+        f'({real_created} of them created from inventory); '
+        f'{resolved["provisional"]} made provisional by a proposal at or above the floor '
+        f'({resolved["created"] - real_created} of them created from inventory); '
+        f'{resolved["reverted"]} provisional row(s) taken back.')
+    log(f'  Unchanged this run: {summary["rows_unchanged"]} row(s) examined and left as they were.')
+    summary['state'] = person_state(person)
+    log(f'  State now: {summary["state"]["total"]}.')
 
-    summary['report'] = proposal_report(codes)
+    summary['report'] = proposal_report(report_codes)
     log(f'Proposals against the floor ({summary["report"]["floor"]}%): '
         f'{summary["report"]["status"]}; below the floor by band: {summary["report"]["bands"]}')
 
     log('Rederiving the record...')
+    if not connection.in_atomic_block:
+        close_old_connections()
     try:
-        fields, provisional = rederive(person)
+        derived = rederive(person)
     except Exception as exc:  # noqa: BLE001
         raise FillError(f'Rederiving the record failed ({type(exc).__name__}); the rows are already '
-                        f'provisional. Run the command again with --skip-propose.') from exc
+                        f'resolved. Run the command again with --skip-propose.') from exc
+    fields, provisional, changed = derived['provisional_fields'], derived['provisional'], derived['changed']
+    summary['record_fields_changed'] = len(changed)
+    summary['record_fields_changed_names'] = changed
     summary['provisional_fields'] = len(fields)
-    log(f'  {len(fields)} provisional field(s) on the record.')
+    log(f'  patient_record (approved rows only): {len(changed)} field(s) changed'
+        + (f': {", ".join(changed[:25])}{" ..." if len(changed) > 25 else ""}' if changed else '') + '.')
+    log(f'  patient_record_provisional: {len(fields)} provisional field(s) on the record.')
     for name, percent in sorted(fields.items(), key=lambda item: -item[1])[:12]:
         value = f' = {str(getattr(provisional, name, ""))[:40]}' if show_values and provisional else ''
         log(f'    {name}: {percent}%{value}')

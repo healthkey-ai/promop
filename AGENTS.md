@@ -1498,18 +1498,53 @@ before enabling it there.** Off, nothing is queried, queued or written. See
 
 `manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much
 provisional data as the proposals can support, in one resumable command:
-**propose** (their unresolved and inventory codes' organization-unscoped queue
-rows that are `proposed` with no destination go through the normal Suggest
-pipeline, ranker `--ranker jev|anthropic|both`, default Jev), **materialise**
-(the sweep's own `person_scope` resolve, so rows become provisional at or above
-`PROVISIONAL_CONFIDENCE_FLOOR` and are created for inventory codes with no row;
-the floor is never overridden, and the report counts what fell below it by band
-of the real floor, and a proposal at or above it whose destination the resolver
-will not write, separately) and **rederive** (the record is rebuilt inline, which
-writes `patient_record_provisional` and `patient_record_confidence`).
-`--tables` and `--limit` narrow only the propose step: every proposal there is
-still makes the person's rows provisional and is rederived.
+**propose** (the codes the patient has *unresolved rows* under: their
+organization-unscoped queue rows that are `proposed` with no destination go
+through the normal Suggest pipeline, ranker `--ranker jev|anthropic|both`, default
+Jev; `--include-inventory` adds the inventory-only codes, those with no clinical
+row yet, which are slow, about four seconds each, and only matter for creating
+rows from the inventory -- on HealthTree one patient has 533 codes with unresolved
+rows and 2,546 inventory-only; `--unresolved-only` is the default, spelled out),
+**materialise** (the full per-person resolve over *every* row and *every*
+mapping, not the sweep's narrowed `person_scope`: an approved mapping makes rows
+real, including rows created for inventory codes that have none; a proposal at or
+above `PROVISIONAL_CONFIDENCE_FLOOR` makes them provisional; a proposal below it,
+or unscored, leaves them alone; the floor is never overridden, the report counts
+what fell below it by band of the real floor and a proposal at or above it whose
+destination the resolver will not write separately, and the rows are counted as
+real, provisional and left) and **rederive** (the record is rebuilt inline:
+`patient_record` from the approved rows only, with the names of the fields that
+changed, and `patient_record_provisional` and `patient_record_confidence` from the
+proposed ones, with the provisional field count and percentages).
+`--tables` and `--limit` narrow only the propose step: every table's rows are
+resolved and the record rederived.
 
+- **The resolve is the Generate OMOP path, not a provisional-only pass.** Beyond
+  provisional rows it makes the patient's existing unresolved rows real at an
+  approved mapping's concept, normalises units for a mapping with a destination
+  unit, rewrites deferred re-point concepts, and creates a real row with no value
+  for every inventory entry that has an approved mapping and no clinical row.
+  `--dry-run` prints an estimate of that (unresolved rows whose code has an
+  approved mapping, inventory entries to create). Pre-existing resolver behaviour,
+  not changed here: the approved-mapping lookup is by code and table alone (it
+  does not filter by organization and takes `.first()` unordered), and axis
+  variants are ignored.
+- **The log separates what this run changed from what the rows are.** "Changed this
+  run" counts rows made real, made provisional, and taken back (and those created
+  from inventory); "Unchanged this run" counts rows examined and left as they were;
+  "State now" is one grouped query per clinical table: real, provisional
+  (carrying a confidence) and unresolved rows. A rerun with nothing to do shows the
+  same state with zero changes. The below-floor report covers the codes the run
+  looked at (unresolved ones, and codes already provisional), not inventory-only
+  codes unless `--include-inventory`.
+- **Only rows under a code system the patient holds are proposed for.** A short
+  Epic code repeats across hospitals' systems (on HealthTree 58,588 rows match one
+  patient's codes by string and 997 are in a system she holds), so for a code the inventory holds, a row under
+  another system is never proposed for, in a dry run or a real one (a code with
+  unresolved rows and no inventory row says nothing about its system, and the
+  resolver then looks it up by code alone, so its unscoped queue rows decide it); a held system
+  with no row yet gets its row created first (and counted as one to propose for in
+  a dry run, so the dry run's count is the real run's).
 - **A code the ranker could not rank is never written.** A ranker that cannot run
   (no key, a 429, a timeout) does not raise: Suggest would write its first
   retrieval hit as the destination. This command calls `suggest_mappings` with
@@ -1523,9 +1558,10 @@ still makes the person's rows provisional and is rederived.
   batch's writes land before the next starts; a rerun skips codes already
   answered. Approved rows are never touched, and `--replace` redoes only
   destinations a previous Suggest run set, never an importer's or a curator's.
-- **Queue rows it creates** are born like `enqueue_unmapped_source_codes`'s
-  (proposed, no destination, Seen 1), one per code system the inventory holds the
-  code under, with the inventory's source metadata and a name from Athena or UMLS,
+- **Queue rows it creates** (only for the codes it proposes for, so none for
+  inventory-only codes without `--include-inventory`) are born like
+  `enqueue_unmapped_source_codes`'s (proposed, no destination, Seen 1), one per code
+  system the inventory holds the code under, with the inventory's source metadata and a name from Athena or UMLS,
   so the ranker sees what a curator sees. An HK-* source system, and a row the
   unique constraint (organization, system and code, case sensitive, any table)
   would refuse, are skipped and counted.
