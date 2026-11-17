@@ -76,12 +76,15 @@ A field added through Field Concept Mapping (`CustomPatientField`) has no
 column: its value is a key of `PatientRecord.custom_fields`. Its edits follow
 the same path (#2669, `omop_core/services/custom_field_values.py`):
 
-- **The PATCH carries `custom_fields: {<name>: <value>}`**, partial by key.
-  The editor sends the whole object back, so a key whose value is what the
-  record holds is not an edit. A key that moved must name an approved,
-  non-computed created field, or the request is a 400 that names it and saves
-  nothing. Values are coerced by the field's type (text, number, ISO date,
-  boolean); `null` or `""` clears.
+- **The PATCH carries `custom_fields: {<name>: <value>}`**, partial by key:
+  a key not named is untouched, and one whose value is what the record holds
+  is not an edit. The editors send only the keys the user changed
+  (`frontend/src/utils/addedFieldEdits.ts`), never the object they read,
+  which also holds computed results and other people's values as they were.
+  A key that is not an approved, non-computed created field is ignored, as a
+  read-only column is. Values are coerced by the field's type (text, number,
+  ISO date, boolean); `null` or `""` clears; a value of the wrong type is a
+  400 that names the field and saves nothing.
 - **PatientRecord first.** The value is written to `custom_fields` and marked
   pending in `user_edited_fields` as `custom_fields.<name>`; no column name
   has a dot, so the two never collide. A `RecordRevision` is written under the

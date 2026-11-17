@@ -349,21 +349,27 @@ def test_a_computed_created_field_keeps_its_result_beside_an_edit(record, staff)
 # ---------------------------------------------------------------------- refusals
 
 
-def test_a_computed_field_and_an_unknown_key_are_refused(record, staff):
+def test_a_key_that_is_not_an_editable_field_is_ignored_like_a_read_only_column(record, staff):
+    """A client that sends back the object it read also sends computed results.
+
+    Such a result may have moved on the server since, so a stale one must
+    neither overwrite it nor fail the save of the fields beside it.
+    """
     created_field('note')
     created_field('double_frailty', 'number', mode='computed')
+    created_field('draft', status='proposed')
     PatientRecord.objects.filter(pk=record.pk).update(custom_fields={'double_frailty': 8})
 
-    response = patch(staff, record, {'double_frailty': 9}, expect=400)
-    assert 'formula' in str(response.data['custom_fields']['double_frailty'])
-    response = patch(staff, record, {'not_a_field': 'x'}, expect=400)
-    assert 'not a field' in str(response.data['custom_fields']['not_a_field'])
+    patch(staff, record, {'double_frailty': 9, 'not_a_field': 'x', 'draft': 'y', 'note': 'ok'})
+    saved = stored(record)
+    assert saved.custom_fields == {'double_frailty': 8, 'note': 'ok'}
+    assert pending(record) == set()
+    assert list(RecordRevision.objects.filter(patient_record=record)
+                .values_list('field', flat=True)) == ['custom_fields.note']
+
+    # Not an object at all is a malformed request, not something to ignore.
     response = staff.patch(url(record), {'custom_fields': ['note']}, format='json')
     assert response.status_code == 400
-
-    # The whole object echoed back, computed value included, is no edit.
-    patch(staff, record, {'double_frailty': 8, 'note': 'ok'})
-    assert stored(record).custom_fields == {'double_frailty': 8, 'note': 'ok'}
 
 
 def test_a_refused_value_saves_nothing_from_the_request(record, staff):
@@ -375,12 +381,6 @@ def test_a_refused_value_saves_nothing_from_the_request(record, staff):
     saved = stored(record)
     assert saved.city != 'Rome' and saved.custom_fields == {}
     assert not Measurement.objects.filter(person=record.person).exists()
-
-
-def test_a_field_with_no_approved_mapping_is_not_editable(record, staff):
-    created_field('note', status='proposed')
-    response = patch(staff, record, {'note': 'x'}, expect=400)
-    assert 'approved' in str(response.data['custom_fields']['note'])
 
 
 def test_a_caller_who_cannot_write_the_patient_changes_nothing(record):

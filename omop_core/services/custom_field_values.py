@@ -141,10 +141,13 @@ def values_match(field_type: str, left, right) -> bool:
 def changed_values(record, payload, fields=None) -> dict:
     """The edits a PATCH's ``custom_fields`` asks for: ``{name: value}``.
 
-    The editor sends back the whole object it was given, so a key whose value
-    is what the record already holds is not an edit, whatever the key is. A
-    key that does change must name an approved, non-computed created field.
-    Raises ``CustomValueError`` for the first key that cannot be taken.
+    Partial by key: a key the payload does not name is untouched, and a key
+    whose value is what the record already holds is not an edit. A key that
+    is not an approved, non-computed created field is ignored, as the record
+    PATCH ignores a read-only column: a client that sends back the object it
+    read also sends computed results, which may have moved since. The
+    writable-fields descriptor is where a client learns what it may write.
+    Raises ``CustomValueError`` for a value an editable field cannot hold.
     """
     if not isinstance(payload, dict):
         raise CustomValueError(CONTAINER, 'Send an object mapping each field name to its value.')
@@ -155,14 +158,7 @@ def changed_values(record, payload, fields=None) -> dict:
     for name, raw in payload.items():
         field = fields.get(name)
         if field is None or not is_editable(field):
-            if stored.get(name) == raw:
-                continue
-            if field is None:
-                raise CustomValueError(name, 'This is not a field of the patient record.')
-            raise CustomValueError(
-                name,
-                'A computed field takes its value from its formula.' if field.mode == 'computed'
-                else 'This field has no approved mapping, so it cannot be edited.')
+            continue
         try:
             value = coerce(field.field_type, raw)
         except ValueError as error:

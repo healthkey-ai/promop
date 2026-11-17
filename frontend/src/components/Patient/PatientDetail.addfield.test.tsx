@@ -26,7 +26,12 @@ vi.mock('@/components/PatientInfo/tabs/DiseaseTab', () => ({ default: () => <div
 vi.mock('@/components/PatientInfo/tabs/TreatmentTab', () => ({ default: () => <div>treatment fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/LabsTab', () => ({ default: () => <div>lab fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/GenomicsTab', () => ({ default: () => <div>genomics fields</div> }));
-vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({ default: () => <div>behavior fields</div> }));
+// Behavior also stands in for anything that re-reads the record mid-edit.
+vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({
+  default: ({ onRefresh }: { onRefresh?: () => void }) => (
+    <div>behavior fields<button onClick={onRefresh}>Refresh patient</button></div>
+  ),
+}));
 vi.mock('@/components/PatientInfo/tabs/WearableTab', () => ({ default: () => <div>wearable fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/ClinicalSummaryTab', () => ({ default: () => <div>history</div> }));
 vi.mock('./PatientOmopTab', () => ({ default: () => <div>omop rows</div> }));
@@ -259,7 +264,7 @@ describe('PatientDetail — editing an added field', () => {
 
   const patches = () => (api.patch as ReturnType<typeof vi.fn>).mock.calls;
 
-  it("saves an edit through the record PATCH, keeping the other added fields' values", async () => {
+  it('saves an edit through the record PATCH, sending only the field that was edited', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     await renderPatient(DOCTOR);
     openTab('Multiple Myeloma');
@@ -270,10 +275,59 @@ describe('PatientDetail — editing an added field', () => {
     await act(async () => { vi.advanceTimersByTime(2100); });
 
     await waitFor(() => expect(patches()).toHaveLength(1));
+    // Not the object the editor holds: its other keys are the server's, as
+    // they were when the record was read.
     expect(patches()[0]).toEqual(['/patient-info/101/', {
-      custom_fields: { m_protein_note: 'IgA lambda', frailty_index: 'Fit' },
+      custom_fields: { m_protein_note: 'IgA lambda' },
     }]);
     expect(screen.getByDisplayValue('IgA lambda')).toBeInTheDocument();
+
+    // A later save of something else does not send the added field again.
+    openTab('Labs');
+    fireEvent.change(await screen.findByDisplayValue('Fit'), { target: { value: 'Frail' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1][1]).toEqual({ custom_fields: { frailty_index: 'Frail' } });
+  });
+
+  it('sends two fields edited before one save together', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'IgA' } });
+    openTab('Labs');
+    fireEvent.change(await screen.findByDisplayValue('Fit'), { target: { value: 'Frail' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches().length).toBeGreaterThan(0));
+    expect(Object.assign({}, ...patches().map(([, body]) => body.custom_fields))).toEqual({
+      m_protein_note: 'IgA', frailty_index: 'Frail',
+    });
+  });
+
+  it("keeps an unsaved edit and takes everyone else's values when the record is re-read", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'IgA lambda' } });
+
+    // Before the save goes out, someone else's value for another added field
+    // arrives with a re-read of the record.
+    record = { ...record, custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Robust' } };
+    const reads = () => (api.get as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([url]) => String(url).includes('/patient-info/101/')).length;
+    const before = reads();
+    openTab('Behavior');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));
+    await waitFor(() => expect(reads()).toBe(before + 1));
+
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Only the field edited here: the stale copy of the other one is not sent back.
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: 'IgA lambda' } });
+    openTab('Labs');
+    expect(await screen.findByDisplayValue('Robust')).toBeInTheDocument();
+    openTab('Multiple Myeloma');
+    expect(await screen.findByDisplayValue('IgA lambda')).toBeInTheDocument();
   });
 
   it('sends null for a value that was cleared', async () => {
@@ -287,7 +341,7 @@ describe('PatientDetail — editing an added field', () => {
     await act(async () => { vi.advanceTimersByTime(2100); });
 
     await waitFor(() => expect(patches()).toHaveLength(1));
-    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: null, frailty_index: 'Fit' } });
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: null } });
   });
 
   it('offers no input to a caller the server does not let write', async () => {
@@ -316,8 +370,6 @@ describe('PatientDetail — editing an added field', () => {
     fireEvent.change(input, { target: { value: 'IgG kappa, stable' } });
     await act(async () => { vi.advanceTimersByTime(2100); });
     await waitFor(() => expect(patches()).toHaveLength(1));
-    expect(patches()[0][1]).toEqual({
-      custom_fields: { m_protein_note: 'IgG kappa, stable', frailty_index: 'Fit' },
-    });
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: 'IgG kappa, stable' } });
   });
 });
