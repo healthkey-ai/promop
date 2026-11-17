@@ -363,7 +363,7 @@ const GLOBAL_ORGANIZATION = "__none__";
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
-  const { currentUser } = useAuth();
+  const { currentUser, loading: authLoading } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
   // A doctor reads this page; creating, editing, uploading and Suggest are
   // for staff, org_admin and the analyst grant (#2416). The API refuses the
@@ -1398,8 +1398,11 @@ export default function CodeMappingPage() {
       <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
     </div>
     {directionControls}
-    <ConceptToCodeTab canApprove={canApprove} canWrite={canWrite} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId}
-      onInitialConceptHandled={() => setLinkedConceptId(undefined)} userId={currentUser?.id} />
+    {/* The tab restores the domain this account chose (#2656), so it waits for
+        the account: mounted before it, it would list the unfiltered concepts
+        first and file an early choice under no account. */}
+    {!authLoading && <ConceptToCodeTab canApprove={canApprove} canWrite={canWrite} onWritingChange={setReverseWriting}
+      initialConceptId={linkedConceptId} onInitialConceptHandled={() => setLinkedConceptId(undefined)} userId={currentUser?.id} />}
   </div></div>;
 
   return (

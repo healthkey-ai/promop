@@ -1475,7 +1475,9 @@ destination has no concept to appear under, and the local, non-standard
 `HK-Wearable` concepts are not listed, as on every other domain. The domain a
 curator chooses, Wearables or any other, is saved per account in the browser
 (`promop-concept-to-code:<user id>`, as the patient list's filters are) and
-restored when the tab next opens.
+restored when the tab next opens. The page mounts the tab only once
+`useAuth()` has loaded the account, so the first list request already carries
+the saved domain and no choice is filed under no account.
 
 ### The six LOINC axes decide which candidates are the same test
 
