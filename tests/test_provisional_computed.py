@@ -158,6 +158,52 @@ def test_a_proposal_in_the_wrong_unit_is_not_read(snomed, record):
     assert float(row.height) == 170
 
 
+def test_a_wrong_unit_newest_weight_does_not_let_an_older_one_stand_in(snomed, record):
+    with suppress_patient_record_refresh():
+        _vital(record.person, WEIGHT, 60, 'kg', 82, when=date(2023, 1, 1))     # older, readable
+        _vital(record.person, WEIGHT, 150, 'lb', 82, when=date(2024, 6, 1))    # newest, not readable
+        _height(record.person, 170, conf=75)
+
+    _refresh(record.person)
+
+    row, marks = pair(record.person)
+    assert row.weight is None and row.bmi is None and marks.bmi is None       # not last year's 60 kg
+    assert float(row.height) == 170
+
+
+def test_a_proposed_weight_is_dropped_when_the_records_own_unit_differs(snomed, record):
+    PatientRecord.objects.filter(person=record.person).update(
+        weight_units='lb', user_edited_fields=['weight_units'])
+    with suppress_patient_record_refresh():
+        _weight(record.person, 70, conf=75)
+        _height(record.person, 170, conf=75)
+
+    _refresh(record.person)
+
+    row, marks = pair(record.person)
+    assert row.weight is None and marks.weight is None
+    assert row.bmi is None and marks.bmi is None                              # no BMI from 70 read as lb
+
+
+def test_a_blood_pressure_in_the_wrong_unit_is_not_read(snomed, record):
+    with suppress_patient_record_refresh():
+        _vital(record.person, '8480-6', 16, 'kPa', 82)
+
+    _refresh(record.person)
+
+    assert not PatientRecordProvisional.objects.filter(systolic_blood_pressure__isnull=False).exists()
+
+
+def test_a_blood_pressure_in_mmhg_is_read(snomed, record):
+    with suppress_patient_record_refresh():
+        _vital(record.person, '8480-6', 120, 'mm[Hg]', 82)
+
+    _refresh(record.person)
+
+    row, marks = pair(record.person)
+    assert float(row.systolic_blood_pressure) == 120 and marks.systolic_blood_pressure == 82
+
+
 def test_a_formula_that_owns_the_field_is_left_alone(snomed, record):
     FieldFormula.objects.create(field_name='bmi', formula='weight / (height/100)^2', is_active=True)
     with suppress_patient_record_refresh():
@@ -219,6 +265,25 @@ def test_a_failing_calculation_does_not_cost_the_other_proposals(snomed, record,
 
     row, marks = pair(record.person)
     assert float(row.weight) == 70 and marks.weight == 82 and marks.bmi is None
+
+
+def test_a_failing_recalculation_in_the_mirror_does_not_lose_the_edit(snomed, record, staff, monkeypatch):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    with suppress_patient_record_refresh():
+        _weight(record.person, 70, conf=82)
+        _height(record.person, 170, conf=75)
+    _refresh(record.person)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError('calc boom')
+    monkeypatch.setattr(provisional_record, 'computed_proposals', boom)
+
+    response = staff.patch(f'/api/v1/patient-records/{record.person_id}/',
+                           {'weight': '90'}, format='json')
+
+    assert response.status_code == 200, response.content
+    row, marks = pair(record.person)
+    assert float(row.weight) == 90 and marks.weight is None          # the edit's own mirror still lands
 
 
 def test_the_record_read_shows_the_calculated_field_marked(snomed, record):
