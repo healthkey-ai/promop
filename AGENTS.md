@@ -1494,6 +1494,33 @@ Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
 before enabling it there.** Off, nothing is queried, queued or written. See
 [the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
 
+### One patient's full provisional view: `fill_provisional_record`
+
+`manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much
+provisional data as the proposals can support, in one resumable command:
+**propose** (their unresolved and inventory codes' organization-unscoped queue
+rows that are `proposed` with no destination go through the normal Suggest
+pipeline, ranker `--ranker jev|anthropic|both`, default Jev; a missing queue row
+is created the way `enqueue_unmapped_source_codes` makes it, one per code system
+the inventory holds the code under), **materialise** (the sweep's own
+`person_scope` resolve, so rows become provisional at or above
+`PROVISIONAL_CONFIDENCE_FLOOR` and are created for inventory codes with no row;
+the floor is never overridden, and the report counts what fell below it by band)
+and **rederive** (the record is rebuilt inline, which writes
+`patient_record_provisional` and `patient_record_confidence`). Suggest runs in
+batches (`--batch-size`, 25) so each batch's writes land before the next starts
+and a rerun skips codes this model version already attempted
+(`--retry-declined` redoes them, `--replace` redoes a previous Suggest run's
+destinations and never an importer's or a curator's). A one-question preflight
+and a stop on a batch the ranker answered none of keep an unavailable ranker
+from writing its retrieval-order stand-in. `--dry-run` counts and writes nothing
+and calls no model; `--skip-propose`, `--tables`, `--limit`, `--strategies`
+narrow it; clinical values are printed only with `--show-values`. It refuses,
+writing nothing, with `PROVISIONAL_DATA_ENABLED` off, and runs as a Cloud Run
+job where `JEV_API_KEY` is in the environment. Code:
+`omop_core/services/fill_provisional.py`; `suggest_mappings` gained an optional
+`mapping_ids` to run on a chosen set of queue rows.
+
 ### Replace re-answers rows, it does not delete them
 
 It used to delete: while the candidate set came from a clinical scan, a deleted

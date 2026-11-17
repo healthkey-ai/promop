@@ -464,12 +464,12 @@ def vocabulary_aliases(source_vocabulary_id):
 def suggestable_mappings(omop_table=None, *, source_vocabulary_id=None,
                          min_occurrences=DEFAULT_MIN_OCCURRENCES,
                          limit=None, resuggest=False,
-                         ranking_model=DEFAULT_RANKING_MODEL):
+                         ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None):
     """The rows a run will work through, at most *limit* of them."""
     rows = suggestable_queryset(
         omop_table, source_vocabulary_id=source_vocabulary_id,
         min_occurrences=min_occurrences, resuggest=resuggest,
-        ranking_model=ranking_model,
+        ranking_model=ranking_model, mapping_ids=mapping_ids,
     )
     return list(rows[:limit] if limit else rows)
 
@@ -477,7 +477,7 @@ def suggestable_mappings(omop_table=None, *, source_vocabulary_id=None,
 def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
                          min_occurrences=DEFAULT_MIN_OCCURRENCES,
                          resuggest=False,
-                         ranking_model=DEFAULT_RANKING_MODEL):
+                         ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None):
     """The queue rows on one tab that a Suggest run is allowed to write to.
 
     **Every row on the tab with no destination yet.**  That is the whole default
@@ -513,6 +513,10 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
 
     ``min_occurrences <= 1`` drops the threshold rather than comparing against 1,
     so rows seeded with no count at all still appear.
+
+    *mapping_ids*, when given, narrows the set to those queue rows (every rule
+    above still applies to them): ``fill_provisional_record`` proposes for one
+    person's codes only.
     """
     machine_set = Q(origin_system='') | Q(origin_system__istartswith='suggest')
     rows = (
@@ -528,6 +532,8 @@ def suggestable_queryset(omop_table=None, *, source_vocabulary_id=None,
     if source_vocabulary_id is not None:
         from omop_core.services.athena_mapping_guard import source_tab_filter
         rows = rows.filter(source_tab_filter(source_vocabulary_id))
+    if mapping_ids is not None:
+        rows = rows.filter(pk__in=list(mapping_ids))
     if resuggest:
         # Rows with no destination, plus ones whose destination only a previous
         # Suggest run put there.
@@ -2022,7 +2028,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      limit=None, dry_run=False, source_vocabulary_id=None,
                      strategies=None, lexical_limit=CANDIDATE_LIMIT,
                      resuggest=False, progress=None, activity=None,
-                     ranking_model=DEFAULT_RANKING_MODEL):
+                     ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None):
     """Propose destinations for the unanswered queue rows on one tab.
 
     The candidate set is :func:`suggestable_mappings` -- rows already on the
@@ -2048,6 +2054,9 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     - ``lexical`` — GIN trigram, the best *lexical_limit* survivors.
     - ``vectors`` — up to ten cosine neighbours, even when lexical has hits.
 
+    *mapping_ids* narrows the run to those queue rows (see
+    :func:`suggestable_queryset`); the tab-wide run leaves it unset.
+
     *progress*, when given, is called as ``progress(stage, done, total)`` with
     *stage* ``'retrieving'`` then ``'writing'``.  Retrieval is two thirds of the
     run and completes for every code before the first destination is written, so
@@ -2069,7 +2078,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     mappings = suggestable_mappings(
         omop_table, source_vocabulary_id=source_vocabulary_id,
         min_occurrences=min_occurrences, limit=limit, resuggest=resuggest,
-        ranking_model=ranking_model,
+        ranking_model=ranking_model, mapping_ids=mapping_ids,
     )
 
     # Attach source samples (units, basedOn) so the activity log can carry them.

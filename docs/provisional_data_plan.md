@@ -119,6 +119,12 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
 `omop_core/services/provisional_sweep.py` decides for whom and when. Off with
 `PROVISIONAL_DATA_ENABLED`: nothing is queried, queued or written.
 
+- **One patient at a time.** `manage.py fill_provisional_record <person_id>`
+  (#2696) proposes for one patient's codes with Suggest (Jev by default), makes
+  their rows provisional through the same per-person resolve, and rederives their
+  record inline; see AGENTS.md. It does not override the floor: the report says how
+  many of their proposals fell below it, by band, so the floor can be a product
+  decision rather than a per-run flag a later sweep would undo.
 - **Sweep.** `manage.py sweep_provisional_rows` (also queued on the worker, and
   `--dry-run`, `--mapping-id`, `--after-person-id`) resolves, in person-id chunks
   of 200, every person holding an unresolved row, a provisional row or an
