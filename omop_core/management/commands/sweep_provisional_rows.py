@@ -46,9 +46,12 @@ class Command(BaseCommand):
                               f'after {after_person_id}.')
             return
         if queue:
-            run = provisional_sweep.start_sweep(mapping=mapping, limit=limit)
-            self.stdout.write(f'Queued sweep run {run.id}.')
-            return
+            if provisional_sweep._celery():
+                run = provisional_sweep.start_sweep(mapping=mapping, limit=limit)
+                self.stdout.write(f'Queued sweep run {run.id}.')
+                return
+            self.stdout.write('CELERY_BROKER_URL is not set, so nothing can be queued; '
+                              'running the sweep here instead.')
         run = provisional_sweep.start_run_record()
         after = after_person_id
         while after is not None:

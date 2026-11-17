@@ -56,10 +56,16 @@ def world(settings):
 def broker(world, settings, monkeypatch):
     """A broker is set and every task `.delay` is captured instead of sent."""
     settings.CELERY_BROKER_URL = BROKER
-    sent = {'sweep': [], 'person': []}
+    sent = {'sweep': [], 'person': [], 'warm': []}
     monkeypatch.setattr(tasks.provisional_sweep_task, 'delay', lambda *a: sent['sweep'].append(a))
     monkeypatch.setattr(tasks.provisional_resolve_person_task, 'delay', lambda pid: sent['person'].append(pid))
+    monkeypatch.setattr(tasks.provisional_warm_index_task, 'delay', lambda: sent['warm'].append(1))
     return sent
+
+
+def _warm():
+    """What the worker does before the ingest check can answer: build the qualifying index."""
+    provisional_sweep.qualifying_index(refresh=True)
 
 
 def _person(with_row=True, code=CODE, erroneous=False):
@@ -292,8 +298,9 @@ def test_a_resolve_takes_the_person_lock_first(world):
     with CaptureQueriesContext(connection) as queries:
         provisional_sweep.locked_resolve(person)
 
-    first = next(q['sql'] for q in queries if 'SAVEPOINT' not in q['sql'])
-    assert 'pg_advisory_xact_lock' in first                      # before any read of the person's rows
+    sql = [q['sql'] for q in queries]
+    assert 'pg_try_advisory_lock' in sql[0]                      # before any read of the person's rows
+    assert 'pg_advisory_unlock' in sql[-1]                       # and released after the resolve
 
 
 def test_approval_after_a_sweep_promotes_the_rows(world):
@@ -496,6 +503,7 @@ def test_an_ingested_person_queues_one_resolve_when_a_proposal_covers_their_code
                                                                                 django_capture_on_commit_callbacks):
     person = _person()
     _proposal(world)
+    _warm()
 
     with django_capture_on_commit_callbacks(execute=True):
         for _ in range(20):                                      # twenty POSTs for one patient
@@ -507,6 +515,7 @@ def test_an_ingested_person_queues_one_resolve_when_a_proposal_covers_their_code
 def test_a_later_write_queues_another_once_the_job_has_started(broker, world, django_capture_on_commit_callbacks):
     person = _person()
     _proposal(world)
+    _warm()
     with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
     tasks.provisional_resolve_person_task.run(person.person_id)
@@ -526,6 +535,7 @@ def test_a_person_already_provisional_at_the_current_proposal_queues_nothing(bro
     _proposal(world)
     provisional_sweep.locked_resolve(person)
     cache.clear()
+    _warm()
 
     with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
@@ -536,6 +546,7 @@ def test_a_person_already_provisional_at_the_current_proposal_queues_nothing(bro
 def test_a_person_no_proposal_covers_is_not_queued(broker, world, django_capture_on_commit_callbacks):
     person = _person(code='OTHER')
     _proposal(world)
+    _warm()
 
     with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
@@ -546,6 +557,7 @@ def test_a_person_no_proposal_covers_is_not_queued(broker, world, django_capture
 def test_a_proposal_the_resolver_rejects_is_not_queued_for(broker, world, django_capture_on_commit_callbacks):
     person = _person()
     _proposal(ConceptFactory(concept_name='Non-standard', standard_concept=None))
+    _warm()
 
     with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
@@ -553,19 +565,59 @@ def test_a_proposal_the_resolver_rejects_is_not_queued_for(broker, world, django
     assert broker['person'] == []
 
 
-def test_the_qualifying_set_is_cached_not_loaded_per_post(broker, world):
+def test_a_cold_cache_queues_a_warm_up_and_never_builds_the_index_in_the_request(
+        broker, world, django_capture_on_commit_callbacks):
     person = _person()
     _proposal(world)
+    cache.clear()
 
-    def mapping_queries():
-        with CaptureQueriesContext(connection) as queries:
-            provisional_sweep.person_needs_resolve(person.person_id)
-        return sum('source_code_concept_mapping' in q['sql'] for q in queries)
+    with CaptureQueriesContext(connection) as queries:
+        with django_capture_on_commit_callbacks(execute=True):
+            provisional_sweep.queue_person_resolve(person.person_id)
+            provisional_sweep.queue_person_resolve(person.person_id)
 
-    cold = mapping_queries()          # loads the qualifying set, then asks about the one code held
-    warm = mapping_queries()          # the set comes from the cache
+    assert not any('source_code_concept_mapping' in q['sql'] for q in queries)   # no proposal loaded inline
+    assert broker['warm'] == [1] and broker['person'] == []                      # one warm-up, no job yet
+    tasks.provisional_warm_index_task.run()                                      # the worker builds it
+    assert provisional_sweep.person_needs_resolve(person.person_id) is True
 
-    assert warm == cold - 1
+
+def test_the_check_is_a_fixed_handful_of_queries_whatever_the_number_of_proposals(broker, world):
+    person = _person()
+    for number in range(30):
+        _proposal(world, code=f'PROP-{number}')
+    _proposal(world)
+    _warm()
+
+    with CaptureQueriesContext(connection) as queries:
+        assert provisional_sweep.person_needs_resolve(person.person_id) is True
+
+    assert len(queries) <= 8                                    # one per clinical table plus the inventory
+    assert not any('source_code_concept_mapping' in q['sql'] for q in queries)
+    assert sum(len(q['sql']) for q in queries) < 20_000          # no 189 KB of SQL
+
+
+def test_a_person_coded_in_another_system_is_not_covered_by_that_systems_proposal(broker, world):
+    person = _person()
+    PatientSourceCode.objects.filter(person=person).update(source_vocabulary_id='Cerner')
+    _proposal(world)                                            # a proposal for the code under 'Local'
+    _warm()
+
+    assert provisional_sweep.person_needs_resolve(person.person_id) is False
+    PatientSourceCode.objects.filter(person=person).update(source_vocabulary_id='Local')
+    assert provisional_sweep.person_needs_resolve(person.person_id) is True
+
+
+def test_a_code_in_another_case_is_found_by_the_check_the_selection_and_the_resolver(broker, world):
+    person = _person(code='glu-1')
+    _proposal(world, code='GLU-1')
+    _warm()
+
+    assert provisional_sweep.person_needs_resolve(person.person_id) is True
+    assert provisional_sweep.candidate_person_ids(include_provisional_holders=False) == [person.person_id]
+    provisional_sweep.locked_resolve(person)
+    row = _rows(person, 'glu-1').get()
+    assert (row.measurement_concept_id, row.confidence) == (world.concept_id, 85)
 
 
 def test_the_ingest_check_costs_nothing_with_the_switch_off_or_no_broker(broker, world, settings):
@@ -604,6 +656,7 @@ def test_a_bulk_write_queues_the_resolve_and_a_replay_is_made_provisional_again(
     PatientSourceCode.objects.create(
         person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='Local')
     _proposal(world)
+    _warm()
     client = _etl_client()
     url = '/api/v1/measurements/?skip_refresh=true'
 

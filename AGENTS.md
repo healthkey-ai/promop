@@ -1426,8 +1426,11 @@ queue a one-person resolve after ingest (an ETL replay included), and
 `manage.py sweep_provisional_rows` covers everything else (an `update()` fires no
 signal). All three call `resolve_person_source_codes`, so approval, rejection and
 a moved destination behave as in #2530. The automatic ones need a Celery broker
-and are coalesced per code and per person; with no broker nothing runs in a
-request and the command is the path. **Only unscoped proposals qualify:
+and are coalesced per code and per person (best effort: a cache outage never
+fails a save or an ingest); the per-person resolve takes a session advisory lock
+and keeps its own short transactions, never one outer one (that deadlocked with
+the ETL's keyed write); with no broker nothing runs in a request and the command
+is the path. **Only unscoped proposals qualify:
 organization-scoped ones (set when the caller passes an organization for Epic or
 Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
 before enabling it there.** Off, nothing is queried, queued or written. See

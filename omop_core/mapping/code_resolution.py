@@ -1191,14 +1191,39 @@ def provisional_proposal(source_code, omop_table, vocabularies=None):
             qualifying.setdefault(proposal.target_concept_id, []).append(
                 (proposal.target_concept, percent,
                  canonical_source_vocabulary(proposal.source_vocabulary_id)))
-    if len(qualifying) != 1:
+    concepts = {}
+    for target_id, entries in qualifying.items():
+        concepts[target_id] = entries[0][0]
+    chosen = choose_proposal(
+        [(target_id, percent, vocabulary)
+         for target_id, entries in qualifying.items() for _c, percent, vocabulary in entries],
+        vocabularies)
+    if chosen is None:
         return None
-    entries = next(iter(qualifying.values()))
+    return concepts[chosen[0]], chosen[1]
+
+
+def choose_proposal(entries, vocabularies=None):
+    """The one proposal a code resolves to, from its qualifying *entries*, or None.
+
+    *entries* are ``(target_concept_id, percent, canonical_source_vocabulary)``
+    for the code's qualifying proposals. Nothing qualifies when they disagree on
+    the destination, or when a code system the person holds the code under has no
+    proposal; agreeing proposals take the lowest confidence. The pure half of
+    :func:`provisional_proposal`, so a caller holding the entries (the ingest
+    check) decides exactly as the resolver does, with no query.
+    """
+    by_target = {}
+    for target_id, percent, vocabulary in entries:
+        by_target.setdefault(target_id, []).append((percent, vocabulary))
+    if len(by_target) != 1:
+        return None
+    target_id, items = next(iter(by_target.items()))
     if vocabularies:
         held = {canonical_source_vocabulary(vocabulary) for vocabulary in vocabularies}
-        if not held <= {vocabulary for _concept, _percent, vocabulary in entries}:
+        if not held <= {vocabulary for _percent, vocabulary in items}:
             return None
-    return entries[0][0], min(percent for _concept, percent, _vocabulary in entries)
+    return target_id, min(percent for percent, _vocabulary in items)
 
 
 def _collapse_duplicates(model, concept_col, source_col, match,

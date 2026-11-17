@@ -154,24 +154,42 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
 - **Coalesced.** One pending sweep per code and one pending job per person: a
   cache key is taken when the job is queued and dropped when it starts, so a
   batch of saves for one code, or twenty ingest POSTs for one patient, queue one
-  job, and a change after the job has started queues another. The qualifying code
-  set is cached for 60 seconds for the ingest check.
+  job, and a change after the job has started queues another. The key is taken
+  inside the commit callback, so a save that rolls back leaves none. The cache is
+  best effort: an outage means a duplicate job, never a failed save or POST, and a
+  per-process cache (no `CACHE_URL`) is warned about once because coalescing is
+  then not shared between workers.
 - **After ingest.** The bulk OMOP write and the FHIR sync call
   `queue_person_resolve(person_id)` once per request: a cheap check that this
   person would change (an unresolved row, an inventory code with no row, or a
-  provisional row that no longer matches its code's proposal, judged by the
-  resolver's own proposal rule, so never for a proposal it would reject), and
-  only then a resolve job after commit. It counts a write that only **updated**
+  provisional row that no longer matches its code's proposal), and only then a
+  resolve job after commit. The check is one query per clinical table for the
+  person's own distinct (code, concept, confidence, erroneous) and one for their
+  inventory, compared in Python against a cached index of the qualifying
+  proposals with the resolver's own choice rule (`choose_proposal`), per code
+  system and case-insensitively, so a Cerner-coded person with only an Epic
+  proposal is not queued. A request never builds the index (it loads every
+  proposal): a cold cache queues a warm-up in the worker and the check says "not
+  now"; every sweep chunk refreshes it, which is how a new proposal reaches the
+  check (up to an hour stale otherwise). It counts a write that only **updated**
   rows too: an ETL replay re-posts a row at concept 0 and the upsert rewrites the
   provisional row to unresolved, and the queued resolve makes it provisional
   again (tested end to end). New patients do not wait for a sweep; with the
   switch off, or no broker, it costs no query.
-- **Safe to run concurrently and for long.** A chunk stops on a 600 s budget (and
-  on a soft time limit) and hands its cursor on, saving progress every ten
-  persons, so it stays inside `CELERY_TASK_TIME_LIMIT`; an enqueue that fails
-  marks the run FAILED rather than leaving it pending; and the per-person resolve
-  takes a Postgres advisory lock on the person id first, so two resolves cannot
-  both see "no row yet" and both create one.
+- **Safe to run concurrently and for long.** A chunk stops on a 600 s budget and
+  hands its cursor on, saving progress every ten persons; both tasks carry a soft
+  time limit (60 s under `CELERY_TASK_TIME_LIMIT`) so the chunk can save progress
+  and return its cursor before the hard limit, and a sweep whose retries are
+  spent marks its run FAILED, as does an enqueue that fails. The per-person
+  resolve holds a Postgres **session** advisory lock on the person id (bounded
+  wait; a person another worker holds is skipped by the sweep and retried by the
+  job) while the resolver runs its own short per-group transactions. It is
+  deliberately not one outer transaction: that held row locks across code groups
+  and deadlocked with the ETL's keyed bulk write (tested with two threads), and
+  ran an inline derivation inside the lock's transaction so a timeout rolled the
+  whole resolve back. Each group's rows commit before the next, and the
+  derivation runs after them; a derivation failure surfaces as an error on the
+  run but never undoes the rows.
 - **Never made provisional:** a row entered in error. Taking a provisional row
   back still applies to one.
 - **Only unscoped proposals qualify.** As `provisional_proposal` already

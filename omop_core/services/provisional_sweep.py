@@ -22,7 +22,7 @@ Rules that hold for all three:
 * **Off with ``PROVISIONAL_DATA_ENABLED``**: nothing is queried, queued or written.
 * **Automatic only with a broker.** A trigger or an ingest hook never resolves
   rows (and so never derives a record) inside a request. With no
-  ``CELERY_BROKER_URL`` they do nothing (logged at debug) and
+  ``CELERY_BROKER_URL`` they do nothing (logged once) and
   ``manage.py sweep_provisional_rows`` is the way to run it.
 * **Only unscoped proposals qualify**, as :func:`provisional_proposal` requires:
   the per-patient inventory cannot say which hospital a code came from, so an
@@ -32,15 +32,25 @@ Rules that hold for all three:
   finished) travels in the task arguments, and each chunk stops on a time
   budget, well inside ``CELERY_TASK_TIME_LIMIT``, and hands its cursor on.
 * **Coalesced.** One pending sweep per code and one pending job per person (a
-  cache key taken when queued and dropped when the job starts), so a batch of
-  saves or a burst of ingest POSTs queues one job, not one each.
-* **One resolver per person at a time**: a Postgres advisory lock on the person
-  id, so two resolves cannot both see "no row yet" and both create one.
+  cache key taken when the job is queued, after commit, and dropped when it
+  starts), so a batch of saves or a burst of ingest POSTs queues one job. The
+  cache is best effort: an outage means a duplicate job, never a failed request.
+* **One resolver per person at a time**, with a Postgres *session* advisory lock
+  on the person id, held while the resolver runs its own short per-group
+  transactions. It is deliberately not one outer transaction: that accumulated
+  row locks across code groups and deadlocked with the ETL's keyed bulk write.
+  A person someone else is resolving is skipped and retried, never waited on
+  for long.
+* **The ingest check is cheap**: one query per clinical table for the person's own
+  rows, compared in Python against a cached index of the qualifying proposals.
+  It never builds that index inside a request; a cold cache queues a warm-up in
+  the worker and the check says "not now".
 """
 from __future__ import annotations
 
 import logging
 import time
+from collections import defaultdict
 
 from django.conf import settings
 from django.core.cache import cache
@@ -50,26 +60,35 @@ from django.utils import timezone
 
 from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, _QUARANTINE_VOCABULARIES, _confidence_percent,
-    _usable_destination, normalize_omop_table, provisional_proposal, resolve_person_source_codes,
+    _usable_destination, choose_proposal, normalize_omop_table, resolve_person_source_codes,
 )
 from omop_core.models import (
     Concept, PatientSourceCode, Person, SourceCodeConceptMapping, SourceCodeResolveRun,
 )
+from omop_core.services.source_vocabularies import canonical_source_vocabulary
 
 logger = logging.getLogger(__name__)
 
 SWEEP_CHUNK = 200            # persons per task
-CHUNK_BUDGET_SECONDS = 600   # a chunk stops here and hands on its cursor; CELERY_TASK_TIME_LIMIT is 900
+CHUNK_BUDGET_SECONDS = 600   # a chunk stops here and hands on its cursor
+SOFT_TIME_LIMIT_SECONDS = 840  # below CELERY_TASK_TIME_LIMIT (900), so the handler can fire
 SAVE_EVERY = 10              # persons between progress saves
 _CODE_CHUNK = 1000           # codes per IN list
-_QUALIFYING_TTL = 60         # seconds the qualifying code set is cached
+_INDEX_TTL = 3600            # the qualifying index; refreshed by every sweep chunk start
 _PENDING_TTL = 300           # a pending-job key outlives a lost job by this long
 _LOCK_NAMESPACE = 2662       # first key of the person advisory lock
+LOCK_WAIT_SECONDS = 10       # how long a resolve waits for another resolver of the same person
+_LOCK_POLL_SECONDS = 0.2
 
 # A change to any of these on a proposal can change what its rows should be.
 TRIGGER_FIELDS = frozenset({
     'target_concept', 'target_concept_id', 'suggestion_confidence', 'status', 'omop_table',
+    'source_code', 'source_vocabulary_id', 'organization', 'organization_id',
 })
+
+
+class PersonBusy(Exception):
+    """Another resolver holds this person; the job is retried, the sweep leaves them for next time."""
 
 
 def _enabled() -> bool:
@@ -80,39 +99,132 @@ def _celery() -> bool:
     return bool(getattr(settings, 'CELERY_BROKER_URL', ''))
 
 
+_warned: set[str] = set()
+
+
+def _once(key, level, message, *args):
+    if key not in _warned:
+        _warned.add(key)
+        logger.log(level, message, *args)
+
+
+# ---- the cache, best effort ------------------------------------------------------
+
+def _cache_get(key):
+    try:
+        return cache.get(key)
+    except Exception:  # noqa: BLE001 -- a cache outage must never fail a save or an ingest
+        logger.warning('Cache read failed for %s.', key, exc_info=True)
+        return None
+
+
+def _cache_set(key, value, ttl):
+    try:
+        cache.set(key, value, ttl)
+    except Exception:  # noqa: BLE001
+        logger.warning('Cache write failed for %s.', key, exc_info=True)
+
+
+def _cache_delete(key):
+    try:
+        cache.delete(key)
+    except Exception:  # noqa: BLE001
+        logger.warning('Cache delete failed for %s.', key, exc_info=True)
+
+
+def _take_pending(key, ttl=_PENDING_TTL) -> bool:
+    """True when no job is pending for *key*, and marks one pending (``cache.add`` is atomic).
+
+    A cache that cannot be reached says yes: a duplicate job costs time, a lost
+    one costs data. Warns once when the cache is per-process, because then the
+    coalescing is not shared between workers.
+    """
+    backend = settings.CACHES.get('default', {}).get('BACKEND', '')
+    if backend.endswith('LocMemCache') and _celery():
+        _once('locmem', logging.WARNING,
+              'The cache is per-process (no CACHE_URL), so provisional job coalescing is not '
+              'shared between workers; duplicate jobs are possible and harmless.')
+    try:
+        return bool(cache.add(key, 1, ttl))
+    except Exception:  # noqa: BLE001
+        logger.warning('Cache add failed for %s; queuing without coalescing.', key, exc_info=True)
+        return True
+
+
+def _release_pending(key):
+    _cache_delete(key)
+
+
 # ---- which proposals qualify -----------------------------------------------------
 
-_QUALIFYING_KEY = 'provisional-sweep:qualifying'
+_INDEX_KEY = 'provisional-sweep:index'
 
 
-def qualifying_codes(*, use_cache=False) -> dict[str, set[str]]:
-    """``{table: {source_code}}`` for proposals a provisional row may be written from.
+def build_qualifying_index() -> dict:
+    """The qualifying proposals, indexed for the resolver's own decision.
 
-    The resolver's own rule (:func:`provisional_proposal`): unscoped,
-    ``proposed``, a destination that is standard, valid and in the table's
-    domain, and a confidence at or above the floor. The cached form (60 s) is for
-    the ingest check, which would otherwise load the set on every POST.
+    ``{'entries': {table: {UPPER_CODE: [(target_id, percent, vocabulary)]}},
+    'codes': {table: [source_code]}, 'quarantine': [concept_id]}``. The
+    resolver's rule: unscoped, ``proposed``, a destination that is standard, valid
+    and in the table's domain, and a confidence at or above the floor. One query
+    over the proposals plus one for the quarantine concepts; for a worker or the
+    command, never a request.
     """
-    if use_cache:
-        cached = cache.get(_QUALIFYING_KEY)
-        if cached is not None:
-            return cached
     floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
+    entries: dict[str, dict[str, list]] = {}
     codes: dict[str, set[str]] = {}
     rows = SourceCodeConceptMapping.objects.filter(
         status='proposed', organization__isnull=True,
         target_concept__isnull=False, suggestion_confidence__isnull=False,
     ).select_related('target_concept').only(
-        'omop_table', 'source_code', 'suggestion_confidence', 'target_concept')
+        'omop_table', 'source_code', 'source_vocabulary_id', 'suggestion_confidence', 'target_concept')
     for mapping in rows.iterator():
         table = normalize_omop_table(mapping.omop_table)
-        if (table in CLINICAL_TABLES and mapping.source_code
+        if not (table in CLINICAL_TABLES and mapping.source_code
                 and _confidence_percent(mapping.suggestion_confidence) >= floor
                 and _usable_destination(mapping.target_concept, table)):
-            codes.setdefault(table, set()).add(mapping.source_code)
-    if use_cache:
-        cache.set(_QUALIFYING_KEY, codes, _QUALIFYING_TTL)
-    return codes
+            continue
+        entries.setdefault(table, {}).setdefault(mapping.source_code.upper(), []).append(
+            (mapping.target_concept_id, _confidence_percent(mapping.suggestion_confidence),
+             canonical_source_vocabulary(mapping.source_vocabulary_id)))
+        codes.setdefault(table, set()).add(mapping.source_code)
+    return {'entries': entries, 'codes': {t: sorted(c) for t, c in codes.items()},
+            'quarantine': sorted(_quarantine_concept_ids())}
+
+
+def qualifying_index(*, refresh=False):
+    """The cached index, built (and cached) here when asked or when nothing is cached.
+
+    Only for a worker or the command. A request uses :func:`cached_index`.
+    """
+    if not refresh:
+        cached = _cache_get(_INDEX_KEY)
+        if cached is not None:
+            return cached
+    index = build_qualifying_index()
+    _cache_set(_INDEX_KEY, index, _INDEX_TTL)
+    return index
+
+
+def cached_index():
+    """The cached index or None. Never builds one: a request must not load every proposal."""
+    return _cache_get(_INDEX_KEY)
+
+
+def qualifying_codes(index=None) -> dict[str, set[str]]:
+    """``{table: {source_code spellings}}``, each code as stored, upper and lower case.
+
+    The clinical tables match a source code exactly while the resolver matches
+    case-insensitively, so selection looks for the spellings an ETL is likely to
+    have written and the resolver then settles the rest.
+    """
+    index = build_qualifying_index() if index is None else index
+    out: dict[str, set[str]] = {}
+    for table, codes in index['codes'].items():
+        spellings = out.setdefault(table, set())
+        for code in codes:
+            spellings.update({code, code.upper(), code.lower()})
+    return out
 
 
 def _chunks(values, size=_CODE_CHUNK):
@@ -162,7 +274,7 @@ def candidate_person_ids(*, after=0, limit=SWEEP_CHUNK, codes=None,
             collect(model.objects.filter(**{f'{source_col}__in': chunk})
                     .filter(_unresolved_q(concept_col, quarantine) | Q(confidence__isnull=False)))
             has_row = model.objects.filter(
-                person_id=OuterRef('person_id'), **{source_col: OuterRef('source_value')})
+                person_id=OuterRef('person_id'), **{f'{source_col}__iexact': OuterRef('source_value')})
             collect(PatientSourceCode.objects.filter(omop_table=table, source_value__in=chunk)
                     .annotate(has_row=Exists(has_row)).filter(has_row=False))
     if include_provisional_holders:
@@ -180,24 +292,46 @@ def mapping_codes(mapping) -> dict[str, set[str]]:
     table = normalize_omop_table(mapping.omop_table)
     if table not in CLINICAL_TABLES or not mapping.source_code:
         return {}
-    return {table: {mapping.source_code}}
+    code = mapping.source_code
+    return {table: {code, code.upper(), code.lower()}}
 
 
 # ---- the per-person resolve ------------------------------------------------------
 
+def _try_lock(person_id) -> bool:
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_try_advisory_lock(%s, %s)', [_LOCK_NAMESPACE, person_id])
+        return bool(cursor.fetchone()[0])
+
+
+def _unlock(person_id):
+    with connection.cursor() as cursor:
+        cursor.execute('SELECT pg_advisory_unlock(%s, %s)', [_LOCK_NAMESPACE, person_id])
+
+
 def locked_resolve(person, **kwargs):
     """``resolve_person_source_codes`` with one resolver per person at a time.
 
-    The advisory lock is taken first and held to the end of the transaction, so
-    two resolves of one person run back to back: the second sees the rows the
-    first made and creates none. The ETL's bulk write does not take it, so there
-    is no ordering to violate.
+    The lock is a Postgres *session* advisory lock, taken before and released in
+    ``finally`` after the resolver, which keeps its own short per-group
+    transactions: an outer transaction here accumulated row locks across code
+    groups and deadlocked with the ETL's keyed bulk write (which locks rows in
+    pk order), and ran a derivation inside the lock's transaction, where a
+    failure rolled the whole resolve back. Each group's rows are committed before
+    the next is touched, and the derivation runs after them. The wait is
+    bounded; a person still held raises :class:`PersonBusy`.
     """
-    with transaction.atomic():
-        if connection.vendor == 'postgresql':
-            with connection.cursor() as cursor:
-                cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)', [_LOCK_NAMESPACE, person.person_id])
+    if connection.vendor != 'postgresql':
         return resolve_person_source_codes(person, **kwargs)
+    deadline = time.monotonic() + LOCK_WAIT_SECONDS
+    while not _try_lock(person.person_id):
+        if time.monotonic() >= deadline:
+            raise PersonBusy(f'Person {person.person_id} is being resolved by another worker.')
+        time.sleep(_LOCK_POLL_SECONDS)
+    try:
+        return resolve_person_source_codes(person, **kwargs)
+    finally:
+        _unlock(person.person_id)
 
 
 # ---- the sweep -------------------------------------------------------------------
@@ -223,15 +357,26 @@ def _finish(run, notes=None, state=SourceCodeResolveRun.COMPLETED):
     run.save(update_fields=['state', 'finished_at', 'code_details', 'error_detail'])
 
 
+def fail_run(run_id, message):
+    """Mark a run FAILED (the task gave up, or could not be queued)."""
+    run = SourceCodeResolveRun.objects.filter(pk=run_id).first()
+    if run is None or run.state in (SourceCodeResolveRun.COMPLETED, SourceCodeResolveRun.FAILED):
+        return
+    run.error_detail = (run.error_detail + [{'error': message[:300]}])[:100]
+    _finish(run, state=SourceCodeResolveRun.FAILED)
+
+
 def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
               budget_seconds=CHUNK_BUDGET_SECONDS):
     """Resolve one chunk of candidate persons into *run*; the next cursor, or None when done.
 
     A person that fails is recorded and skipped, not fatal, as in the bulk
-    resolve. Progress is saved every few persons, the chunk stops on its time
-    budget (or a soft time limit) and returns the cursor it reached, so a task
-    killed or paused loses at most a few persons. With the switch off nothing is
-    done and the run ends at once.
+    resolve; one another worker holds is left for the next sweep. Progress is
+    saved every few persons, the chunk stops on its time budget (or a soft time
+    limit) and returns the cursor it reached, so a task killed or paused loses at
+    most a few persons. With the switch off nothing is done and the run ends at
+    once. Each chunk starts by refreshing the qualifying index, which is how the
+    request-side check learns of a new proposal.
     """
     from celery.exceptions import SoftTimeLimitExceeded
 
@@ -255,9 +400,12 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
     run.state = SourceCodeResolveRun.RUNNING
     run.save(update_fields=['state'])
 
+    # A full sweep always refreshes the index; a mapping's sweep at most once a
+    # minute, so a burst of saves does not rebuild it for each.
+    index = qualifying_index(refresh=mapping is None or _take_pending('provisional-sweep:index-fresh', 60))
     ids = candidate_person_ids(
         after=after, limit=limit,
-        codes=mapping_codes(mapping) if mapping else None,
+        codes=mapping_codes(mapping) if mapping else qualifying_codes(index),
         include_provisional_holders=mapping is None,
     )
     started = time.monotonic()
@@ -277,6 +425,9 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
                       skipped=result['skipped'], already_resolved=result['already_resolved'])
             except SoftTimeLimitExceeded:
                 raise
+            except PersonBusy:
+                _bump(run, errors=1)
+                errors.append({'person_id': pid, 'error': 'busy: left for the next sweep'})
             except Exception as exc:  # noqa: BLE001 -- one person must not stop the sweep
                 logger.exception('Provisional sweep failed for person %s in run %s', pid, run_id)
                 _bump(run, errors=1)
@@ -322,8 +473,7 @@ def start_sweep(*, mapping=None, user=None, limit=SWEEP_CHUNK):
                 provisional_sweep_task.delay(str(run.id), 0, mapping_id, limit)
             except Exception as exc:  # noqa: BLE001 -- a queue outage must be visible on the run
                 logger.exception('Could not queue the provisional sweep %s.', run.id)
-                run.error_detail = [{'error': f'Could not queue the sweep: {str(exc)[:200]}'}]
-                _finish(run, state=SourceCodeResolveRun.FAILED)
+                fail_run(run.id, f'Could not queue the sweep: {exc}')
         transaction.on_commit(enqueue, robust=True)
         return run
     after = 0
@@ -338,46 +488,44 @@ def _code_key(mapping) -> str:
     return f'provisional-sweep:code:{normalize_omop_table(mapping.omop_table)}:{(mapping.source_code or "").upper()}'
 
 
-def _take_pending(key) -> bool:
-    """True when no job is pending for *key*, and marks one pending (``cache.add`` is atomic)."""
-    return bool(cache.add(key, 1, _PENDING_TTL))
-
-
-def _release_pending(key):
-    cache.delete(key)
-
-
 def _state(mapping) -> tuple | None:
-    """What a mapping says about its code, for deciding whether a save changed the answer."""
+    """What a mapping says about its code, for deciding whether a save changed the answer.
+
+    Includes where the mapping is (code, code system, organization), so
+    re-pointing a qualifying mapping at another code queues a sweep for it.
+    """
     if mapping is None:
         return None
+    percent = None if mapping.suggestion_confidence is None else _confidence_percent(mapping.suggestion_confidence)
     qualifies = (
         mapping.status == 'proposed' and mapping.organization_id is None
-        and mapping.target_concept_id is not None and mapping.suggestion_confidence is not None
-        and _confidence_percent(mapping.suggestion_confidence) >= settings.PROVISIONAL_CONFIDENCE_FLOOR
+        and mapping.target_concept_id is not None and percent is not None
+        and percent >= settings.PROVISIONAL_CONFIDENCE_FLOOR
         and normalize_omop_table(mapping.omop_table) in CLINICAL_TABLES
     )
-    return (qualifies, mapping.target_concept_id,
-            None if mapping.suggestion_confidence is None else _confidence_percent(mapping.suggestion_confidence),
-            normalize_omop_table(mapping.omop_table))
+    return (qualifies, mapping.target_concept_id, percent, normalize_omop_table(mapping.omop_table),
+            mapping.source_code, mapping.source_vocabulary_id, mapping.organization_id)
 
 
-def mapping_pre_save(sender, instance, **kwargs):
-    """Remember what the mapping said before this save (one query, only with the switch on)."""
+def mapping_pre_save(sender, instance, update_fields=None, **kwargs):
+    """Remember what the mapping said before this save (one query, only when it can matter)."""
+    instance._provisional_before = None
     if not _enabled() or instance.pk is None:
-        instance._provisional_before = None
         return
-    before = SourceCodeConceptMapping.objects.filter(pk=instance.pk).first()
-    instance._provisional_before = _state(before)
+    if update_fields is not None and not (set(update_fields) & TRIGGER_FIELDS):
+        return
+    instance._provisional_before = _state(
+        SourceCodeConceptMapping.objects.filter(pk=instance.pk).first())
 
 
 def mapping_saved(sender, instance, created=False, update_fields=None, **kwargs):
     """post_save receiver: queue a sweep of the code when the proposal's answer changed.
 
     Queued when the mapping qualifies now or did before and the answer (qualifies,
-    destination, confidence, table) differs, so a new or changed proposal reaches
-    patients and a withdrawn one (rejected, destination cleared, below the
-    floor) is taken back, while a save that only changed notes queues nothing.
+    destination, confidence, table, where it is) differs, so a new or changed
+    proposal reaches patients and a withdrawn one (rejected, destination cleared,
+    below the floor) is taken back, while a save that only changed notes queues
+    nothing.
     """
     if not _enabled():
         return
@@ -389,7 +537,9 @@ def mapping_saved(sender, instance, created=False, update_fields=None, **kwargs)
         return
     if before == now:
         return
-    cache.delete(_QUALIFYING_KEY)
+    # A re-point to another code or table sweeps the new one; rows left under the
+    # old one are taken back by the next full sweep (it visits every holder of a
+    # provisional row).
     queue_mapping_sweep(instance)
 
 
@@ -397,18 +547,23 @@ def queue_mapping_sweep(mapping) -> None:
     """Queue a sweep of the persons holding this mapping's code, after commit.
 
     Only with a broker (never inline in a request), and coalesced: one pending
-    sweep per code, so a batch of saves for one code queues one.
+    sweep per code, so a batch of saves for one code queues one. The pending key
+    is taken inside the commit callback, so a save that rolls back leaves none.
     """
     if not _enabled():
         return
     if not _celery():
-        logger.debug('Provisional sweep for mapping %s not queued: no broker. '
-                     'Run manage.py sweep_provisional_rows.', mapping.pk)
-        return
-    if not _take_pending(_code_key(mapping)):
+        _once('no-broker', logging.INFO,
+              'Provisional triggers are not queued: there is no CELERY_BROKER_URL. '
+              'Run manage.py sweep_provisional_rows to make provisional rows.')
         return
     mapping_id = mapping.pk
-    transaction.on_commit(lambda: dispatch_mapping_sweep(mapping_id), robust=True)
+    key = _code_key(mapping)
+
+    def queue():
+        if _take_pending(key):
+            dispatch_mapping_sweep(mapping_id)
+    transaction.on_commit(queue, robust=True)
 
 
 def dispatch_mapping_sweep(mapping_id):
@@ -420,47 +575,48 @@ def dispatch_mapping_sweep(mapping_id):
 
 # ---- after ingest ----------------------------------------------------------------
 
-def person_needs_resolve(person_id) -> bool:
-    """Whether resolving this person would change anything.
+def person_needs_resolve(person_id) -> bool | None:
+    """Whether resolving this person would change anything; None when it cannot say yet.
 
-    True for an unresolved row (not entered in error) or an inventory code with
-    no row under a qualifying proposal, and for a provisional row that no longer
-    matches its code's proposal (moved, or no longer qualifying). A person
-    already provisional at the current proposal is not. Uses the cached
-    qualifying set and the resolver's own proposal rule, so it never says yes for
-    a proposal the resolver would reject.
+    One query per clinical table for the person's own distinct
+    ``(code, concept, confidence, erroneous)``, one for their inventory, compared
+    in Python against the cached qualifying index with the resolver's own choice
+    rule (:func:`choose_proposal`), per code system and case-insensitively: yes
+    for an unresolved row, or an inventory code with no row, that a proposal
+    covers, and for a provisional row that no longer matches its code's proposal.
+    Never builds the index (that loads every proposal): with none cached it
+    returns None and the caller queues a warm-up.
     """
-    codes = qualifying_codes(use_cache=True)
-    if not codes:
-        # Nothing qualifies: only a provisional row left behind needs taking back.
-        return any(model.objects.filter(person_id=person_id, confidence__isnull=False).exists()
-                   for model, _c, _s in CLINICAL_TABLES.values())
-    quarantine = _quarantine_concept_ids()
-    for table, code_set in codes.items():
-        model, concept_col, source_col = CLINICAL_TABLES[table]
-        rows = model.objects.filter(person_id=person_id)
-        for chunk in _chunks(code_set):
-            held = list(rows.filter(**{f'{source_col}__in': chunk})
-                        .filter(_unresolved_q(concept_col, quarantine) | Q(confidence__isnull=False))
-                        .values_list(source_col, concept_col, 'confidence').distinct())
-            for code, concept_id, confidence in held:
-                proposal = provisional_proposal(code, table)
-                if confidence is None:
-                    if proposal is not None:
-                        return True           # unresolved, and a proposal qualifies
-                    continue
-                if proposal is None or (proposal[0].pk, proposal[1]) != (concept_id, confidence):
-                    return True               # provisional, but the proposal moved or went
-            has_row = model.objects.filter(
-                person_id=OuterRef('person_id'), **{source_col: OuterRef('source_value')})
-            if PatientSourceCode.objects.filter(person_id=person_id, omop_table=table,
-                                                source_value__in=chunk).annotate(
-                    has_row=Exists(has_row)).filter(has_row=False).exists():
+    index = cached_index()
+    if index is None:
+        return None
+    entries = index['entries']
+    quarantine = frozenset(index['quarantine'])
+    vocabularies = defaultdict(set)
+    for table, value, vocabulary in PatientSourceCode.objects.filter(person_id=person_id).values_list(
+            'omop_table', 'source_value', 'source_vocabulary_id'):
+        vocabularies[(normalize_omop_table(table), (value or '').upper())].add(vocabulary)
+    for table, (model, concept_col, source_col) in CLINICAL_TABLES.items():
+        table_entries = entries.get(table, {})
+        with_rows = set()
+        for code, concept_id, confidence, erroneous in model.objects.filter(person_id=person_id).values_list(
+                source_col, concept_col, 'confidence', 'is_erroneous').distinct():
+            if not code:
+                continue
+            upper = code.upper()
+            with_rows.add(upper)
+            proposal = choose_proposal(table_entries.get(upper, []), vocabularies.get((table, upper)))
+            if confidence is None:
+                if (not erroneous and (concept_id == NO_MATCHING_CONCEPT_ID or concept_id in quarantine)
+                        and proposal is not None):
+                    return True
+            elif proposal is None or proposal != (concept_id, confidence):
                 return True
-    # A provisional row under a code that no longer qualifies at all.
-    return any(model.objects.filter(person_id=person_id, confidence__isnull=False)
-               .exclude(**{f'{source_col}__in': sorted(codes.get(table, ()))}).exists()
-               for table, (model, _c, source_col) in CLINICAL_TABLES.items())
+        for (inventory_table, upper), held in vocabularies.items():
+            if (inventory_table == table and upper not in with_rows
+                    and choose_proposal(table_entries.get(upper, []), held) is not None):
+                return True
+    return False
 
 
 def _person_key(person_id) -> str:
@@ -471,22 +627,52 @@ def queue_person_resolve(person_id) -> None:
     """After a person's rows are written: resolve them if a proposal covers any.
 
     A no-op when the switch is off or there is no broker, and when nothing the
-    person holds would change, so the common ingest costs one cheap check.
+    person holds would change, so the common ingest costs a handful of queries.
     Coalesced per person: twenty POSTs for one patient queue one job. Queued
-    after commit; a failed check never fails an ingest.
+    after commit; a failed check, or an unreachable cache, never fails an ingest.
     """
     if not _enabled():
         return
     if not _celery():
-        logger.debug('Provisional resolve of person %s not queued: no broker.', person_id)
+        _once('no-broker', logging.INFO,
+              'Provisional triggers are not queued: there is no CELERY_BROKER_URL. '
+              'Run manage.py sweep_provisional_rows to make provisional rows.')
         return
     try:
-        if not person_needs_resolve(person_id) or not _take_pending(_person_key(person_id)):
-            return
+        needed = person_needs_resolve(person_id)
     except Exception:  # noqa: BLE001
         logger.exception('Provisional check failed for person %s.', person_id)
         return
-    transaction.on_commit(lambda: dispatch_person_resolve(person_id), robust=True)
+    if needed is None:
+        _queue_index_warmup()
+        return
+    if not needed:
+        return
+
+    def queue():
+        if _take_pending(_person_key(person_id)):
+            dispatch_person_resolve(person_id)
+    transaction.on_commit(queue, robust=True)
+
+
+def _queue_index_warmup():
+    """The index is not cached: have a worker build it, once, instead of the request."""
+    def queue():
+        if _take_pending('provisional-sweep:warm'):
+            try:
+                from omop_core.tasks import provisional_warm_index_task
+                provisional_warm_index_task.delay()
+            except Exception:  # noqa: BLE001
+                logger.warning('Could not queue the provisional index warm-up.', exc_info=True)
+                _release_pending('provisional-sweep:warm')
+    transaction.on_commit(queue, robust=True)
+
+
+def warm_index():
+    """Worker body: build and cache the qualifying index."""
+    _release_pending('provisional-sweep:warm')
+    if _enabled():
+        qualifying_index(refresh=True)
 
 
 def dispatch_person_resolve(person_id):
