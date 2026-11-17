@@ -84,6 +84,65 @@ def test_a_cache_outage_never_fails_a_save_or_an_ingest_and_still_queues(broker,
     assert [a[2] for a in broker['sweep']] == [mapping.pk]        # coalescing is lost, not the job
 
 
+def test_a_second_proposal_within_the_refresh_window_is_not_hidden_by_a_stale_index(
+        broker, world, django_capture_on_commit_callbacks):
+    with django_capture_on_commit_callbacks(execute=True):
+        _proposal(world, code='X-1')
+    tasks.provisional_sweep_task.run(*broker['sweep'].pop())      # builds the index, opens the window
+    with django_capture_on_commit_callbacks(execute=True):
+        _proposal(world, code='Y-1')                              # 30 s later, inside the window
+    tasks.provisional_sweep_task.run(*broker['sweep'].pop())      # skips the rebuild
+    newcomer = _person(code='Y-1')                                # a new patient holding the new code
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert provisional_sweep.person_needs_resolve(newcomer.person_id) is None   # not "False" from a stale index
+        provisional_sweep.queue_person_resolve(newcomer.person_id)
+
+    assert broker['warm'] == [1]
+    tasks.provisional_warm_index_task.run()
+    assert provisional_sweep.person_needs_resolve(newcomer.person_id) is True
+
+
+def test_a_partial_resolve_still_marks_the_record_stale_and_queues_the_derivation(world):
+    from unittest import mock
+    from omop_core.mapping import code_resolution
+    from omop_core.models import PatientRecord
+    from omop_core.services.derivation_jobs import use_dispatcher
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    PatientRecord.objects.filter(person=person).update(derivation_version=5)
+    for code in ('A-1', 'B-1'):
+        MeasurementFactory(person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+                           measurement_source_value=code, measurement_date=date(2026, 1, 1))
+        _proposal(world, code=code)
+    real = code_resolution._reconcile_with_proposal
+
+    def fail_on_b(model, concept_col, source_col, table_key, rows, sv, *args, **kwargs):
+        if sv == 'B-1':
+            raise RuntimeError('group B failed')
+        return real(model, concept_col, source_col, table_key, rows, sv, *args, **kwargs)
+
+    class Recorder:
+        dispatched = []
+
+        def dispatch(self, person):
+            self.dispatched.append(person.person_id)
+            return 'task'
+
+        def status(self, task_id):
+            raise NotImplementedError
+
+    recorder = Recorder()
+    with mock.patch.object(code_resolution, '_reconcile_with_proposal', fail_on_b), use_dispatcher(recorder):
+        with pytest.raises(RuntimeError, match='group B failed'):
+            code_resolution.resolve_person_source_codes(person)
+
+    assert Measurement.objects.get(person=person, measurement_source_value='A-1').confidence == 85   # committed
+    assert PatientRecord.objects.get(person=person).derivation_version == 0                          # stale
+    assert recorder.dispatched == [person.person_id]                                                 # and queued
+
+
 def test_a_per_process_cache_is_warned_about_once(broker, world, caplog):
     provisional_sweep._warned.clear()
 

@@ -1440,6 +1440,37 @@ def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv
 def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
     """Re-resolve clinical rows for *person* with unresolved or prior targets.
 
+    The work is :func:`_resolve_groups`; this wrapper makes the person's record
+    stale and queues the derivation for whatever it **committed**, even when a
+    later group raises: each group commits on its own, so a partial resolve has
+    changed rows the record must be re-derived from. The derivation runs after
+    the commits (on Celery with a broker; inline with a statement_timeout
+    otherwise) and a failure to queue it never masks the error that stopped the
+    resolve.
+    """
+    touched: set[int] = set()
+    failed = False
+    try:
+        return _resolve_groups(person, source_values, omop_tables, touched)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        if touched:
+            try:
+                PatientRecord.objects.filter(person_id__in=touched).update(derivation_version=0)
+                from omop_core.services.derivation_jobs import get_dispatcher
+                get_dispatcher().dispatch(person)
+            except Exception:
+                if not failed:
+                    raise
+                logger.exception('Could not queue the derivation for person %s after a failed resolve.',
+                                 person.person_id)
+
+
+def _resolve_groups(person, source_values, omop_tables, person_ids_touched):
+    """Re-resolve clinical rows for *person* with unresolved or prior targets.
+
     Uses the current approved SCCM mappings.  Returns a dict with counts:
     ``{'resolved': N, 'created': N, 'provisional': N, 'reverted': N,
     'skipped': N, 'already_resolved': N}``.
@@ -1464,7 +1495,6 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     provisional = 0
     reverted = 0
     code_details: list[dict] = []
-    person_ids_touched: set[int] = set()
 
     # Concept IDs in quarantine vocabularies (HK-*).
     quarantine_concept_ids = frozenset(
@@ -1642,17 +1672,6 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     if rows_created:
         person_ids_touched.add(person.person_id)
     code_details.extend(creation_details)
-
-    # Mark PatientRecord stale and dispatch derivation asynchronously.
-    # The mapping updates above are fast; the derivation (12-32s on bulk-loaded
-    # patients) runs on Celery when a broker is configured, or inline with a
-    # statement_timeout otherwise — either way, outside this request.
-    if person_ids_touched:
-        PatientRecord.objects.filter(
-            person_id__in=person_ids_touched,
-        ).update(derivation_version=0)
-        from omop_core.services.derivation_jobs import get_dispatcher
-        get_dispatcher().dispatch(person)
 
     return {
         'resolved': resolved,

@@ -307,6 +307,12 @@ def _try_lock(person_id) -> bool:
 def _unlock(person_id):
     with connection.cursor() as cursor:
         cursor.execute('SELECT pg_advisory_unlock(%s, %s)', [_LOCK_NAMESPACE, person_id])
+        if not cursor.fetchone()[0]:
+            # A session lock belongs to one connection. Releasing nothing means the
+            # unlock ran on another: this design assumes a session-pooled or direct
+            # connection, never a transaction-pooling pgbouncer.
+            logger.warning('The provisional person lock for %s was not held by this connection; '
+                           'is the database behind a transaction-pooling proxy?', person_id)
 
 
 def locked_resolve(person, **kwargs):
@@ -400,9 +406,18 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
     run.state = SourceCodeResolveRun.RUNNING
     run.save(update_fields=['state'])
 
-    # A full sweep always refreshes the index; a mapping's sweep at most once a
-    # minute, so a burst of saves does not rebuild it for each.
-    index = qualifying_index(refresh=mapping is None or _take_pending('provisional-sweep:index-fresh', 60))
+    # A full sweep always refreshes the index. A mapping's sweep rebuilds it at
+    # most once a minute, so a burst of saves does not rebuild it for each; when
+    # it skips the rebuild the cached index no longer knows this save's proposal,
+    # so it is dropped, and the next ingest check queues a warm-up instead of
+    # answering from a stale one.
+    index = None
+    if mapping is None:
+        index = qualifying_index(refresh=True)
+    elif _take_pending('provisional-sweep:index-fresh', 60):
+        qualifying_index(refresh=True)
+    else:
+        _cache_delete(_INDEX_KEY)
     ids = candidate_person_ids(
         after=after, limit=limit,
         codes=mapping_codes(mapping) if mapping else qualifying_codes(index),
