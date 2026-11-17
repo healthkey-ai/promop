@@ -6,10 +6,12 @@ points at another alias, an answerable entry without a labelled action, an
 input nobody can resolve — is a silent read-only row in a federated trial, so
 the tests state the rules instead of trusting each block to remember them.
 """
+import re
+
 import pytest
 from django.conf import settings
 
-from omop_core.services.patient_form import patient_form_descriptors
+from omop_core.services.patient_form import FORM_LABELS, patient_form_descriptors
 from omop_core.services.write_descriptor import (
     DESCRIPTOR_META_KEY,
     DESCRIPTOR_RESOURCE_INPUTS,
@@ -92,6 +94,110 @@ def test_the_clinical_dates_keep_their_reviewed_labels(descriptor):
     assert enriched['dlbcl_transformation_date']['label'] == 'DLBCL transformation date'
     assert (enriched['dlbcl_transformation_date_precision']['label']
             == 'DLBCL transformation date precision')
+
+
+def test_every_reviewed_label_is_the_served_label(descriptor):
+    """`FORM_LABELS` is the single owner of the wording a reader sees.
+
+    Asserting the enriched descriptor catches an entry that names a field the
+    descriptor does not serve, one that a later override silently wins, and a
+    reviewed unit that never reaches the response. A projection owns the unit
+    of the fact it writes, so its entry keeps the projection's unit instead.
+    """
+    enriched = patient_form_descriptors(descriptor)
+    for name, (label, unit) in FORM_LABELS.items():
+        assert name in enriched, f'{name} is labelled but not served'
+        assert enriched[name]['label'] == label, name
+        raw = descriptor.get(name) or {}
+        # One owner: when the mapping already supplies a unit it must be the
+        # reviewed one, and a projection keeps its own unit rather than taking
+        # a display spelling (#2652 review).
+        assert unit is None or raw.get('unit') in (None, unit), name
+        assert enriched[name].get('unit') == (
+            raw.get('unit') or (None if raw.get('projection') else unit)), name
+
+
+def test_a_reviewed_unit_does_not_become_the_projected_fact_unit(descriptor):
+    """A label table must not set the `unit_source_value` of a written fact.
+
+    `projection_for_descriptor` reads the entry's unit first, so a display
+    spelling like "%" would land on the Measurement's unit_source_value when
+    the mapping itself carries none. The projection owns that value.
+    """
+    projected = {**descriptor['hba1c_percent'], 'projection': {'unit': None},
+                 'unit': None}
+    enriched = patient_form_descriptors({**descriptor, 'hba1c_percent': projected})
+    assert enriched['hba1c_percent']['unit'] is None
+
+
+# Field-name tokens whose fallback spelling is not the reviewed wording. The
+# fallback leaves the token as `token` mid-sentence and `Token` at the start
+# (#2652), so either is a hit; an expanded review ("Triple negative status",
+# "Prothrombin time") carries no residue and passes without prescribing one
+# spelling.
+ACRONYM_TOKENS = {
+    'sct', 'dlbcl', 'pd', 'egfr', 'hba1c', 'inr', 'pt', 'ptt', 'psa', 'flipi',
+    'gelf', 'hrd', 'tnbc', 'hr', 'btk', 'bcl2', 'anc', 'alc', 'amc', 'rbc',
+    'ast', 'alt', 'bnp', 'cea', 'bmi', 'mrd', 'her2', 'ecog', 'esr', 'esr1',
+    'uln', 'ldh', 'hiv', 'flc', 'dx', 'vo2', 'imwg', 'iwcll',
+}
+
+
+def _is_word(text, token):
+    return bool(re.search(
+        rf'(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])', text))
+
+
+def _acronym_residues(label, name):
+    """The fallback spellings a served label still carries, if any."""
+    residues = []
+    for token in set(name.split('_')) & ACRONYM_TOKENS:
+        residues += [spelling for spelling in (token, token.capitalize())
+                     if _is_word(label, spelling)]
+    # A token carrying digits is a symbol or an isoform (BRCA1, TP53, CD20,
+    # t414), never a word to lower-case.
+    for token in name.split('_'):
+        if re.fullmatch(r'[a-z]{2,}[0-9]+[a-z]*', token):
+            residues += [spelling for spelling in (token, token.capitalize())
+                         if _is_word(label, spelling)]
+    return residues
+
+
+def test_no_acronym_is_served_with_the_fallback_spelling(descriptor):
+    """A new acronym column must be given a reviewed label, not inherit one.
+
+    The issue names one instance (#2601); this pins the class for the tokens the
+    descriptor serves today and for every symbol carrying a digit, so the next
+    `pd_l1_*` or `brca1`-style field fails here instead of reaching a client
+    flattened.
+    """
+    enriched = patient_form_descriptors(descriptor)
+    offenders = [f'{name}: {residues}' for name, entry in enriched.items()
+                 if (residues := _acronym_residues(entry.get('label') or '', name))]
+    assert not offenders, offenders
+
+
+def test_every_genomics_finding_carries_a_reviewed_label(descriptor):
+    """The descriptor serves one row per gene or cytogenetic finding.
+
+    The family grows with the genomics catalogue, so the rule is "reviewed, or
+    it fails" rather than a list of symbols whose fallback flattens the name
+    into prose ("Genomics brca1") (#2652 review).
+    """
+    served = sorted(name for name in patient_form_descriptors(descriptor)
+                    if name.startswith('genomics_'))
+    assert served
+    assert not [name for name in served if name not in FORM_LABELS]
+
+
+def test_negated_views_say_no(descriptor):
+    """A negated row asks the opposite question; its label must say so."""
+    negated = {name: entry['label'] for name, entry
+               in patient_form_descriptors(descriptor).items()
+               if name.startswith('no_') and entry.get('kind') == KIND_NEGATED}
+    assert negated
+    assert not {name: label for name, label in negated.items()
+                if not label.startswith('No ')}
 
 
 def test_aliases_are_one_way(descriptor):

@@ -10,6 +10,7 @@ const UNIT_DISPLAY: Record<string, string> = {
   '10*9/L': '10⁹/L',
   '10*12/L': '10¹²/L',
   'mL/min/1.73m2': 'mL/min/1.73m²',
+  'mm/h': 'mm/hr',
 };
 
 /** Long spellings a reviewed label may use for a symbol unit. */
