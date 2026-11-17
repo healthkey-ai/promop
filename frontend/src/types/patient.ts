@@ -13,6 +13,9 @@ export interface PatientInfo {
   /** The Person this record derives from. Present in every API response; the
    *  therapy-line write needs it. */
   person_id?: number;
+  /** Fields shown from a proposed (unapproved) mapping, with the confidence percentage.
+   *  Absent or empty when everything shown is approved. */
+  provisional_fields?: Record<string, number>;
   email?: string;
   
   // General

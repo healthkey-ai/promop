@@ -4,6 +4,7 @@ import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -278,6 +279,22 @@ function PatientDetailSkeleton() {
   );
 }
 
+/** The record's proposal marks (field to confidence), or none. */
+function marksOf(info: Record<string, unknown> | null | undefined): Record<string, number> {
+  const raw = info?.provisional_fields;
+  return raw && typeof raw === 'object' ? (raw as Record<string, number>) : {};
+}
+
+/** The same marks without the named fields: an edited field is approved data now. */
+function withoutMarks(info: Record<string, unknown>, fields: Iterable<string>): Record<string, unknown> {
+  const marks = { ...marksOf(info) };
+  let changed = false;
+  for (const field of fields) {
+    if (field in marks) { delete marks[field]; changed = true; }
+  }
+  return changed ? { ...info, provisional_fields: marks } : info;
+}
+
 interface PatientDetailProps {
   /** Override the :personId route param — used to render a fixed record (patient mode). */
   personIdOverride?: string;
@@ -416,7 +433,7 @@ export default function PatientDetail({
         }
       }
     }
-    const edited = { ...fresh, ...unsaved };
+    const edited = withoutMarks({ ...fresh, ...unsaved }, Object.keys(unsaved));
 
     patientInfoRef.current = { ...fresh };
     setPatientInfo(fresh);
@@ -493,8 +510,14 @@ export default function PatientDetail({
       const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
 
+      // A field the server filled with a proposal holds that value in the
+      // baseline, so an untouched one never differs from it and is never sent.
+      // A proposal the user touched is sent even when they land on the same
+      // value: that is confirming it, and it becomes approved data (#2659).
+      const proposed = marksOf(baseline);
       for (const [f, v] of Object.entries(info)) {
-        if (LIFECYCLE.has(f) || v === baseline[f]) continue;
+        const confirmed = f in proposed && dirtyFieldsRef.current.has(f);
+        if (LIFECYCLE.has(f) || (v === baseline[f] && !confirmed)) continue;
         const desc = descriptors[f];
         if (desc?.writable && desc.target === 'patient_record') {
           patchFields[f] = v;
@@ -511,6 +534,9 @@ export default function PatientDetail({
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
         );
         saveRevisionRef.current += 1;
+        if (patientInfoRef.current) {
+          patientInfoRef.current = withoutMarks(patientInfoRef.current, Object.keys(patchFields));
+        }
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
@@ -627,8 +653,11 @@ export default function PatientDetail({
 
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
-    const updated = { ...base, [field]: value };
-    if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
+    // Touching a proposed field makes it the user's answer, so its indicator goes
+    // and it is sent as an edit even if they end up on the proposed value.
+    const proposed = field in marksOf(patientInfoRef.current);
+    const updated = withoutMarks({ ...base, [field]: value }, [field]);
+    if (value === patientInfoRef.current?.[field] && !proposed) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
@@ -961,6 +990,7 @@ export default function PatientDetail({
                 {addFieldLink}
               </div>
 
+              <ProvisionalContext.Provider value={{ marks: marksOf(editedInfo), patientMode }}>
               <div key={activeTab} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
                   <>
@@ -1043,6 +1073,7 @@ export default function PatientDetail({
                 )}
                 {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
               </div>
+              </ProvisionalContext.Provider>
             </div>
           </>
         )}
