@@ -55,9 +55,10 @@ def test_concepts_are_deduplicated_and_counts_do_not_multiply_by_field(client, c
     from patient_portal.api.concept_to_code import concept_to_code_list
     request = APIRequestFactory().get(BASE)
     force_authenticate(request, user=client.user)
-    # Paging, count, concepts, fields, domains, the page's concept locks (#2390)
-    # and its notes (#2411).
-    with django_assert_num_queries(7):
+    # Count, the per-category summary of the whole list (#2690), concepts,
+    # fields, domains, priority count, the page's concept locks (#2390) and
+    # its notes (#2411).
+    with django_assert_num_queries(8):
         response = concept_to_code_list(request)
     assert response.status_code == 200
     assert response.data['total'] == 1
@@ -228,6 +229,259 @@ def test_wearables_domain_is_narrowed_by_a_disease(client):
         BASE, {'domain': 'wearables'}).data['results']} == {in_disease.pk, elsewhere.pk}
     assert [item['concept_id'] for item in client.get(
         BASE, {'domain': 'wearables', 'disease': 'MM'}).data['results']] == [in_disease.pk]
+
+
+# ── Category (#2690) ─────────────────────────────────────────────────────────
+
+def classed(name, concept_class, field=True, **overrides):
+    """A standard concept of one concept class, backing a patient field unless told otherwise."""
+    from tests.factories import ConceptClassFactory
+    made = ConceptFactory(concept_name=name, concept_class=ConceptClassFactory(
+        concept_class_id=concept_class, concept_class_name=concept_class), **overrides)
+    if field:
+        FieldConceptMapping.objects.create(concept=made, field_name=f'field_{made.pk}', omop_table='measurement')
+    return made
+
+
+def wearable(target, *categories, status='proposed', vocabulary='OpenWearables'):
+    """One wearable mapping to `target` per category given."""
+    for category in categories:
+        index = SourceCodeConceptMapping.objects.count()
+        source(f'metric-{index}', source_vocabulary_id=vocabulary, target_concept=target,
+               category=category, status=status)
+
+
+def listed(client, **params):
+    response = client.get(BASE, params)
+    assert response.status_code == 200, response.data
+    return response.data
+
+
+def category_of(client, **params):
+    return {item['concept_id']: item['category'] for item in listed(client, **params)['results']}
+
+
+def test_a_wearable_concepts_category_is_the_one_most_of_its_wearable_mappings_carry(client):
+    frequent = ConceptFactory(concept_name='Mostly sleep')
+    tied = ConceptFactory(concept_name='Tied')
+    uncategorized = ConceptFactory(concept_name='No category')
+    rejected_majority = ConceptFactory(concept_name='Rejected majority')
+    wearable(frequent, 'Sleep', 'Sleep', 'Activity')
+    # A tie goes to the category that comes first in WEARABLE_METRIC_CATEGORIES,
+    # not the first alphabetically: Fitness precedes Body Composition there.
+    wearable(tied, 'Body Composition', 'Fitness')
+    wearable(uncategorized, '', '')
+    # Rejected mappings are codes that are not mapped to the concept.
+    wearable(rejected_majority, 'Nutrition')
+    wearable(rejected_majority, 'Hearing', 'Hearing', status='rejected')
+    # A hospital code's category is not a wearable category, however many carry it.
+    wearable(tied, 'Safety', 'Safety', 'Safety', vocabulary='EPIC')
+    # A blank category never outvotes a named one.
+    wearable(frequent, '', '', '', '')
+
+    assert category_of(client, domain='wearables') == {
+        frequent.pk: 'Sleep', tied.pk: 'Fitness', uncategorized.pk: '', rejected_majority.pk: 'Nutrition',
+    }
+
+
+def test_a_loinc_concepts_category_is_its_loinc_class_and_any_other_concepts_its_concept_class(client):
+    from omop_core.models import LoincClass, LoincCodeClass
+    LoincClass.objects.create(code='CHEM', display_name='Chemistry - non-challenge')
+    LoincClass.objects.create(code='ADMIN.PATIENT', display_name=' ')
+    chemistry = classed('Albumin', 'Lab Test', concept_code='1751-7')
+    unnamed_class = classed('Patient name', 'Clinical Observation', concept_code='54125-0')
+    unclassed = classed('No class row', 'Lab Test', concept_code='99999-9')
+    # A code that happens to be a LOINC number in another vocabulary is not LOINC.
+    snomed = classed('Hypertension', 'Disorder', concept_code='38341003', vocabulary=VocabularyFactory(
+        vocabulary_id='SNOMED', vocabulary_name='SNOMED'))
+    for code, loinc_class in (('1751-7', 'CHEM'), ('54125-0', 'ADMIN.PATIENT'), ('38341003', 'CHEM')):
+        LoincCodeClass.objects.create(loinc_num=code, loinc_class_id=loinc_class)
+
+    assert category_of(client) == {
+        chemistry.pk: 'Chemistry - non-challenge', unnamed_class.pk: 'ADMIN.PATIENT',
+        unclassed.pk: 'Lab Test', snomed.pk: 'Disorder',
+    }
+    # Under Wearables the same concept is filed by its wearable mappings.
+    wearable(chemistry, 'Nutrition')
+    assert category_of(client, domain='wearables') == {chemistry.pk: 'Nutrition'}
+
+
+def test_the_list_is_ordered_by_category_then_priority_then_name(client):
+    from omop_core.services import concept_priority
+    # Case does not decide the order: "alpha" precedes "Beta".
+    zinc = classed('Zinc', 'alpha class')
+    yttrium = classed('Yttrium', 'alpha class')
+    argon = classed('Argon', 'Beta class')
+    boron = classed('Boron', 'Beta class')
+    cobalt = classed('Cobalt', 'Beta class')
+    concept_priority.move(argon, 1)
+    concept_priority.move(yttrium, 2)
+    concept_priority.mark_done(boron, True, client.user)
+
+    data = listed(client)
+    assert [item['concept_id'] for item in data['results']] == [yttrium.pk, zinc.pk, argon.pk, cobalt.pk, boron.pk]
+    assert (data['order'], data['grouped']) == ('category', True)
+    assert data['categories'] == [{'category': 'alpha class', 'count': 2}, {'category': 'Beta class', 'count': 3}]
+    assert listed(client, order='category')['results'] == data['results']
+
+    # The global ranked list, as before categories: ranked, then by name, Done last.
+    ranked = listed(client, order='priority')
+    assert [item['concept_id'] for item in ranked['results']] == [argon.pk, yttrium.pk, cobalt.pk, zinc.pk, boron.pk]
+    assert (ranked['order'], ranked['grouped'], ranked['categories']) == ('priority', False, None)
+    assert {item['category'] for item in ranked['results']} == {'alpha class', 'Beta class'}
+
+    assert client.get(BASE, {'order': 'bogus'}).status_code == 400
+    assert client.get(BASE, {'order': '-category'}).status_code == 400
+
+
+def test_wearables_are_ordered_by_the_metric_category_list_with_no_category_last(client):
+    from omop_core.services import concept_priority
+    body = ConceptFactory(concept_name='Aardvark weight')
+    fitness_late = ConceptFactory(concept_name='Zone minutes')
+    fitness_ranked = ConceptFactory(concept_name='VO2 max')
+    none = ConceptFactory(concept_name='Aaa unfiled')
+    wearable(body, 'Body Composition')
+    wearable(fitness_late, 'Fitness')
+    wearable(fitness_ranked, 'Fitness')
+    wearable(none, '')
+    concept_priority.move(none, 1)
+    concept_priority.move(fitness_ranked, 2)
+
+    data = listed(client, domain='wearables')
+    assert [(item['concept_id'], item['category']) for item in data['results']] == [
+        (fitness_ranked.pk, 'Fitness'), (fitness_late.pk, 'Fitness'), (body.pk, 'Body Composition'), (none.pk, ''),
+    ]
+    assert data['categories'] == [
+        {'category': 'Fitness', 'count': 2}, {'category': 'Body Composition', 'count': 1}, {'category': '', 'count': 1},
+    ]
+    assert [item['concept_id'] for item in listed(client, domain='wearables', order='priority')['results']] == [
+        none.pk, fitness_ranked.pk, body.pk, fitness_late.pk,
+    ]
+
+
+def test_category_counts_cover_the_whole_filtered_list_on_every_page(client):
+    from omop_core.services import concept_priority
+    big = [classed(f'Big {index:02}', 'Big class') for index in range(51)]
+    small = [classed(f'Small {index} needle', 'Small class') for index in range(3)]
+    classed('Big needle', 'Big class')
+    concept_priority.move(small[1], 1)
+    concept_priority.move(big[7], 2)
+    counts = [{'category': 'Big class', 'count': 52}, {'category': 'Small class', 'count': 3}]
+
+    first, second = listed(client), listed(client, page=2)
+    assert first['categories'] == second['categories'] == counts
+    assert first['total'] == 55 and {item['category'] for item in first['results']} == {'Big class'}
+    # The category that began on page 1 goes on, ahead of the next one.
+    assert [item['category'] for item in second['results']] == ['Big class'] * 2 + ['Small class'] * 3
+    assert second['results'][2]['concept_id'] == small[1].pk  # ranked first inside its own category
+
+    assert listed(client, search='needle')['categories'] == [
+        {'category': 'Big class', 'count': 1}, {'category': 'Small class', 'count': 3}]
+    assert listed(client, prioritized='1')['categories'] == [
+        {'category': 'Big class', 'count': 1}, {'category': 'Small class', 'count': 1}]
+    assert listed(client, search='no such concept')['categories'] == []
+
+
+@pytest.mark.usefixtures('disease_extensions')
+def test_category_counts_respect_the_disease(client):
+    from tests.factories import ConceptClassFactory
+    for name, concept_class, field in (('M-protein', 'Lab Test', 'monoclonal_protein_serum'),
+                                       ('ER status', 'Staging / Scales', 'estrogen_receptor_status')):
+        made = ConceptFactory(concept_name=name, concept_class=ConceptClassFactory(
+            concept_class_id=concept_class, concept_class_name=concept_class))
+        FieldConceptMapping.objects.create(concept=made, field_name=field, omop_table='measurement')
+    assert listed(client)['categories'] == [
+        {'category': 'Lab Test', 'count': 1}, {'category': 'Staging / Scales', 'count': 1}]
+    assert listed(client, disease='MM')['categories'] == [{'category': 'Lab Test', 'count': 1}]
+
+
+def test_category_filter_narrows_to_one_category_under_the_same_definition(client):
+    from omop_core.models import LoincClass, LoincCodeClass
+    LoincClass.objects.create(code='CHEM', display_name='Chemistry')
+    LoincCodeClass.objects.create(loinc_num='1751-7', loinc_class_id='CHEM')
+    albumin = classed('Albumin', 'Lab Test', concept_code='1751-7')
+    other_lab = classed('Albumin by another name', 'Lab Test')
+    disorder = classed('Hypertension', 'Disorder')
+
+    def ids(**params):
+        return {item['concept_id'] for item in listed(client, **params)['results']}
+
+    # The LOINC class is the category, so the concept class it would otherwise have does not match.
+    assert ids(category='Chemistry') == {albumin.pk}
+    assert ids(category='Lab Test') == {other_lab.pk}
+    assert ids(category='Disorder') == {disorder.pk}
+    assert ids(category='Lab Test', search='Hypertension') == set()
+    assert ids(category='Albumin', scope='all') == set()  # an unknown category matches nothing
+    assert ids(category='chemistry') == set()  # and the match is exact
+    assert ids(category='Chem\x00istry') == set()  # not a value the database can be asked about
+    narrowed = listed(client, category='Chemistry', order='priority')
+    assert narrowed['total'] == 1 and narrowed['results'][0]['concept_id'] == albumin.pk
+    assert listed(client, category='Chemistry')['categories'] == [{'category': 'Chemistry', 'count': 1}]
+    assert ids(category='__none__') == set()
+
+    # Under Wearables the filter reads the wearable category, and __none__ the concepts without one.
+    unfiled = ConceptFactory(concept_name='Unfiled metric')
+    wearable(albumin, 'Nutrition')
+    wearable(unfiled, '')
+    assert ids(domain='wearables', category='Nutrition') == {albumin.pk}
+    assert ids(domain='wearables', category='Chemistry') == set()
+    assert ids(domain='wearables', category='__none__') == {unfiled.pk}
+    assert listed(client, domain='wearables', category='__none__')['categories'] == [{'category': '', 'count': 1}]
+    assert ids(domain='wearables', category='__none__', search='Albumin') == set()
+
+
+def test_a_list_longer_than_the_limit_is_not_grouped_and_keeps_the_priority_order(client):
+    from omop_core.services import concept_priority
+    alpha = classed('Zeta', 'Alpha class')
+    beta = classed('Eta', 'Beta class')
+    gamma = classed('Theta', 'Gamma class')
+    concept_priority.move(gamma, 1)
+    with patch('omop_core.services.concept_to_code.CONCEPT_CATEGORY_GROUP_LIMIT', 2):
+        for params in ({}, {'order': 'category'}):
+            data = listed(client, **params)
+            assert (data['grouped'], data['categories'], data['order'], data['group_limit']) == (False, None, 'priority', 2)
+            assert [(item['concept_id'], item['category']) for item in data['results']] == [
+                (gamma.pk, 'Gamma class'), (beta.pk, 'Beta class'), (alpha.pk, 'Alpha class')]
+        # A filter that brings the list within the limit groups it again.
+        assert listed(client, search='eta')['total'] == 3
+        narrowed = listed(client, search='Zeta')
+        assert (narrowed['grouped'], narrowed['total']) == (True, 1)
+    with patch('omop_core.services.concept_to_code.CONCEPT_CATEGORY_GROUP_LIMIT', 3):
+        data = listed(client)
+        assert data['grouped'] is True and len(data['categories']) == 3
+        assert [item['concept_id'] for item in data['results']] == [alpha.pk, beta.pk, gamma.pk]
+
+
+@pytest.mark.parametrize('params, queries', [
+    ({}, 8), ({'domain': 'wearables'}, 8), ({'category': 'Lab Test'}, 8),
+    # No summary when the list is in priority order.
+    ({'order': 'priority'}, 7),
+])
+def test_the_list_reads_no_more_for_more_concepts(client, django_assert_num_queries, params, queries):
+    from omop_core.models import LoincClass, LoincCodeClass
+    from patient_portal.api.concept_to_code import concept_to_code_list
+    LoincClass.objects.create(code='CHEM', display_name='Chemistry')
+
+    def add(count):
+        for _ in range(count):
+            index = SourceCodeConceptMapping.objects.count()
+            made = classed(f'Counted {index}', 'Lab Test' if index % 2 else 'Disorder', concept_code=f'{index}-1')
+            if index % 3 == 0:
+                LoincCodeClass.objects.create(loinc_num=made.concept_code, loinc_class_id='CHEM')
+            wearable(made, 'Sleep' if index % 2 else '')
+
+    def read():
+        request = APIRequestFactory().get(BASE, params)
+        force_authenticate(request, user=client.user)
+        with django_assert_num_queries(queries):
+            response = concept_to_code_list(request)
+        assert response.status_code == 200
+        return response.data['total']
+
+    add(2)
+    few = read()
+    add(9)
+    assert read() > few
 
 
 def test_list_and_detail_paginate_before_serialization(client, concept):

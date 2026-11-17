@@ -16,8 +16,10 @@ from omop_core.models import (
     SourceCodeConceptMapping, SuggestRun,
 )
 from omop_core.services import concept_lock
+from omop_core.services import concept_to_code as concept_browse
 from omop_core.services.concept_to_code import (
-    WEARABLES_DOMAIN, browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
+    CONCEPT_ORDERS, WEARABLES_DOMAIN, browse_concepts, category_summary, concept_payload, eligible_sources,
+    order_concepts, source_payload, standard_destinations,
 )
 from omop_core.services.mapping_samples import attach_source_samples
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
@@ -39,14 +41,21 @@ def _authorize(user, *, write=False):
         raise PermissionDenied('Mapping curator access required.')
 
 
-def _paginate(queryset, params, page_size=PAGE_SIZE):
+def _page_number(params):
     try:
         page = int(params.get('page', 1))
         if page < 1:
             raise ValueError
     except (TypeError, ValueError):
         raise ValidationError({'page': 'Enter a positive whole number.'})
-    count = queryset.count()
+    return page
+
+
+def _paginate(queryset, params, page_size=PAGE_SIZE, count=None):
+    """One page of `queryset`. A caller that has already counted it passes `count`."""
+    page = _page_number(params)
+    if count is None:
+        count = queryset.count()
     page = min(page, max(1, (count + page_size - 1) // page_size))
     return queryset[(page - 1) * page_size:page * page_size], {
         'page': page, 'page_size': page_size, 'total': count,
@@ -75,8 +84,22 @@ def concept_to_code_list(request):
         page_size = 0
     if page_size not in CONCEPT_PAGE_SIZES:
         raise ValidationError({'page_size': f'Choose one of {", ".join(map(str, CONCEPT_PAGE_SIZES))}.'})
+    order = params.get('order') or 'category'
+    if order not in CONCEPT_ORDERS:
+        raise ValidationError({'order': f'Choose one of {", ".join(CONCEPT_ORDERS)}.'})
+    _page_number(params)  # a malformed page is refused before anything is read
     concepts, fields, annotations = browse_concepts(params)
-    page, paging = _paginate(concepts, params, page_size)
+    # Counted once, here: the total decides the order as well as the paging.
+    # Sorting and counting by category is one more pass over the whole
+    # filtered list, so it is done only for a list short enough to afford it;
+    # a longer one keeps the priority order and is not grouped.
+    total = concepts.count()
+    limit = concept_browse.CONCEPT_CATEGORY_GROUP_LIMIT
+    grouped = order == 'category' and total <= limit
+    if not grouped:
+        order = 'priority'
+    categories = category_summary(concepts, params) if grouped else None
+    page, paging = _paginate(order_concepts(concepts, params, order), params, page_size, count=total)
     page = list(page.annotate(**annotations))
     field_map = {}
     for field in fields.filter(concept_id__in=[concept.pk for concept in page]).order_by('field_name'):
@@ -90,7 +113,11 @@ def concept_to_code_list(request):
     notes = _notes_for([concept.pk for concept in page])
     return Response({
         **paging, 'domains': list(domains),
-        'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
+        # The order in force, whether the rows are in category order, and
+        # then every category of the filtered list with its size, in order.
+        'order': order, 'grouped': grouped, 'group_limit': limit, 'categories': categories,
+        'results': [{**concept_payload(concept), 'category': concept.category,
+                     'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
                      'seen': concept.seen, 'priority': concept.priority,
                      'done': concept.done, 'lock': locks.get(concept.pk),
