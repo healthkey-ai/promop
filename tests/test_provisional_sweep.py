@@ -800,8 +800,26 @@ def test_a_mapping_sweep_still_resolves_its_one_code(world, resolver_calls):
     assert _row(person).confidence == 85
 
 
-def test_a_loaded_chart_costs_the_same_queries_as_a_bare_one(world):
-    """The walk is gone: 2,000 unrelated codes add no queries to a person's resolve."""
+def test_the_scope_costs_one_query_per_table_whatever_the_chart_or_the_qualifying_set(world):
+    """The walk is gone, and no IN list of qualifying codes is sent either (#2663)."""
+    bare, loaded = _person(), _person()
+    _unrelated_rows(loaded, 2000)
+    _proposal(world)
+    big_set = {table: {f'Q{n}' for n in range(1500)} | {CODE}
+               for table in provisional_sweep.CLINICAL_TABLES}
+
+    counts = {}
+    for name, person in (('bare', bare), ('loaded', loaded)):
+        with CaptureQueriesContext(connection) as queries:
+            scope = provisional_sweep.person_scope(person.person_id, big_set)
+        counts[name] = len(queries)
+        assert scope == ([CODE], ['measurement'])
+
+    # 5 tables x (the person's distinct codes + the provisional holders) + the inventory.
+    assert counts == {'bare': 11, 'loaded': 11}
+
+
+def test_a_loaded_chart_resolves_in_the_queries_of_a_bare_one(world):
     bare, loaded = _person(), _person()
     _unrelated_rows(loaded, 2000)
     _proposal(world)
@@ -817,3 +835,143 @@ def test_a_loaded_chart_costs_the_same_queries_as_a_bare_one(world):
 
     assert counts['loaded'] == counts['bare']
     assert _row(loaded).confidence == 85
+
+
+def test_every_spelling_of_a_proposed_code_is_resolved(world, resolver_calls):
+    """The resolver matches a proposal case-insensitively, and so must the scope."""
+    person = _person(code='HGB')
+    PatientSourceCode.objects.create(
+        person=person, source_value='Hgb', omop_table='measurement', source_vocabulary_id='Local')
+    MeasurementFactory(
+        person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+        measurement_source_value='Hgb', measurement_date=date(2026, 1, 1), confidence=None)
+    _unrelated_rows(person, 10)
+    _proposal(world, code='HGB')
+
+    provisional_sweep.start_sweep()
+
+    (_pid, kwargs), = resolver_calls
+    assert kwargs == {'source_values': ['HGB', 'Hgb'], 'omop_tables': ['measurement']}
+    for spelling in ('HGB', 'Hgb'):
+        row = _rows(person, spelling).get()
+        assert (row.measurement_concept_id, row.confidence) == (world.concept_id, 85), spelling
+
+
+def test_a_mixed_case_inventory_code_with_no_row_is_in_scope_and_gets_one(world):
+    # Candidate selection looks for the spellings an ETL is likely to write
+    # (code, upper, lower), so a person holding only `Hgb` is not selected; once
+    # selected for another code, the scope still covers every spelling.
+    person = _person(code='Hgb', with_row=False)
+    _proposal(world, code='HGB')
+    codes = provisional_sweep.qualifying_codes()
+
+    scope = provisional_sweep.person_scope(person.person_id, codes)
+    provisional_sweep.locked_resolve(person, source_values=scope[0], omop_tables=scope[1])
+
+    assert scope == (['Hgb'], ['measurement'])
+    assert _rows(person, 'Hgb').get().confidence == 85
+
+
+def _concept_in(domain, name):
+    from tests.factories import DomainFactory
+    return ConceptFactory(concept_name=name, domain=DomainFactory(domain_id=domain, domain_name=domain))
+
+
+def _observation_person(code, with_row=True):
+    from omop_core.models import Observation
+    from tests.factories import ObservationFactory
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    PatientSourceCode.objects.create(
+        person=person, source_value=code, omop_table='observation', source_vocabulary_id='Local')
+    if with_row:
+        ObservationFactory(
+            person=person, observation_concept_id=NO_MATCHING_CONCEPT_ID,
+            observation_source_value=code, observation_date=date(2026, 1, 1), confidence=None)
+    return person, Observation.objects.filter(person=person, observation_source_value=code)
+
+
+def _table_proposal(table, domain, target, code, confidence=0.85):
+    return SourceCodeConceptMapping.objects.create(
+        source_code=code, source_vocabulary_id='Local', source_code_description=code,
+        domain_id=domain, omop_table=table, target_concept=target,
+        status='proposed', suggestion_confidence=confidence)
+
+
+def test_an_inventory_only_observation_code_is_in_scope_and_gets_a_row(world, resolver_calls):
+    target = _concept_in('Observation', 'Smoking status')
+    person, rows = _observation_person('SMK', with_row=False)
+    _table_proposal('observation', 'Observation', target, 'SMK')
+
+    provisional_sweep.start_sweep()
+
+    assert resolver_calls == [(person.person_id, {
+        'source_values': ['SMK'], 'omop_tables': ['observation']})]
+    row = rows.get()
+    assert (row.observation_concept_id, row.confidence) == (target.concept_id, 85)
+
+
+def test_a_provisional_condition_whose_proposal_stopped_qualifying_is_in_scope_and_reverted(
+        world, resolver_calls):
+    from omop_core.models import ConditionOccurrence
+    from tests.factories import ConditionOccurrenceFactory
+    target = _concept_in('Condition', 'Anemia')
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    PatientSourceCode.objects.create(
+        person=person, source_value='ANEM', omop_table='condition', source_vocabulary_id='Local')
+    ConditionOccurrenceFactory(
+        person=person, condition_concept_id=NO_MATCHING_CONCEPT_ID,
+        condition_source_value='ANEM', condition_start_date=date(2026, 1, 1))
+    mapping = _table_proposal('condition', 'Condition', target, 'ANEM')
+    provisional_sweep.start_sweep()
+    rows = ConditionOccurrence.objects.filter(person=person, condition_source_value='ANEM')
+    assert rows.get().confidence == 85
+    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(suggestion_confidence=0.4)  # no hook fires
+    resolver_calls.clear()
+
+    run = provisional_sweep.start_sweep()
+
+    assert resolver_calls == [(person.person_id, {
+        'source_values': ['ANEM'], 'omop_tables': ['condition']})]
+    row = rows.get()
+    assert (row.condition_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None)
+    run.refresh_from_db()
+    assert run.reverted == 1
+
+
+def test_a_person_holding_codes_in_two_tables_resolves_each_in_its_own_table(world, resolver_calls):
+    target = _concept_in('Observation', 'Smoking status')
+    person, obs_rows = _observation_person('SMK')
+    PatientSourceCode.objects.create(
+        person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='Local')
+    MeasurementFactory(
+        person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+        measurement_source_value=CODE, measurement_date=date(2026, 1, 1), confidence=None)
+    # A code each table holds but only the other table has a proposal for stays as it is.
+    MeasurementFactory(
+        person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+        measurement_source_value='SMK', measurement_date=date(2026, 1, 1), confidence=None)
+    _proposal(world)
+    _table_proposal('observation', 'Observation', target, 'SMK')
+
+    provisional_sweep.start_sweep()
+
+    (_pid, kwargs), = resolver_calls
+    assert kwargs == {'source_values': [CODE, 'SMK'], 'omop_tables': ['measurement', 'observation']}
+    assert _row(person).confidence == 85
+    assert obs_rows.get().confidence == 85
+    assert _rows(person, 'SMK').get().confidence is None            # no measurement proposal for SMK
+
+
+def test_an_inventory_alias_for_a_table_is_folded_onto_its_canonical_key(world):
+    from omop_core.models import ConditionOccurrence  # noqa: F401
+    target = _concept_in('Condition', 'Anemia')
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    PatientSourceCode.objects.create(
+        person=person, source_value='ANEM', omop_table='condition_occurrence', source_vocabulary_id='Local')
+    _table_proposal('condition', 'Condition', target, 'ANEM')
+
+    assert provisional_sweep.person_scope(
+        person.person_id, provisional_sweep.qualifying_codes()) == (['ANEM'], ['condition'])

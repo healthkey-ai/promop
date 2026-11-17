@@ -344,36 +344,51 @@ def person_scope(person_id, codes) -> tuple[list[str], list[str]]:
     """``(source_values, omop_tables)`` a full sweep resolves for one person.
 
     The codes the person holds that a sweep can change: a clinical row or an
-    inventory code whose spelling is in *codes* (the qualifying proposals), or a
-    row that already carries a provisional mark (a proposal that stopped
-    qualifying gets its rows taken back). Restricting the resolver to these is
-    the whole point: unrestricted, it walks the person's entire inventory, which
-    on a loaded patient is thousands of already-resolved codes and minutes of
-    queries for a handful of rows that can change. Empty lists mean there is
-    nothing to resolve, and the caller must not call the resolver: it reads an
-    empty ``source_values`` as no restriction. Bounded by the person's own codes
-    whatever the size of *codes*; the qualifying set is looked up in
-    ``_CODE_CHUNK`` pieces.
+    inventory code that is a qualifying proposal's code in any spelling (the
+    resolver matches a proposal case-insensitively, so ``Hgb`` is covered by a
+    proposal for ``HGB``), or a row that already carries a provisional mark (a
+    proposal that stopped qualifying gets its rows taken back). The values
+    returned are the person's *actual* spellings, which is what the resolver
+    filters on. Restricting the resolver to these is the whole point:
+    unrestricted, it walks the person's entire inventory, which on a loaded
+    patient is thousands of already-resolved codes and minutes of queries for a
+    handful of rows that can change.
+
+    One query per clinical table for the person's distinct codes, one for the
+    provisional holders, and one for the inventory, whatever the size of
+    *codes*: the qualifying set is intersected in Python, never sent as an IN
+    list. Empty lists mean there is nothing to resolve, and the caller must not
+    call the resolver: it reads an empty ``source_values`` as no restriction.
     """
+    wanted = {table: {code.upper() for code in spellings} for table, spellings in codes.items()}
     values: set[str] = set()
     tables: set[str] = set()
 
+    def covered(table, source_value):
+        return source_value.upper() in wanted.get(table, ())
+
     def found(table, spellings):
-        spellings = set(spellings)
+        spellings = {v for v in spellings if v}
         if spellings:
             values.update(spellings)
             tables.add(table)
 
     for table, (model, _concept_col, source_col) in CLINICAL_TABLES.items():
         rows = model.objects.filter(person_id=person_id)
+        if wanted.get(table):
+            found(table, (v for v in rows.values_list(source_col, flat=True).distinct()
+                          if v and covered(table, v)))
         found(table, rows.filter(confidence__isnull=False).values_list(source_col, flat=True).distinct())
-        for chunk in _chunks(codes.get(table, ())):
-            found(table, rows.filter(**{f'{source_col}__in': chunk})
-                  .values_list(source_col, flat=True).distinct())
-            found(table, PatientSourceCode.objects.filter(
-                person_id=person_id, omop_table=table, source_value__in=chunk,
-            ).values_list('source_value', flat=True).distinct())
-    return sorted(v for v in values if v), sorted(tables)
+    if wanted:
+        found_inventory: dict[str, set[str]] = {}
+        for omop_table, value in PatientSourceCode.objects.filter(person_id=person_id).values_list(
+                'omop_table', 'source_value').distinct():
+            table = normalize_omop_table(omop_table)
+            if table in CLINICAL_TABLES and value and covered(table, value):
+                found_inventory.setdefault(table, set()).add(value)
+        for table, spellings in found_inventory.items():
+            found(table, spellings)
+    return sorted(values), sorted(tables)
 
 
 _NOTHING_RESOLVED = {
