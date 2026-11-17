@@ -117,22 +117,24 @@ const domains = [
 ];
 /** What the tab remembers per account in this browser, as the patient list's
  * filters are: the chosen domain (#2656), the list's order, and the categories
- * folded shut under each domain (#2690). */
-type Preferences = { domain: string; order: ConceptOrder; collapsed: Record<string, string[]> };
+ * the categories a curator has opened under each domain; every other category
+ * starts folded (#2690). */
+type Preferences = { domain: string; order: ConceptOrder; expanded: Record<string, string[]> };
 const domainPreferenceKey = (userId?: number | string | null) => `promop-concept-to-code:${userId ?? 'session'}`;
 /** Each part is read on its own, and one of the wrong shape is ignored. */
 function loadPreferences(key: string): Preferences {
-  const preferences: Preferences = { domain: '', order: 'category', collapsed: {} };
+  const preferences: Preferences = { domain: '', order: 'category', expanded: {} };
   try {
     const saved = JSON.parse(localStorage.getItem(key) || '{}');
     if (!saved || typeof saved !== 'object') return preferences;
     const isDomain = (value: unknown) => domains.some(([domain]) => domain === value);
     if (isDomain(saved.domain)) preferences.domain = saved.domain;
     if (saved.order === 'priority') preferences.order = 'priority';
-    if (saved.collapsed && typeof saved.collapsed === 'object' && !Array.isArray(saved.collapsed)) {
-      for (const [domain, names] of Object.entries(saved.collapsed)) {
+    // An older `collapsed` list is not read: it said what was shut, not what is open.
+    if (saved.expanded && typeof saved.expanded === 'object' && !Array.isArray(saved.expanded)) {
+      for (const [domain, names] of Object.entries(saved.expanded)) {
         if (isDomain(domain) && Array.isArray(names) && names.every(name => typeof name === 'string')) {
-          preferences.collapsed[domain] = names;
+          preferences.expanded[domain] = names;
         }
       }
     }
@@ -140,11 +142,11 @@ function loadPreferences(key: string): Preferences {
   return preferences;
 }
 /** Only what differs from a fresh tab is written, beside the domain. */
-function savePreferences(key: string, { domain, order, collapsed }: Preferences) {
-  const folded = Object.fromEntries(Object.entries(collapsed).filter(([, names]) => names.length));
+function savePreferences(key: string, { domain, order, expanded }: Preferences) {
+  const opened = Object.fromEntries(Object.entries(expanded).filter(([, names]) => names.length));
   try {
     localStorage.setItem(key, JSON.stringify({
-      domain, ...(order === 'category' ? {} : { order }), ...(Object.keys(folded).length ? { collapsed: folded } : {}),
+      domain, ...(order === 'category' ? {} : { order }), ...(Object.keys(opened).length ? { expanded: opened } : {}),
     }));
   } catch { /* Storage may be disabled. */ }
 }
@@ -190,7 +192,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   initialConceptId?: number;
   /** Called once the linked concept is opened or reported, so it is not reopened. */
   onInitialConceptHandled?: () => void;
-  /** Whose domain, order and folded categories to restore and save. */
+  /** Whose domain, order and opened categories to restore and save. */
   userId?: number | string | null;
 }) {
   const [diseases, setDiseases] = useState<[string, string][]>([['', 'All diseases']]);
@@ -334,13 +336,16 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
 
   // Rows sit under a header per category only when the server sent them in
   // category order with the categories' sizes; an older or longer response
-  // is a plain list. Folding is this page's rows, shown or not (#2690).
+  // is a plain list. Folding changes what is drawn of this page's rows (#2690).
   const groups = data?.grouped === true && Array.isArray(data.categories) ? groupByCategory(data) : null;
   const listCategories = groups ? (data?.categories ?? []).map(entry => entry.category) : [];
-  const folded = new Set(preferences.collapsed[domain] ?? []);
-  const fold = (names: Iterable<string>) => remember({ collapsed: { ...preferences.collapsed, [domain]: [...new Set(names)] } });
-  const toggleCategory = (category: string) => fold(
-    folded.has(category) ? [...folded].filter(name => name !== category) : [...folded, category]);
+  // A category is folded until the curator opens it; what they opened is
+  // remembered per domain, so a category never seen starts folded.
+  const expanded = new Set(preferences.expanded[domain] ?? []);
+  const setExpanded = (names: Iterable<string>) => remember({ expanded: { ...preferences.expanded, [domain]: [...new Set(names)] } });
+  const toggleCategory = (category: string) => setExpanded(
+    expanded.has(category) ? [...expanded].filter(name => name !== category) : [...expanded, category]);
+  const allFolded = Boolean(groups?.every(group => !expanded.has(group.category)));
   // The whole filtered list is too long to sort and count by category.
   const tooLongToGroup = Boolean(data && data.grouped === false && order === 'category'
     && data.group_limit !== undefined && data.total > data.group_limit);
@@ -449,17 +454,19 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
         <option value="category">Category, then priority</option><option value="priority">Priority</option>
       </select>
       {groups && <div role="group" aria-label="Categories" className="flex items-center gap-2">
-        <button type="button" className={button} disabled={!listCategories.some(name => folded.has(name))}
-          onClick={() => fold([...folded].filter(name => !listCategories.includes(name)))}>Expand all</button>
-        <button type="button" className={button} disabled={listCategories.every(name => folded.has(name))}
-          onClick={() => fold([...folded, ...listCategories])}>Collapse all</button>
+        <button type="button" className={button} disabled={listCategories.every(name => expanded.has(name))}
+          onClick={() => setExpanded([...expanded, ...listCategories])}>Expand all</button>
+        <button type="button" className={button} disabled={!listCategories.some(name => expanded.has(name))}
+          onClick={() => setExpanded([...expanded].filter(name => !listCategories.includes(name)))}>Collapse all</button>
       </div>}
     </div>
     <p className="text-xs text-slate-500">{order === 'category'
       ? 'Concepts are listed by category and, inside a category, ranked ones first. Priority is one list across every category, and ranked concepts are mapped first.'
       : 'Ranked concepts are mapped first and come first on every page.'} Drag a row, or type
       its priority (1 is first; clear it to unrank). Click a Priority cell for Done once a concept's codes are mapped; Done
-      concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.</p>
+      concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.
+      {groups && ' Categories start folded; dragging reorders the rows of the categories you have opened.'}</p>
+    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts, or Expand all.</p>}
     {tooLongToGroup && data && <p className="text-xs text-slate-500">This list has {data.total.toLocaleString()} concepts, too
       many to group by category (the limit is {data.group_limit?.toLocaleString()}), so it is in priority order. Choose a
       domain or a disease, or search, to narrow it.</p>}
@@ -475,7 +482,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
           <th scope="col" className="p-3 text-right">Approved</th><th scope="col" className="p-3 text-right">Proposed</th><th scope="col" className="p-3 text-right">Rejected</th>
         </tr></thead>
         {groups ? groups.map((group, index) => {
-          const open = !folded.has(group.category);
+          const open = expanded.has(group.category);
           const shown = group.rows.length;
           return <tbody key={`${index}:${group.category}`} data-testid={`concept-group-${group.category || 'none'}`}>
             <tr className="border-t border-slate-200 bg-slate-50">

@@ -1610,16 +1610,24 @@ has its `concept_class_id`. It is a string, `''` for none.
   definition (`__none__` for none) and combines with every other filter; an
   unknown value matches nothing.
 - **The page.** A grouped list shows one header row per category: a button
-  with the category ("Uncategorized" for none) and its size across every page,
-  "(continued)" when the category began on an earlier page (worked out from
-  the counts before it). Clicking folds that category's rows on the page; the
-  rows still belong to the page, so folding changes what is drawn and asks the
-  server for nothing. Expand all and Collapse all act on the categories of the
-  filtered list. A list too long to group says so and how to narrow it.
+  with the category ("Uncategorized" for none), its size across every page and,
+  when fewer, how many are on this page, and "(continued)" when the category
+  began on an earlier page (worked out from the counts before it). **Every
+  category starts folded**: only its header is drawn until the curator opens
+  it, and a one-line hint says so while all of them are folded. Folded rows
+  still belong to the page, so opening or folding changes what is drawn and
+  asks the server for nothing. Expand all and Collapse all act on the
+  categories of the filtered list. Drag-to-reorder needs visible rows, so it
+  works among the categories that are open (the help text says so); a drop on
+  a row of another open category still sets the global position. A list too
+  long to group says so and how to narrow it.
 - **Remembered.** The per-account object that holds the domain
-  (`promop-concept-to-code:<user id>`) also holds `order` when it is
-  `priority` and `collapsed`, the folded categories per domain
-  (`{"wearables": ["Sleep"]}`); a part of the wrong shape is ignored on its own.
+  (`promop-concept-to-code:<user id>`) is `{"domain", "order"?, "expanded"?}`:
+  `order` only when it is `priority`, and `expanded`, the categories the
+  curator has opened per domain (`{"wearables": ["Sleep", ""]}`, `""` being
+  Uncategorized). A category not listed is folded, so a new account, domain or
+  category starts folded. A part of the wrong shape is ignored on its own, and
+  an older `collapsed` list is not read.
 
 ### The six LOINC axes decide which candidates are the same test
 
