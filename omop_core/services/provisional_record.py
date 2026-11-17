@@ -128,6 +128,69 @@ def _attribute(person, record, snapshot, kept, measurements, observations, routi
     return confidence
 
 
+# The calculated fields a provisional input can move, and the stored fields
+# each is calculated from (#2661). A field is listed only when it has a
+# confidence column; ``_compute_derived_fields`` and ``combine_b_symptoms``
+# are the real record's own rules, run over a copy. Left for later: the
+# fields calculated from a JSON input (no confidence column for it), the free
+# light chain pair, which is read only from one lab event, the age, the
+# therapy dates, and fields owned by an admin formula.
+COMPUTED_INPUTS = {
+    'bmi': ('weight', 'height', 'weight_units', 'height_units'),
+    'tnbc_status': ('estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status'),
+    'hr_status': ('estrogen_receptor_status', 'progesterone_receptor_status'),
+    'metastatic_status': ('distant_metastasis_stage',),
+    'renal_adequacy_status': ('egfr_ml_min_173m2', 'serum_creatinine_mg_dl'),
+    'no_active_infection_status': ('active_infection_status',),
+    'b_symptoms': ('b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss'),
+}
+
+
+def computed_proposals(record, proposals, marks, blocked=()) -> tuple[dict, dict]:
+    """(values, confidences) of the calculated fields the *proposals* make possible.
+
+    The real record's calculations run over a copy of *record* with the
+    proposals laid on it, so nothing is saved and ``patient_record`` never
+    holds a provisional value. A calculated field is provisional only when the
+    record has no answer for it, nobody has typed one, a proposal is among its
+    inputs, and no reader already proposed it (a measured BMI beats a
+    calculated one). Its confidence is the lowest of its provisional inputs.
+    """
+    import copy
+    from omop_core.models import FieldFormula
+    from omop_core.services.patient_record_service import (
+        _compute_derived_fields, _is_empty, combine_b_symptoms,
+    )
+    names = _confidence_names()
+    wanted = [
+        field for field, inputs in COMPUTED_INPUTS.items()
+        if field in names and field not in blocked and field not in proposals
+        and _is_empty(getattr(record, field, None)) and any(name in proposals for name in inputs)
+    ]
+    if not wanted:
+        return {}, {}
+    owned = set(FieldFormula.objects.filter(is_active=True, field_name__in=wanted)
+                .values_list('field_name', flat=True))
+    wanted = [field for field in wanted if field not in owned]
+    if not wanted:
+        return {}, {}
+    view = copy.copy(record)
+    for name, value in proposals.items():
+        setattr(view, name, value)
+    _compute_derived_fields(view, apply_formulas=False)
+    symptoms = [getattr(view, name) for name in COMPUTED_INPUTS['b_symptoms']]
+    if any(value is not None for value in symptoms):
+        view.b_symptoms = combine_b_symptoms(symptoms)
+    values, confidences = {}, {}
+    for field in wanted:
+        value = getattr(view, field)
+        if _is_empty(value) or not _storable(field, value):
+            continue
+        values[field] = value
+        confidences[field] = min(marks[name] for name in COMPUTED_INPUTS[field] if name in proposals)
+    return values, confidences
+
+
 def _storable(name, value) -> bool:
     """Whether *value* fits column *name* (the real refresh drops what does not).
 
@@ -146,6 +209,24 @@ def _storable(name, value) -> bool:
         return stored.is_finite() and stored.adjusted() + 1 <= field.max_digits - field.decimal_places
     width = getattr(field, 'max_length', None)
     return not (width and isinstance(value, str) and len(value) > width)
+
+
+# The vitals reader takes a weight as kilograms and a height as centimetres
+# (or metres). A real row has been converted to the mapping's unit; a proposal
+# has not, so it is read only when it says it is already in one of those.
+_VITAL_UNITS = {
+    '29463-7': frozenset({'kg', 'kilogram', 'kilograms'}),
+    '8302-2': frozenset({'cm', 'centimeter', 'centimeters', 'centimetre', 'centimetres',
+                         'm', 'meter', 'meters', 'metre', 'metres'}),
+}
+
+
+def _vital_unit_ok(row) -> bool:
+    codes = {row.measurement_source_value, getattr(row.measurement_concept, 'concept_code', None)}
+    for code in codes & _VITAL_UNITS.keys():
+        if (row.unit_source_value or '').strip().lower() not in _VITAL_UNITS[code]:
+            return False
+    return True
 
 
 def _after_clears(snapshot, provisional_rows, target):
@@ -173,7 +254,8 @@ def _after_clears(snapshot, provisional_rows, target):
 def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name."""
     from omop_core.services.patient_record_service import _is_empty
-    measurements = _after_clears(snapshot, snapshot.provisional_measurements, 'measurement')
+    measurements = [row for row in _after_clears(snapshot, snapshot.provisional_measurements, 'measurement')
+                    if _vital_unit_ok(row)]
     observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
     if not (measurements or observations):
         return {}, {}
@@ -191,7 +273,13 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
     }
     if not kept:
         return {}, {}
-    return kept, _attribute(person, record, snapshot, kept, measurements, observations, routing)
+    confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
+    try:
+        computed, computed_marks = computed_proposals(record, kept, confidences, blocked)
+    except Exception:  # noqa: BLE001 -- a calculation must not cost the person's other proposals
+        logger.exception('Provisional calculation failed for person_id=%s.', person.person_id)
+        computed, computed_marks = {}, {}
+    return {**kept, **computed}, {**confidences, **computed_marks}
 
 
 def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
@@ -252,11 +340,44 @@ def mirror_user_edit(record, edited_fields) -> None:
                     if mark is not None and field.name in names:
                         setattr(confidence, field.name, None)
                         cleared.append(field.name)
+            if confidence is not None:
+                cleared += _settle_computed(record, provisional, confidence, edited)
             provisional.save()
             if cleared:
                 confidence.save(update_fields=cleared)
     except Exception:  # noqa: BLE001 -- the user's edit is already saved; this is the side picture
         logger.exception('Provisional mirror failed for person_id=%s; the edit is saved.', record.person_id)
+
+
+def _settle_computed(record, provisional, confidence, edited) -> list[str]:
+    """Recalculate the provisional calculated fields after an edit; names touched.
+
+    A calculated field that still waits on a proposal was worked out from
+    inputs that an edit may have changed. It is recalculated over the proposals
+    that remain; when that gives nothing and an input was edited, the stale
+    proposal is dropped in favour of the record's own value. Returns the
+    confidence columns written, for the caller's ``update_fields``.
+    """
+    names = _confidence_names()
+    waiting = {f for f in COMPUTED_INPUTS if f in names and getattr(confidence, f) is not None}
+    if not waiting:
+        return []
+    proposals = {f: getattr(provisional, f) for f in names
+                 if f not in COMPUTED_INPUTS and getattr(confidence, f) is not None}
+    marks = {f: getattr(confidence, f) for f in proposals}
+    blocked = set(record.user_edited_fields or []) | edited
+    values, level = computed_proposals(record, proposals, marks, blocked)
+    touched = []
+    for field in waiting:
+        if field in values:
+            setattr(provisional, field, values[field])
+            setattr(confidence, field, level[field])
+            touched.append(field)
+        elif edited & set(COMPUTED_INPUTS[field]):
+            setattr(provisional, field, getattr(record, field))
+            setattr(confidence, field, None)
+            touched.append(field)
+    return touched
 
 
 def overlay(record):

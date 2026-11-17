@@ -1040,7 +1040,8 @@ def _section_readers():
 def provisional_section_readers():
     """The readers the provisional pass runs: those whose fields can carry a confidence,
     in the real refresh's relative order."""
-    wanted = {_get_assertion_data, _get_laboratory_data}
+    # Vitals are here so a proposed weight and height can give a BMI (#2661).
+    wanted = {_get_assertion_data, _get_laboratory_data, _get_vitals_data}
     return tuple(fn for fn in _section_readers() if fn in wanted)
 
 
@@ -1175,6 +1176,20 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         return record
 
 
+def combine_b_symptoms(values) -> bool | None:
+    """The composite B-symptoms answer from fever, night sweats and weight loss.
+
+    Any present symptom is True, all three recorded absent is False, anything
+    else is unknown. The real recompute and the provisional computation share it.
+    """
+    values = list(values)
+    if any(v is True for v in values):
+        return True
+    if all(v is False for v in values):
+        return False
+    return None
+
+
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:
     """Save aliases and calculations from the current record without reading OMOP facts.
 
@@ -1240,12 +1255,7 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     _b_symptom_fields = ('b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss')
     _vals = [getattr(patient_info, f) for f in _b_symptom_fields]
     if any(f in changed_fields for f in _b_symptom_fields) or any(v is not None for v in _vals):
-        if any(v is True for v in _vals):
-            patient_info.b_symptoms = True
-        elif all(v is False for v in _vals):
-            patient_info.b_symptoms = False
-        else:
-            patient_info.b_symptoms = None
+        patient_info.b_symptoms = combine_b_symptoms(_vals)
     _compute_derived_fields(patient_info, apply_formulas=False)
     _clear_overflowing_decimal_fields(patient_info)
     patient_info.save()
