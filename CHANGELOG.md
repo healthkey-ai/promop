@@ -282,6 +282,15 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Acronym fields carry their reviewed labels in the shared form (#2652)** —
+  `capitalize()` only upper-cases the first character, so the descriptor served
+  "Sct eligibility", "Transformed to dlbcl", "Pd l1 assay", "Hba1c percent",
+  "Flipi score" and about thirty more. Those fields now carry the reviewed
+  spelling (SCT, DLBCL, PD-L1, eGFR, HbA1c, FLIPI, GELF, HRD, TNBC, BTK, BCL2,
+  ANC/ALC/AMC/RBC, AST/ALT, BNP, CEA, PSA, INR, aPTT, MRD, HER2, ECOG, BMI)
+  and the lab units the native tabs show. A descriptor contract test now fails
+  when a served label flattens a known acronym, so the next such column cannot
+  repeat #2601 silently.
 - **SCT and DLBCL transformation dates carry reviewed labels (#2601)** — both
   dates and their precision companions were missing from `FORM_LABELS`, so the
   descriptor fell back to the verbose name through `capitalize()` and served

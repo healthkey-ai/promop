@@ -9,7 +9,7 @@ the tests state the rules instead of trusting each block to remember them.
 import pytest
 from django.conf import settings
 
-from omop_core.services.patient_form import patient_form_descriptors
+from omop_core.services.patient_form import FORM_LABELS, patient_form_descriptors
 from omop_core.services.write_descriptor import (
     DESCRIPTOR_META_KEY,
     DESCRIPTOR_RESOURCE_INPUTS,
@@ -92,6 +92,48 @@ def test_the_clinical_dates_keep_their_reviewed_labels(descriptor):
     assert enriched['dlbcl_transformation_date']['label'] == 'DLBCL transformation date'
     assert (enriched['dlbcl_transformation_date_precision']['label']
             == 'DLBCL transformation date precision')
+
+
+def test_every_reviewed_label_is_the_served_label(descriptor):
+    """`FORM_LABELS` is the single owner of the wording a reader sees.
+
+    Asserting the enriched descriptor catches an entry that names a field the
+    descriptor does not serve, and one that a later override silently wins.
+    """
+    enriched = patient_form_descriptors(descriptor)
+    for name, (label, _unit) in FORM_LABELS.items():
+        assert name in enriched, f'{name} is labelled but not served'
+        assert enriched[name]['label'] == label, name
+
+
+# The lowercase token as it appears in a field name, and the spelling a reader
+# must see. `capitalize()` only upper-cases the first character, so the fallback
+# renders "Sct eligibility", "Pd l1 assay" and "Transformed to dlbcl" (#2652).
+ACRONYM_SPELLINGS = {
+    'sct': 'SCT', 'dlbcl': 'DLBCL', 'pd': 'PD-L1', 'egfr': 'eGFR',
+    'hba1c': 'HbA1c', 'inr': 'INR', 'ptt': 'PTT', 'psa': 'PSA',
+    'flipi': 'FLIPI', 'gelf': 'GELF', 'hrd': 'HRD', 'tnbc': 'TNBC',
+    'btk': 'BTK', 'bcl2': 'BCL2', 'anc': 'ANC', 'alc': 'ALC', 'amc': 'AMC',
+    'rbc': 'RBC', 'ast': 'AST', 'alt': 'ALT', 'bnp': 'BNP', 'cea': 'CEA',
+    'bmi': 'BMI', 'mrd': 'MRD', 'her2': 'HER2', 'ecog': 'ECOG',
+}
+
+
+def test_no_acronym_is_served_with_the_fallback_spelling(descriptor):
+    """A new acronym column must be given a reviewed label, not inherit one.
+
+    The issue names one instance (#2601); this pins the class, so the next
+    `pd_l1_*`-style field fails here instead of reaching a client flattened.
+    """
+    enriched = patient_form_descriptors(descriptor)
+    offenders = []
+    for name, entry in enriched.items():
+        label = entry.get('label') or ''
+        for token in name.split('_'):
+            spelling = ACRONYM_SPELLINGS.get(token)
+            if spelling and spelling not in label:
+                offenders.append(f'{name}: {token!r} served as {label!r}')
+    assert not offenders, offenders
 
 
 def test_aliases_are_one_way(descriptor):
