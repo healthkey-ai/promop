@@ -41,7 +41,9 @@ def test_copy_patient_covers_every_patient_table():
         'omop_core.Person', 'omop_core.Location', 'omop_core.ProvenanceRecord',
     }
     # No clinical row references these yet, so there is nothing to follow.
-    assert instance_data.PATIENT - copied == {'omop_core.CareSite', 'omop_core.Provider'}
+    assert instance_data.PATIENT - copied - instance_data.PATIENT_DERIVED == {
+        'omop_core.CareSite', 'omop_core.Provider',
+    }
 
 
 def test_copy_reference_data_covers_every_copied_reference_table():
