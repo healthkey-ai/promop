@@ -12,6 +12,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import SelectControl from './SelectControl';
+import { optionsToObjects } from '../utils';
 
 const TNM_OPTIONS = [
   { value: 'T1: Invasive Tumor <= 2 cm', label: 'T1: Invasive Tumor <= 2 cm' },
@@ -123,5 +124,40 @@ describe('SelectControl - values outside the vocabulary', () => {
     expect(
       screen.getAllByRole('option', { name: 'T1: Invasive Tumor <= 2 cm' }),
     ).toHaveLength(1);
+  });
+});
+
+describe('SelectControl - codes beside displays', () => {
+  // The descriptor publishes `{value: display, code: primary_code}` for a
+  // FieldChoice vocabulary, and the record stores the code (#5905).
+  const GENDER = [
+    { value: 'Female', label: 'Female', code: 'F' },
+    { value: 'Male', label: 'Male', code: 'M' },
+    { value: 'Unknown', label: 'Unknown', code: 'U' },
+  ];
+
+  it('keeps the code through the option mapping', () => {
+    expect(optionsToObjects(GENDER)).toEqual(GENDER);
+  });
+
+  it('selects the option whose code the record stores, instead of adding it', async () => {
+    const user = userEvent.setup();
+    render(<SelectControl value="M" options={GENDER} onChange={vi.fn()} />);
+
+    expect(screen.getByRole('combobox')).toHaveTextContent('Male');
+    await user.click(screen.getByRole('combobox'));
+    expect(screen.queryByRole('option', { name: 'M' })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Male' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Female' })).toBeInTheDocument();
+  });
+
+  it('writes the option value, not its code', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<SelectControl value="M" options={GENDER} onChange={onChange} />);
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Female' }));
+    expect(onChange).toHaveBeenCalledWith('Female');
   });
 });
