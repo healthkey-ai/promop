@@ -1227,10 +1227,18 @@ def _write_custom_field_revisions(patient_record, previous, edits, user):
         else 'system'
     )
     width = RecordRevision._meta.get_field('field').max_length
+
+    def history_name(name):
+        # A name too long to carry the prefix is recorded as itself, whole:
+        # cut short, two long names would share one history. A created field
+        # cannot be named as a column, so the bare name is not ambiguous.
+        prefixed = pending_key(name)
+        return prefixed if len(prefixed) <= width else name
+
     RecordRevision.objects.bulk_create([
         RecordRevision(
             patient_record=patient_record, changed_by=changed_by,
-            field=pending_key(name)[:width],
+            field=history_name(name),
             old_value=None if previous.get(name) is None else str(previous[name]),
             new_value=None if value is None else str(value),
         )

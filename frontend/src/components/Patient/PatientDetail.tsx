@@ -659,7 +659,12 @@ export default function PatientDetail({
             }
             else if (typeof data.error === "string") detail = data.error;
             else {
-              const fieldErrors = Object.entries(data)
+              // An added field's refusal is nested under custom_fields, by
+              // its own name: {custom_fields: {frailty_index: ["Enter a number."]}}.
+              const { [ADDED_FIELDS]: added, ...columns } = data;
+              const nested = added && typeof added === "object" && !Array.isArray(added)
+                ? added as Record<string, unknown> : {};
+              const fieldErrors = [...Object.entries(columns), ...Object.entries(nested)]
                 .filter(([, v]) => Array.isArray(v))
                 .map(([k, v]) => `${k}: ${(v as string[]).join(", ")}`)
                 .join("; ");

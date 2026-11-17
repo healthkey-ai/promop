@@ -5,6 +5,7 @@ import { ArrowLeft, ChevronDown, ChevronRight, Download, Search, BookOpen, Check
 import api from "@/api/axios";
 import { fetchDiseaseCategories } from "@/api/mappingHub";
 import { useAuth } from "@/hooks/useAuth";
+import { invalidateAllWritableFields } from "@/hooks/useWritableFields";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
@@ -434,6 +435,9 @@ export default function FieldMappingPage() {
   const closeNewField = (created: boolean) => {
     const returnTo = newField?.returnTo;
     setNewField(null);
+    // A new field is writable on every record it is part of; the patient
+    // page this returns to must ask again rather than render it read-only.
+    if (created) invalidateAllWritableFields();
     if (returnTo) {
       // Replacing this entry: Back from the patient page must not reopen
       // the dialog on a field already added or abandoned.
@@ -506,6 +510,8 @@ export default function FieldMappingPage() {
   const handleMappingSaved = () => {
     setDialogOpen(false);
     setSelectedField(null);
+    // A mapping decides what a patient page may write.
+    invalidateAllWritableFields();
     fetchDescriptors();
   };
 

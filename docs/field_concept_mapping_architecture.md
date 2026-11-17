@@ -142,8 +142,10 @@ the record PATCH carries it under `custom_fields`, it lands in
 `PatientRecord.custom_fields`, and it is projected into OMOP through the
 field's own mapping. The section renders an input for each field the
 writable-fields descriptor lists as writable for this caller and this
-patient, and a read-only box with the reason otherwise; a computed field
-shows its formula's result. A value already in a patient's OMOP data for the
+patient, and a read-only box otherwise, with the server's reason when it
+gives one (a field the descriptor does not list, as on a host served by an
+older instance, is simply read-only); a computed field shows its formula's
+result. A value already in a patient's OMOP data for the
 field's concept (`_get_custom_patient_field_data`) appears when the record
 is next derived, so a field added just now is empty on a record until then;
 `manage.py backfill_patient_records --all` derives every record.

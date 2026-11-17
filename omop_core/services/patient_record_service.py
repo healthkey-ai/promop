@@ -935,7 +935,7 @@ def _get_custom_patient_field_data(snapshot: OmopSnapshot, person: Person = None
     for field in fields:
         mapping = field.mapping
         target = custom_field_values.target_for(mapping.omop_table)
-        source = mapping.source_value
+        source = custom_field_values.source_key(field)
         concept_id = mapping.concept_id
         entered: list = []
         imported: list = []
@@ -5224,10 +5224,22 @@ def recompute_formula_field(field_formula) -> int:
                 field: getattr(patient_info, field) for field in changed_fields
                 if field in {model_field.name for model_field in PatientRecord._meta.concrete_fields}
             }
-            if changed_fields & custom_field_names:
-                updates['custom_fields'] = patient_info.custom_fields
             updates['updated_at'] = timezone.now()
-            PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+            computed = changed_fields & custom_field_names
+            if not computed:
+                PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+            else:
+                # custom_fields also holds values people entered. Only the
+                # computed keys are written, over the object as it is now and
+                # under the record's lock, so an edit saved since this record
+                # was read is not put back to what it was.
+                with transaction.atomic():
+                    current = (PatientRecord.objects.select_for_update()
+                               .values_list('custom_fields', flat=True).get(pk=patient_info.pk))
+                    results = patient_info.custom_fields or {}
+                    updates['custom_fields'] = {
+                        **(current or {}), **{name: results.get(name) for name in computed}}
+                    PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
             updated += 1
     return updated
 

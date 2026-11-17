@@ -102,14 +102,19 @@ the same path (#2669, `omop_core/services/custom_field_values.py`):
   date's own value); an imported row answers a boolean by existing and a date
   by its own date. The latest fact answers the field, so a newer import
   replaces an entered value and on one day the entered value wins. A value
-  cleared in the editor stays cleared against facts of that day or before
-  (`cleared_days`), and a later import becomes current.
+  cleared in the editor stays cleared against imported facts of that day or
+  before (`cleared_days`); a later import, or a value entered after the
+  clear by anyone, becomes current.
 - **The descriptor lists them.** `GET /api/v1/patient-records/writable-fields/`
   adds an entry per created field (`custom: true`, `container:
   "custom_fields"`), writable when approved and not computed, read-only for a
   caller without write access, and scoped by `?disease=` like a column. The
   entries are added at the endpoint, not in `build_writable_field_descriptor`,
   which the save path calls on every PATCH.
+
+`recompute_formula_field`, which runs when a formula changes, writes only
+the computed keys of `custom_fields`, under the record's lock, so it cannot
+put an entered value back to what it was.
 
 Not covered: whether the field belongs to the record's disease is not
 enforced (#2333), and a pending created-field edit is not re-projected when

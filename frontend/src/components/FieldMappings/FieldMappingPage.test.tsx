@@ -2,6 +2,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import FieldMappingPage from "./FieldMappingPage";
+import { invalidateAllWritableFields } from "@/hooks/useWritableFields";
 
 const mockGet = vi.fn();
 const mockPost = vi.fn();
@@ -11,6 +12,8 @@ const mockUseAuth = vi.fn();
 vi.mock("@/hooks/useAuth", () => ({
   useAuth: () => mockUseAuth(),
 }));
+
+vi.mock("@/hooks/useWritableFields", () => ({ invalidateAllWritableFields: vi.fn() }));
 
 vi.mock("@/api/axios", () => ({
   default: {
@@ -863,6 +866,9 @@ describe("FieldMappingPage", () => {
         fireEvent.click(within(dialog).getByRole("button", { name: "Add Field" }));
 
         expect(await screen.findByText(/patient page, tab disease/)).toBeInTheDocument();
+        // The patient page it returns to must ask again what is writable:
+        // the answer it cached does not know the new field.
+        expect(invalidateAllWritableFields).toHaveBeenCalled();
         expect(mockPost).toHaveBeenCalledWith("/v1/custom-patient-fields/", expect.objectContaining({
           field_name: "m_protein_note", tab: "disease", diseases: ["MM"], concept: 4112853,
         }));

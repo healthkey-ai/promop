@@ -233,6 +233,52 @@ def test_a_cleared_value_stays_cleared_through_derivation(record, staff):
     assert stored(record).custom_fields == {'frailty_index': 8}
 
 
+def test_a_value_entered_the_day_someone_else_cleared_the_field_is_kept(record, staff):
+    """The patient's answer is its own fact beside the clinician's cleared one."""
+    field = created_field('frailty_index', 'number', 'Measurement')
+    patch(staff, record, {'frailty_index': 3})
+    patch(staff, record, {'frailty_index': None})
+
+    identity = Identity.objects.create_user(email='patient@example.org')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    patient = APIClient()
+    patient.force_authenticate(identity)
+    response = patient.patch('/api/patient-info/me/', {'custom_fields': {'frailty_index': 5}}, format='json')
+    assert response.status_code == 200, response.data
+    assert facts(record, field, Measurement).count() == 2
+
+    refresh_patient_record(record.person)
+    assert stored(record).custom_fields == {'frailty_index': 5}
+    assert pending(record) == set()
+
+
+def test_a_mapping_whose_source_key_was_blanked_still_reads_what_it_wrote(record, staff):
+    """The mapping is editable; the writer and the readers must use one key."""
+    field = created_field('agreed', 'boolean', 'Observation')
+    FieldConceptMapping.objects.filter(pk=field.mapping_id).update(source_value='')
+    patch(staff, record, {'agreed': False})
+    assert facts(record, field).get().value_as_number == Decimal('0')
+
+    refresh_patient_record(record.person)
+    assert stored(record).custom_fields == {'agreed': False}
+    assert pending(record) == set()
+
+
+def test_changing_a_formula_leaves_entered_values_alone(record, staff):
+    from omop_core.services.patient_record_service import recompute_formula_field
+
+    created_field('registry_id', 'text', 'Person')
+    created_field('double_weight', 'number', 'Measurement', mode='computed')
+    PatientRecord.objects.filter(pk=record.pk).update(weight=70)
+    patch(staff, record, {'registry_id': 'R-100'})
+
+    formula = FieldFormula.objects.create(field_name='double_weight', formula='weight * 2', is_active=True)
+    assert recompute_formula_field(formula) == 1
+    saved = stored(record)
+    assert saved.custom_fields == {'registry_id': 'R-100', 'double_weight': 140}
+    assert pending(record) == {'registry_id'}
+
+
 def test_an_empty_string_clears_like_null(record, staff):
     created_field('note')
     patch(staff, record, {'note': 'something'})
@@ -471,3 +517,13 @@ def test_a_source_key_too_long_for_the_column_is_not_projected(record, staff):
     patch(staff, record, {name: 'kept'})
     assert stored(record).custom_fields == {name: 'kept'} and pending(record) == {name}
     assert 'projection' not in staff.get(WRITABLE).data[name]
+
+
+def test_a_long_field_name_keeps_its_own_revision_history(record, staff):
+    """Cut to the column's width, two long names would share one history."""
+    stem = 'f' * 85
+    for suffix in ('one', 'two'):
+        created_field(f'{stem}_{suffix}', 'text', 'Person')
+    patch(staff, record, {f'{stem}_one': 'a', f'{stem}_two': 'b'})
+    names = set(RecordRevision.objects.filter(patient_record=record).values_list('field', flat=True))
+    assert names == {f'{stem}_one', f'{stem}_two'}

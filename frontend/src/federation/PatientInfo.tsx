@@ -112,7 +112,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
-  // Which of them this caller may edit on this patient (#2669).
+  // Which of them this caller may edit on this patient (#2669). Until the
+  // record names its person there is no such answer, and none is read-only.
   const { descriptors: writableFields } = useWritableFields(
     editedInfo.person_id as number | string | undefined,
   );
@@ -536,7 +537,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
               tabs={addedFieldTabs(tabKeys[activeTab])}
               diseases={diseaseCode ? [diseaseCode] : []}
               formData={editedInfo}
-              descriptors={writableFields}
+              descriptors={editedInfo.person_id == null ? undefined : writableFields}
               onChange={readOnly ? undefined : handleAddedFieldChange}
             />
           )}

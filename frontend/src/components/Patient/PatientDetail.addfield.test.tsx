@@ -344,6 +344,18 @@ describe('PatientDetail — editing an added field', () => {
     expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: null } });
   });
 
+  it("shows the server's reason when it refuses an added field's value", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    (api.patch as ReturnType<typeof vi.fn>).mockRejectedValue({ response: { status: 400, data: {
+      custom_fields: { m_protein_note: ['Enter text.'] },
+    } } });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'x' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    expect(await screen.findByText(/m_protein_note: Enter text\./)).toBeInTheDocument();
+  });
+
   it('offers no input to a caller the server does not let write', async () => {
     descriptors = { m_protein_note: {
       kind: 'direct', writable: false, read_only_for_caller: true,

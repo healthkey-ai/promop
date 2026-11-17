@@ -63,6 +63,16 @@ def target_for(omop_table) -> str | None:
     return _TARGETS.get(re.sub(r'[^a-z]', '', (omop_table or '').lower()))
 
 
+def source_key(field) -> str:
+    """The source value a field's entered facts are written and read under.
+
+    The mapping's own, which creation sets to ``custom:<name>``; that default
+    again when a later edit of the mapping left it blank, so the writer and
+    the readers never look under different keys.
+    """
+    return field.mapping.source_value or f'custom:{field.field_name}'
+
+
 def pending_key(field_name: str) -> str:
     return PENDING_PREFIX + field_name
 
@@ -200,7 +210,7 @@ def projection_for(field, unit_concept_ids=None) -> dict | None:
 
     mapping = field.mapping
     target = target_for(mapping.omop_table)
-    source_value = mapping.source_value or f'custom:{field.field_name}'
+    source_value = source_key(field)
     if target is None or mapping.concept_id is None:
         return None
     width = _MAPPING_SOURCE_FIELDS[target].max_length
@@ -345,14 +355,19 @@ def latest_row(entered_rows, concept_rows, cleared_on=None):
 
     The latest date wins, so an import newer than an entered value replaces
     it; on the same day the entered value wins, being the correction.
-    ``cleared_on`` is the day the field was last cleared in the editor: a
-    fact of that day or before no longer answers it, a later one does.
+    ``cleared_on`` is the day the field was last cleared in the editor: an
+    imported fact of that day or before no longer answers it, a later one
+    does.
     """
     best = None
     for entered, rows in ((True, entered_rows), (False, concept_rows)):
         for row in rows:
             day = _row_date(row) or date.min
-            if cleared_on is not None and day <= cleared_on:
+            # Entered rows are already ordered against a clear by the
+            # snapshot, row by row: one entered after it, that day included
+            # and by another author included, still answers. Only a fact
+            # under another source key needs the day to be held against.
+            if not entered and cleared_on is not None and day <= cleared_on:
                 continue
             key = (day, entered, row.pk)
             if best is None or key > best[0]:
@@ -373,8 +388,8 @@ def cleared_days(person, fields) -> dict:
     sources: dict[str, set] = {}
     for field in fields:
         target = target_for(field.mapping.omop_table)
-        if target in ('measurement', 'observation') and field.mapping.source_value:
-            sources.setdefault(target, set()).add(field.mapping.source_value)
+        if target in ('measurement', 'observation'):
+            sources.setdefault(target, set()).add(source_key(field))
     days = {}
     for target, wanted in sources.items():
         model, _pk, _concept, date_field, _type, source_field, _num, _str = _TARGET_CONFIG[target]
