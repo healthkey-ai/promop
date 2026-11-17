@@ -418,6 +418,21 @@ def _settle_computed(record, provisional, confidence, edited) -> list[str]:
     return touched
 
 
+# Fields a proposal is never laid over, whether or not a mark exists for them:
+# identity and contact, and every field the record serializer redacts or
+# withholds for a reader who is not the account holder
+# (PatientRecordSerializer.REDACTED_DEMOGRAPHIC_FIELDS and
+# WITHHELD_IDENTIFIER_FIELDS; a test holds this set to them). The redaction runs
+# on the serializer's output, so an overlaid value here would also dodge the
+# consent flag it follows.
+NEVER_OVERLAID = frozenset({
+    'date_of_birth', 'date_of_birth_precision', 'age', 'patient_age', 'death_date',
+    'country', 'region', 'city', 'postal_code', 'longitude', 'latitude', 'patient_name', 'name',
+    'email', 'phone_number', 'race', 'ethnicity', 'insurance_type', 'facility_name', 'validated_by',
+    'suppress_demographics_for_others', 'consent_capability',
+})
+
+
 def overlay(record):
     """The record as a reader sees it: ``(record, marks)``.
 
@@ -446,7 +461,7 @@ def overlay(record):
         return record, {}
     view, marks = copy.copy(record), {}
     for field in PatientRecordConfidence._meta.concrete_fields:
-        if field.name == 'person':
+        if field.name == 'person' or field.name in NEVER_OVERLAID:
             continue
         mark = getattr(confidence, field.name)
         if mark is not None and _is_empty(getattr(record, field.attname, None)):

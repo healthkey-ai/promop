@@ -19,6 +19,7 @@ from django.utils import timezone
 
 from omop_core.models import DrugExposure, ProcedureOccurrence
 from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
+from omop_core.services.provisional import real_or_provisional
 from omop_oncology.models import EpisodeEvent
 
 from .names import drug_name, procedure_name
@@ -71,7 +72,8 @@ def _line_rows(person, episode_id: int | None) -> list[DrugExposure]:
     ids = EpisodeEvent.objects.filter(episode_id=episode_id,
         episode_event_field_concept_id__in=drug_event_concepts().values('pk')).values_list('event_id', flat=True)
     return list(
-        DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
+        real_or_provisional(
+            DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False))
         .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
@@ -104,7 +106,8 @@ def _medications(person, episode_id: int | None) -> list[dict[str, Any]]:
     ids = EpisodeEvent.objects.filter(episode_id=episode_id,
         episode_event_field_concept_id__in=drug_event_concepts().values('pk')).values_list('event_id', flat=True)
     rows = list(
-        DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
+        real_or_provisional(
+            DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False))
         .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
@@ -149,7 +152,7 @@ class _Context:
         self.person, self.record = person, record
         self.today = timezone.localdate()
         self.procedures = list(
-            ProcedureOccurrence.objects.filter(person=person, is_erroneous=False)
+            real_or_provisional(ProcedureOccurrence.objects.filter(person=person, is_erroneous=False))
             .select_related('procedure_concept', 'procedure_source_concept', 'visit_occurrence')
             .order_by('procedure_date')
         )

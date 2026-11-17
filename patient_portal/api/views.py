@@ -1157,6 +1157,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         withheld = self._withholds_identifiers(request)
         queryset = order_context(self._apply_patient_list_filters(base_queryset),
                                  request.query_params.get('ordering', '-updated'), request.user, withheld)
+        if settings.PROVISIONAL_DATA_ENABLED:
+            # The overlay reads each row's provisional pair: one join, not a query per row.
+            queryset = queryset.select_related(
+                'person__patient_record_provisional', 'person__patient_record_confidence')
         from patient_portal.models import PatientUser
         own_person_id = (PatientUser.objects.filter(identity=request.user).values_list('person_id', flat=True).first()
                          if request.user and request.user.is_authenticated else None)

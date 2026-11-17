@@ -496,6 +496,9 @@ class SharedRecordMixin:
     throttle_scope = 'phr_shared'
     http_method_names = ['get', 'options']
     share_section: str | None = None
+    # What a patient shares is what their care centers sent and they approved:
+    # a proposal from a mapping not yet approved is never shared.
+    show_provisional = False
 
     def resolve(self, request):
         self.share = request.auth.share

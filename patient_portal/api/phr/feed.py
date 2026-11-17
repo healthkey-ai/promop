@@ -18,6 +18,7 @@ from omop_core.models import ConditionOccurrence, DrugExposure, Measurement, Pat
 
 from .labs import NOT_LABS, effective_concept
 from omop_core.services.condition_context import measurement_context_filter
+from omop_core.services.provisional import real_or_provisional
 from .records import GENETIC_DOC_LABELS
 from .sources import PATIENT_SELF_REPORT_TYPE_CONCEPT_ID, care_site_names, patient_authored_ids, row_sources, source
 
@@ -34,8 +35,10 @@ def whats_new(person, record) -> dict[str, Any]:
     counts: Counter = Counter()
 
     def tally(model, date_field, type_field, section, extra=None, **filters):
+        # What arrived from the care centers: a proposal from a mapping not yet approved did not.
         query = (
-            model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters)
+            real_or_provisional(model.objects.filter(
+                person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters))
             .exclude(**{type_field: PATIENT_SELF_REPORT_TYPE_CONCEPT_ID})
         )
         if model is Measurement:

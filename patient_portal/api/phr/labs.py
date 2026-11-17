@@ -14,11 +14,12 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
-from django.db.models import Q
+from django.db.models import F, Q
 
 from omop_core.models import Measurement
 from omop_core.services.canonical_units import is_unproven, measurement_stored_unit
 from omop_core.services.condition_context import measurement_context_filter
+from omop_core.services.provisional import real_or_provisional
 from patient_portal.models import LabMarker
 
 from .sources import row_sources
@@ -103,6 +104,8 @@ def result(row: Measurement, source: dict) -> dict[str, Any]:
         else None,
         'flag': flag(row),
         'source': source,
+        # A proposal from a mapping not yet approved (None, so absent, for a real result).
+        'confidence': row.confidence,
     }
     return {k: v for k, v in item.items() if v is not None}
 
@@ -113,6 +116,7 @@ def _brief(row: Measurement) -> dict[str, Any]:
         'value': None if is_unproven(row) else _number(row.value_as_number),
         'value_text': (row.value_as_string or '').strip() or None,
         'flag': flag(row),
+        'confidence': row.confidence,
     }
     return {k: v for k, v in item.items() if v is not None}
 
@@ -133,16 +137,21 @@ def _genetic_ids(person) -> set[int]:
     return parents | set(components)
 
 
-def _rows(person):
+def _rows(person, provisional=False):
+    """The person's lab rows, newest first; on a date, a real result before a provisional one.
+
+    Provisional rows (proposed mappings) are listed only when the caller asks
+    and the site switch is on; otherwise they are not read at all.
+    """
     return (
-        Measurement.objects.filter(person=person, is_erroneous=False)
+        real_or_provisional(Measurement.objects.filter(person=person, is_erroneous=False), provisional)
         .exclude(pk__in=_genetic_ids(person))
         .exclude(measurement_context_filter())
         .exclude(value_as_number__isnull=True, value_as_string__isnull=True)
         .select_related(
             'measurement_concept', 'measurement_source_concept', 'unit_concept', 'visit_occurrence',
         )
-        .order_by('-measurement_date', '-measurement_id')
+        .order_by('-measurement_date', F('confidence').asc(nulls_first=True), '-measurement_id')
     )
 
 
@@ -154,6 +163,12 @@ def _grouped(rows) -> dict[int, list[Measurement]]:
             continue
         groups[concept.concept_id].append(row)
     return groups
+
+
+def _latest(group: list[Measurement]) -> Measurement:
+    """The result a test is headlined by: the newest real one, whatever the
+    proposals' dates. A proposal is the headline only when no real result exists."""
+    return next((row for row in group if row.confidence is None), group[0])
 
 
 def _test_meta(concept, markers: dict[str, LabMarker]) -> dict[str, Any]:
@@ -194,17 +209,18 @@ def _markers() -> dict[str, LabMarker]:
     return {m.loinc_code: m for m in LabMarker.objects.all()}
 
 
-def labs(person, record, diagnosed: dict | None = None) -> dict[str, Any]:
-    """The latest result per test. ``diagnosed``: the Diagnoses section, when already built."""
-    rows = list(_rows(person))
+def labs(person, record, diagnosed: dict | None = None, provisional: bool = False) -> dict[str, Any]:
+    """The latest result per test. ``diagnosed``: the Diagnoses section, when already built.
+    ``provisional``: also list results from proposed mappings, each with its ``confidence``."""
+    rows = list(_rows(person, provisional))
     groups = _grouped(rows)
-    latest_rows = [group[0] for group in groups.values()]
+    latest_rows = [_latest(group) for group in groups.values()]
     sources = row_sources(Measurement, latest_rows, type_attr='measurement_type_concept', date_attr='measurement_date')
     markers = _markers()
 
     tests = []
     for concept_id, group in groups.items():
-        latest = group[0]
+        latest = _latest(group)
         tests.append({
             **_test_meta(effective_concept(latest), markers),
             'latest': result(latest, sources[latest.pk]),
@@ -226,9 +242,9 @@ def labs(person, record, diagnosed: dict | None = None) -> dict[str, Any]:
     return {'tests': tests, 'filters': filters}
 
 
-def lab_history(person, concept_id: int, record=None) -> dict[str, Any] | None:
+def lab_history(person, concept_id: int, record=None, provisional: bool = False) -> dict[str, Any] | None:
     rows = list(
-        _rows(person).filter(
+        _rows(person, provisional).filter(
             Q(measurement_concept_id=concept_id)
             | Q(measurement_concept_id=0, measurement_source_concept_id=concept_id)
         )[:HISTORY_LIMIT]
@@ -280,7 +296,7 @@ def blood_type(person) -> tuple[str, Measurement] | None:
     """
     newest: dict[str, Measurement] = {}
     rows = (
-        Measurement.objects.filter(person=person, is_erroneous=False)
+        real_or_provisional(Measurement.objects.filter(person=person, is_erroneous=False))
         .filter(Q(measurement_concept__concept_code__in=BLOOD_TYPING)
                 | Q(measurement_concept_id=0, measurement_source_concept__concept_code__in=BLOOD_TYPING))
         .select_related('measurement_concept', 'measurement_source_concept', 'value_as_concept', 'visit_occurrence')

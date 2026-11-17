@@ -235,7 +235,7 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
   record's: a patient reads their own, a verified representative and a doctor
   the patient's, with the same demo-org de-identification; an analyst reads no
   patient, so no proposal either. Nothing is written: the overlay is a copy.
-  The list view is not overlaid yet.
+  The PHR APIs and the patient list are overlaid too (#2660, below).
 - **Switch off means nothing:** with `PROVISIONAL_DATA_ENABLED` off no pair is
   written or mirrored, no provisional measurement is unit-read, the overlay is
   the record itself and `provisional_fields` is `{}`. A pair stored while the
@@ -244,6 +244,63 @@ All of it behind `PROVISIONAL_DATA_ENABLED`. Code: `omop_core/services/provision
 - **Not done:** the frontend (badge, show-provisional toggle, the untouched-form
   PATCH test), and the per-organization/domain floor. HealthTree's
   `patient_record` row count is still unread, so full-versus-sparse stays open.
+
+### As built in #2660: the PHR APIs and the patient list
+
+The same proposals, to the same audiences, on the other screens.
+
+- **PHR owner reads** (`/api/v1/phr/`). A section opts in with
+  `show_provisional = True` (About me, Diagnoses, Status, Labs, Lab history,
+  Procedures); the default is off, so share options, consent and entries see the
+  approved record. For an opted-in section the record read in `PhrView.get` is the overlay copy (`provisional_record.overlay`),
+  so About me and the primary cancer carry `confidence` on a value a proposal
+  filled (the lowest confidence among the fields an entry is built from). Labs
+  (list, history), Diagnoses and Procedures also list **rows** from proposed
+  mappings, each with `confidence`, and a section with only proposals is
+  `ready` in status. Real beats provisional: on one date a real lab result is
+  ordered before a proposed one, and a proposed condition or procedure is
+  dropped when a real row already holds its concept
+  (`provisional.without_shadowed`).
+- **Switch off means nothing.** Every PHR clinical-row query goes through
+  `provisional.real_or_provisional`, which filters `confidence IS NULL` unless
+  the caller asked for proposals **and** the switch is on. Before this change
+  the PHR sections read every row, so a proposal would have shown as an
+  unmarked fact; now the default of every reader is approved-only.
+- **Approved-only by design** (`show_provisional = False` on
+  `SharedRecordMixin`, and no opt-in elsewhere): share recipients and the share
+  catalog, the record export, Medications (a patient answers "did you take
+  it?" against a row, which a proposal must not stand in for), Therapy lines,
+  What's new (it counts what arrived from care centers), and the blood type.
+- **Left out and why:** Genetics and Imaging read composite services in
+  `omop_core` (genomics variants, imaging studies) that combine many rows, the
+  composite-reader work in #2534; they are untouched here.
+- **Patient list** (`PatientListSerializer.to_representation`): with the switch
+  on, the row's empty columns (stage, ECOG, the status and biomarker summaries)
+  take the proposal and the row carries `provisional_fields`. The page's
+  queryset `select_related`s the pair, so the query count is flat in page size
+  (`test_the_list_costs_the_same_queries_for_one_patient_or_many`). Access is
+  the list's own: a reader who cannot list a patient, an analyst included,
+  gets no proposal for them.
+- **Rules the review added.** A real result is a test's `latest` whatever the
+  proposals' dates (a proposal is the headline only when no real result
+  exists); proposals are listed beside it in `recent` and `history` with
+  `confidence`. A real condition names and dates a cancer entry; proposals in
+  that family are listed apart under `proposed` (name, date, confidence) and a
+  family only a proposal answers is headlined by it with its `confidence`.
+  A proposed procedure is hidden only by a real one with the same concept **and
+  the same date** (a repeat biopsy shows); a proposed condition is hidden by a
+  real one of the same concept. `provisional_record.NEVER_OVERLAID` is an
+  explicit denylist (identity, contact, and every field the record serializer
+  redacts or withholds; a test holds it to those sets) that the overlay never
+  touches, whether or not a mark exists for the field.
+- **List filters and sort are approved-only.** The patient list shows an
+  overlaid stage or disease status, but its filters (`stage`, `disease`, the
+  status filter) and ordering read the stored columns, so `?stage=II` does not
+  return a patient whose stage II is only a proposal. Making them follow the
+  overlay would need a join to the provisional pair and a coalesce in every
+  filter and sort, which is not flat or cheap at list scale; the simpler rule
+  is chosen, pinned by a test, and the provisional picture is the row's display.
+- Tests: `tests/test_provisional_phr.py`.
 
 ### As built in phase 1b (#2530)
 
