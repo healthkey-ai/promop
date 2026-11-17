@@ -46,6 +46,10 @@ sentence-transformers>=3.0.0
 # no system libraries, unlike weasyprint.
 reportlab==4.4.10
 
+# The Wearables tab's Word download (omop_core/services/wearable_mapping_export.py).
+# Pure Python apart from lxml, which installs from a wheel.
+python-docx==1.2.0
+
 # Testing
 pytest==9.0.3
 pytest-django==4.11.1

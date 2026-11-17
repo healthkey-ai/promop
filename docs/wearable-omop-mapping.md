@@ -340,6 +340,14 @@ python manage.py seed_hl7_phr_mappings --update-seeded
 python manage.py seed_wearable_device_mappings   # or wait for the next vocabulary load
 ```
 
+### Downloading the tab
+
+The Wearables tab has "Download all wearable mappings", as a CSV or as a Word document with one
+table per category: every mapping on the tab, proposed and approved, without rejected rows,
+ordered so that the codes of one metric sit together. Anyone who can read the Code Mapping page
+can download it. The endpoint, the columns and what the file leaves out are in
+[code-mapping-api.md](code-mapping-api.md#downloading-the-wearables-tab).
+
 ## HL7 PHR: metrics with no device code yet
 
 The HL7 PHR Code Mapping table names metrics that no OpenWearables, Apple or Garmin code

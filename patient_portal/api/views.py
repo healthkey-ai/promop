@@ -15881,6 +15881,35 @@ def field_mapping_export(request):
     return response
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def wearable_mapping_export(request):
+    """Every mapping on the Wearables tab as one file, for use outside the app.
+
+    GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx
+
+    ``csv`` (the default) is one line per mapping; ``docx`` is a Word document
+    with a table per category. Both hold the whole tab, whatever section or
+    page a row is on, without the rejected rows. The parameter is not
+    ``format``: DRF reads that one itself and answers 404 for a name it has no
+    renderer for. Reference data: no patient value, reviewer or note, and
+    whoever may read the mapping pages may download it.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from django.http import HttpResponse
+    from omop_core.services import wearable_mapping_export as export
+    try:
+        filename, content_type, body = export.export_file(
+            request.query_params.get('file_format') or export.FORMAT_CSV)
+    except export.FormatError as error:
+        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    response = HttpResponse(body, content_type=content_type)
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
 @api_view(['GET', 'PUT'])
 @permission_classes([IsAuthenticated])
 def field_scope(request, field_name):

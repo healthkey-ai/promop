@@ -16,6 +16,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { CuratorNoteMark } from "./CuratorNoteMark";
 import { saveBlob } from "@/utils/download";
 import { AxisVariantFlag, AxisVariantList } from "./LoincAxisChips";
+import WearableMappingsDownload from "./WearableMappingsDownload";
 import {
   type CodeMappingRow,
   type Reference,
@@ -1876,6 +1877,8 @@ export default function CodeMappingPage() {
           <span className="ml-1 text-sm font-normal text-slate-500" data-testid="all-mappings-count">({allCount})</span>
           <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
           {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
+          {/* The whole tab, built by the server, where the menus write loaded rows. */}
+          {selectedVocabulary === WEARABLES_TAB && <WearableMappingsDownload />}
         </div>
 
         {sectionNames.map((section) => {
