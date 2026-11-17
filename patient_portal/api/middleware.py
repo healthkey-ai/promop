@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+import re
 import time
 from email.utils import parsedate_to_datetime
 from typing import Callable
@@ -156,23 +157,17 @@ def _get_resource_id(request):
     return None
 
 
-# URL arguments that are credentials, not identifiers: the public voting
-# pages' share and confirmation tokens (#2678). Whoever reads the audit trail
-# must not be able to open the link, or confirm a stranger's votes, from it.
-_SECRET_URL_KWARGS = ('token', 'confirm_token')
+# The public voting pages carry their share and confirmation tokens in the URL
+# (#2678). Those are credentials, not identifiers: whoever reads the audit
+# trail must not be able to open the link, or confirm a stranger's votes, from
+# it. Matched on the path itself rather than the resolved route, so a request
+# that misses the route (no trailing slash) is covered too.
+_PUBLIC_VOTE_TOKEN = re.compile(r'^(/api/v1/public/mapping-votes/(?:confirm/)?)[^/]+')
 
 
 def _audit_path(request):
-    """The request path as the audit trail records it: with a token that is
-    part of the URL replaced by its name."""
-    path = request.path
-    resolver_match = getattr(request, 'resolver_match', None)
-    if resolver_match:
-        for key in _SECRET_URL_KWARGS:
-            value = resolver_match.kwargs.get(key)
-            if isinstance(value, str) and value:
-                path = path.replace(f'/{value}/', f'/:{key}/')
-    return path
+    """The request path as the audit trail records it."""
+    return _PUBLIC_VOTE_TOKEN.sub(r'\1:token', request.path)
 
 
 # A view's own note on its request (``request.audit_detail``): a small JSON

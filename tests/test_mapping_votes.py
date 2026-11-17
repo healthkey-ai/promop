@@ -451,11 +451,18 @@ def test_tokens_stay_out_of_the_audit_trail(anonymous):
     anonymous.get(confirm_url(token))
     anonymous.post(confirm_url(token))
 
+    # A request that misses the route (no trailing slash) falls through to the
+    # page shell, which this test database has no build of, and is audited too.
+    shell = APIClient(raise_request_exception=False)
+    shell.get(f'{PUBLIC}{share.token}')
+    shell.get(f'{PUBLIC}confirm/{token}')
+
     paths = list(AuditEvent.objects.values_list('path', flat=True))
 
     assert paths, 'the requests are still audited'
     assert not any(share.token in path or token in path for path in paths)
-    assert f'{PUBLIC}:token/' in paths and f'{PUBLIC}confirm/:confirm_token/' in paths
+    assert len(paths) == 6
+    assert f'{PUBLIC}:token/' in paths and f'{PUBLIC}confirm/:token/' in paths
     assert not AuditEvent.objects.filter(user_email__isnull=False).exists()
 
 
@@ -693,8 +700,9 @@ def test_a_failed_send_answers_the_same_and_leaves_nothing_to_confirm(anonymous)
     assert not MappingVoteSubmission.objects.exists() and not MappingVote.objects.exists()
 
 
-def test_no_address_or_comment_is_logged(anonymous, caplog, settings):
-    settings.DEBUG = False
+@pytest.mark.parametrize('debug', [False, True])
+def test_no_address_comment_or_token_is_logged(anonymous, caplog, settings, debug):
+    settings.DEBUG = debug
     share = make_share()
     steps = proposal('STEPS')
     caplog.set_level(logging.DEBUG)

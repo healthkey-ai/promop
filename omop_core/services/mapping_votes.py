@@ -405,9 +405,8 @@ def confirmation_email(share, votes, token):
 def _send_confirmation(share, email, votes, token):
     """Send the link; return whether the backend accepted it. Never raises."""
     subject, body = confirmation_email(share, votes, token)
-    if settings.DEBUG:
-        # A developer machine has no mailbox; the link is the only way through.
-        logger.debug('Vote confirmation email preview\n\n%s', body)
+    # No preview in the log, unlike the account emails: the body carries the
+    # token, and a developer machine's console mail backend prints it anyway.
     try:
         return send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [email]) == 1
     except Exception:  # noqa: BLE001 - the visitor gets the same answer either way
