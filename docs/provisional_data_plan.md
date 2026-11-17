@@ -798,18 +798,25 @@ lookup contract below remains for a caller that does want to write rows itself.
 
 ### Gaps before HealthTree can run with provisional data on (2026-11-17)
 
-Phases 0 to 1c are on `dev`: the confidence column, the Generate OMOP writes,
-the two tables, the provisional pass, the PATCH mirror and the overlay on the
-patient-record read, all behind `PROVISIONAL_DATA_ENABLED`. To deploy to
-HealthTree GCP with it on, and have patients see proposals without a click:
+Status as of 2026-11-17, all behind `PROVISIONAL_DATA_ENABLED`. Built and on
+`dev`: the confidence column, the Generate OMOP writes, the two tables, the
+provisional pass, the PATCH mirror, the overlay on the patient-record read, the
+page indicator, the PHR and list overlay, computed fields, the mapping
+confidence on the Edit Mapping dialog (signed Calc score) and the server-side
+sweep. To deploy to HealthTree GCP with it on, and have patients see proposals
+without a click:
 
-| Gap | Issue |
-|---|---|
-| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) |
-| The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) |
-| Computed fields (BMI, scores, stages) use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) |
-| HealthTree's clinical rows come from the ETL: write provisional rows for them (ETL `confidence` or a server sweep) and widen the pass beyond labs, assertions and curated mappings (#2533, #2534) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) |
-| Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) |
+| Gap | Issue | State |
+|---|---|---|
+| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) | done (#2665); controls that bypass `Field` (GELF, FLIPI, treating institution, planned therapies) show no indicator yet |
+| The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) | done (#2667); Genetics and Imaging wait on #2534; list filters and sort stay approved-only |
+| Computed fields use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) | done (#2666, #2672); JSON-input fields, FLC pair, age left |
+| Proposals are stored with a confidence on the mapping, kept on approval, recomputed by Calc | [#2668](https://github.com/healthkey-ai/promop/issues/2668) | done (#2670) |
+| Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
+| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
+| The patient's "Confirm my record" attestation is still offered while proposals are shown | (no issue yet) | open |
+| Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
+| Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | open |
 
 The rule for all of them: with the switch off, no provisional data is computed,
 stored or shown to anyone.
