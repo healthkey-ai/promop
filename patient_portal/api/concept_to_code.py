@@ -29,6 +29,8 @@ PAGE_SIZE = 50
 # The concept list may show more per page, so a curator can drag a concept
 # from what would be a later page into the priority order (#1914).
 CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
+# `view=categories` asks for the category headers alone (#2699).
+CONCEPT_VIEWS = ('categories',)
 
 
 def _authorize(user, *, write=False):
@@ -87,6 +89,9 @@ def concept_to_code_list(request):
     order = params.get('order') or 'category'
     if order not in CONCEPT_ORDERS:
         raise ValidationError({'order': f'Choose one of {", ".join(CONCEPT_ORDERS)}.'})
+    view = params.get('view') or ''
+    if view and view not in CONCEPT_VIEWS:
+        raise ValidationError({'view': f'Choose {" or ".join(CONCEPT_VIEWS)}, or leave it out.'})
     _page_number(params)  # a malformed page is refused before anything is read
     concepts, fields, annotations = browse_concepts(params)
     # Counted once, here: the total decides the order as well as the paging.
@@ -99,6 +104,19 @@ def concept_to_code_list(request):
     if not grouped:
         order = 'priority'
     categories = category_summary(concepts, params) if grouped else None
+    domains = FieldConceptMapping.objects.exclude(status='rejected').filter(
+        concept_id__in=standard_destinations().values('pk'),
+    ).values('omop_table').annotate(count=Count('concept_id', distinct=True)).order_by('omop_table')
+    if view == 'categories' and grouped:
+        # The headers alone: the page opens a category to ask for its rows, so
+        # no row, field, lock or note is read, and the cost does not grow with
+        # the concepts. A list that is not grouped has no headers to show and
+        # returns its page of rows as usual, so the caller needs no second request.
+        return Response({
+            'page': 1, 'page_size': page_size, 'total': total, 'domains': list(domains),
+            'order': order, 'grouped': True, 'group_limit': limit, 'categories': categories,
+            'results': [], 'prioritized': ConceptMappingPriority.objects.count(),
+        })
     page, paging = _paginate(order_concepts(concepts, params, order), params, page_size, count=total)
     page = list(page.annotate(**annotations))
     field_map = {}
@@ -106,9 +124,6 @@ def concept_to_code_list(request):
         field_map.setdefault(field.concept_id, []).append({
             'field_name': field.field_name, 'status': field.status, 'omop_table': field.omop_table,
         })
-    domains = FieldConceptMapping.objects.exclude(status='rejected').filter(
-        concept_id__in=standard_destinations().values('pk'),
-    ).values('omop_table').annotate(count=Count('concept_id', distinct=True)).order_by('omop_table')
     locks = concept_lock.locks_for([concept.pk for concept in page], request.user)
     notes = _notes_for([concept.pk for concept in page])
     return Response({

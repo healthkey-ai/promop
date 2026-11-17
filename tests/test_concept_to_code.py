@@ -452,10 +452,15 @@ def test_a_list_longer_than_the_limit_is_not_grouped_and_keeps_the_priority_orde
         assert [item['concept_id'] for item in data['results']] == [alpha.pk, beta.pk, gamma.pk]
 
 
+CATEGORIES_VIEW_QUERIES = 4
+
+
 @pytest.mark.parametrize('params, queries', [
     ({}, 8), ({'domain': 'wearables'}, 8), ({'category': 'Lab Test'}, 8),
     # No summary when the list is in priority order.
     ({'order': 'priority'}, 7),
+    # The headers alone read no row, field, lock or note (#2699).
+    ({'view': 'categories'}, CATEGORIES_VIEW_QUERIES), ({'view': 'categories', 'domain': 'wearables'}, CATEGORIES_VIEW_QUERIES),
 ])
 def test_the_list_reads_no_more_for_more_concepts(client, django_assert_num_queries, params, queries):
     from omop_core.models import LoincClass, LoincCodeClass
@@ -482,6 +487,84 @@ def test_the_list_reads_no_more_for_more_concepts(client, django_assert_num_quer
     few = read()
     add(9)
     assert read() > few
+
+
+def test_view_categories_returns_the_headers_and_no_rows(client):
+    from omop_core.services import concept_priority
+    zinc = classed('Zinc', 'alpha class')
+    classed('Yttrium', 'alpha class')
+    argon = classed('Argon', 'Beta class')
+    concept_priority.move(argon, 1)
+
+    full = listed(client)
+    headers = listed(client, view='categories')
+    assert headers['results'] == []
+    assert headers['grouped'] is True and headers['order'] == 'category'
+    assert headers['categories'] == full['categories'] == [
+        {'category': 'alpha class', 'count': 2}, {'category': 'Beta class', 'count': 1}]
+    # The rest of the envelope is today's.
+    assert {key: headers[key] for key in ('total', 'prioritized', 'domains', 'group_limit')} == {
+        key: full[key] for key in ('total', 'prioritized', 'domains', 'group_limit')}
+    assert headers['total'] == 3 and headers['prioritized'] == 1
+    # An empty `view` is no view; the rows are returned.
+    assert [item['concept_id'] for item in listed(client, view='')['results']] == [
+        item['concept_id'] for item in full['results']]
+    assert zinc.pk in {item['concept_id'] for item in full['results']}
+    for bad in ('rows', 'Categories', 'category', 'categories,rows'):
+        response = client.get(BASE, {'view': bad})
+        assert response.status_code == 400 and 'view' in response.data
+
+
+def test_view_categories_respects_every_filter(client):
+    from omop_core.services import concept_priority
+    needle = classed('Needle one', 'Big class')
+    classed('Needle two', 'Small class')
+    classed('Other', 'Big class')
+    concept_priority.move(needle, 1)
+
+    def headers(**params):
+        data = listed(client, view='categories', **params)
+        assert data['results'] == []
+        return data['categories']
+
+    assert headers() == [{'category': 'Big class', 'count': 2}, {'category': 'Small class', 'count': 1}]
+    assert headers(search='needle') == [{'category': 'Big class', 'count': 1}, {'category': 'Small class', 'count': 1}]
+    assert headers(prioritized='1') == [{'category': 'Big class', 'count': 1}]
+    assert headers(category='Small class') == [{'category': 'Small class', 'count': 1}]
+    assert headers(search='no such concept') == []
+    assert headers(domain='wearables') == []
+
+
+def test_view_categories_on_a_list_too_long_to_group_returns_the_rows(client):
+    # There are no headers to show, so one request is enough for the page.
+    alpha = classed('Zeta', 'Alpha class')
+    beta = classed('Eta', 'Beta class')
+    with patch('omop_core.services.concept_to_code.CONCEPT_CATEGORY_GROUP_LIMIT', 1):
+        data = listed(client, view='categories')
+        assert (data['grouped'], data['categories'], data['order']) == (False, None, 'priority')
+        assert {item['concept_id'] for item in data['results']} == {alpha.pk, beta.pk}
+        # Under the limit again once a category narrows it, and then the rows are left out.
+        narrowed = listed(client, view='categories', category='Alpha class')
+        assert (narrowed['grouped'], narrowed['results']) == (True, [])
+
+
+def test_one_category_is_fetched_and_paged_by_its_own_name(client):
+    from omop_core.services import concept_priority
+    big = [classed(f'Big {index:02}', 'Big class') for index in range(53)]
+    small = classed('Small', 'Small class')
+    concept_priority.move(big[9], 1)
+
+    first = listed(client, category='Big class')
+    second = listed(client, category='Big class', page=2)
+    assert first['total'] == second['total'] == 53 and (first['page'], second['page']) == (1, 2)
+    assert len(first['results']) == 50 and len(second['results']) == 3
+    assert first['results'][0]['concept_id'] == big[9].pk  # ranked first inside its category
+    assert {item['category'] for item in first['results'] + second['results']} == {'Big class'}
+    assert len({item['concept_id'] for item in first['results'] + second['results']}) == 53
+    larger = listed(client, category='Big class', page_size=100)
+    assert len(larger['results']) == 53 and larger['page'] == 1
+    assert [item['concept_id'] for item in listed(client, category='Small class')['results']] == [small.pk]
+    assert listed(client, category='No such class')['results'] == []
 
 
 def test_list_and_detail_paginate_before_serialization(client, concept):

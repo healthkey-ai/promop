@@ -51,13 +51,14 @@ row's value, the counts and the filter read that annotation.
 
 ### Order, grouping and the limit
 
-`GET /api/v1/concept-to-code/` takes two parameters for this and returns four
+`GET /api/v1/concept-to-code/` takes three parameters for this and returns four
 keys beside each row's `category`:
 
 | Parameter | Values | Effect |
 |---|---|---|
 | `order` | `category` (default), `priority` | `category` sorts by category, then by curator priority, Done last, then name. `priority` is the global ranked list. Anything else is a 400. |
-| `category` | a category, or `__none__` | narrows to that category under the same definition; combines with every other filter; an unknown value matches nothing |
+| `category` | a category, or `__none__` | narrows to that category under the same definition; combines with every other filter; an unknown value matches nothing. This is how the page asks for the rows of one opened category, paged by `page` and `page_size` within it |
+| `view` | `categories`, or absent | `categories` answers the headers alone (#2699): the whole envelope (`grouped`, `categories`, `order`, `group_limit`, `total`, `prioritized`, `domains`) with `results: []`, and no row, field, lock or note is read, so it costs 4 queries whatever the list holds (8 with rows). Every filter applies to the counts. A list that is not grouped has no headers, so it returns its page of rows as without `view`. Absent or empty is the list as before; any other value is a 400 |
 
 | Response key | Meaning |
 |---|---|
@@ -82,19 +83,33 @@ of queries however many concepts it lists.
 
 ### On the page
 
-A grouped list has one header row per category, spanning the table: a button
-with the category ("Uncategorized" for none) and the number of concepts in it
-across every page, with the number on this page when that is fewer. A category
-that began on an earlier page says "(continued)"; the page works that out from
-the sizes of the categories before it.
+A grouped list is **one list of headers, never paged**: one row per category,
+spanning the table, a button with the category ("Uncategorized" for none) and
+the number of concepts in it. The page asks for it with `view=categories`
+(together with the filters) and fetches no concept row until a category is
+opened, so with every category folded there is one request however many
+concepts the list holds, and the page never fills with headers.
 
-Every category starts folded: only the headers are drawn, and a line above them
-says "Categories are folded: open one to see its concepts, or Expand all."
-while all of them are. Clicking a header opens that category's rows, and
-Expand all and Collapse all act on every category of the filtered list. Opening
-is a matter of what is drawn: the rows of a folded category are still part of
-the page, so a folded category frees no room for more concepts. Drag-to-reorder
-needs visible rows, so it works among the categories that are open.
+Every category starts folded, and a line above them says "Categories are
+folded: open one to see its concepts, or Expand all." while all of them are.
+Clicking a header opens that category: the page asks the same endpoint for
+`category=<name>` with the current filters, `page` and the page-size selector
+(50, 100, 250, 500), and draws that category's rows under its header. Each
+open category pages on its own: a "Pages of <category>" control sits under its
+rows and only when the category holds more than one page ("unless the screen is
+full"), and a filter or a page-size change starts every open category over at
+its first page. Open categories are independent requests, with no more than six
+in flight at once (`MAX_CATEGORY_REQUESTS`); the rest wait their turn. Folding a
+category discards its rows and its page. A write (priority, Done, Lock, a note,
+a saved mapping) asks again for the headers and for the open categories only,
+and a saved note shows on its row before that reload.
+
+Collapse all folds every category of the list. Expand all opens them all, one
+request each, so it is offered only for a list of twelve categories or fewer
+(`EXPAND_ALL_LIMIT`) and is disabled, with a title that says why, above that. The
+categories remembered as open are fetched when the page loads, after the
+headers, and no others. Drag-to-reorder needs visible rows, so it works among
+the categories that are open.
 
 Priority remains one list across every category. Typing a number, the arrows
 and a drop onto a row in another category all set the global position, and the
