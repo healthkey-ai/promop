@@ -374,6 +374,12 @@ hand-coded computations do not; phase 1 writes the list for the ones that
 read a phase 1 field and leaves the rest equal to `patient_record`.
 Custom fields (`custom_fields` JSON) are phase 3.
 
+Decision (2026-11-17): with the switch on, computed fields use provisional
+inputs, so a patient with a proposed weight and height sees a BMI. The
+computation runs over the overlaid values without saving, and the result is a
+provisional field at the lowest confidence of its inputs
+([#2661](https://github.com/healthkey-ai/promop/issues/2661)).
+
 ### User edits
 
 A PATCH to `patient_record` writes the value as today. Because direct saves do
@@ -490,20 +496,23 @@ so the floor only matters for the band between the two. Build the floor first;
 every PATCH read and write approved data only. This is the main reason for the
 split.
 
-**Patient page (professional roles).** The page loads the provisional view and
-shows each provisional value with an amber "Provisional 82%" badge after the
-label, with a title saying the value came from an unapproved mapping and a link
-to the mapping dialog for its code (the Source Codes tab already links a code
-to its mapping). The control reads the badge from `confidence[name]`. An edit
-on a provisional field saves to the real endpoint as an approved value, and
-the badge goes. A per-user "show provisional" toggle returns the page to the
-approved-only view.
+**Patient page, every role that reads the patient.** Where the switch is on, a
+patient (on their own page), a verified representative and every professional who
+may read the patient see proposed values **by default**, with no toggle. The
+record read lays each proposal over a field the record leaves empty and returns
+`provisional_fields` (field to confidence). The page shows an amber "Provisional
+82%" indicator after the label, with a title saying the value came from a
+mapping not yet approved (a patient sees "not yet confirmed"), and a clinician's
+link to the mapping dialog for its code. An edit on a provisional field saves
+to the real endpoint as an approved value, and the indicator goes. The page
+keeps the real record as its PATCH baseline. The purpose is to give patients a
+view of their data while the concepts are mapped to codes. Analysts read no
+patient, so they see no proposals. With the switch off nothing is computed,
+stored or shown to anyone ([#2659](https://github.com/healthkey-ai/promop/issues/2659)).
 
-**Patient page (patient role) and PHR APIs.** A patient sees no provisional
-values in phase 1: the role cannot reach the provisional endpoint, and the PHR
-labs API (`patient_portal/api/phr/labs.py`) skips provisional rows as it skips
-unproven ones. Showing a patient an unconfirmed diagnosis is a product
-decision for a later phase.
+**PHR APIs and lists.** The same audiences see the same proposals on the PHR
+labs and other APIs and on the patient list, with `confidence` on each, never a
+different answer on another screen ([#2660](https://github.com/healthkey-ai/promop/issues/2660)).
 
 **Patient OMOP tab and Source Codes tab.** A provisional row shows the badge
 in its row. The "Generate OMOP" banner says how many provisional rows the run
@@ -586,6 +595,24 @@ existing-mapping view) is the same number and lands with this.
 - Patient-facing display policy.
 - #1532 auto-approval reading the same floor.
 
+### Gaps before HealthTree can run with provisional data on (2026-11-17)
+
+Phases 0 to 1c are on `dev`: the confidence column, the Generate OMOP writes,
+the two tables, the provisional pass, the PATCH mirror and the overlay on the
+patient-record read, all behind `PROVISIONAL_DATA_ENABLED`. To deploy to
+HealthTree GCP with it on, and have patients see proposals without a click:
+
+| Gap | Issue |
+|---|---|
+| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) |
+| The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) |
+| Computed fields (BMI, scores, stages) use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) |
+| HealthTree's clinical rows come from the ETL: write provisional rows for them (ETL `confidence` or a server sweep) and widen the pass beyond labs, assertions and curated mappings (#2533, #2534) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) |
+| Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) |
+
+The rule for all of them: with the switch off, no provisional data is computed,
+stored or shown to anyone.
+
 Each phase is its own PR against `dev`, with a migration in phase 0 only;
 rebase on `dev` immediately before `makemigrations` and again before merge
 (see [Migration conflicts](../AGENTS.md#migration-conflicts)).
@@ -613,15 +640,14 @@ rebase on `dev` immediately before `makemigrations` and again before merge
    is what ingest writes today. A row Generate OMOP created from the
    inventory, which would not otherwise exist, is the one case where a delete
    would be cleaner; it is kept as an unresolved row so that one rule holds.
-3. **What a patient sees.** Phase 1 hides provisional values from the patient
-   role. Showing them with a badge is a product call that needs a clinician's
-   view of the risk of an unconfirmed diagnosis on a patient's own page.
+3. **What a patient sees.** Settled 2026-11-17: where the switch is on, a
+   patient sees their own proposed values, marked, by default. This reverses
+   the phase 1 refusal.
 4. **The floor's scope.** One deployment-wide floor in phase 1. A per-organization
    floor, or per domain (a provisional lab value is a smaller claim than a
    provisional condition), is a phase 3 setting if curators ask for it.
-5. **Default view for professionals.** The plan shows the provisional view by
-   default with a toggle to approved-only. The opposite default is safer for a
-   clinician who does not read the badge, and is a one-line change.
+5. **Default view.** Settled 2026-11-17: provisional by default for every role
+   that reads the patient, with no toggle; the site switch is the control.
 
 ## Related
 
