@@ -183,7 +183,7 @@ def test_mapped_codes_list_every_code_the_concept_list_counts(client):
         source(code, source_vocabulary_id=vocabulary, target_concept=steps, status=status, occurrence_count=0)
     listed = client.get(BASE, {'domain': 'wearables'}).data['results']
     assert [item['sccm_counts'] for item in listed] == [{'approved': 2, 'proposed': 3, 'rejected': 0}]
-    # The dialog sends seen_only=1 for its work queue; it does not narrow this list.
+    # Whatever a caller sends for seen_only, it does not narrow this list.
     for params in ({}, {'seen_only': '1'}, {'seen_only': '0'}):
         data = client.get(f'{BASE}{steps.pk}/', params).data
         assert data['total'] == 5
@@ -199,6 +199,9 @@ def test_mapped_codes_list_every_code_the_concept_list_counts(client):
         f'{BASE}{steps.pk}/', {'mode': 'available', **params}).data['results']}
     assert queue(seen_only='1') == {'seen-candidate'}
     assert queue(seen_only='0') == {'seen-candidate', 'unseen-candidate'}
+    # A malformed value is still refused in both modes.
+    assert client.get(f'{BASE}{steps.pk}/', {'seen_only': 'true'}).status_code == 400
+    assert client.get(f'{BASE}{steps.pk}/', {'mode': 'available', 'seen_only': 'true'}).status_code == 400
 
 
 def test_wearables_domain_keeps_the_ranked_only_filter(client):

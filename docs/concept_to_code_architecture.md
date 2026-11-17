@@ -52,7 +52,7 @@ own codes have no sightings on an instance that holds no wearable data. The
 filter narrows what could be mapped, never what is: Mapped Codes has no such
 checkbox and its requests carry no `seen_only`, as the Code to Concept page
 applies Seen > 0 only to its Unmapped section (#1648). On the API, `seen_only`
-narrows `mode=available` and is ignored for `mode=linked`, which still returns
+narrows `mode=available` and does not narrow `mode=linked` (a malformed value is a 400 in both), which still returns
 `zero_seen`. Seen represents the
 stored occurrence counter, not a count of distinct patients. On a seeded
 instance it starts as the hospital-code extract's record count, which counts
