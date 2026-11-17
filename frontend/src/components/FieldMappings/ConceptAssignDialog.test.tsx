@@ -361,3 +361,164 @@ describe("Scope (#2332)", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
+
+/** Create mode (#721): the dialog creates a field with its approved mapping. */
+describe("create mode", () => {
+  const CONCEPT = {
+    concept_id: 4112853, concept_name: "Frailty index", concept_code: "F-1",
+    vocabulary_id: "SNOMED", domain_id: "Observation", concept_class_id: "Clinical Finding",
+    standard_concept: "S",
+  };
+  const TABS = [
+    { value: "general", label: "General" },
+    { value: "disease", label: "Disease" },
+    { value: "labs", label: "Labs" },
+  ];
+  const OPTIONS = [
+    { value: "BC", label: "Breast Cancer" },
+    { value: "MM", label: "Multiple Myeloma" },
+  ];
+  const createProps = (tab: string, diseases: string[] = []) => ({
+    fieldName: "",
+    fieldType: "",
+    create: { tab, tabOptions: TABS },
+    fieldScope: { diseases, options: OPTIONS },
+    onClose: vi.fn(),
+    onSaved: vi.fn(),
+  });
+  const addButton = () => screen.getByRole("button", { name: "Add Field" });
+  const pickConcept = async () => {
+    fireEvent.change(screen.getByLabelText("Search concepts"), { target: { value: "frailty" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Frailty index/ }));
+  };
+  const posted = () => mockPost.mock.calls.find(([url]) => url === "/v1/custom-patient-fields/")?.[1];
+
+  beforeEach(() => {
+    mockGet.mockResolvedValue({ data: { results: [CONCEPT] } });
+  });
+
+  it("creates the field on the tab it was opened for once a concept is chosen", async () => {
+    const props = createProps("labs");
+    render(<ConceptAssignDialog {...props} />);
+    expect(screen.getByRole("heading", { name: "Add Field" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Tab")).toHaveValue("labs");
+    expect(screen.getByRole("radio", { name: /Base record/ })).toBeChecked();
+    // A created field arrives approved, so there is no status to choose.
+    expect(screen.queryByLabelText("Status")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
+    expect(screen.getByLabelText("Field name")).toHaveValue("frailty_index");
+    fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "number" } });
+    expect(addButton()).toBeDisabled();
+    await pickConcept();
+    expect(addButton()).toBeDisabled();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    fireEvent.click(addButton());
+
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalled());
+    expect(posted()).toEqual({
+      confirm_patient_record: true,
+      display_name: "Frailty Index",
+      field_name: "frailty_index",
+      field_type: "number",
+      mode: "editable",
+      formula: undefined,
+      tab: "labs",
+      concept: 4112853,
+      omop_table: "Measurement",
+      unit: "",
+      notes: "",
+      diseases: [],
+    });
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+
+  it("opens disease-specific on the disease it was given and sends that scope", async () => {
+    const props = createProps("disease", ["MM"]);
+    render(<ConceptAssignDialog {...props} />);
+    expect(screen.getByLabelText("Tab")).toHaveValue("disease");
+    expect(screen.getByRole("radio", { name: "Disease-specific" })).toBeChecked();
+    expect(within(screen.getByRole("group", { name: "Disease Categories" })).getByRole("checkbox", { name: /MM/ })).toBeChecked();
+
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "M protein note" } });
+    await pickConcept();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    fireEvent.click(addButton());
+
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalled());
+    expect(posted()).toMatchObject({ field_name: "m_protein_note", tab: "disease", diseases: ["MM"] });
+  });
+
+  it("keeps a field name that was typed over when the display name changes", () => {
+    render(<ConceptAssignDialog {...createProps("general")} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty" } });
+    fireEvent.change(screen.getByLabelText("Field name"), { target: { value: "cfs_score" } });
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty score" } });
+    expect(screen.getByLabelText("Field name")).toHaveValue("cfs_score");
+  });
+
+  it("refuses disease-specific with no category ticked", async () => {
+    const props = createProps("disease", ["MM"]);
+    render(<ConceptAssignDialog {...props} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "M protein note" } });
+    await pickConcept();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    fireEvent.click(within(screen.getByRole("group", { name: "Disease Categories" })).getByRole("checkbox", { name: /MM/ }));
+    fireEvent.click(addButton());
+
+    expect(await screen.findByText(/Choose at least one Disease Category/)).toBeInTheDocument();
+    expect(posted()).toBeUndefined();
+    expect(props.onSaved).not.toHaveBeenCalled();
+  });
+
+  it("needs a formula for a computed field", async () => {
+    render(<ConceptAssignDialog {...createProps("general")} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Double weight" } });
+    await pickConcept();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    expect(screen.queryByLabelText("Formula")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Field mode"), { target: { value: "computed" } });
+    expect(addButton()).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Formula"), { target: { value: "weight * 2" } });
+    fireEvent.click(addButton());
+    await waitFor(() => expect(posted()).toMatchObject({ mode: "computed", formula: "weight * 2" }));
+  });
+
+  it("says which input the server refused and stays open", async () => {
+    mockPost.mockRejectedValue({ response: { status: 400, data: {
+      field_name: ["A custom PatientRecord field already uses this name."],
+    } } });
+    const props = createProps("general");
+    render(<ConceptAssignDialog {...props} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
+    await pickConcept();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    fireEvent.click(addButton());
+
+    expect(await screen.findByText("field_name: A custom PatientRecord field already uses this name.")).toBeInTheDocument();
+    expect(props.onSaved).not.toHaveBeenCalled();
+    expect(addButton()).toBeEnabled();
+  });
+
+  it("shows a refused scope under the scope control", async () => {
+    mockPost.mockRejectedValue({ response: { status: 400, data: { diseases: ["ZZ is not a Disease Category."] } } });
+    render(<ConceptAssignDialog {...createProps("disease", ["ZZ"])} />);
+    // A category the list does not offer is still shown, ticked.
+    expect(screen.getByRole("checkbox", { name: /ZZ/ })).toBeChecked();
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Note" } });
+    await pickConcept();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    fireEvent.click(addButton());
+    expect(await screen.findByText("ZZ is not a Disease Category.")).toBeInTheDocument();
+  });
+
+  it("seeds Suggest from the display name", async () => {
+    render(<ConceptAssignDialog {...createProps("general")} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "Frailty Index", limit: "50" } },
+    ));
+  });
+});

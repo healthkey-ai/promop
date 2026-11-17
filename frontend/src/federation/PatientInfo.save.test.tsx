@@ -250,3 +250,36 @@ describe('federated PatientInfo save', () => {
     expect(posts).toEqual([]);
   });
 });
+
+describe('federated PatientInfo added fields (#721)', () => {
+  it('shows a field added through Field Concept Mapping on its tab, with no Add Field', async () => {
+    const original = (client.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('custom-patient-fields')) {
+        return Promise.resolve({ data: [{
+          id: 1, field_name: 'frailty_index', display_name: 'Frailty index', tab: 'labs',
+          field_type: 'text', mode: 'editable', unit: '', scope: 'base', diseases: [],
+        }] });
+      }
+      if (url.includes('/patient-info/me/')) {
+        return Promise.resolve({ data: {
+          patient_info: { ...PATIENT_INFO, custom_fields: { frailty_index: 'Fit' } },
+          user: { name: 'Alishia Howell', email: 'howell@example.org' },
+          patient_name: 'Alishia Tawny Howell',
+        } });
+      }
+      return original(url);
+    });
+
+    await renderAndLoad();
+    // Read through the host client, and not on the General tab.
+    await waitFor(() => expect(client.get).toHaveBeenCalledWith('/api/v1/custom-patient-fields/'));
+    expect(screen.queryByText('Frailty index')).not.toBeInTheDocument();
+
+    await openLabsTab();
+    expect(await screen.findByText('Frailty index')).toBeInTheDocument();
+    expect(screen.getByText('Fit')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Add Field' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Field concept mapping/ })).not.toBeInTheDocument();
+  });
+});

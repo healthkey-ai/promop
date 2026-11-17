@@ -48,3 +48,24 @@ export function resolveDiseaseFilter(value: string, options: DiseaseCategoryOpti
   );
   return match ? match.value : null;
 }
+
+/**
+ * The Disease Category of each disease the patient editor has a tab for, by
+ * the editor's disease type, as `disease_profiles.SEED_DISEASE_FIELDS` names
+ * them. A record of any other disease has the base record only.
+ */
+const DISEASE_TYPE_CATEGORY: Record<string, string> = {
+  breast: "BC", lymphoma: "FL", myeloma: "MM", cll: "CLL", mcl: "MCL",
+};
+
+export const diseaseCategoryCode = (diseaseType: string): string =>
+  DISEASE_TYPE_CATEGORY[diseaseType] ?? "";
+
+const LAB_FIELD_TABS = ["labs", "blood"];
+
+/**
+ * The field tabs whose added fields a patient tab shows (#721). The Labs tab
+ * is where the editor shows blood counts, so a field placed on the mapping
+ * page's Blood tab renders there too.
+ */
+export const addedFieldTabs = (tab: string): string[] => (tab === "labs" ? LAB_FIELD_TABS : [tab]);

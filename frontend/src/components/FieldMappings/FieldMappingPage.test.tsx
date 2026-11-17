@@ -39,15 +39,6 @@ vi.mock("./FormulaEditDialog", () => ({
   ),
 }));
 
-vi.mock("@/components/PatientInfo/CustomPatientFields", () => ({
-  AddCustomFieldDialog: ({ tab, onClose }: { tab: string; onClose: () => void }) => (
-    <div data-testid="add-custom-field-dialog">
-      Add custom field for {tab}
-      <button onClick={onClose}>Close add field</button>
-    </div>
-  ),
-}));
-
 const MOCK_DESCRIPTORS = [
   {
     field_name: "hemoglobin_g_dl",
@@ -745,11 +736,31 @@ describe("FieldMappingPage", () => {
     expect(mockPatch).not.toHaveBeenCalled();
   });
 
-  it("opens Add Field from the mapping header for the selected tab", async () => {
+  it("opens the mapping dialog in create mode from the header, on the selected tab", async () => {
     renderPage();
     await screen.findByText("Field Concept Mappings");
+    fireEvent.click(await screen.findByRole("button", { name: /Behavior/ }));
     fireEvent.click(screen.getByRole("button", { name: /add field/i }));
-    expect(screen.getByTestId("add-custom-field-dialog")).toHaveTextContent("general");
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "Add Field" })).toBeInTheDocument();
+    expect(within(dialog).getByLabelText("Tab")).toHaveValue("behavior");
+    expect(within(dialog).getByRole("radio", { name: /Base record/ })).toBeChecked();
+    // Cancelling stays on the page: nothing sent it here from a patient tab.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+  });
+
+  it("offers Add field to no one who cannot approve (#721)", async () => {
+    // An analyst writes mappings but a created field arrives approved.
+    mockUseAuth.mockReturnValue({ currentUser: {
+      id: 3, sub: "an", email: "an@example.com", name: "An", is_staff: false,
+      org_accesses: [{ role: "analyst", org_name: "Org", org_slug: "org", expires_at: null }],
+    } });
+    renderPage();
+    await screen.findByText("Field Concept Mappings");
+    expect(screen.getByRole("button", { name: /suggest/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /add field/i })).not.toBeInTheDocument();
   });
 
   describe("FieldMappingPage links", () => {
@@ -777,6 +788,104 @@ describe("FieldMappingPage", () => {
       renderLinked("bmi");
       expect(await screen.findByText("bmi")).toBeVisible();
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    /** A patient tab's Add field link (#721): ?new=1&tab=<tab>[&disease=<code>]. */
+    describe("Add field link", () => {
+      const CONCEPT = {
+        concept_id: 4112853, concept_name: "Frailty index", concept_code: "F-1",
+        vocabulary_id: "SNOMED", domain_id: "Observation", concept_class_id: "Clinical Finding",
+        standard_concept: "S",
+      };
+      function PatientProbe() {
+        const location = useLocation();
+        return <div>patient page, tab {String((location.state as { tab?: string } | null)?.tab)}</div>;
+      }
+      const renderNew = (search: string, state?: unknown) =>
+        render(
+          <MemoryRouter initialEntries={[{ pathname: "/field-mappings", search, state }]}>
+            <Routes>
+              <Route path="/field-mappings" element={<FieldMappingPage />} />
+              <Route path="/patient/:personId" element={<PatientProbe />} />
+            </Routes>
+          </MemoryRouter>
+        );
+      const FROM_PATIENT = (tab: string) => ({ addFieldReturn: { path: "/patient/42", tab } });
+
+      beforeEach(() => {
+        mockGet.mockImplementation((url: string) => {
+          if (url === "/v1/field-mappings/") return Promise.resolve({ data: MOCK_DESCRIPTORS });
+          if (url === "/v1/disease-categories/") {
+            return Promise.resolve({ data: [
+              { value: "BC", label: "Breast Cancer" }, { value: "MM", label: "Multiple Myeloma" },
+            ] });
+          }
+          if (url === "/v1/concepts/search/") return Promise.resolve({ data: { results: [CONCEPT] } });
+          if (url.startsWith("/v1/field-synonyms/batch/")) return Promise.resolve({ data: {} });
+          return Promise.resolve({ data: [] });
+        });
+      });
+
+      it("opens create mode on the tab named, as a base field", async () => {
+        renderNew("?new=1&tab=labs", FROM_PATIENT("labs"));
+        const dialog = await screen.findByRole("dialog");
+        expect(within(dialog).getByRole("heading", { name: "Add Field" })).toBeInTheDocument();
+        expect(within(dialog).getByLabelText("Tab")).toHaveValue("labs");
+        expect(within(dialog).getByRole("radio", { name: /Base record/ })).toBeChecked();
+      });
+
+      it("creates a disease tab field for the record's disease and returns to that tab", async () => {
+        renderNew("?new=1&tab=disease&disease=MM", FROM_PATIENT("disease"));
+        const dialog = await screen.findByRole("dialog");
+        expect(within(dialog).getByLabelText("Tab")).toHaveValue("disease");
+        expect(within(dialog).getByRole("radio", { name: "Disease-specific" })).toBeChecked();
+        expect(within(dialog).getByRole("checkbox", { name: /MM/ })).toBeChecked();
+        expect(within(dialog).getByRole("checkbox", { name: /BC/ })).not.toBeChecked();
+
+        fireEvent.change(within(dialog).getByLabelText("Display name"), { target: { value: "M protein note" } });
+        fireEvent.change(within(dialog).getByLabelText("Search concepts"), { target: { value: "frailty" } });
+        fireEvent.click(await within(dialog).findByRole("button", { name: /Frailty index/ }));
+        fireEvent.click(within(dialog).getByLabelText(/I confirm/));
+        fireEvent.click(within(dialog).getByRole("button", { name: "Add Field" }));
+
+        expect(await screen.findByText("patient page, tab disease")).toBeInTheDocument();
+        expect(mockPost).toHaveBeenCalledWith("/v1/custom-patient-fields/", expect.objectContaining({
+          field_name: "m_protein_note", tab: "disease", diseases: ["MM"], concept: 4112853,
+        }));
+      });
+
+      it("returns to the patient tab on cancel, having created nothing", async () => {
+        renderNew("?new=1&tab=general", FROM_PATIENT("general"));
+        const dialog = await screen.findByRole("dialog");
+        fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+        expect(await screen.findByText("patient page, tab general")).toBeInTheDocument();
+        expect(mockPost).not.toHaveBeenCalled();
+      });
+
+      it("stays on the page when the link names no patient page to return to", async () => {
+        renderNew("?new=1&tab=general", { addFieldReturn: { path: "https://elsewhere.example/", tab: "general" } });
+        const dialog = await screen.findByRole("dialog");
+        fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+      });
+
+      it("falls back to General for a tab that is not one", async () => {
+        renderNew("?new=1&tab=nowhere");
+        const dialog = await screen.findByRole("dialog");
+        expect(within(dialog).getByLabelText("Tab")).toHaveValue("general");
+      });
+
+      it("opens nothing and says why for someone who cannot approve", async () => {
+        mockUseAuth.mockReturnValue({ currentUser: {
+          id: 3, sub: "an", email: "an@example.com", name: "An", is_staff: false,
+          org_accesses: [{ role: "analyst", org_name: "Org", org_slug: "org", expires_at: null }],
+        } });
+        renderNew("?new=1&tab=labs", FROM_PATIENT("labs"));
+        expect(await screen.findByText("Only org admins and staff can add a field to PatientRecord.")).toBeInTheDocument();
+        await screen.findByText("Field Concept Mappings");
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
     });
 
     it("says so when the linked field is not in the mapper", async () => {

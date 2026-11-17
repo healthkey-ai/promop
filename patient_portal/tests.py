@@ -22276,6 +22276,45 @@ class CustomPatientFieldApiTest(TestCase):
         response = self.client.post('/api/v1/custom-patient-fields/', self.payload(), format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_creating_a_field_is_an_approval_so_analyst_and_doctor_are_refused(self):
+        """A created field arrives with an approved mapping (#721).
+
+        An analyst writes mappings and a doctor reads them, but neither
+        approves, so neither creates a field; both still list them.
+        """
+        for role in ('analyst', 'doctor'):
+            with self.subTest(role=role):
+                user = Identity.objects.create_user(email=f'custom-field-{role}@t.com', password='x')
+                GroupAccess.objects.create(identity=user, org=self.org, role=role)
+                self.client.force_authenticate(user=user)
+                response = self.client.post(
+                    '/api/v1/custom-patient-fields/', self.payload(), format='json')
+                self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+                self.assertFalse(CustomPatientField.objects.exists())
+                self.assertFalse(
+                    FieldConceptMapping.objects.filter(field_name='tumor_response_note').exists())
+                self.assertEqual(
+                    self.client.get('/api/v1/custom-patient-fields/').status_code, status.HTTP_200_OK)
+
+    def test_created_field_carries_the_tab_and_disease_it_was_added_from(self):
+        """What a patient tab's Add field sends: its tab and the record's disease."""
+        from omop_core.models import DiseaseCategoryChoice, FieldDiseaseMembership
+        DiseaseCategoryChoice.objects.get_or_create(code='MM', defaults={'label': 'Multiple Myeloma'})
+        self.client.force_authenticate(user=self.org_admin)
+        response = self.client.post(
+            '/api/v1/custom-patient-fields/', self.payload(diseases=['MM']), format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(response.data['tab'], 'disease')
+        self.assertEqual(response.data['scope'], 'disease')
+        self.assertEqual(response.data['diseases'], ['MM'])
+        self.assertEqual(
+            list(FieldDiseaseMembership.objects.filter(field_name='tumor_response_note')
+                 .values_list('disease', flat=True)),
+            ['MM'],
+        )
+        listed = self.client.get('/api/v1/custom-patient-fields/').data
+        self.assertEqual(listed[0]['diseases'], ['MM'])
+
     def test_computed_field_requires_valid_formula_and_creates_an_active_formula(self):
         self.client.force_authenticate(user=self.staff)
         response = self.client.post(

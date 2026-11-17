@@ -30,7 +30,6 @@ vi.mock("@/api/axios", () => ({
 
 vi.mock("./FieldChoiceEditor", () => ({ FieldChoiceEditor: () => null }));
 vi.mock("./FormulaEditDialog", () => ({ FormulaEditDialog: () => null }));
-vi.mock("@/components/PatientInfo/CustomPatientFields", () => ({ AddCustomFieldDialog: () => null }));
 
 const field = (field_name: string, tab: string, diseases: string[], extra: Record<string, unknown> = {}) => ({
   field_name,

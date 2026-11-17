@@ -283,8 +283,9 @@ disease tab, add it to `SEED_DISEASE_FIELDS` there (a drift test holds that
 list to `DiseaseTab.tsx`) **and** add the rows in a data migration that
 declares its own frozen `FIELD_DISEASE_SEED`, as 0347 does: the seed migration
 has already run on every existing instance, and a second test fails until
-some migration writes the field. A field a curator creates takes `diseases`
-on `POST /api/v1/custom-patient-fields/` instead.
+some migration writes the field. A field an org admin creates takes `diseases`
+on `POST /api/v1/custom-patient-fields/` instead; from a patient's disease
+tab the Add Field link preselects that record's Disease Category.
 See [the architecture](docs/field_concept_mapping_architecture.md#whose-record-a-field-is-part-of-fielddiseasemembership).
 
 ### 7. TypeScript Type (`frontend/src/types/patient.ts`)
@@ -702,7 +703,7 @@ row removes that role. The helpers in `omop_core/services/access.py` and
 |---|---|
 | `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: writes and approves mappings, administers access, uploads |
 | `doctor` | patients, read and write (`can_access_patient`, `can_write_patient`, `get_visible_orgs`, `has_curation_access`), and **every mapping page read-only** (`has_mapping_read_access`, `_can_view_mappings`): the hub, Code Mapping, field mappings, therapy and disease-category reference, relevance signals, source systems |
-| `analyst` | every mapping page, **and writing them** (`has_mapping_write_access`, `_can_manage_mappings`): creating, editing, proposing and uploading code and field mappings, synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting, source-system facility review, rejecting relevance signals -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). The one exception is a public demo org (`allows_patient_signup`) the grant sits at: its sample patients are listed and CSV-exported to every grant there, whatever the role, a patient's included (#1392), but de-identified for a reader without curation access -- names, age and location withheld on the server as if each patient had opted in (`withhold_identifiers`, #2460) -- and the detail stays 404 as it does for a patient there; the UI shows such a reader no Name column and no row link. |
+| `analyst` | every mapping page, **and writing them** (`has_mapping_write_access`, `_can_manage_mappings`): creating, editing, proposing and uploading code and field mappings, synonyms and choices, Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting, source-system facility review, rejecting relevance signals -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). The one exception is a public demo org (`allows_patient_signup`) the grant sits at: its sample patients are listed and CSV-exported to every grant there, whatever the role, a patient's included (#1392), but de-identified for a reader without curation access -- names, age and location withheld on the server as if each patient had opted in (`withhold_identifiers`, #2460) -- and the detail stays 404 as it does for a patient there; the UI shows such a reader no Name column and no row link. |
 | `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
 
 So a doctor sees every mapping but creates or changes one only when also
@@ -728,6 +729,14 @@ mapping endpoint's reads with `_can_view_mappings` and its writes with
 `_can_manage_mappings` (`concept_to_code._authorize(user, write=True)` on
 that module); a mixed-verb view checks both. `AnalystRoleScopeTest` and
 `MappingApprovalRoleTest` in `patient_portal/tests.py` hold the roles to this.
+
+Adding a field to PatientRecord is an approval, not a mapping write: `POST
+/api/v1/custom-patient-fields/` creates the field with an approved mapping, so
+it is gated by `_can_approve_mappings` and an analyst or a doctor gets 403
+(#721). The UI offers it to staff and org admins only, outside patient mode:
+the Add Field link at the top and bottom of each patient tab
+(`AddFieldLink.tsx`, shown with the fields' globes) and the Field Mappings
+page's own button, both of which open the mapping dialog in create mode.
 
 ---
 

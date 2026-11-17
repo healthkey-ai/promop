@@ -14,6 +14,8 @@ import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
+import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
+import { addedFieldTabs, diseaseCategoryCode } from "@/utils/fieldScope";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -452,6 +454,18 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
           {activeTab === historyIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
         </div>
+
+        {/* Fields added through Field Concept Mapping, last on their tab
+            (#721). The host has no Field Mappings page, so no Add Field. */}
+        {tabKeys[activeTab] !== "history" && (
+          <div className="mt-6">
+            <CustomPatientFields
+              tabs={addedFieldTabs(tabKeys[activeTab])}
+              diseases={diseaseCategoryCode(diseaseType) ? [diseaseCategoryCode(diseaseType)] : []}
+              formData={editedInfo}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

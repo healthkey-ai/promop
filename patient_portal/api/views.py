@@ -15732,7 +15732,10 @@ def custom_patient_field_list(request):
     """List runtime PatientRecord fields or atomically add one with its mapping.
 
     Definitions are visible to every signed-in user because Patient Info needs
-    them to render values.  Creation remains limited to mapping administrators.
+    them to render values.  Creating one is an approval: the field arrives with
+    an approved mapping, so only staff and org admins may (#721). An analyst
+    proposes and remaps existing fields and is refused here, as on any other
+    approval.
     """
     from .serializers import CustomPatientFieldCreateSerializer, CustomPatientFieldSerializer
 
@@ -15745,7 +15748,7 @@ def custom_patient_field_list(request):
             fields, many=True, context={'field_diseases': disease_profiles.memberships()},
         ).data)
 
-    if not _can_manage_mappings(request.user):
+    if not _can_approve_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = CustomPatientFieldCreateSerializer(

@@ -1193,6 +1193,15 @@ multi-disease union and `Other`.
 
 ### 10.3 Creating and scoping a field from a patient tab
 
+> **Delivered 2026-11-17 (#721).** The tab action, the deep link, create mode
+> in the one dialog, the org-admin gate and the rendering of created fields
+> are built as described in
+> [Adding a field from a patient tab](field_concept_mapping_architecture.md#adding-a-field-from-a-patient-tab).
+> Created fields render through `CustomPatientFields.tsx`, read-only, without
+> waiting for the generic slot of #2330, which still owns placed built-in
+> fields. The tab control when remapping an existing field stays with #2329.
+> The baseline below is the state before that change.
+
 #### Verified baseline
 
 | Piece | Today |
@@ -1302,7 +1311,7 @@ disease code, and round-trip of scope through
 | [#2329](https://github.com/healthkey-ai/promop/issues/2329) | Placement curation: the tab control in the Field Concept Mapping dialog; Unplaced group | #2328 |
 | [#2330](https://github.com/healthkey-ai/promop/issues/2330) | Patient tabs render registry-placed fields, created ones included, through a generic slot; drift test | #2328 |
 | [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field scope as membership reference data keyed to `DiseaseCategoryChoice`, a record's profile resolved through `DiseaseCategoryMapping`; seed and CancerBot reconciliation; descriptor `scope`/`diseases`; relevance reads it; the `?disease=`/`set=` filter on the field-mappings list and the per-disease CSV export endpoint. **Delivered 2026-11-16** except the CancerBot reconciliation (#1149) and the inventory export reading the rows; see [the architecture](field_concept_mapping_architecture.md#whose-record-a-field-is-part-of-fielddiseasemembership) | #2328 |
-| [#721](https://github.com/healthkey-ai/promop/issues/721) | Add field from a patient tab: the tab action and deep link, create mode in the one dialog, scope on the create API, org-admin gate (10.3) | #2329, #2330, #2331 |
+| [#721](https://github.com/healthkey-ai/promop/issues/721) | Add field from a patient tab: the tab action and deep link, create mode in the one dialog, scope on the create API, org-admin gate (10.3). **Delivered 2026-11-17**, with created fields rendered read-only on their tab | #2331 |
 | [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, chosen by the record's category instead of a name match, a tab for any category with an extension, extension size on the Disease Category Mappings page, the disease filter (extension or full record) and its two CSV download actions on the Field Mappings page, scope control on existing fields, disease-scoped choices. **Delivered 2026-11-16:** the Field Mappings page half (scope column, disease filter, both downloads, scope control in the dialog); the rest is open | #2330, #2331, #1224 |
 | [#2333](https://github.com/healthkey-ai/promop/issues/2333) | Per-disease write validation: audit, warn-only, enforce behind a setting | #2331 |
 | [#1147](https://github.com/healthkey-ai/promop/issues/1147) | ~~Remove the inline Add field control from the patient tabs~~ Already true on `dev`; #721 carries the requirement that the new tab action is never patient-facing | **Closed** |
