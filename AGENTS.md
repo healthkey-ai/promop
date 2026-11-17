@@ -1500,26 +1500,42 @@ before enabling it there.** Off, nothing is queried, queued or written. See
 provisional data as the proposals can support, in one resumable command:
 **propose** (their unresolved and inventory codes' organization-unscoped queue
 rows that are `proposed` with no destination go through the normal Suggest
-pipeline, ranker `--ranker jev|anthropic|both`, default Jev; a missing queue row
-is created the way `enqueue_unmapped_source_codes` makes it, one per code system
-the inventory holds the code under), **materialise** (the sweep's own
-`person_scope` resolve, so rows become provisional at or above
+pipeline, ranker `--ranker jev|anthropic|both`, default Jev), **materialise**
+(the sweep's own `person_scope` resolve, so rows become provisional at or above
 `PROVISIONAL_CONFIDENCE_FLOOR` and are created for inventory codes with no row;
-the floor is never overridden, and the report counts what fell below it by band)
-and **rederive** (the record is rebuilt inline, which writes
-`patient_record_provisional` and `patient_record_confidence`). Suggest runs in
-batches (`--batch-size`, 25) so each batch's writes land before the next starts
-and a rerun skips codes this model version already attempted
-(`--retry-declined` redoes them, `--replace` redoes a previous Suggest run's
-destinations and never an importer's or a curator's). A one-question preflight
-and a stop on a batch the ranker answered none of keep an unavailable ranker
-from writing its retrieval-order stand-in. `--dry-run` counts and writes nothing
-and calls no model; `--skip-propose`, `--tables`, `--limit`, `--strategies`
-narrow it; clinical values are printed only with `--show-values`. It refuses,
-writing nothing, with `PROVISIONAL_DATA_ENABLED` off, and runs as a Cloud Run
-job where `JEV_API_KEY` is in the environment. Code:
-`omop_core/services/fill_provisional.py`; `suggest_mappings` gained an optional
-`mapping_ids` to run on a chosen set of queue rows.
+the floor is never overridden, and the report counts what fell below it by band
+of the real floor, and a proposal at or above it whose destination the resolver
+will not write, separately) and **rederive** (the record is rebuilt inline, which
+writes `patient_record_provisional` and `patient_record_confidence`).
+`--tables` and `--limit` narrow only the propose step: every proposal there is
+still makes the person's rows provisional and is rederived.
+
+- **A code the ranker could not rank is never written.** A ranker that cannot run
+  (no key, a 429, a timeout) does not raise: Suggest would write its first
+  retrieval hit as the destination. This command calls `suggest_mappings` with
+  `skip_fallback=True` (off for every other caller), which leaves such a row, and
+  one whose ranking raised, untouched and unstamped; the run stops after the
+  batch that had one, with a non-zero exit, and a rerun retries exactly those. A
+  ranker's explicit decline is an answer: written, stamped, not retried without
+  `--retry-declined`. A one-question preflight catches a missing or rejected key
+  before the first batch.
+- **Batched and resumable.** Suggest runs in batches (`--batch-size`, 25), so each
+  batch's writes land before the next starts; a rerun skips codes already
+  answered. Approved rows are never touched, and `--replace` redoes only
+  destinations a previous Suggest run set, never an importer's or a curator's.
+- **Queue rows it creates** are born like `enqueue_unmapped_source_codes`'s
+  (proposed, no destination, Seen 1), one per code system the inventory holds the
+  code under, with the inventory's source metadata and a name from Athena or UMLS,
+  so the ranker sees what a curator sees. An HK-* source system, and a row the
+  unique constraint (organization, system and code, case sensitive, any table)
+  would refuse, are skipped and counted.
+- `--dry-run` counts and writes nothing and calls no model; `--skip-propose`,
+  `--strategies` narrow it; clinical values are printed only with
+  `--show-values`; failures name the step and the exception's class, never its
+  text. It refuses, writing nothing, with `PROVISIONAL_DATA_ENABLED` off, and runs
+  as a Cloud Run job where `JEV_API_KEY` is in the environment. Code:
+  `omop_core/services/fill_provisional.py`; `suggest_mappings` gained optional
+  `mapping_ids` and `skip_fallback`.
 
 ### Replace re-answers rows, it does not delete them
 

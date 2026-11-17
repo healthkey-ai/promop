@@ -6,11 +6,12 @@ provisional at proposals at or above ``PROVISIONAL_CONFIDENCE_FLOOR``, and
 rebuild the patient's record so the provisional tables are filled. See
 ``omop_core/services/fill_provisional.py``.
 
-Resumable: a code this model version already attempted is skipped on a rerun
-(``--retry-declined`` redoes them). Writes to ``DATABASE_URL``: name the
-database explicitly. Refuses, writing nothing, when ``PROVISIONAL_DATA_ENABLED``
-is off. The ranker's key comes from the environment (``JEV_API_KEY`` or
-``ANTHROPIC_API_KEY``).
+Resumable: a code the ranker answered (a destination, or a decline) is skipped
+on a rerun (``--retry-declined`` redoes declines); a code it could not rank is
+left untouched and retried. ``--tables`` and ``--limit`` narrow only the propose
+step. Writes to ``DATABASE_URL``: name the database explicitly. Refuses, writing
+nothing, when ``PROVISIONAL_DATA_ENABLED`` is off. The ranker's key comes from
+the environment (``JEV_API_KEY`` or ``ANTHROPIC_API_KEY``).
 """
 import sys
 
@@ -29,9 +30,10 @@ class Command(BaseCommand):
         parser.add_argument('--ranker', choices=sorted(RANKING_MODELS), default='jev',
                             help='The ranking model Suggest uses (default jev).')
         parser.add_argument('--limit', type=int, default=None,
-                            help='Propose for at most this many queue rows in this run.')
+                            help='Propose for at most this many queue rows in this run (the propose step only).')
         parser.add_argument('--tables', nargs='+', choices=sorted(CLINICAL_TABLES), default=None,
-                            help='Only the codes held under these clinical tables.')
+                            help='Only propose for codes held under these clinical tables (the propose step only: '
+                                 'rows are made provisional and the record rederived for every proposal).')
         parser.add_argument('--dry-run', action='store_true',
                             help='Count what would be proposed; write nothing and call no model.')
         parser.add_argument('--skip-propose', action='store_true',

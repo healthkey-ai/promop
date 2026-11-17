@@ -71,7 +71,6 @@ down is worse than one that returns a decent guess a curator can correct.
 """
 import json
 import logging
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1169,12 +1168,8 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
         return fallback, f'{fallback_note} Details: {detail}', None
 
     jev_key = getattr(settings, 'JEV_API_KEY', '')
-    logger.info(
-        'Jev ranking: JEV_API_KEY from settings=%r, from env=%r, bool=%s',
-        jev_key[:8] + '...' if jev_key else '',
-        (os.environ.get('JEV_API_KEY', '') or '')[:8] + '...' if os.environ.get('JEV_API_KEY') else '',
-        bool(jev_key),
-    )
+    # Whether a key is configured, never any part of it: this runs once per code.
+    logger.info('Jev ranking: JEV_API_KEY configured=%s', bool(jev_key))
     if not jev_key:
         return unavailable('missing_api_key', 'JEV_API_KEY is not configured.')
 
@@ -2028,7 +2023,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      limit=None, dry_run=False, source_vocabulary_id=None,
                      strategies=None, lexical_limit=CANDIDATE_LIMIT,
                      resuggest=False, progress=None, activity=None,
-                     ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None):
+                     ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None,
+                     skip_fallback=False):
     """Propose destinations for the unanswered queue rows on one tab.
 
     The candidate set is :func:`suggestable_mappings` -- rows already on the
@@ -2056,6 +2052,15 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     *mapping_ids* narrows the run to those queue rows (see
     :func:`suggestable_queryset`); the tab-wide run leaves it unset.
+
+    *skip_fallback* (off: every existing caller is unchanged) stops the run from
+    writing what is not an answer. A ranker that could not run (a rejected key, a
+    429, a timeout) does not raise: it hands back the first retrieval hit with a
+    "ranking model unavailable" note, which an ordinary run writes as the
+    destination. With *skip_fallback* such a row, and one whose ranking raised, is
+    left exactly as it was, unwritten and unstamped (so a rerun retries it), and
+    its result entry carries ``unanswered: True``. A ranker's explicit decline is
+    an answer and is still written and stamped.
 
     *progress*, when given, is called as ``progress(stage, done, total)`` with
     *stage* ``'retrieving'`` then ``'writing'``.  Retrieval is two thirds of the
@@ -2269,6 +2274,12 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             # and both have `suggested` None. `ranked` counts destinations.
             'updated': False,
         }
+        if skip_fallback and (job.get('ranking_failed') or _is_retrieval_fallback(chosen, note)):
+            entry.update(suggested=None, strategy_used=None, unanswered=True)
+            results.append(entry)
+            emit('result', **entry, dry_run=dry_run)
+            report('writing', len(results))
+            continue
         if chosen and athena_supplies_mapping(
             mapping.source_vocabulary_id, mapping.source_code[:SOURCE_CODE_MAX],
             chosen['concept_id'],
