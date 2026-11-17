@@ -30,7 +30,9 @@ mapping's ``category``, ``measure_class`` and ``metric_key``, the first two
 columns of the Wearables tab. ``--update-seeded`` fills any of them on any row
 where it is blank, whatever the row's status, and never changes one that is set.
 
-``seed_hl7_phr_mappings`` runs this same command over the HL7 PHR metrics.
+``seed_hl7_phr_mappings`` runs this same command over the HL7 PHR metrics and
+the HealthKit and Health Connect codes the HL7 PHR table maps them from: one
+``seed`` call per source vocabulary.
 """
 
 import logging
@@ -320,10 +322,17 @@ UCUM_SYSTEM = 'http://unitsofmeasure.org'
 # recorded, but they get no destination unit: an approved mapping's unit is a
 # conversion target, and the temperature conversion is for absolute readings
 # (0.5 degF as a reading is -17.5 Cel; as a difference it is 0.28).
+# Named by source code or by metric key, so another vocabulary's code for one of
+# these metrics follows the same rule.
 NO_DESTINATION_UNIT = frozenset({
     'skin_temperature_deviation', 'skin_temperature_trend_deviation',
     'garmin_skin_temperature',
 })
+
+# Vocabularies of locally minted concepts. They are quarantined as non-standard
+# on purpose (concept_fixtures._hk), and are still the destination the proposal
+# names for a metric with no LOINC or SNOMED equivalent.
+LOCAL_TARGET_VOCABULARIES = frozenset({'HK-Wearable'})
 
 
 def unit_evidence(unit):
@@ -408,13 +417,17 @@ def _repoint(row, target):
 class Command(BaseCommand):
     help = 'Seed SourceCodeConceptMapping rows for OpenWearables metrics.'
 
-    # What a run seeds. seed_hl7_phr_mappings overrides all six.
+    # What a run seeds. seed_hl7_phr_mappings names its own provenance and
+    # calls ``seed`` once for each of its vocabularies.
     vocabulary_id = VOCABULARY_ID
     origin_system = SEED_ORIGIN_SYSTEM
     metrics = OPENWEARABLES_METRICS
     categories = OPENWEARABLES_CATEGORIES
     measure_classes = OPENWEARABLES_MEASURE_CLASSES
     metric_keys = OPENWEARABLES_METRIC_KEYS
+    # Whether a target outside LOCAL_TARGET_VOCABULARIES must be a standard
+    # concept to be proposed. Off here: this seed's targets predate the check.
+    require_standard_target = False
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -432,13 +445,25 @@ class Command(BaseCommand):
         )
 
     def handle(self, **options):
+        self.seed(self.vocabulary_id, self.metrics, self.categories,
+                  self.measure_classes, self.metric_keys, **options)
+
+    def seed(self, vocabulary_id, metrics, categories, measure_classes, metric_keys,
+             label='', **options):
+        """Seed *metrics* into *vocabulary_id* and report it.
+
+        *label* names the vocabulary on the report of a command that seeds
+        several. Returns the counts its summary line gives.
+        """
         dry_run = options['dry_run']
         update_seeded = options['update_seeded']
         detail = self.stdout.write if options['verbosity'] >= 1 else (lambda _line: None)
+        if label:
+            detail(f'{label}:')
 
         # Collect all target codes that need concept lookup, grouped by vocab.
         vocab_codes: dict[str, set[str]] = {}
-        for _code, _name, _unit, _domain, t_vocab, t_code in self.metrics:
+        for _code, _name, _unit, _domain, t_vocab, t_code in metrics:
             if t_vocab and t_code:
                 vocab_codes.setdefault(t_vocab, set()).add(t_code)
 
@@ -449,10 +474,10 @@ class Command(BaseCommand):
                 vocabulary_id=vocab,
                 concept_code__in=codes,
             ).only('concept_id', 'concept_code', 'vocabulary_id', 'domain_id',
-                   'invalid_reason'):
+                   'invalid_reason', 'standard_concept'):
                 concepts[(vocab, c.concept_code)] = c
         # The unit each metric is recorded in, as a UCUM concept.
-        ucum_codes = {UCUM_BY_UNIT[unit] for _c, _n, unit, *_rest in self.metrics
+        ucum_codes = {UCUM_BY_UNIT[unit] for _c, _n, unit, *_rest in metrics
                       if unit in UCUM_BY_UNIT}
         units = {
             c.concept_code: c for c in Concept.objects.filter(
@@ -465,14 +490,14 @@ class Command(BaseCommand):
         source_units_filled = fillable = 0
         described_filled = {'category': 0, 'measure_class': 0, 'metric_key': 0}
         describable = 0
-        without_unit = sorted({unit for _c, _n, unit, *_rest in self.metrics
+        without_unit = sorted({unit for _c, _n, unit, *_rest in metrics
                                if unit and UCUM_BY_UNIT.get(unit) not in units})
         left_alone = []  # (source_code, reason): the seed's target was not applied
         with transaction.atomic():
             existing = {
                 row.source_code: row
                 for row in SourceCodeConceptMapping.objects.filter(
-                    organization=None, source_vocabulary_id=self.vocabulary_id,
+                    organization=None, source_vocabulary_id=vocabulary_id,
                 ).select_related('target_concept')
             }
             # A concept a curator holds refuses every write that names it
@@ -485,16 +510,17 @@ class Command(BaseCommand):
                 })
                 .values_list('concept_id', flat=True)
             )
-            for ow_code, display, unit, domain, t_vocab, t_code in self.metrics:
+            for ow_code, display, unit, domain, t_vocab, t_code in metrics:
                 target = concepts.get((t_vocab, t_code)) if t_vocab else None
-                unit_concept = (None if ow_code in NO_DESTINATION_UNIT
-                                else units.get(UCUM_BY_UNIT.get(unit)))
+                no_unit = (ow_code in NO_DESTINATION_UNIT
+                           or metric_keys.get(ow_code) in NO_DESTINATION_UNIT)
+                unit_concept = None if no_unit else units.get(UCUM_BY_UNIT.get(unit))
                 evidence = unit_evidence(unit)
                 # What the proposal says about the metric itself.
                 described = (
-                    ('category', self.categories.get(ow_code, ''), 'CATEGORY'),
-                    ('measure_class', self.measure_classes.get(ow_code, ''), 'MEASURE CLASS'),
-                    ('metric_key', self.metric_keys.get(ow_code, ''), 'METRIC KEY'),
+                    ('category', categories.get(ow_code, ''), 'CATEGORY'),
+                    ('measure_class', measure_classes.get(ow_code, ''), 'MEASURE CLASS'),
+                    ('metric_key', metric_keys.get(ow_code, ''), 'METRIC KEY'),
                 )
                 desc = f'{display} ({unit})' if unit else display
                 omop_table = DOMAIN_TO_TABLE.get(domain, '')
@@ -510,14 +536,27 @@ class Command(BaseCommand):
                     # another domain would sit in the wrong clinical table.
                     unusable = (f'Concept is in domain {target.domain_id}, '
                                 f'the seed files the metric under {domain}')
+                elif (target and self.require_standard_target
+                        and target.standard_concept != 'S'
+                        and target.vocabulary_id not in LOCAL_TARGET_VOCABULARIES):
+                    unusable = 'Concept is not standard'
                 if unusable:
                     logger.warning('%s: %s %s for metric %s', unusable, t_vocab, t_code, ow_code)
                     detail(self.style.WARNING(f'  {unusable}: {wanted} for metric {ow_code}'))
                     target = None
+                row = existing.get(ow_code)
+                if row is None and target and target.pk in locked:
+                    # A curator holds this concept (#2390), and the API would
+                    # refuse a save that names it. The row is created without
+                    # a destination; --update-seeded points it there once the
+                    # concept is unlocked.
+                    detail(self.style.WARNING(
+                        f'  Concept is locked by a curator: {wanted} for metric {ow_code}; '
+                        'created without a destination'))
+                    target = None
                 if not target:
                     unresolved += 1
 
-                row = existing.get(ow_code)
                 if row is None and dry_run:
                     created += 1
                     state = 'MAPPED' if target else 'UNMAPPED'
@@ -526,7 +565,7 @@ class Command(BaseCommand):
                 if row is None:
                     row, was_created = SourceCodeConceptMapping.objects.get_or_create(
                         organization=None,
-                        source_vocabulary_id=self.vocabulary_id,
+                        source_vocabulary_id=vocabulary_id,
                         source_code=ow_code,
                         defaults={
                             'domain_id': domain,
@@ -646,8 +685,11 @@ class Command(BaseCommand):
                 + ', '.join(f'{unit} ({UCUM_BY_UNIT.get(unit, "no UCUM code")})'
                             for unit in without_unit)
                 + ' (destination unit left unset)'))
-        total = len(self.metrics)
-        prefix = 'DRY RUN: would have ' if dry_run else 'Done: '
+        total = len(metrics)
+        if dry_run:
+            prefix = f'DRY RUN [{label}]: would have ' if label else 'DRY RUN: would have '
+        else:
+            prefix = f'{label}: ' if label else 'Done: '
         summary = (
             f'{prefix}{created} created, {existed} already existed, '
             f'{unresolved} without target concept (of {total} total).'
@@ -671,3 +713,5 @@ class Command(BaseCommand):
                         'class or metric key; --update-seeded would fill it.')
         self.stdout.write(
             self.style.WARNING(summary) if dry_run else self.style.SUCCESS(summary))
+        return {'created': created, 'existed': existed, 'unresolved': unresolved,
+                'total': total}

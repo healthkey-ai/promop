@@ -1699,10 +1699,10 @@ algorithmic estimate from another, under different vendor codes.
 |---|---|---|
 | `category` | the metric's category in the wearable mapping proposal | '' or one of `source_vocabularies.WEARABLE_METRIC_CATEGORIES` (20: Activity, Fitness, Heart & Cardiovascular, Blood & Respiratory, Body Composition, Sleep, Mobility & Gait, Nutrition, Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing, Medication & Device Use, Safety, Self-reported, Stress & Autonomic, Environmental, Location, Garmin-specific) |
 | `measure_class` | how the source produces the value | '' or one of `WEARABLE_MEASURE_CLASSES` (Direct measurement, Aggregate over interval, Algorithmic estimate, Vendor score, Environmental context, User-entered or device log) |
-| `metric_key` | the vendor-neutral key of the metric (`steps`, `resting_hr`), shared by every source code that reports it: the HealthKit identifier, the Garmin key, the OpenWearables code, the HL7 PHR code. It is what ties the wearable vocabularies together, since OpenWearables does not cover every metric. Not indexed: nothing filters on it yet | '' or lowercase snake case, `[a-z][a-z0-9_]*`, at most 64 (`clean_metric_key`) |
+| `metric_key` | the vendor-neutral key of the metric (`steps`, `resting_hr`), shared by every source code that reports it: the HealthKit identifier, the Health Connect record type, the Garmin key, the OpenWearables code, the HL7 PHR code. It is what ties the wearable vocabularies together, since OpenWearables does not cover every metric. Not indexed: nothing filters on it yet | '' or lowercase snake case, `[a-z][a-z0-9_]*`, at most 64 (`clean_metric_key`) |
 
 - **Where they show.** Only on the Wearables tab (`OpenWearables`, which also
-  holds Apple, Garmin and HL7-PHR rows): Category is the first column, with
+  holds Apple, Garmin, HL7-PHR and HealthConnect rows): Category is the first column, with
   the measure class as a muted second line in the same cell, and Metric is
   the second, both sortable (`category`, `metric_key` on the browse endpoint,
   flat and grouped). Every other tab has neither column, and a Category or
@@ -1736,7 +1736,12 @@ algorithmic estimate from another, under different vendor codes.
   any row, whatever its status, and never replaces one that is set; the
   device seed does the same on every run. A fill stamps `updated_at`, since
   the list API returns the fields. An OpenWearables metric the proposal gives
-  no internal key is keyed by its own code.
+  no internal key is keyed by its own code. `seed_hl7_phr_mappings` seeds
+  three vocabularies from one table (`PHR_SOURCE_METRICS`: the HL7 PHR code,
+  HealthKit identifier and Health Connect record of each wearable metric), as
+  proposed `HL7-PHR`, `Apple` and `HealthConnect` rows that carry the metric's
+  one key; it skips the HealthKit codes the device seed owns. See
+  [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#hl7-phr-hl7-phr-healthkit-and-health-connect-codes).
 - **Blank means "not yet described", not "none".** A curator who clears one
   of the three gets it back from the next fill: `load_athena_vocabularies`
   runs the device seed after every load, and `--update-seeded` does it for

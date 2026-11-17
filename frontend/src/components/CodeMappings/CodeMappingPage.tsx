@@ -181,7 +181,8 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
 /**
  * Which tab a row belongs to — keyed by source vocabulary.
  * Blank source_vocabulary_id ("") means uncoded/free text.
- * Apple, Garmin and HL7-PHR rows are consolidated under the Wearables tab.
+ * Apple, Garmin, HL7-PHR and HealthConnect rows are consolidated under the
+ * Wearables tab.
  * ICD10CM rows are merged into the ICD-10 tab (#1028).
  * FHIR OID URIs are merged into their canonical OMOP vocabulary.
  */
@@ -189,10 +190,11 @@ const VOCABULARY_ALIASES: Record<string, string> = {
   Apple: "OpenWearables",
   Garmin: "OpenWearables",
   "HL7-PHR": "OpenWearables",
+  HealthConnect: "OpenWearables",
   // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-/** The Wearables tab: OpenWearables, Apple, Garmin and HL7 PHR metrics. */
+/** The Wearables tab: OpenWearables, Apple, Garmin, HL7 PHR and Health Connect metrics. */
 const WEARABLES_TAB = "OpenWearables";
 /**
  * Whether a tab starts grouped by label. A hospital label arrives under
