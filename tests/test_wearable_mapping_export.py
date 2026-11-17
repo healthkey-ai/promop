@@ -13,7 +13,6 @@ from rest_framework.test import APIClient
 
 from omop_core.models import GroupAccess, Organization, SourceCodeConceptMapping
 from omop_core.services import wearable_mapping_export as export
-from omop_core.services.source_vocabularies import WEARABLE_SOURCE_VOCABULARIES
 from patient_portal.models import Identity
 from tests.factories import ConceptFactory, VocabularyFactory
 
@@ -178,12 +177,53 @@ def test_rejected_rows_are_left_out_and_every_other_status_and_section_is_in(rea
         'approved', 'athena', 'proposed-mapped', 'proposed-unmapped']
 
 
-def test_a_hospitals_rows_are_in_it_as_on_the_tab(reader):
+def test_a_hospitals_own_override_is_left_out(reader):
+    """The file is for use outside the app: one line per code, the global one."""
     hospital = Organization.objects.create(slug='export-hospital', name='Export Hospital')
-    row('steps', organization=hospital)
-    row('steps')
+    row('steps', organization=hospital, metric_key='hospital_steps')
+    row('steps', metric_key='steps')
+    row('hospital-only', organization=hospital)
     _, rows = csv_rows(reader)
-    assert [r['Source code'] for r in rows] == ['steps', 'steps']
+    assert [(r['Source code'], r['Metric key']) for r in rows] == [('steps', 'steps')]
+    assert 'Export Hospital' not in reader.get(URL, {'file_format': 'csv'}).content.decode('utf-8-sig')
+
+
+@pytest.mark.parametrize('character', ['\x01', '\x0b', '\x1f', '\ufffe', '\uffff'])
+def test_a_control_character_in_stored_text_does_not_fail_the_word_document(reader, character):
+    """XML 1.0 cannot hold these, and nothing on the save path strips them."""
+    concept = loinc('8867-4', f'Heart{character} rate')
+    row(f'stress{character}level', source_vocabulary_id='Garmin', category='Sleep',
+        metric_key='stress', measure_class='Vendor score', target_concept=concept,
+        source_unit_evidence=[{'code': f'/m{character}in'}])
+    cells = [plain(cell.text) for cell in document(reader).tables[0].rows[1].cells]
+    assert 'stresslevel' in cells[2]
+    assert 'Heart rate' in cells[3]
+    # The CSV keeps the text as stored.
+    assert reader.get(URL, {'file_format': 'csv'}).status_code == 200
+
+
+def test_the_word_document_is_refused_above_its_row_limit(reader, monkeypatch):
+    monkeypatch.setattr(export, 'DOCX_MAX_ROWS', 2)
+    for code in ('a', 'b', 'c'):
+        row(code)
+    response = reader.get(URL, {'file_format': 'docx'})
+    assert response.status_code == 400
+    assert 'holds 3 mappings' in response.json()['detail']
+    assert 'Download the CSV instead' in response.json()['detail']
+    assert reader.get(URL, {'file_format': 'csv'}).status_code == 200
+    monkeypatch.setattr(export, 'DOCX_MAX_ROWS', 3)
+    assert reader.get(URL, {'file_format': 'docx'}).status_code == 200
+
+
+def test_every_cell_of_outside_text_is_kept_from_running_as_a_formula(reader):
+    concept = loinc('=1+1', '=HYPERLINK("http://x")')
+    row('code', target_concept=concept, destination_unit_concept=ucum('@unit', 'Unit'),
+        source_unit_evidence=[{'code': '+1'}], category='', metric_key='')
+    _, (line,) = csv_rows(reader)
+    assert line['Destination code'] == "'=1+1"
+    assert line['Destination concept'] == "'=HYPERLINK(\"http://x\")"
+    assert line['Destination unit'] == "'@unit"
+    assert line['Source unit'] == "'+1"
 
 
 def test_rows_run_by_category_then_metric_then_source_then_code(reader):
@@ -201,10 +241,7 @@ def test_rows_run_by_category_then_metric_then_source_then_code(reader):
     row('vo2', category='Fitness', metric_key='vo2_max')
     row('garmin-only', category='Garmin-specific', metric_key='body_battery',
         source_vocabulary_id='Garmin')
-    # Health Connect joins the tab in another change; its place is fixed here.
-    health_connect = (
-        [('Activity', 'steps', 'Health Connect', 'hc')]
-        if 'HealthConnect' in WEARABLE_SOURCE_VOCABULARIES else [])
+    health_connect = [('Activity', 'steps', 'Health Connect', 'hc')]
     _, rows = csv_rows(reader)
     assert [(r['Category'], r['Metric key'], r['Source'], r['Source code']) for r in rows] == [
         ('Activity', 'distance', 'OpenWearables', 'dist'),
