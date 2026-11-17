@@ -283,10 +283,11 @@ All notable changes to PRomop are documented here.
 ### Fixed
 
 - **SCT and DLBCL transformation dates carry reviewed labels (#2601)** — both
-  were missing from `FORM_LABELS`, so the descriptor fell back to the verbose
-  name through `capitalize()` and served "Sct date" and "Dlbcl transformation
-  date" (and CB derived "Sct date precision" from the first). The reviewed
-  spelling is now pinned by a descriptor test.
+  dates and their precision companions were missing from `FORM_LABELS`, so the
+  descriptor fell back to the verbose name through `capitalize()` and served
+  "Sct date", "Sct date precision", "Dlbcl transformation date" and "Dlbcl
+  transformation date precision". The reviewed spelling is now pinned by a
+  descriptor test.
 - **The clinician-validation block is staff-only on every descriptor (#2604)** —
   `validated`, `validated_by`, `validation_date` and
   `suppress_demographics_for_others` are dropped from a nonstaff caller's PATCH,
