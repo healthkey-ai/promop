@@ -6,6 +6,8 @@ points at another alias, an answerable entry without a labelled action, an
 input nobody can resolve — is a silent read-only row in a federated trial, so
 the tests state the rules instead of trusting each block to remember them.
 """
+import re
+
 import pytest
 from django.conf import settings
 
@@ -98,24 +100,43 @@ def test_every_reviewed_label_is_the_served_label(descriptor):
     """`FORM_LABELS` is the single owner of the wording a reader sees.
 
     Asserting the enriched descriptor catches an entry that names a field the
-    descriptor does not serve, and one that a later override silently wins.
+    descriptor does not serve, one that a later override silently wins, and a
+    reviewed unit that never reaches the response. A projection owns the unit
+    of the fact it writes, so its entry keeps the projection's unit instead.
     """
     enriched = patient_form_descriptors(descriptor)
-    for name, (label, _unit) in FORM_LABELS.items():
+    for name, (label, unit) in FORM_LABELS.items():
         assert name in enriched, f'{name} is labelled but not served'
         assert enriched[name]['label'] == label, name
+        raw = descriptor.get(name) or {}
+        expected_unit = raw.get('unit') or (
+            None if raw.get('projection') else unit)
+        assert enriched[name].get('unit') == expected_unit, name
 
 
-# The lowercase token as it appears in a field name, and the spelling a reader
-# must see. `capitalize()` only upper-cases the first character, so the fallback
-# renders "Sct eligibility", "Pd l1 assay" and "Transformed to dlbcl" (#2652).
-ACRONYM_SPELLINGS = {
-    'sct': 'SCT', 'dlbcl': 'DLBCL', 'pd': 'PD-L1', 'egfr': 'eGFR',
-    'hba1c': 'HbA1c', 'inr': 'INR', 'ptt': 'PTT', 'psa': 'PSA',
-    'flipi': 'FLIPI', 'gelf': 'GELF', 'hrd': 'HRD', 'tnbc': 'TNBC',
-    'btk': 'BTK', 'bcl2': 'BCL2', 'anc': 'ANC', 'alc': 'ALC', 'amc': 'AMC',
-    'rbc': 'RBC', 'ast': 'AST', 'alt': 'ALT', 'bnp': 'BNP', 'cea': 'CEA',
-    'bmi': 'BMI', 'mrd': 'MRD', 'her2': 'HER2', 'ecog': 'ECOG',
+def test_a_reviewed_unit_does_not_become_the_projected_fact_unit(descriptor):
+    """A label table must not set the `unit_source_value` of a written fact.
+
+    `projection_for_descriptor` reads the entry's unit first, so a display
+    spelling like "%" would land on the Measurement's unit_source_value when
+    the mapping itself carries none. The projection owns that value.
+    """
+    projected = {**descriptor['hba1c_percent'], 'projection': {'unit': None},
+                 'unit': None}
+    enriched = patient_form_descriptors({**descriptor, 'hba1c_percent': projected})
+    assert enriched['hba1c_percent']['unit'] is None
+
+
+# Field-name tokens whose fallback spelling is not the reviewed wording. The
+# fallback leaves the token as `token` mid-sentence and `Token` at the start
+# (#2652), so either is a hit; an expanded review ("Triple negative status",
+# "Prothrombin time") carries no residue and passes without prescribing one
+# spelling.
+ACRONYM_TOKENS = {
+    'sct', 'dlbcl', 'pd', 'egfr', 'hba1c', 'inr', 'pt', 'ptt', 'psa', 'flipi',
+    'gelf', 'hrd', 'tnbc', 'btk', 'bcl2', 'anc', 'alc', 'amc', 'rbc', 'ast',
+    'alt', 'bnp', 'cea', 'bmi', 'mrd', 'her2', 'ecog', 'esr', 'esr1', 'uln',
+    'ldh', 'hiv', 'flc',
 }
 
 
@@ -129,10 +150,10 @@ def test_no_acronym_is_served_with_the_fallback_spelling(descriptor):
     offenders = []
     for name, entry in enriched.items():
         label = entry.get('label') or ''
-        for token in name.split('_'):
-            spelling = ACRONYM_SPELLINGS.get(token)
-            if spelling and spelling not in label:
-                offenders.append(f'{name}: {token!r} served as {label!r}')
+        for token in set(name.split('_')) & ACRONYM_TOKENS:
+            for residue in (token, token.capitalize()):
+                if re.search(rf'(?<![A-Za-z0-9]){re.escape(residue)}(?![A-Za-z0-9])', label):
+                    offenders.append(f'{name}: {residue!r} served in {label!r}')
     assert not offenders, offenders
 
 

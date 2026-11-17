@@ -294,7 +294,7 @@ FORM_LABELS = {
     # in its storage code (the client maps UCUM to display wording, #2610).
     'ldh_u_l': ('LDH', 'U/L'),
     'ldh_upper_limit_normal': ('LDH upper limit of normal', 'U/L'),
-    'wbc_count_thousand_per_ul': ('WBC count', '10³/µL'),
+    'wbc_count_thousand_per_ul': ('WBC count', '10*3/uL'),
     'anc_thousand_per_ul': ('ANC', '10*3/uL'),
     'alc_thousand_per_ul': ('ALC', '10*3/uL'),
     'amc_thousand_per_ul': ('AMC', '10*3/uL'),
@@ -311,6 +311,11 @@ FORM_LABELS = {
     # A ratio, not a unit: {ratio} fields carry no physical unit (#2610).
     'inr': ('INR', None),
     'ptt_seconds': ('aPTT', 's'),
+    'pt_seconds': ('Prothrombin time', 's'),
+    'prothrombin_time_uln': ('Prothrombin time ULN', None),
+    'activated_partial_thromboplastin_time_uln': (
+        'Activated partial thromboplastin time ULN', None),
+    'esr': ('ESR', 'mm/h'),
     'psa_ng_ml': ('PSA', 'ng/mL'),
     'cea_ng_ml': ('CEA', 'ng/mL'),
     'ca19_9_u_ml': ('CA 19-9', 'U/mL'),
@@ -323,16 +328,18 @@ FORM_LABELS = {
     'mipi_c_risk': ('MIPI-C Risk', None),
     'mrd_status': ('MRD status', None),
     'her2_status': ('HER2 status', None),
-    'tnbc_status': ('TNBC status', None),
+    # The native tab spells these two out; the shared form agrees (#2652).
+    'tnbc_status': ('Triple negative status', None),
     'hrd_status': ('HRD status', None),
     'pd_l1_assay': ('PD-L1 assay', None),
-    'pd_l1_tumor_cells': ('PD-L1 tumor cells', '%'),
+    'pd_l1_tumor_cells': ('PD-L1 status', '%'),
     'pd_l1_ic_percentage': ('PD-L1 IC', '%'),
     'pd_l1_combined_positive_score': ('PD-L1 combined positive score', None),
     'btk_inhibitor_refractory': ('BTK inhibitor refractory', None),
-    'bcl2_inhibitor_refractory': ('BCL2 inhibitor refractory', None),
+    'bcl2_inhibitor_refractory': ('BCL-2 inhibitor refractory', None),
     'genomics_bcl2': ('Genomics BCL2', None),
     'genomics_bcl2_amplification': ('Genomics BCL2 amplification', None),
+    'genomics_esr1': ('Genomics ESR1', None),
     'kappa_flc': ('Kappa free light chains', None),
     'lambda_flc': ('Lambda free light chains', None),
     'flipi_score': ('FLIPI score', None),
@@ -340,6 +347,9 @@ FORM_LABELS = {
     'flipi_score_options': ('FLIPI score options', None),
     'gelf_criteria_status': ('GELF criteria status', None),
     'gelf_criteria_options': ('GELF criteria options', None),
+    # Legacy aliases of ldh_u_l, still served to descriptor consumers.
+    'ldh': ('LDH', None),
+    'ldh_level': ('LDH level', None),
     'date_of_birth': ('Date of birth', None),
     # Acronyms the fallback would flatten to "Sct date"/"Dlbcl transformation
     # date": `capitalize()` lower-cases the rest of the verbose name, and CB
@@ -354,6 +364,8 @@ FORM_LABELS = {
     'sct_eligibility': ('SCT eligibility', None),
     'transformed_to_dlbcl': ('Transformed to DLBCL', None),
     'hiv_status': ('HIV status', None),
+    # The inverted view of hiv_status; the row asks the negated question.
+    'no_hiv_status': ('No HIV', None),
     'hepatitis_b_status': ('Hepatitis B status', None),
     'hepatitis_c_status': ('Hepatitis C status', None),
 }
@@ -463,7 +475,10 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         entry['label'] = reviewed_label or entry.get('label') or (
             str(field.verbose_name).replace('_', ' ').capitalize() if field
             else name.replace('_', ' ').capitalize())
-        if reviewed_unit and not entry.get('unit'):
+        # A projection owns the unit of the fact it writes (#2652 review): a
+        # reviewed display unit must not silently become that row's
+        # `unit_source_value`, so it only fills entries that never project.
+        if reviewed_unit and not entry.get('unit') and not entry.get('projection'):
             entry['unit'] = reviewed_unit
         entry['bindings'] = FIELD_BINDINGS.get(name, [])
         kind = field.get_internal_type() if field else ''

@@ -25,7 +25,9 @@ def test_mipi_inputs_carry_reviewed_labels_and_units():
 
     wbc = descriptors['wbc_count_thousand_per_ul']
     assert wbc['label'] == 'WBC count'
-    assert wbc['unit'] == '10³/µL'
+    # The storage code, like the ANC/ALC/AMC/RBC entries; the client renders it
+    # as 10³/µL (#2652).
+    assert wbc['unit'] == '10*3/uL'
 
     assert descriptors['mipi_risk']['label'] == 'MIPI Risk'
     assert descriptors['mipi_c_risk']['label'] == 'MIPI-C Risk'
