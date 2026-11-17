@@ -17,6 +17,12 @@ export interface CodeMappingRow {
   source_system_context?: SourceSystemContext;
   source_code: string;
   source_code_description: string;
+  /** Wearable metric category (Activity, Sleep, ...); '' on other mappings. */
+  category?: string;
+  /** How the source produces a wearable metric's value; '' on other mappings. */
+  measure_class?: string;
+  /** Vendor-neutral key of the wearable metric, shared across its source codes. */
+  metric_key?: string;
   organization_id?: number | null;
   organization_slug?: string;
   organization_name?: string;
@@ -144,6 +150,11 @@ export interface Reference {
   destination_vocabularies: VocabularyRef[];
   omop_tables: Record<string, string>;
   source_vocabulary_tabs?: SourceVocabularyTab[];
+  /** The values a wearable mapping's Category and Measure Class may take. */
+  wearable_metric_categories?: string[];
+  wearable_measure_classes?: string[];
+  /** The source vocabularies of the Wearables tab, which those and the metric key apply to. */
+  wearable_source_vocabularies?: string[];
 }
 
 /** An approval queued the move of stored clinical rows; a job does it. */
@@ -278,6 +289,12 @@ export const TIP = {
     "Exactly what appears in the source data -- the code if there is one, otherwise the raw text.",
   source_description:
     "Human-readable description of the source code, where the source supplies one.",
+  category:
+    "The kind of wearable metric this is -- Activity, Sleep, Nutrition and so on. It groups and sorts the Wearables tab.",
+  metric_key:
+    "The vendor-neutral key of this metric, e.g. resting_hr: the same for the Apple, Garmin, OpenWearables and HL7 PHR codes that report it, which is what ties them together. Lowercase snake case.",
+  measure_class:
+    "How the source produces the value: a direct sensor reading, an aggregate over an interval, an algorithmic estimate, a vendor's own score, environmental context, or something the user or device logged. It describes this source metric, not the destination concept: two sources of one concept can differ.",
   destination_concept_id:
     "The OMOP concept this source code means. Type an id directly or pick one from the search above.",
   destination_concept_name:

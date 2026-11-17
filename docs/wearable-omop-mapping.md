@@ -290,6 +290,39 @@ adapters report in (`km`, `km/hr`, `bpm`, …), filling it on rows seeded before
 recorded. It sets no destination unit: those rows are approved, and the proposal's metres and
 m/s differ from the kilometres and km/h the adapters store.
 
+### Category, measure class and metric key
+
+Three more things the proposal says about each metric are seeded onto its mapping. All three
+describe the **source** metric, not the destination concept: the same LOINC concept can be fed
+by a direct sensor reading from one source and an algorithmic estimate from another.
+
+- **Category** (`category`, the proposal's "Category" column): Activity, Heart & Cardiovascular,
+  Sleep and so on. It is the first column of the Wearables tab. The allowed list
+  (`WEARABLE_METRIC_CATEGORIES`) holds twenty values: the fifteen the proposal uses today and
+  five (Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing) for HL7 PHR metrics
+  that are about to join it.
+- **Measure class** (`measure_class`, the "Measure Class" column): how the source produces the
+  value. One of Direct measurement, Aggregate over interval, Algorithmic estimate, Vendor score,
+  Environmental context, User-entered or device log. The list shows it as a second line under
+  the category.
+- **Metric key** (`metric_key`, the "Internal Metric Key" column): the vendor-neutral name of
+  the metric, in lowercase snake case, shared by every source code that reports it.
+  `resting_hr` is `HKQuantityTypeIdentifierRestingHeartRate` for Apple, `resting_hr` for Garmin
+  and `resting_heart_rate` for OpenWearables. It is the Wearables tab's second column, and what
+  ties the vocabularies together: OpenWearables does not cover every metric, and the HL7 PHR
+  table maps from HealthKit and Health Connect directly. For the Apple and Garmin seeds it is
+  the last element of each metric's tuple, which already held this key. An OpenWearables metric
+  the proposal gives no key is keyed by its own code.
+
+The values live beside each metric list (`OPENWEARABLES_CATEGORIES`,
+`OPENWEARABLES_MEASURE_CLASSES`, `OPENWEARABLES_METRIC_KEYS`, and the `HL7_PHR_*`, `APPLE_*` and
+`GARMIN_*` equivalents), not inside the metric tuples. A new row gets all three.
+`--update-seeded` fills whichever is blank on a row that exists, whatever its status, reports
+each as `[CATEGORY]`, `[MEASURE CLASS]` or `[METRIC KEY]`, counts them at the end of the summary
+line, and never changes one that is set. A plain re-run fills nothing and says how many rows
+`--update-seeded` would fill. `seed_wearable_device_mappings` fills blanks on every run, as it
+does for the source unit. A curator can change any of the three in the Edit Mapping dialog.
+
 ## HL7 PHR: metrics with no device code yet
 
 The HL7 PHR Code Mapping table names metrics that no OpenWearables, Apple or Garmin code
@@ -316,7 +349,8 @@ snore index. `manage.py seed_hl7_phr_mappings` creates one **proposed** mapping 
 | `dietarySodium` | LOINC 9086-0 |
 
 It is the OpenWearables command run over another list, so everything above about re-running,
-`--dry-run`, `--update-seeded` and units applies, with `HL7 PHR` as the provenance that marks a
+`--dry-run`, `--update-seeded`, units, category, measure class and metric key applies, with
+`HL7 PHR` as the provenance that marks a
 row as this seed's. Nothing ingests under these codes yet: the rows record the agreed
 destination so a source that starts sending the HL7 PHR codes finds a curated mapping waiting.
 

@@ -277,6 +277,10 @@ Each row carries `status`, `source_vocabulary_id`, `source_code`,
 `destination_concept_code`, `destination_concept_name`,
 `destination_vocabulary_id`, `destination_domain_id`, `destination_omop_table`),
 `organization_slug`, `reviewer` and `reviewed_at`, and `occurrence_count`. A
+wearable row also describes its source metric: `category`, `measure_class`
+(how the source produces the value) and `metric_key`, the vendor-neutral key
+the Apple, Garmin, OpenWearables and HL7 PHR codes for one metric share; all
+three are `""` on other rows. A
 queue row with no destination yet has `destination_concept_id: null` and,
 normally, `status: "proposed"`. Consume as a vocabulary only `approved` rows
 with a destination; everything else is a gap.

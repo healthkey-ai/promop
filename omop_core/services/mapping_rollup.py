@@ -32,10 +32,12 @@ from django.db.models.functions import Cast, Coalesce, Concat, Lower
 SYNTHETIC_PREFIX = ':'
 
 # Group rows do not have most of a source-code row's sortable fields. These
-# are the two group-level values the review table can honestly order by.
+# are the group-level values the review table can honestly order by.
 GROUP_ORDER_FIELDS = {
     'occurrence_count': 'seen',
     'source_code_description': 'description_sort',
+    'category': 'category_sort',
+    'metric_key': 'metric_key_sort',
 }
 
 
@@ -78,6 +80,15 @@ def _grouped(queryset):
             destination_units=Count(Coalesce('destination_unit_concept_id', Value(0)), distinct=True),
             destination_unit_code=Max('destination_unit_concept__concept_code'),
             destination_unit_name=Max('destination_unit_concept__concept_name'),
+            # The wearable metric category, measure class and metric key, by
+            # the same rule. None is ever NULL, so blank against a value
+            # already counts as two.
+            categories=Count('category', distinct=True),
+            only_category=Max('category'),
+            measure_classes=Count('measure_class', distinct=True),
+            only_measure_class=Max('measure_class'),
+            metric_keys=Count('metric_key', distinct=True),
+            only_metric_key=Max('metric_key'),
             statuses=Count('status', distinct=True),
             # Not named `status`: an annotation shadows the column of the same
             # name, so Q(status='proposed') below would resolve against
@@ -99,6 +110,16 @@ def _grouped(queryset):
         .annotate(
             seen=Coalesce('supplied_group_seen', 'summed_seen', Value(0)),
             description_sort=Lower('description'),
+            # What the entry shows: the members' category, and their metric
+            # key, when they agree.
+            category_sort=Case(
+                When(categories=1, then=F('only_category')),
+                default=Value(''), output_field=CharField(),
+            ),
+            metric_key_sort=Case(
+                When(metric_keys=1, then=F('only_metric_key')),
+                default=Value(''), output_field=CharField(),
+            ),
         )
     )
 
@@ -133,6 +154,10 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
             'sample_mapping_id': entry['max_id'],
             'group_key': entry['group_key'],
             'description': entry['description'],
+            # '' when the members disagree, as when none has one.
+            'category': entry['category_sort'],
+            'measure_class': entry['only_measure_class'] if entry['measure_classes'] == 1 else '',
+            'metric_key': entry['metric_key_sort'],
             'members': entry['members'],
             'seen': entry['seen'],
             'proposed': entry['proposed'],

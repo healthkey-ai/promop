@@ -7275,7 +7275,9 @@ class SeedOpenWearablesMappingsTest(TestCase):
         # A second run finds nothing left to fill.
         again = io.StringIO()
         call_command('seed_openwearables_mappings', '--update-seeded', stdout=again)
-        self.assertIn(' 0 units filled, 0 source units filled.', again.getvalue())
+        self.assertIn(
+            ' 0 units filled, 0 source units filled, 0 categories filled, '
+            '0 measure classes filled, 0 metric keys filled.', again.getvalue())
 
     def test_update_seeded_fills_the_unit_beside_a_suggest_destination(self):
         """A blank unit is nobody's answer, so Suggest's row gets it too."""
@@ -7415,7 +7417,9 @@ class SeedOpenWearablesMappingsTest(TestCase):
                 row = self._row('heart_rate')
                 self.assertEqual(row.source_unit_evidence[0]['code'], '/min')
                 self.assertIn('[SOURCE UNIT] heart_rate: /min', out.getvalue())
-                self.assertIn(' 1 source units filled.', out.getvalue())
+                self.assertIn(
+                    ' 1 source units filled, 0 categories filled, 0 measure classes filled, '
+                    '0 metric keys filled.', out.getvalue())
                 # A sighting, like the Seen count: updated_at is not stamped.
                 self.assertEqual(row.updated_at, held.updated_at)
 
@@ -7446,6 +7450,138 @@ class SeedOpenWearablesMappingsTest(TestCase):
         call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
         self.assertEqual(
             self._row('lean_body_mass').target_concept_id, self.lean_mass.concept_id)
+
+    # ── Category, Measure Class and Metric Key ───────────────────────────
+    # (field, the seed's value for resting_heart_rate, its report tag, its summary noun)
+    DESCRIBED = (
+        ('category', 'Heart & Cardiovascular', 'CATEGORY', 'categories'),
+        ('measure_class', 'Aggregate over interval', 'MEASURE CLASS', 'measure classes'),
+        ('metric_key', 'resting_hr', 'METRIC KEY', 'metric keys'),
+    )
+
+    def test_seed_sets_the_category_measure_class_and_metric_key_of_every_metric(self):
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_CATEGORIES, OPENWEARABLES_MEASURE_CLASSES, OPENWEARABLES_METRIC_KEYS,
+        )
+        call_command('seed_openwearables_mappings', verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(source_vocabulary_id='OpenWearables')
+        self.assertEqual(
+            dict(rows.values_list('source_code', 'category')), OPENWEARABLES_CATEGORIES)
+        self.assertEqual(
+            dict(rows.values_list('source_code', 'measure_class')),
+            OPENWEARABLES_MEASURE_CLASSES)
+        self.assertEqual(
+            dict(rows.values_list('source_code', 'metric_key')), OPENWEARABLES_METRIC_KEYS)
+        self.assertFalse(rows.filter(metric_key='').exists())
+        row = self._row('heart_rate')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Heart & Cardiovascular', 'Direct measurement', 'heart_rate'))
+        # The proposal's internal key where it names one, the code itself elsewhere.
+        self.assertEqual(self._row('resting_heart_rate').metric_key, 'resting_hr')
+        self.assertEqual(self._row('weight').metric_key, 'body_mass')
+        self.assertEqual(self._row('running_power').metric_key, 'running_power')
+        # cgm_glucose has no OpenWearables code in the proposal; its row is the
+        # one keyed by the internal metric name.
+        self.assertEqual(self._row('cgm_glucose').category, 'Blood & Respiratory')
+        self.assertEqual(self._row('garmin_body_battery').measure_class, 'Vendor score')
+
+    def test_update_seeded_fills_a_blank_described_field_whatever_the_status(self):
+        for field, value, tag, noun in self.DESCRIBED:
+            for label, fields in (
+                ('proposed', {}),
+                ('approved', {'status': 'approved'}),
+                ('rejected', {'status': 'rejected'}),
+                ('suggest answered', {'origin_system': 'suggest v0.4'}),
+                ('curator decision', {'decision_surface': 'code2concept'}),
+            ):
+                with self.subTest(field=field, state=label):
+                    SourceCodeConceptMapping.objects.filter(
+                        source_vocabulary_id='OpenWearables').delete()
+                    held = self._seed_then_hold('resting_heart_rate', **{field: ''}, **fields)
+                    out = io.StringIO()
+                    call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                    row = self._row('resting_heart_rate')
+                    self.assertEqual(getattr(row, field), value)
+                    self.assertIn(f'[{tag}] resting_heart_rate: {value}', out.getvalue())
+                    self.assertIn(f' 1 {noun} filled', out.getvalue())
+                    # The list API returns it, so the delta has to see the row.
+                    self.assertGreater(row.updated_at, held.updated_at)
+                    # Nothing else about the row moved.
+                    self.assertEqual(row.status, held.status)
+                    self.assertEqual(row.target_concept_id, held.target_concept_id)
+                    self.assertEqual(row.origin_system, held.origin_system)
+                    self.assertEqual(row.decision_surface, held.decision_surface)
+
+    def test_update_seeded_summary_counts_the_three_fills_at_its_end(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(source_vocabulary_id='OpenWearables')
+        rows.filter(source_code__in=['heart_rate', 'steps', 'weight']).update(category='')
+        rows.filter(source_code__in=['steps', 'weight']).update(measure_class='')
+        rows.filter(source_code='weight').update(metric_key='')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        self.assertTrue(out.getvalue().rstrip().endswith(
+            ' 0 source units filled, 3 categories filled, 2 measure classes filled, '
+            '1 metric keys filled.'))
+        row = self._row('weight')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Body Composition', 'Direct measurement', 'body_mass'))
+
+    def test_update_seeded_never_replaces_a_described_field_that_is_set(self):
+        for field, other in (('category', 'Fitness'), ('measure_class', 'Vendor score'),
+                             ('metric_key', 'pulse')):
+            with self.subTest(field):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                held = self._seed_then_hold('heart_rate', **{field: other})
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                row = self._row('heart_rate')
+                self.assertEqual(getattr(row, field), other)
+                self.assertEqual(row.updated_at, held.updated_at)
+                self.assertNotIn('] heart_rate:', out.getvalue())
+
+    def test_rerun_without_flag_does_not_fill_a_described_field(self):
+        for field, _value, _tag, _noun in self.DESCRIBED:
+            with self.subTest(field):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                held = self._seed_then_hold('heart_rate', **{field: ''})
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', stdout=out)
+                row = self._row('heart_rate')
+                self.assertEqual(getattr(row, field), '')
+                self.assertEqual(row.updated_at, held.updated_at)
+                self.assertIn(
+                    ' 1 existing rows have no category, measure class or metric key; '
+                    '--update-seeded would fill it.', out.getvalue())
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        again = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=again)
+        self.assertNotIn('existing rows have no category', again.getvalue())
+
+    def test_update_seeded_dry_run_reports_the_fills_and_writes_none(self):
+        self._seed_then_hold('heart_rate', category='', measure_class='', metric_key='')
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command(
+            'seed_openwearables_mappings', '--update-seeded', '--dry-run', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        row = self._row('heart_rate')
+        self.assertEqual((row.category, row.measure_class, row.metric_key), ('', '', ''))
+        self.assertIn('[CATEGORY] heart_rate: Heart & Cardiovascular', out.getvalue())
+        self.assertIn('[MEASURE CLASS] heart_rate: Direct measurement', out.getvalue())
+        self.assertIn('[METRIC KEY] heart_rate: heart_rate', out.getvalue())
+        self.assertIn(
+            ' 1 categories filled, 1 measure classes filled, 1 metric keys filled.',
+            out.getvalue())
+
+    def test_dry_run_of_a_first_seed_writes_no_category(self):
+        call_command('seed_openwearables_mappings', '--dry-run', verbosity=0)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables').exists())
 
 
 class SeedHl7PhrMappingsTest(TestCase):
@@ -7568,6 +7704,73 @@ class SeedHl7PhrMappingsTest(TestCase):
         call_command('seed_hl7_phr_mappings', '--update-seeded', stdout=out)
         self.assertEqual(self._row('rrInterval').destination_unit_concept_id, millisecond.pk)
         self.assertIn('[UNIT] rrInterval: ms', out.getvalue())
+
+    def test_seed_sets_the_category_measure_class_and_metric_key_of_every_metric(self):
+        from omop_core.management.commands.seed_hl7_phr_mappings import (
+            HL7_PHR_CATEGORIES, HL7_PHR_MEASURE_CLASSES, HL7_PHR_METRIC_KEYS,
+        )
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(
+            dict(self._rows().values_list('source_code', 'category')), HL7_PHR_CATEGORIES)
+        self.assertEqual(
+            dict(self._rows().values_list('source_code', 'measure_class')),
+            HL7_PHR_MEASURE_CLASSES)
+        self.assertEqual(
+            dict(self._rows().values_list('source_code', 'metric_key')), HL7_PHR_METRIC_KEYS)
+        row = self._row('totalEnergyBurned')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Activity', 'Algorithmic estimate', 'total_energy_burned'))
+        row = self._row('dietarySodium')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Nutrition', 'User-entered or device log', 'dietary_sodium'))
+
+    def test_update_seeded_fills_the_blank_described_fields_through_this_command(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        # One row still proposed, one a curator approved.
+        self._rows().filter(source_code='snoreIndex').update(
+            category='', measure_class='', metric_key='')
+        self._rows().filter(source_code='rrInterval').update(
+            category='', measure_class='', metric_key='', status='approved')
+        self._rows().filter(source_code='boneMass').update(
+            category='Fitness', measure_class='Vendor score', metric_key='bone')
+
+        # A plain re-run fills nothing.
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertEqual(self._row('snoreIndex').category, '')
+        self.assertEqual(self._row('rrInterval').measure_class, '')
+        self.assertEqual(self._row('rrInterval').metric_key, '')
+        self.assertIn(
+            ' 2 existing rows have no category, measure class or metric key', out.getvalue())
+
+        # Neither does a dry run of the fill.
+        dry = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', '--dry-run', stdout=dry)
+        self.assertEqual(self._row('snoreIndex').category, '')
+        self.assertIn('[CATEGORY] snoreIndex: Sleep', dry.getvalue())
+
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', stdout=out)
+        row = self._row('snoreIndex')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Sleep', 'Aggregate over interval', 'snore_index'))
+        row = self._row('rrInterval')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key, row.status),
+            ('Heart & Cardiovascular', 'Direct measurement', 'rr_interval', 'approved'))
+        # A value somebody set is never replaced.
+        row = self._row('boneMass')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Fitness', 'Vendor score', 'bone'))
+        self.assertIn('[MEASURE CLASS] rrInterval: Direct measurement', out.getvalue())
+        self.assertIn('[METRIC KEY] rrInterval: rr_interval', out.getvalue())
+        self.assertIn(
+            ' 2 categories filled, 2 measure classes filled, 2 metric keys filled.',
+            out.getvalue())
 
     def test_browse_and_suggest_find_hl7_phr_rows_on_the_wearables_tab(self):
         from omop_core.mapping.suggestions import suggestable_queryset
@@ -7870,6 +8073,95 @@ class SeedWearableDeviceSourceUnitsTest(TestCase):
         call_command('seed_wearable_device_mappings', stdout=out)
         self.assertEqual(self._rows().get(pk=row.pk).source_unit_evidence, seen)
         self.assertNotIn('Source units filled', out.getvalue())
+
+    # ── Category, Measure Class and Metric Key ───────────────────────────
+
+    def test_new_rows_carry_the_category_measure_class_and_metric_key(self):
+        from omop_core.management.commands.seed_wearable_device_mappings import (
+            APPLE_CATEGORIES, APPLE_MEASURE_CLASSES, APPLE_METRIC_KEYS,
+            GARMIN_CATEGORIES, GARMIN_MEASURE_CLASSES, GARMIN_METRIC_KEYS,
+        )
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        for vocabulary, categories, measure_classes, metric_keys in (
+            ('Apple', APPLE_CATEGORIES, APPLE_MEASURE_CLASSES, APPLE_METRIC_KEYS),
+            ('Garmin', GARMIN_CATEGORIES, GARMIN_MEASURE_CLASSES, GARMIN_METRIC_KEYS),
+        ):
+            rows = self._rows().filter(source_vocabulary_id=vocabulary)
+            self.assertTrue(rows.exists())
+            for row in rows:
+                with self.subTest(f'{vocabulary}:{row.source_code}'):
+                    self.assertEqual(row.category, categories[row.source_code])
+                    self.assertEqual(row.measure_class, measure_classes[row.source_code])
+                    self.assertEqual(row.metric_key, metric_keys[row.source_code])
+        # One code, two vocabularies, each with its own row and values.
+        steps = self._rows().get(source_vocabulary_id='Garmin', source_code='steps')
+        self.assertEqual(
+            (steps.category, steps.measure_class, steps.metric_key),
+            ('Activity', 'Aggregate over interval', 'steps'))
+        # The key is what the Apple code for the same metric shares.
+        apple = self._rows().get(
+            source_vocabulary_id='Apple', source_code='HKQuantityTypeIdentifierStepCount')
+        self.assertEqual(apple.metric_key, 'steps')
+
+    def test_one_metric_key_joins_the_vocabularies_once_all_seeds_have_run(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        call_command('seed_openwearables_mappings', verbosity=0)
+        shared = set(SourceCodeConceptMapping.objects.filter(metric_key='resting_hr')
+                     .values_list('source_vocabulary_id', 'source_code'))
+        self.assertEqual(shared, {
+            ('Apple', 'HKQuantityTypeIdentifierRestingHeartRate'),
+            ('Garmin', 'resting_hr'), ('OpenWearables', 'resting_heart_rate')})
+
+    def test_rerun_fills_the_blank_described_fields_on_an_approved_row(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().get(source_vocabulary_id='Garmin', source_code='resting_hr')
+        self.assertEqual(row.status, 'approved')
+        self._rows().filter(pk=row.pk).update(category='', measure_class='', metric_key='')
+        before = self._rows().get(pk=row.pk)
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual(
+            (after.category, after.measure_class, after.metric_key),
+            ('Heart & Cardiovascular', 'Aggregate over interval', 'resting_hr'))
+        self.assertIn('Categories filled on 1 existing rows.', out.getvalue())
+        self.assertIn('Measure classes filled on 1 existing rows.', out.getvalue())
+        self.assertIn('Metric keys filled on 1 existing rows.', out.getvalue())
+        # The list API returns both, so the delta has to see the row.
+        self.assertGreater(after.updated_at, before.updated_at)
+        self.assertEqual(after.status, 'approved')
+        self.assertEqual(after.target_concept_id, before.target_concept_id)
+        self.assertEqual(after.source_unit_evidence, before.source_unit_evidence)
+        # A further run has nothing left to fill and says nothing.
+        again = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=again)
+        self.assertNotIn('filled on', again.getvalue())
+        self.assertEqual(self._rows().get(pk=row.pk).updated_at, after.updated_at)
+
+    def test_rerun_never_replaces_a_described_field_that_is_set(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().get(source_vocabulary_id='Garmin', source_code='resting_hr')
+        self._rows().filter(pk=row.pk).update(
+            category='Fitness', measure_class='Vendor score', metric_key='pulse')
+        before = self._rows().get(pk=row.pk)
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual(
+            (after.category, after.measure_class, after.metric_key),
+            ('Fitness', 'Vendor score', 'pulse'))
+        self.assertEqual(after.updated_at, before.updated_at)
+        self.assertNotIn('filled on', out.getvalue())
+
+    def test_dry_run_fills_no_described_field(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().get(source_vocabulary_id='Garmin', source_code='resting_hr')
+        self._rows().filter(pk=row.pk).update(category='', measure_class='', metric_key='')
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', '--dry-run', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual((after.category, after.measure_class, after.metric_key), ('', '', ''))
+        self.assertNotIn('filled on', out.getvalue())
 
 
 class ResolveWearableMappingsTest(TestCase):

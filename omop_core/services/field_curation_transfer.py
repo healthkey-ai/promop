@@ -114,7 +114,15 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # Travels with the note it describes (#2423): the copy replaces the text,
     # so a payload without the key leaves no mark over the source's note.
     'curator_note_at': None,
+    # The wearable metric category, measure class and metric key. See
+    # _CODE_MAPPING_NOT_CARRIED_WHEN_ABSENT.
+    'category': '',
+    'measure_class': '',
+    'metric_key': '',
 }
+# Curation a payload written before the column cannot speak for: blank on a
+# row it creates, left as it is on a row that exists here.
+_CODE_MAPPING_NOT_CARRIED_WHEN_ABSENT = frozenset({'category', 'measure_class', 'metric_key'})
 _CODE_MAPPING_CONCEPT_FKS = (
     'source_concept', 'target_concept', 'suggested_target_concept',
 )
@@ -798,6 +806,9 @@ def _write_code_mapping(
     label = f"{row['source_vocabulary_id'] or '(uncoded)'}:{row['source_code']}"
     values = {name: row[name] for name in _CODE_MAPPING_FIELDS}
     for name, default in _CODE_MAPPING_OPTIONAL_FIELDS.items():
+        if (mapping is not None and name not in row
+                and name in _CODE_MAPPING_NOT_CARRIED_WHEN_ABSENT):
+            continue
         values[name] = row.get(name, default() if callable(default) else default)
     organization_slug = row.get('organization_slug') or ''
     if organization_slug:

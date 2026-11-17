@@ -1169,7 +1169,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
     {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {withNotes ? 'Uncheck with notes to include codes without a curator note. ' : ''}{seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
       Run Suggest source codes to search.</p>}
     <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
-      reference={reference ?? emptyReference} canApprove={canApprove}
+      reference={reference ?? emptyReference} canApprove={canApprove} canWrite={!readOnly}
       strategies={dialogStrategies} rankingModel={dialogRanking}
       onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
       onSaved={editorSaved} onDeleted={editorDeleted}

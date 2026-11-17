@@ -380,6 +380,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         row={dialogRow}
         reference={reference}
         canApprove={canApprove}
+        canWrite={canWrite}
         strategies={strategies}
         rankingModel={rankingModel}
         onStrategiesChange={setStrategies}

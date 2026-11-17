@@ -11,6 +11,8 @@
  *   mode / row          -- new or edit, the row being edited
  *   reference           -- domain & vocabulary reference data
  *   canApprove          -- whether the user can set status to Approved
+ *   canWrite            -- whether the user can change a mapping (default true:
+ *                          every opener offers the dialog to curators only)
  *   strategies / rankingModel -- suggest settings from the parent
  *   onSaved / onDeleted -- callbacks after a successful write or delete
  *   onBanner            -- surface informational banners to the parent
@@ -78,6 +80,12 @@ export interface EditMappingDialogProps {
   row: CodeMappingRow | null;
   reference: Reference;
   canApprove: boolean;
+  /**
+   * Whether the user can write mappings. Without it the wearable Category,
+   * Measure Class and Metric Key read as text. Defaults to true: the pages
+   * open the dialog for curators only.
+   */
+  canWrite?: boolean;
   strategies: { umls: boolean; lexical: boolean; vectors: boolean };
   rankingModel: "anthropic" | "jev" | "both";
   onStrategiesChange?: (next: { umls: boolean; lexical: boolean; vectors: boolean }) => void;
@@ -163,6 +171,7 @@ export default function EditMappingDialog({
   row: selectedRow,
   reference,
   canApprove,
+  canWrite = true,
   strategies,
   rankingModel,
   onStrategiesChange,
@@ -204,6 +213,17 @@ export default function EditMappingDialog({
   // carry no note at all (the patient page's rows), and sending that back
   // would overwrite the stored note and claim a curator wrote it (#2423).
   const openedNotes = useRef("");
+  // A wearable metric's Category, Measure Class and Metric Key, and what the
+  // dialog opened with. Like the note, each is sent only when the curator
+  // changed it: a row built by another page (the patient's source codes)
+  // carries none of them, and sending that blank back would erase the stored
+  // value.
+  const [category, setCategory] = useState("");
+  const [measureClass, setMeasureClass] = useState("");
+  const [metricKey, setMetricKey] = useState("");
+  const openedCategory = useRef("");
+  const openedMeasureClass = useRef("");
+  const openedMetricKey = useRef("");
   // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
   // Keyed by mapping: overrides belong to the code they were made for, and
   // must never ride along with a Suggest for another row or an edited code.
@@ -258,6 +278,11 @@ export default function EditMappingDialog({
     && String(selectedRow.destination_concept_id || "") !== form.destination_concept_id;
 
   const hasRetrieval = strategies.umls || strategies.lexical || strategies.vectors;
+
+  // Category, Measure Class and Metric Key exist for the Wearables tab's
+  // vocabularies only; the server says which those are and what the first two
+  // may hold, and refuses a metric key that is not lowercase snake case.
+  const showMetricFields = (reference.wearable_source_vocabularies ?? []).includes(form.source_vocabulary_id);
 
   /** Offer the caller's destination when the row arrives without one. */
   const withDefaultDestination = useCallback((built: MappingForm): MappingForm => {
@@ -315,6 +340,12 @@ export default function EditMappingDialog({
       setSourceSaveMessage("");
       setUnitSelectionAuto(false);
       setUnitSelectionNeedsReview(false);
+      openedCategory.current = selectedRow?.category || "";
+      openedMeasureClass.current = selectedRow?.measure_class || "";
+      openedMetricKey.current = selectedRow?.metric_key || "";
+      setCategory(openedCategory.current);
+      setMeasureClass(openedMeasureClass.current);
+      setMetricKey(openedMetricKey.current);
 
       if (mode === "new") {
         // When opened from PatientSourceCodesTab, selectedRow carries the
@@ -444,6 +475,20 @@ export default function EditMappingDialog({
           openedNotes.current = stored;
           setForm((prev) => prev.notes === openedWith ? { ...prev, notes: stored } : prev);
         }
+        // The same for the wearable metric fields: the stored value is what a
+        // save is compared against, and a value already being edited is kept.
+        const adoptStored = (
+          value: unknown, opened: { current: string },
+          set: (update: (previous: string) => string) => void,
+        ) => {
+          if (typeof value !== "string" || value === opened.current) return;
+          const was = opened.current;
+          opened.current = value;
+          set((previous) => previous === was ? value : previous);
+        };
+        adoptStored(data.category, openedCategory, setCategory);
+        adoptStored(data.measure_class, openedMeasureClass, setMeasureClass);
+        adoptStored(data.metric_key, openedMetricKey, setMetricKey);
         // Auto-populate source_unit from evidence when the form has none
         // (e.g. opened from Code Mapping browse, where the list omits units).
         const dominant = dominantSourceUnit(evidence?.units);
@@ -808,6 +853,10 @@ export default function EditMappingDialog({
     // follow the mapping when it is filed under another table (#2393).
     ...(patientId && selectedRow?.destination_omop_table ? { rows_omop_table: selectedRow.destination_omop_table } : {}),
     ...(surface && !patientId ? { decision_surface: surface } : {}),
+    // Never sent for a row the fields are not shown on, nor when unchanged.
+    ...(showMetricFields && category !== openedCategory.current ? { category } : {}),
+    ...(showMetricFields && measureClass !== openedMeasureClass.current ? { measure_class: measureClass } : {}),
+    ...(showMetricFields && metricKey.trim() !== openedMetricKey.current ? { metric_key: metricKey.trim() } : {}),
     ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
     source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
     // Empty stays empty: never send concept 0 as a destination.
@@ -1105,6 +1154,11 @@ export default function EditMappingDialog({
                       }} className="text-slate-600 underline">Use extracted values</button>
                       {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
                     </div>
+                  ) : showMetricFields ? (
+                    // The cell beside BasedOn is free outside the patient page.
+                    <MetricChoiceField id="category" label="Category" tip={TIP.category}
+                      value={category} options={reference.wearable_metric_categories ?? []}
+                      canWrite={canWrite} onChange={setCategory} />
                   ) : <div />}
                   <div className="min-w-0">
                     <ReadOnlyField id="source_based_on" label="BasedOn"
@@ -1112,6 +1166,27 @@ export default function EditMappingDialog({
                       value={sourceIdentityUnchanged ? selectedRow?.based_on?.join("; ") || "" : ""}
                       testId="source-based-on" fullWidth />
                   </div>
+                  {showMetricFields && patientId && selectedRow?.source_code_id && (
+                    <MetricChoiceField id="category" label="Category" tip={TIP.category}
+                      value={category} options={reference.wearable_metric_categories ?? []}
+                      canWrite={canWrite} onChange={setCategory} />
+                  )}
+                  {showMetricFields && (
+                    <MetricChoiceField id="measure_class" label="Measure Class" tip={TIP.measure_class}
+                      value={measureClass} options={reference.wearable_measure_classes ?? []}
+                      canWrite={canWrite} onChange={setMeasureClass} />
+                  )}
+                  {showMetricFields && (canWrite ? (
+                    <Field id="metric_key" label="Metric Key" tip={TIP.metric_key}>
+                      <input id="metric_key" title={TIP.metric_key} value={metricKey}
+                        onChange={(e) => setMetricKey(e.target.value)}
+                        maxLength={64} spellCheck={false} autoCapitalize="none"
+                        placeholder="e.g. resting_hr" className={`${INPUT_CLASS} font-mono`} />
+                    </Field>
+                  ) : (
+                    <ReadOnlyField id="metric_key" label="Metric Key" tip={TIP.metric_key}
+                      value={metricKey} fullWidth />
+                  ))}
                 </div>
               </div>
               {/* The list row omits the mapping's own metadata; the detail
@@ -1721,6 +1796,35 @@ interface UnitResult {
 }
 
 const DESTINATION_UNIT_TIP = "UCUM concept linked to this mapping. Used for unit conversion during ETL.";
+
+/**
+ * One of a wearable metric's two fields with a fixed list (Category, Measure Class):
+ * a select of the allowed values for a curator, plain text for anyone else. A
+ * stored value the list no longer offers stays selectable, so opening the
+ * dialog never shows it as blank.
+ */
+function MetricChoiceField({ id, label, tip, value, options, canWrite, onChange }: {
+  id: string;
+  label: string;
+  tip: string;
+  value: string;
+  options: string[];
+  canWrite: boolean;
+  onChange: (next: string) => void;
+}) {
+  if (!canWrite) {
+    return <ReadOnlyField id={id} label={label} tip={tip} value={value} fullWidth />;
+  }
+  const offered = value && !options.includes(value) ? [...options, value] : options;
+  return (
+    <Field id={id} label={label} tip={tip}>
+      <select id={id} title={tip} value={value} onChange={(e) => onChange(e.target.value)} className={INPUT_CLASS}>
+        <option value="">-- none --</option>
+        {offered.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </Field>
+  );
+}
 
 interface DestinationUnitPickerProps {
   sourceUnit: string;

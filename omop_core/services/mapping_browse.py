@@ -37,6 +37,7 @@ ORDER_FIELDS = {
     'destination_concept_name': 'target_concept__concept_name',
     'destination_concept_id': 'target_concept_id',
     'destination_count': 'destination_count', 'status': 'status',
+    'category': 'category', 'metric_key': 'metric_key',
 }
 
 
@@ -452,7 +453,7 @@ def browse_mappings(mappings, params, serialize):
         if rollup:
             if order.lstrip('-') not in GROUP_ORDER_FIELDS:
                 raise ValidationError({
-                    'order': 'Grouped queues can only sort by Seen or Source description.',
+                    'order': 'Grouped queues can only sort by Seen, Source description, Category or Metric.',
                 })
             # Pagination counts groups, not rows -- a page of 100 rows ordered
             # by a group's summed Seen would cut groups in half, and the whole
