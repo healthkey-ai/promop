@@ -962,7 +962,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
             patchRow(row, current, { replace: true });
           }
           const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
-            status: 'approved', expected_updated_at: current.updated_at,
+            status: 'approved', expected_updated_at: current.updated_at, run_id: run?.run_id,
           });
           saved += 1; written += 1;
           patchRow(row, updated, { replace: true });
@@ -999,7 +999,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
             patchRow(row, current, { replace: true });
           }
           const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
-            status: 'rejected', expected_updated_at: current.updated_at,
+            status: 'rejected', expected_updated_at: current.updated_at, run_id: run?.run_id,
           });
           saved += 1; written += 1;
           patchRow(row, updated, { replace: true });

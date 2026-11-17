@@ -1360,9 +1360,13 @@ token is a 400; a typed `suggestion_confidence` number is ignored (`null`
 clears); with no token the stored value follows the rules below, so an analyst
 cannot make a never-ranked mapping yield provisional rows. **Approval keeps it**;
 it is cleared when a destination moves without a token for the new one (it
-described the machine's pick), or a file upload re-points the code. A Concept to
-Code *apply* that moves a proposal's destination stores none: Calc in the dialog
-computes it. It is separate from `decision_confidence`, the ranker's belief at
+described the machine's pick), or a file upload re-points the code. Both Concept
+to Code writes store the preview's own score, read server-side from the saved
+reverse run (`_preview_candidate`: the client names the run, never a number, so
+no token is needed): a proposal stores its candidate's, and an *apply* that moves
+an existing proposal to this concept stores the score the preview gave that row
+for it (the tab sends `run_id` with each approve/reject); a candidate the preview
+did not score, or no run, stores none and Calc computes it. It is separate from `decision_confidence`, the ranker's belief at
 the moment of a curator save (#2382), which a Calc for the destination saved also
 sets.
 

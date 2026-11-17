@@ -446,6 +446,30 @@ def concept_to_code_run(request, run_id):
     return Response(_run_payload(get_object_or_404(SuggestRun, pk=run_id, direction='reverse')))
 
 
+def _preview_candidate(run_id, concept, *, mapping_id):
+    """The candidate a saved Concept to Code preview listed for this concept and source row.
+
+    The run's activity was written by the server, so its ``confidence`` is the
+    ranker's own score and needs no token: a client names the run, never the number.
+    ``mapping_id`` selects an existing proposal's candidate; ``None`` finds none.
+    """
+    if run_id in (None, ''):
+        return None
+    try:
+        run_id = UUID(str(run_id))
+    except (TypeError, ValueError):
+        raise ValidationError({'run_id': 'Supply the source preview run ID.'})
+    run = SuggestRun.objects.filter(
+        pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE],
+    ).first()
+    if run is None:
+        return None
+    return next((candidate for event in (run.activity or [])
+                 if event['concept']['concept_id'] == concept.pk
+                 for candidate in event['candidates']
+                 if mapping_id is not None and candidate.get('mapping_id') == mapping_id), None)
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
@@ -528,10 +552,22 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     selected_status = request.data.get('status', 'proposed')
     if selected_status not in ('proposed', 'approved', 'rejected'):
         raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
+    # A proposal moved to this concept carries the score the preview gave it for this
+    # concept (the machine's own number, read from the saved run, never a client's); a
+    # row whose destination stands keeps what it has, and no preview score stores none.
+    moved = row.target_concept_id != concept.pk
+    candidate = _preview_candidate(request.data.get('run_id'), concept, mapping_id=row.pk) if moved else None
+    score = candidate.get('confidence') if candidate else None
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0.0 <= score <= 1.0:
+        score = None
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id, 'decision_surface': 'concept2code',
+        **({'decision_confidence': score} if score is not None else {}),
     }, request.user, mapping=row)
+    if score is not None and moved:
+        row.suggestion_confidence = score
+        row.save(update_fields=['suggestion_confidence'])
     return Response({**source_payload(row), 'repoint': repoint})
 
 

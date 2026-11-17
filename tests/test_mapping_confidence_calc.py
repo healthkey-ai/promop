@@ -524,3 +524,113 @@ def test_a_concept_to_code_proposal_stores_the_previews_confidence(lab, staff, m
     assert response.status_code == 201, response.content
     mapping = SourceCodeConceptMapping.objects.get(source_code='GLU-LOCAL')
     assert (mapping.status, mapping.suggestion_confidence) == ('proposed', 0.77)
+
+
+def _preview(concept, row, confidence):
+    """A finished Concept to Code preview that listed *row* as a candidate for *concept*."""
+    candidate = {'source_code': row.source_code, 'source_vocabulary_id': row.source_vocabulary_id,
+                 'mapping_id': row.pk, 'source_code_description': 'Glucose, serum'}
+    if confidence is not None:
+        candidate['confidence'] = confidence
+    return SuggestRun.objects.create(
+        direction='reverse', state=SuggestRun.SUCCESS,
+        activity=[{'concept': {'concept_id': concept.concept_id}, 'candidates': [candidate]}],
+    )
+
+
+def _proposal_pointing_at(concept, confidence=0.3):
+    return SourceCodeConceptMapping.objects.create(
+        source_code='GLU-LOCAL', source_vocabulary_id='Local', omop_table='measurement',
+        domain_id='Measurement', status='proposed', target_concept=concept,
+        suggestion_confidence=confidence, origin='import',
+    )
+
+
+def _apply(client, concept, row, run=None, **extra):
+    body = {'status': 'proposed', 'expected_updated_at': row.updated_at.isoformat(), **extra}
+    if run is not None:
+        body['run_id'] = str(run.pk)
+    return client.post(f'/api/v1/concept-to-code/{concept.concept_id}/mappings/{row.pk}/', body, format='json')
+
+
+def test_applying_a_destination_stores_the_previews_score_for_it(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['glucose'], row, 0.77)
+
+    response = _apply(staff, lab['glucose'], row, run)
+
+    assert response.status_code == 200, response.content
+    row.refresh_from_db()
+    assert (row.target_concept_id, row.suggestion_confidence) == (lab['glucose'].concept_id, 0.77)
+    assert row.decision_confidence == 0.77
+
+
+def test_applying_a_candidate_the_preview_did_not_score_stores_none(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'], confidence=0.9)
+    run = _preview(lab['glucose'], row, None)
+
+    _apply(staff, lab['glucose'], row, run)
+
+    row.refresh_from_db()
+    assert row.target_concept_id == lab['glucose'].concept_id and row.suggestion_confidence is None
+
+
+def test_applying_without_a_preview_run_stores_none_and_ignores_a_client_number(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'], confidence=0.9)
+
+    _apply(staff, lab['glucose'], row, confidence=1.0, suggestion_confidence=1.0)
+
+    row.refresh_from_db()
+    assert row.target_concept_id == lab['glucose'].concept_id and row.suggestion_confidence is None
+
+
+def test_a_preview_for_another_concept_gives_no_score(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['sodium'], row, 0.99)          # the preview was for a different concept
+
+    _apply(staff, lab['glucose'], row, run)
+
+    row.refresh_from_db()
+    assert row.suggestion_confidence is None
+
+
+def test_a_later_approval_keeps_the_applied_score(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['glucose'], row, 0.77)
+    _apply(staff, lab['glucose'], row, run)
+    row.refresh_from_db()
+
+    response = _apply(staff, lab['glucose'], row, run, status='approved')
+
+    assert response.status_code == 200, response.content
+    row.refresh_from_db()
+    assert (row.status, row.suggestion_confidence) == ('approved', 0.77)
+
+
+def test_a_curator_moving_the_destination_afterwards_clears_it(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    _apply(staff, lab['glucose'], row, _preview(lab['glucose'], row, 0.77))
+
+    _patch(staff, row.pk, lab['sodium'])
+
+    row.refresh_from_db()
+    assert row.target_concept_id == lab['sodium'].concept_id and row.suggestion_confidence is None
+
+
+def test_a_proposal_whose_preview_gave_no_score_stores_none(lab, staff, monkeypatch):
+    concept = lab['glucose']
+    candidate = {'source_code': 'GLU-LOCAL', 'source_vocabulary_id': 'Local', 'mapping_id': None,
+                 'source_code_description': 'Glucose, serum'}
+    run = SuggestRun.objects.create(
+        direction='reverse', state=SuggestRun.SUCCESS,
+        activity=[{'concept': {'concept_id': concept.concept_id}, 'candidates': [candidate]}],
+    )
+    monkeypatch.setattr('omop_core.mapping.reverse_catalog.refresh_catalog_candidate',
+                        lambda cand, conc: dict(cand))
+
+    response = staff.post(f'/api/v1/concept-to-code/{concept.concept_id}/mappings/', {
+        'run_id': str(run.pk), 'source_code': 'GLU-LOCAL', 'source_vocabulary_id': 'Local',
+    }, format='json')
+
+    assert response.status_code == 201, response.content
+    assert SourceCodeConceptMapping.objects.get(source_code='GLU-LOCAL').suggestion_confidence is None

@@ -416,9 +416,10 @@ describe('concept-first curation', () => {
     expect(post).toHaveBeenNthCalledWith(2, '/v1/concept-to-code/123/mappings/', {
       run_id: 'run-1', source_vocabulary_id: 'SNOMED', source_code: 'NEW1', status: 'proposed',
     });
-    // The approval carries the revision the proposal returned, not the preview's.
+    // The approval carries the revision the proposal returned, not the preview's, and
+    // names the preview so the server can store the score that preview gave (#2668).
     expect(post).toHaveBeenNthCalledWith(3, '/v1/concept-to-code/123/mappings/17/', {
-      status: 'approved', expected_updated_at: 'new-revision',
+      status: 'approved', expected_updated_at: 'new-revision', run_id: 'run-1',
     });
     expect(post).toHaveBeenCalledTimes(3);
     expect(screen.getByText('approved')).toBeInTheDocument();
