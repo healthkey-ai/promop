@@ -141,6 +141,33 @@ promoted rows as on re-pointed ones. Provisional rows are **not** normalized
 at write time: the proposal has no curated `destination_unit_concept`, and a
 write-time conversion is an approved mapping's privilege (#2157).
 
+### As built in phase 0b (#2528)
+
+- **The two tables are generated, not typed.** `PatientRecordProvisional`
+  clones every `PatientRecord` column when the models load
+  (`_provisional_columns`), except the key, the lifecycle columns that describe
+  the real row (`derivation_version`, `derived_at`, `created_at`, `updated_at`)
+  and `user_edited_fields`, which stays one source of truth
+  (`PROVISIONAL_EXCLUDED_COLUMNS`). A clone drops `unique` and `db_index`;
+  `organization` is rebuilt by hand because a foreign key cannot be
+  deconstructed while models load, and keeps its own index for tenancy.
+  `PatientRecordConfidence` has one nullable `PositiveSmallIntegerField` per
+  non-JSON column in `_OMOP_DERIVED_FIELDS`: 274. A field added to
+  `PatientRecord` therefore needs the same migration to add its twin, which
+  `makemigrations` writes by itself.
+- **`_OMOP_DERIVED_FIELDS` moved** to `omop_core/derived_fields.py`, plain data,
+  because a model module cannot import `patient_record_service`.
+  `patient_record_service._OMOP_DERIVED_FIELDS` is the same list object.
+- **Full, not sparse.** One row per person. The HealthTree row count that would
+  settle it could not be read (the Cloud SQL proxy's credentials had expired),
+  so this is the plan's default; sparse is a change to the provisional pass and
+  the endpoint, not to the schema, and can still be made once the count is
+  known.
+- **Classification.** Both models are patient data in `instance_data.PATIENT` and
+  also in `PATIENT_DERIVED`: `copy_patient` does not copy them, the refresh it
+  runs afterwards rebuilds them. A person's delete cascades.
+- Tests: `tests/test_patient_record_provisional_tables.py`.
+
 ### As built in phase 1b (#2530)
 
 Generate OMOP is the writer built so far; the lookup contract and FHIR sync

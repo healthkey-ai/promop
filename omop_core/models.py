@@ -4493,6 +4493,90 @@ FIELD_TAB_CHOICES = [
 UNPLACED_TAB = 'omop'
 
 
+# --- Provisional patient record (docs/provisional_data_plan.md, #2528) ----------------
+#
+# Two tables beside patient_record, generated from it so they cannot drift:
+#   patient_record_provisional  the best-known picture, same column names
+#   patient_record_confidence   one percentage per derived field, same names
+# patient_record itself is untouched and holds approved data only.
+
+# Columns the provisional table does not clone: the key (its own one-to-one
+# `person`), the lifecycle columns that describe the real row (derivation
+# stamps, timestamps) and user_edited_fields, which stays one source of truth.
+PROVISIONAL_EXCLUDED_COLUMNS = frozenset({
+    'id', 'person', 'derivation_version', 'derived_at', 'created_at', 'updated_at',
+    'user_edited_fields',
+})
+
+
+def _provisional_columns():
+    """An unbound copy of every PatientRecord column the provisional table keeps.
+
+    Constraints and the secondary indexes stay on patient_record: this table is
+    read by person, and the organization foreign key (tenancy) is its only
+    other lookup. A cloned field drops ``unique`` and ``db_index`` so it adds no
+    index of its own.
+    """
+    columns = {}
+    for field in PatientRecord._meta.concrete_fields:
+        if field.name in PROVISIONAL_EXCLUDED_COLUMNS:
+            continue
+        if isinstance(field, models.ForeignKey):
+            # deconstruct() needs the app registry, which is not ready while
+            # models load, so a foreign key is rebuilt from its attributes.
+            columns[field.name] = models.ForeignKey(
+                field.remote_field.model, on_delete=field.remote_field.on_delete,
+                null=field.null, blank=field.blank, related_name='+',
+            )
+            continue
+        _, _, args, kwargs = field.deconstruct()
+        kwargs.pop('unique', None)
+        kwargs.pop('db_index', None)
+        columns[field.name] = field.__class__(*args, **kwargs)
+    return columns
+
+
+def confidence_field_names():
+    """The PatientRecord fields that carry a confidence: every derived field
+    that is a real, non-JSON column. JSON fields join in phase 3."""
+    from omop_core.derived_fields import _OMOP_DERIVED_FIELDS
+    names = []
+    for name in dict.fromkeys(_OMOP_DERIVED_FIELDS):
+        try:
+            field = PatientRecord._meta.get_field(name)
+        except Exception:  # noqa: BLE001 -- a derived name that is not a column
+            continue
+        if not isinstance(field, models.JSONField) and getattr(field, 'concrete', False):
+            names.append(name)
+    return names
+
+
+class PatientRecordProvisional(models.Model):
+    """The best-known picture of a person: approved values where there are any,
+    a proposal's value where only a proposal answers. One row per person."""
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, primary_key=True, related_name='patient_record_provisional',
+    )
+    locals().update(_provisional_columns())
+
+    class Meta:
+        db_table = 'patient_record_provisional'
+
+
+class PatientRecordConfidence(models.Model):
+    """The confidence (0-100) of each provisional value in PatientRecordProvisional,
+    under the same column name. Null means the value is approved, or absent."""
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, primary_key=True, related_name='patient_record_confidence',
+    )
+    locals().update({
+        name: models.PositiveSmallIntegerField(null=True, blank=True) for name in confidence_field_names()
+    })
+
+    class Meta:
+        db_table = 'patient_record_confidence'
+
+
 class FieldConceptMapping(models.Model):
     """A reviewer-approved OMOP concept assignment for a PatientRecord field.
 
