@@ -472,17 +472,6 @@ export type { CandidateActivity };
  * The ranked/result events list every scored candidate as `alternatives`.
  */
 export function rankedConfidence(activity: CandidateActivity[], conceptId: string): number | null {
-  return rankedScore(activity, conceptId)?.confidence ?? null;
-}
-
-/** A confidence and the server's signed token for it, if the run issued one (#2668). */
-export interface ConfidenceScore {
-  confidence: number;
-  token: string | null;
-}
-
-/** ``rankedConfidence`` with the token of the score it picked, which is what a save sends. */
-export function rankedScore(activity: CandidateActivity[], conceptId: string): ConfidenceScore | null {
   const id = Number(conceptId);
   if (!Number.isFinite(id) || id <= 0) return null;
   for (let index = activity.length - 1; index >= 0; index -= 1) {
@@ -492,10 +481,34 @@ export function rankedScore(activity: CandidateActivity[], conceptId: string): C
     // lists both rankers' scores for a concept and the higher one is the
     // candidate's confidence; a score the server would refuse (NaN, out of
     // range) reads as unscored, not as a 400.
-    const scored = alternatives
+    const scores = alternatives
       .filter(alt => alt.concept_id === id && Number.isFinite(alt.confidence) && alt.confidence >= 0 && alt.confidence <= 1)
-      .sort((a, b) => b.confidence - a.confidence);
-    return scored.length ? { confidence: scored[0].confidence, token: scored[0].confidence_token ?? null } : null;
+      .map(alt => alt.confidence);
+    return scores.length ? Math.max(...scores) : null;
+  }
+  return null;
+}
+
+/** A confidence and the server's signed token for it (#2668). */
+export interface ConfidenceScore {
+  confidence: number;
+  token: string;
+}
+
+/**
+ * The score a run signed for this concept, or null. The server signs only the score of
+ * the concept a ranker chose, so a candidate the curator picks from the table usually has
+ * none: it then stores no confidence, and Calc computes it.
+ */
+export function signedScore(activity: CandidateActivity[], conceptId: string): ConfidenceScore | null {
+  const id = Number(conceptId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const alternatives = activity[index].alternatives;
+    if (!alternatives?.length) continue;
+    const signed = alternatives.find(alt => alt.concept_id === id && alt.confidence_token
+      && Number.isFinite(alt.confidence) && alt.confidence >= 0 && alt.confidence <= 1);
+    return signed ? { confidence: signed.confidence, token: signed.confidence_token as string } : null;
   }
   return null;
 }

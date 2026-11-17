@@ -1352,23 +1352,36 @@ those are the writers: Suggest and its group/reverse runs store the ranker's
 score, a Concept to Code proposal stores its preview's. **The server stores only
 a confidence it produced.** The score endpoint and suggest-one sign what they
 computed (`omop_core/mapping/confidence_token.py`: `django.core.signing`, its own
-salt, one hour) bound to the source vocabulary, code, table, destination and
-number; the dialog sends that `suggestion_confidence_token` with its save and
-`_saved_confidence` stores the number only when the token verifies against the
-row's source and the destination being saved. A forged, expired or mismatched
-token is a 400; a typed `suggestion_confidence` number is ignored (`null`
-clears); with no token the stored value follows the rules below, so an analyst
-cannot make a never-ranked mapping yield provisional rows. **Approval keeps it**;
-it is cleared when a destination moves without a token for the new one (it
-described the machine's pick), or a file upload re-points the code. Both Concept
-to Code writes store the preview's own score, read server-side from the saved
-reverse run (`_preview_candidate`: the client names the run, never a number, so
-no token is needed): a proposal stores its candidate's, and an *apply* that moves
-an existing proposal to this concept stores the score the preview gave that row
-for it (the tab sends `run_id` with each approve/reject); a candidate the preview
-did not score, or no run, stores none and Calc computes it. It is separate from `decision_confidence`, the ranker's belief at
-the moment of a curator save (#2382), which a Calc for the destination saved also
-sets.
+salt, one hour), bound to the source vocabulary, code and table, the destination,
+a hash of the source **description** (case and spacing ignored) and the number.
+Only a score a ranker stood behind is signed: the score endpoint signs the
+destination's own score when a ranker chose it, and suggest-one signs only the
+chosen concept's score (the winner's own ranker lists first); never an
+alternative a ranker merely scored (Jev scores every candidate, declined or not),
+and nothing at all when no ranker chose. The dialog sends that
+`suggestion_confidence_token` with its save and `_saved_confidence` stores the
+number only when the token verifies against the saved row's source, table,
+destination and description. A forged, expired or mismatched token is a 400; a
+typed `suggestion_confidence` number is ignored (`null` clears); with no token
+the stored value follows the rules below, so an analyst cannot make a
+never-ranked mapping yield provisional rows, or have a score be about text of
+their choosing. For an **existing** mapping the score endpoint takes the
+description and metadata from the stored row, whatever the body sends; for a new
+row the body's description is bound and its metadata (client-supplied) is not,
+and the dialog keeps Calc off while the source text has an unsaved edit.
+**Approval keeps it**; it is cleared when the destination moves without a token
+for the new one, when the saved row's source code, source vocabulary or table
+changes (it described the machine's pick for that source), or when a file upload
+re-points the code. Both Concept to Code writes store the preview's own score,
+read server-side from the saved reverse run (`_preview_score`: the client names
+the run, never a number, so no token is needed), and only while the run is under
+24 hours old and the candidate's description is still what the row says: a
+proposal stores its candidate's, and an *apply* that moves an existing proposal
+to this concept stores the score the preview gave that row for it (the tab sends
+`run_id` with each approve/reject); a candidate the preview did not score, a
+stale or mismatched preview, or no run stores none and Calc computes it. It is
+separate from `decision_confidence`, the ranker's belief at the moment of a
+curator save (#2382), which a Calc for the destination saved also sets.
 
 **Calc** is the dialog's button beside the number: `POST /api/v1/code-mappings/score/`
 takes suggest-one's body plus `destination_concept_id`, which must be a valid

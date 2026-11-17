@@ -46,7 +46,7 @@ import {
   type MappingForm,
   type MappingSurface,
   rankedConfidence,
-  rankedScore,
+  signedScore,
   type ConfidenceScore,
   type Reference,
   type RepointResult,
@@ -312,6 +312,12 @@ export default function EditMappingDialog({
     selectedRow
     && form.source_code === selectedRow.source_code
     && form.source_vocabulary_id === selectedRow.source_vocabulary_id,
+  );
+  // Calc scores an existing mapping on the text the server has stored for it (a score is about
+  // that text), so an unsaved edit to the code, system or description cannot be scored yet.
+  const sourceTextEdited = Boolean(
+    selectedRow?.mapping_id
+    && (!sourceIdentityUnchanged || form.source_code_description !== (selectedRow.source_code_description || "")),
   );
   const sourceSystemContext = sourceIdentityUnchanged
     ? selectedRow?.source_system_context ?? sourceEvidence?.system_context
@@ -898,7 +904,7 @@ export default function EditMappingDialog({
       } else if (result?.suggested && dialogChoice.current !== request) {
         applyConcept(
           result.suggested as ConceptResult, false,
-          rankedScore(current.activity ?? [], String((result.suggested as ConceptResult).concept_id)) ?? undefined,
+          signedScore(current.activity ?? [], String((result.suggested as ConceptResult).concept_id)) ?? undefined,
         );
         setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
       } else if (!result?.suggested && dialogChoice.current !== request) {
@@ -1542,7 +1548,7 @@ export default function EditMappingDialog({
                       void axesPanel.current?.setVariantDestination(axisKey, candidate.concept_id);
                       return;
                     }
-                    applyConcept(candidate as ConceptResult, false, rankedScore(
+                    applyConcept(candidate as ConceptResult, false, signedScore(
                       individualSuggestion.activity, String(candidate.concept_id)) ?? undefined);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}
@@ -1859,10 +1865,12 @@ export default function EditMappingDialog({
                 <button
                   type="button"
                   onClick={() => void calcConfidence()}
-                  disabled={!form.destination_concept_id || calcing}
+                  disabled={!form.destination_concept_id || calcing || sourceTextEdited}
                   title={!form.destination_concept_id
                     ? "Choose a destination to compute its confidence."
-                    : "Compute (or recompute) the ranker's confidence in this destination."}
+                    : sourceTextEdited
+                      ? "Save the source change first: a score is about the saved source text."
+                      : "Compute (or recompute) the ranker's confidence in this destination."}
                   className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-60"
                 >
                   {calcing && <Loader2 size={13} className="animate-spin" aria-hidden="true" />}

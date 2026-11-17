@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  buildEditForm, confidencePercent, emptyReference, pollSuggestRun, rankedConfidence,
+  buildEditForm, confidencePercent, emptyReference, pollSuggestRun, rankedConfidence, signedScore,
   type CodeMappingRow, type SuggestRunProgress,
 } from "./codeMappingTypes";
 
@@ -39,6 +39,28 @@ describe("the form's confidence (#2668)", () => {
     expect(confidencePercent(0)).toBe("0");
     expect(confidencePercent(null)).toBe("");
     expect(confidencePercent(undefined)).toBe("");
+  });
+});
+
+describe("signedScore (#2668)", () => {
+  const activity = [{
+    stage: "result",
+    alternatives: [
+      { concept_id: 1, confidence: 0.9, confidence_token: "tok-1" },
+      { concept_id: 2, confidence: 0.8 },
+      { concept_id: 3, confidence: 7, confidence_token: "tok-3" },
+    ],
+  }];
+
+  it("returns the signed score of the concept a ranker chose", () => {
+    expect(signedScore(activity, "1")).toEqual({ confidence: 0.9, token: "tok-1" });
+  });
+
+  it("returns none for a scored candidate the server did not sign, or a score it would refuse", () => {
+    expect(signedScore(activity, "2")).toBeNull();
+    expect(signedScore(activity, "3")).toBeNull();
+    expect(signedScore(activity, "99")).toBeNull();
+    expect(signedScore([], "1")).toBeNull();
   });
 });
 

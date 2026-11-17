@@ -13277,17 +13277,17 @@ def _decision_confidence(data, mapping, concept, previous_concept_id):
     return mapping.suggestion_confidence if destination_stands else None
 
 
-def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, concept):
+def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, concept, source_description):
     """What a save does to the mapping's ``suggestion_confidence``: ``(set, value)``.
 
     Provisional data reads this number as evidence, so the server stores only a
     confidence it produced: the dialog sends the ``suggestion_confidence_token``
-    the score endpoint (Calc) or a Suggest run signed for this source, table and
-    destination (``confidence_token``). A token that is forged, expired or for
-    another source or destination is a 400, never a silent store. A bare
-    ``suggestion_confidence`` number is ignored; ``null`` clears it. Left out
-    entirely, the rules in the caller stand (kept while the destination stands,
-    cleared when it moves).
+    the score endpoint (Calc) or a Suggest run signed for this source, table,
+    destination and description (``confidence_token``). A token that is forged,
+    expired or for another source, destination or description is a 400, never a
+    silent store. A bare ``suggestion_confidence`` number is ignored; ``null``
+    clears it. Left out entirely, the rules in the caller stand (kept while the
+    destination and source stand, cleared when either moves).
     """
     from omop_core.mapping import confidence_token
     token = data.get('suggestion_confidence_token')
@@ -13296,6 +13296,7 @@ def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, co
             return True, confidence_token.verify(
                 token, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
                 omop_table=omop_table, destination_concept_id=concept.concept_id if concept else None,
+                source_description=source_description,
             )
         except ValueError as exc:
             raise serializers.ValidationError({'suggestion_confidence_token': str(exc)})
@@ -13674,8 +13675,15 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         values['decision_confidence'] = _decision_confidence(
             data, mapping, concept, previous_concept_id,
         )
-    # The ranker's confidence was in the destination it chose, not this one.
-    if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
+    # The ranker's confidence was in the destination it chose, for the source it was
+    # shown: neither a moved destination nor a re-pointed source (code, system or
+    # table) keeps it.
+    if mapping is not None and (
+        (concept is not None and concept.concept_id != previous_concept_id)
+        or source_vocabulary_id != mapping.source_vocabulary_id
+        or source_code != mapping.source_code
+        or (omop_table and omop_table != mapping.omop_table)
+    ):
         values['suggestion_confidence'] = None
     # A confidence the server signed for this source and destination (a Calc, or
     # a Suggest run's score for the destination chosen) is the number to keep,
@@ -13683,6 +13691,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     keep, saved_confidence = _saved_confidence(
         data, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
         omop_table=omop_table, concept=concept,
+        source_description=(data['source_code_description'] if 'source_code_description' in data
+                            else mapping.source_code_description if mapping else ''),
     )
     if keep:
         values['suggestion_confidence'] = saved_confidence
@@ -15078,11 +15088,20 @@ def _suggest_one(request, score_concept_id=None):
             axis_variants_module.observed_units(axes_mapping, unit_evidence)
             if axes_mapping and omop_table == 'measurement' else None
         ),
-        'source_description': str(request.data.get('source_code_description') or ''),
+        # A score is about the text the stored row says: for an existing mapping the
+        # description and metadata come from the row, whatever the body sends, so a
+        # curator cannot choose the text a score is about. (A new row's are the body's;
+        # the token binds its description, not its metadata.)
+        'source_description': (
+            axes_mapping.source_code_description
+            if score_concept_id is not None and axes_mapping is not None
+            else str(request.data.get('source_code_description') or '')),
         # The dialog's Source Metadata, else this table's mapping's own:
         # ranker context only.
         'row_metadata': (
-            request.data.get('source_metadata')
+            axes_mapping.source_metadata
+            if score_concept_id is not None and axes_mapping is not None
+            else request.data.get('source_metadata')
             if isinstance(request.data.get('source_metadata'), dict)
             and request.data.get('source_metadata')
             else SourceCodeConceptMapping.objects.filter(

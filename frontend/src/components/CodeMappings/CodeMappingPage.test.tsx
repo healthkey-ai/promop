@@ -921,7 +921,11 @@ describe("CodeMappingPage", () => {
         await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).toBeDisabled());
 
         fireEvent.change(dialog.getByLabelText("Source Description"), { target: { value: "Something else" } });
-        await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).not.toBeDisabled());
+        // The run is abandoned, and Calc stays off until the change is saved: a score is about
+        // the text the server has stored.
+        await waitFor(() => expect(dialog.getByRole("button", { name: "Calc" })).toHaveAttribute(
+          "title", expect.stringMatching(/Save the source change first/)));
+        expect(dialog.getByRole("button", { name: "Calc" })).toBeDisabled();
         finish(calcRun({
           concept_id: proposedRow.destination_concept_id, confidence: 0.64, ranked: true, note: "", token: "stale",
         }));

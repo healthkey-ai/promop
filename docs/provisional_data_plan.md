@@ -315,7 +315,11 @@ rows. A score is never invented (no ranker answer, or a ranker that preferred
 another concept, means no number and a note), and it is never typed in: the server
 signs what Calc or Suggest computed for a source and destination, and a save stores
 a confidence only through that token, so no mapping writer can manufacture the
-evidence provisional data trusts. Details in the Code Mapping Suggest section of
+evidence provisional data trusts. The token binds the source, destination and a hash
+of the description scored, covers only a score a ranker stood behind, and a stored
+confidence is cleared when the destination or the source is re-pointed; a Concept to
+Code preview's own score is trusted only while the preview is under a day old and
+still describes the row. Details in the Code Mapping Suggest section of
 `AGENTS.md`.
 
 ### As built in phase 1b (#2530)

@@ -2545,23 +2545,30 @@ def scored_destination(results, concept, job):
             'note': f'The ranking model is unavailable, so no confidence was computed ({detail}).'}
 
 
-def signed_alternatives(alternatives, *, source_vocabulary_id, source_code, omop_table):
-    """*alternatives* with a ``confidence_token`` on each scored one (see ``confidence_token``).
+def signed_alternatives(alternatives, chosen, *, source_vocabulary_id, source_code, omop_table,
+                        source_description):
+    """*alternatives* with a ``confidence_token`` on the chosen concept's own score.
 
-    The dialog saves a Suggest winner's score only through this token, so the
-    server stores nothing it did not produce for this source and destination.
+    The dialog saves a Suggest winner's score only through this token (see
+    ``confidence_token``), so only a score a ranker stood behind is signed: the
+    first entry for the concept that was *chosen* (the winner's own ranker lists
+    first). Nothing is signed when no ranker chose a concept, and never an
+    alternative a ranker merely scored (Jev lists every candidate it was shown,
+    declined or not).
     """
     from omop_core.mapping import confidence_token
-    signed = []
+    signed, done = [], chosen is None
     for alt in alternatives or []:
         alt = dict(alt) if isinstance(alt, dict) else alt
-        confidence = alt.get('confidence') if isinstance(alt, dict) else None
-        if (isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
-                and 0.0 <= confidence <= 1.0 and alt.get('concept_id')):
+        if (not done and isinstance(alt, dict) and alt.get('concept_id') == chosen.get('concept_id')
+                and isinstance(alt.get('confidence'), (int, float)) and not isinstance(alt['confidence'], bool)
+                and 0.0 <= alt['confidence'] <= 1.0):
             alt['confidence_token'] = confidence_token.issue(
                 source_vocabulary_id=source_vocabulary_id, source_code=source_code,
-                omop_table=omop_table, destination_concept_id=alt['concept_id'], confidence=confidence,
+                omop_table=omop_table, destination_concept_id=alt['concept_id'],
+                source_description=source_description, confidence=alt['confidence'],
             )
+            done = True
         signed.append(alt)
     return signed
 
@@ -2642,16 +2649,15 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
         # pool the curator's destination is judged against.
         results = _rank_for_score(job, ranking_model)
         scored = scored_destination(results, scored_concept, job)
-        alternatives = signed_alternatives(
-            [a for _chosen, _note, alts in results.values() for a in alts or []],
-            source_vocabulary_id=source_vocabulary_id, source_code=source_code, omop_table=omop_table,
-        )
+        # Only the destination's own score, when a ranker chose it, is signed; the
+        # alternatives (Jev scores every candidate) are shown unsigned.
+        alternatives = [dict(a) for _chosen, _note, alts in results.values() for a in alts or []]
         if scored['confidence'] is not None:
             from omop_core.mapping import confidence_token
             scored['token'] = confidence_token.issue(
                 source_vocabulary_id=source_vocabulary_id, source_code=source_code,
                 omop_table=omop_table, destination_concept_id=scored_concept.concept_id,
-                confidence=scored['confidence'],
+                source_description=source_description, confidence=scored['confidence'],
             )
         emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,
              suggested=None, note=scored['note'], strategy_used=None,
@@ -2678,8 +2684,9 @@ def suggest_one_mapping(source_code, source_vocabulary_id, omop_table, *,
     # Each scored alternative carries a signed token, the only way the dialog can
     # save its score on a mapping (see confidence_token).
     alternatives = (
-        signed_alternatives(job['alternatives'], source_vocabulary_id=source_vocabulary_id,
-                            source_code=source_code, omop_table=omop_table)
+        signed_alternatives(job['alternatives'], chosen, source_vocabulary_id=source_vocabulary_id,
+                            source_code=source_code, omop_table=omop_table,
+                            source_description=source_description)
         if job.get('alternatives') else job.get('alternatives')
     )
     emit("ranked", source_code=source_code, source_vocabulary_id=source_vocabulary_id,

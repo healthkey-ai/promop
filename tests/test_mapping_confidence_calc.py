@@ -25,6 +25,7 @@ pytestmark = pytest.mark.django_db
 
 SCORE = '/api/v1/code-mappings/score/'
 SOURCE = {'source_vocabulary_id': 'Local', 'source_code': 'GLU-LOCAL', 'omop_table': 'measurement'}
+DESCRIPTION = 'Glucose, serum'
 
 
 @pytest.fixture()
@@ -105,7 +106,7 @@ def _stub_jev(monkeypatch, pick, scores):
 
 def _score(client, concept_id, **extra):
     return client.post(SCORE, {
-        **SOURCE, 'source_code_description': 'Glucose, serum',
+        **SOURCE, 'source_code_description': DESCRIPTION,
         'destination_concept_id': concept_id, **extra,
     }, format='json')
 
@@ -123,7 +124,8 @@ def test_calc_returns_the_rankers_score_for_the_destination(lab, staff, monkeypa
         lab['glucose'].concept_id, 0.82, True, '')
     # ... and signs it for exactly this source and destination.
     assert confidence_token.verify(
-        scored['token'], destination_concept_id=lab['glucose'].concept_id, **SOURCE) == 0.82
+        scored['token'], destination_concept_id=lab['glucose'].concept_id,
+        source_description=DESCRIPTION, **SOURCE) == 0.82
 
 
 def test_the_destination_is_in_the_pool_even_when_retrieval_finds_nothing(lab, staff, monkeypatch):
@@ -328,24 +330,27 @@ def test_a_suggest_one_alternative_carries_a_token_for_its_own_destination(lab, 
 
     [alternative] = response.data['alternatives']
     assert confidence_token.verify(
-        alternative['confidence_token'], destination_concept_id=lab['glucose'].concept_id, **SOURCE) == 0.9
+        alternative['confidence_token'], destination_concept_id=lab['glucose'].concept_id,
+        source_description='Glucose', **SOURCE) == 0.9
 
 
 # --- the token ------------------------------------------------------------------------
 
 def _token(concept, confidence=0.82, **overrides):
     return confidence_token.issue(**{
-        **SOURCE, 'destination_concept_id': concept.concept_id, 'confidence': confidence, **overrides,
+        **SOURCE, 'destination_concept_id': concept.concept_id, 'confidence': confidence,
+        'source_description': DESCRIPTION, **overrides,
     })
 
 
 def test_a_token_is_bound_to_its_source_table_and_destination(lab):
     token = _token(lab['glucose'])
-    good = {**SOURCE, 'destination_concept_id': lab['glucose'].concept_id}
+    good = {**SOURCE, 'destination_concept_id': lab['glucose'].concept_id, 'source_description': DESCRIPTION}
 
     assert confidence_token.verify(token, **good) == 0.82
     for change in ({'destination_concept_id': lab['sodium'].concept_id}, {'source_code': 'OTHER'},
-                   {'omop_table': 'observation'}, {'source_vocabulary_id': 'Epic'}):
+                   {'omop_table': 'observation'}, {'source_vocabulary_id': 'Epic'},
+                   {'source_description': 'Hemoglobin A1c'}):
         with pytest.raises(ValueError):
             confidence_token.verify(token, **{**good, **change})
     with pytest.raises(ValueError):
@@ -361,7 +366,8 @@ def test_a_token_expires(lab, monkeypatch):
     monkeypatch.setattr(confidence_token, 'MAX_AGE_SECONDS', -1)
 
     with pytest.raises(ValueError, match='expired'):
-        confidence_token.verify(token, **SOURCE, destination_concept_id=lab['glucose'].concept_id)
+        confidence_token.verify(token, **SOURCE, destination_concept_id=lab['glucose'].concept_id,
+                                source_description=DESCRIPTION)
 
 
 # --- the save keeps only a confidence the server signed -------------------------------
@@ -369,7 +375,7 @@ def test_a_token_expires(lab, monkeypatch):
 def _create(client, concept, **extra):
     return client.post('/api/v1/code-mappings/', {
         **SOURCE, 'domain_id': 'Measurement', 'destination_concept_id': concept.concept_id,
-        'status': 'proposed', **extra,
+        'status': 'proposed', 'source_code_description': DESCRIPTION, **extra,
     }, format='json')
 
 
@@ -403,7 +409,8 @@ def test_a_signed_confidence_is_stored_and_returned(lab, staff):
 
 def test_a_forged_mismatched_or_expired_token_is_a_400_and_stores_nothing(lab, staff, monkeypatch):
     for token in ('forged', _token(lab['sodium']), _token(lab['glucose'], source_code='OTHER'),
-                  _token(lab['glucose'], omop_table='observation')):
+                  _token(lab['glucose'], omop_table='observation'),
+                  _token(lab['glucose'], source_description='Hemoglobin A1c')):
         response = _create(staff, lab['glucose'], suggestion_confidence_token=token)
         assert response.status_code == 400, token
         assert 'suggestion_confidence_token' in response.data
@@ -542,7 +549,7 @@ def _proposal_pointing_at(concept, confidence=0.3):
     return SourceCodeConceptMapping.objects.create(
         source_code='GLU-LOCAL', source_vocabulary_id='Local', omop_table='measurement',
         domain_id='Measurement', status='proposed', target_concept=concept,
-        suggestion_confidence=confidence, origin='import',
+        suggestion_confidence=confidence, origin='import', source_code_description=DESCRIPTION,
     )
 
 
@@ -634,3 +641,210 @@ def test_a_proposal_whose_preview_gave_no_score_stores_none(lab, staff, monkeypa
 
     assert response.status_code == 201, response.content
     assert SourceCodeConceptMapping.objects.get(source_code='GLU-LOCAL').suggestion_confidence is None
+
+
+# --- review round: what is signed, what it is about, when it goes ------------------------
+
+def _tokens(alternatives):
+    return {a['concept_id']: a.get('confidence_token') for a in alternatives or []}
+
+
+def test_the_score_response_signs_only_the_destination_a_ranker_chose(lab, staff, monkeypatch):
+    """Jev scores every candidate it is shown; only the chosen destination's score is signed."""
+    _also_retrieve(monkeypatch, lab['sodium'])
+    _stub_jev(monkeypatch, lab['glucose'], {lab['glucose'].concept_id: 0.8, lab['sodium'].concept_id: 0.6})
+
+    response = _score(staff, lab['glucose'].concept_id, ranking_model='jev')
+
+    scored = response.data['scored']
+    assert scored['confidence'] == 0.8 and scored['token']
+    assert all(token is None for token in _tokens(response.data['alternatives']).values())
+
+
+def test_a_declining_ranker_signs_nothing_in_suggest_one(lab, staff, monkeypatch):
+    _also_retrieve(monkeypatch, lab['sodium'])
+    _stub_jev(monkeypatch, None, {lab['glucose'].concept_id: 0.9, lab['sodium'].concept_id: 0.8})
+
+    response = staff.post('/api/v1/code-mappings/suggest-one/', {
+        **SOURCE, 'source_code_description': DESCRIPTION, 'ranking_model': 'jev'}, format='json')
+
+    assert response.data['suggested'] is None
+    assert response.data['alternatives'] and all(
+        token is None for token in _tokens(response.data['alternatives']).values())
+
+
+def test_suggest_one_signs_only_the_concept_that_was_chosen(lab, staff, monkeypatch):
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates',
+                        lambda *a, **k: [_hit(lab['glucose']), _hit(lab['sodium'])])
+    _stub_jev(monkeypatch, lab['sodium'], {lab['glucose'].concept_id: 0.7, lab['sodium'].concept_id: 0.9})
+
+    response = staff.post('/api/v1/code-mappings/suggest-one/', {
+        **SOURCE, 'source_code_description': DESCRIPTION, 'ranking_model': 'jev'}, format='json')
+
+    tokens = _tokens(response.data['alternatives'])
+    assert tokens[lab['sodium'].concept_id] and tokens[lab['glucose'].concept_id] is None
+    assert confidence_token.verify(
+        tokens[lab['sodium'].concept_id], destination_concept_id=lab['sodium'].concept_id,
+        source_description=DESCRIPTION, **SOURCE) == 0.9
+
+
+def test_a_token_for_another_description_is_refused_on_save(lab, staff):
+    """A score is about the text it was computed for; the row being saved must say the same."""
+    token = _token(lab['glucose'], source_description='Totally different text')
+
+    response = _create(staff, lab['glucose'], suggestion_confidence_token=token)
+
+    assert response.status_code == 400 and 'suggestion_confidence_token' in response.data
+    assert not SourceCodeConceptMapping.objects.filter(source_code='GLU-LOCAL').exists()
+
+
+def test_the_description_is_matched_ignoring_case_and_spacing(lab, staff):
+    token = _token(lab['glucose'], source_description='  GLUCOSE,   serum ')
+
+    assert _create(staff, lab['glucose'], suggestion_confidence_token=token).status_code == 201
+
+
+def test_a_token_cannot_follow_a_description_edit_on_save(lab, staff):
+    mapping_id = _create(staff, lab['glucose']).data['mapping_id']
+
+    response = _patch(staff, mapping_id, lab['glucose'], source_code_description='Something else',
+                      suggestion_confidence_token=_token(lab['glucose']))
+
+    assert response.status_code == 400 and _stored(mapping_id) is None
+
+
+def test_scoring_an_existing_mapping_uses_its_stored_text_not_the_body(lab, staff, monkeypatch):
+    SourceCodeConceptMapping.objects.create(
+        **SOURCE, domain_id='Measurement', status='proposed', target_concept=lab['glucose'],
+        source_code_description=DESCRIPTION, source_metadata={'fhir': {'code': {'text': 'stored metadata'}}},
+    )
+    seen = {}
+
+    def rank(source_value, candidates, source_description, *args, source_context=None, **kwargs):
+        seen['description'], seen['context'] = source_description, source_context
+        chosen = candidates[0]
+        return chosen, 'high confidence: ok', [
+            {'concept_id': chosen['concept_id'], 'concept_name': chosen['concept_name'],
+             'confidence': 0.9, 'ranker': 'anthropic'}]
+    monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates', rank)
+
+    response = _score(staff, lab['glucose'].concept_id, source_code_description='Chosen by the caller',
+                      source_metadata={'fhir': {'code': {'text': 'chosen metadata'}}})
+
+    assert seen['description'] == DESCRIPTION
+    assert 'chosen metadata' not in str(seen['context']) and 'stored metadata' in str(seen['context'])
+    # ... and the token is about the stored text, so it saves on that row and nowhere else.
+    assert confidence_token.verify(
+        response.data['scored']['token'], destination_concept_id=lab['glucose'].concept_id,
+        source_description=DESCRIPTION, **SOURCE) == 0.9
+    with pytest.raises(ValueError):
+        confidence_token.verify(
+            response.data['scored']['token'], destination_concept_id=lab['glucose'].concept_id,
+            source_description='Chosen by the caller', **SOURCE)
+
+
+def test_scoring_a_new_row_binds_the_description_it_was_given(lab, staff, monkeypatch):
+    _stub_ranker(monkeypatch, lab['glucose'], confidence=0.8)
+
+    response = _score(staff, lab['glucose'].concept_id, source_code_description='A new row description')
+
+    assert confidence_token.verify(
+        response.data['scored']['token'], destination_concept_id=lab['glucose'].concept_id,
+        source_description='A new row description', **SOURCE) == 0.8
+
+
+def test_re_pointing_the_source_clears_the_stored_confidence(lab, staff):
+    for change in ({'source_code': 'OTHER-CODE'}, {'source_vocabulary_id': 'ICD10CM'}):
+        SourceCodeConceptMapping.objects.all().delete()
+        mapping_id = _create(staff, lab['glucose'], suggestion_confidence_token=_token(lab['glucose'])).data['mapping_id']
+        assert _stored(mapping_id) == 0.82
+
+        response = _patch(staff, mapping_id, lab['glucose'], **change)
+
+        assert response.status_code == 200, response.content
+        assert SourceCodeConceptMapping.objects.get(pk=mapping_id).suggestion_confidence is None, change
+
+
+def test_a_save_that_changes_nothing_about_the_source_keeps_it(lab, staff):
+    mapping_id = _create(staff, lab['glucose'], suggestion_confidence_token=_token(lab['glucose'])).data['mapping_id']
+
+    _patch(staff, mapping_id, lab['glucose'], source_code=SOURCE['source_code'],
+           source_vocabulary_id=SOURCE['source_vocabulary_id'], notes='checked')
+
+    assert _stored(mapping_id) == 0.82
+
+
+def _age(run, **delta):
+    from datetime import timedelta
+    from django.utils import timezone
+    SuggestRun.objects.filter(pk=run.pk).update(created_at=timezone.now() - timedelta(**delta))
+
+
+def test_a_stale_preview_stores_no_score_on_apply(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['glucose'], row, 0.77)
+    _age(run, hours=25)
+
+    response = _apply(staff, lab['glucose'], row, run)
+
+    assert response.status_code == 200
+    row.refresh_from_db()
+    assert row.target_concept_id == lab['glucose'].concept_id and row.suggestion_confidence is None
+    assert row.decision_confidence is None
+
+
+def test_a_fresh_preview_still_stores_it(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['glucose'], row, 0.77)
+    _age(run, hours=23)
+
+    _apply(staff, lab['glucose'], row, run)
+
+    row.refresh_from_db()
+    assert row.suggestion_confidence == 0.77
+
+
+def test_a_preview_of_other_text_stores_no_score_on_apply(lab, staff):
+    """The row's description changed after the preview scored it."""
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['glucose'], row, 0.77)
+    SourceCodeConceptMapping.objects.filter(pk=row.pk).update(source_code_description='Hemoglobin A1c')
+    row.refresh_from_db()
+
+    _apply(staff, lab['glucose'], row, run)
+
+    row.refresh_from_db()
+    assert row.target_concept_id == lab['glucose'].concept_id and row.suggestion_confidence is None
+
+
+def test_a_preview_matches_its_text_ignoring_case_and_spacing(lab, staff):
+    row = _proposal_pointing_at(lab['sodium'])
+    run = _preview(lab['glucose'], row, 0.77)
+    SourceCodeConceptMapping.objects.filter(pk=row.pk).update(source_code_description='  GLUCOSE,  Serum')
+    row.refresh_from_db()
+
+    _apply(staff, lab['glucose'], row, run)
+
+    row.refresh_from_db()
+    assert row.suggestion_confidence == 0.77
+
+
+def test_a_stale_preview_still_proposes_but_stores_no_score(lab, staff, monkeypatch):
+    concept = lab['glucose']
+    candidate = {'source_code': 'GLU-LOCAL', 'source_vocabulary_id': 'Local', 'mapping_id': None,
+                 'source_code_description': DESCRIPTION, 'confidence': 0.77}
+    run = SuggestRun.objects.create(
+        direction='reverse', state=SuggestRun.SUCCESS,
+        activity=[{'concept': {'concept_id': concept.concept_id}, 'candidates': [candidate]}],
+    )
+    _age(run, hours=48)
+    monkeypatch.setattr('omop_core.mapping.reverse_catalog.refresh_catalog_candidate',
+                        lambda cand, conc: dict(cand))
+
+    response = staff.post(f'/api/v1/concept-to-code/{concept.concept_id}/mappings/', {
+        'run_id': str(run.pk), 'source_code': 'GLU-LOCAL', 'source_vocabulary_id': 'Local',
+    }, format='json')
+
+    assert response.status_code == 201, response.content
+    mapping = SourceCodeConceptMapping.objects.get(source_code='GLU-LOCAL')
+    assert mapping.status == 'proposed' and mapping.suggestion_confidence is None
