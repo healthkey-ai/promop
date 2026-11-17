@@ -86,6 +86,8 @@ export type FieldDescriptors = Record<string, FieldDescriptor>;
 export const LIFECYCLE: ReadonlySet<string> = new Set([
   'id', 'person', 'organization', 'created_at', 'updated_at',
   'derived_at', 'derivation_version', 'user_edited_fields',
+  // Which fields the server filled with a proposal (#2659): read, never written.
+  'provisional_fields',
 ]);
 
 /** Cached per patient, because the answer is per patient.

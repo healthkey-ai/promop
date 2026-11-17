@@ -5,6 +5,8 @@ import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
+import { marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
@@ -122,12 +124,17 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   if (data && data !== prevData) {
     setPrevData(data);
     const pending = pendingDataRef.current;
-    const rebased = { ...initialInfo };
+    let rebased: Record<string, unknown> = { ...initialInfo };
+    const kept: string[] = [];
     for (const field of dirtyFieldsRef.current) {
       if (field === 'patient_name') continue;
-      if (pending && pending[field] !== initialInfo[field]) rebased[field] = pending[field];
-      else dirtyFieldsRef.current.delete(field);
+      // A touched proposal is kept even on the proposed value: that is confirming it.
+      if (pending && (pending[field] !== initialInfo[field] || field in marksOf(initialInfo))) {
+        rebased[field] = pending[field];
+        kept.push(field);
+      } else dirtyFieldsRef.current.delete(field);
     }
+    rebased = withoutMarks(rebased, kept);
     if (pending && ['estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status']
       .some((field) => dirtyFieldsRef.current.has(field))) {
       rebased.tnbc_status = pending.tnbc_status;
@@ -189,8 +196,12 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       const patchFields: Record<string, unknown> = {};
 
       if (personId) {
+        // An untouched proposal equals the baseline and is never sent; a touched
+        // one is the user's answer even on the proposed value (#2659).
+        const proposed = marksOf(baseline);
         for (const [f, v] of Object.entries(info)) {
-          if (f === "patient_name" || LIFECYCLE.has(f) || v === baseline[f]) continue;
+          const confirmed = f in proposed && dirtyFieldsRef.current.has(f);
+          if (f === "patient_name" || LIFECYCLE.has(f) || (v === baseline[f] && !confirmed)) continue;
           const desc = descriptors[f];
           if (desc?.writable && desc.target === 'patient_record') {
             patchFields[f] = v;
@@ -226,6 +237,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       }
 
       const result = await patchMutation.mutateAsync(payload);
+      serverInfoRef.current = withoutMarks(serverInfoRef.current, Object.keys(combined));
       for (const f of Object.keys(combined)) {
         serverInfoRef.current[f] = info[f];
         if (pendingDataRef.current?.[f] === info[f]) dirtyFieldsRef.current.delete(f);
@@ -255,8 +267,11 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
-    const updated = { ...base, [field]: value };
-    if (value === serverInfoRef.current[field]) dirtyFieldsRef.current.delete(field);
+    // Touching a proposed field makes it the user's answer: its indicator goes and
+    // it is sent as an edit even if they land on the proposed value (#2659).
+    const proposed = field in marksOf(serverInfoRef.current);
+    const updated = withoutMarks({ ...base, [field]: value }, [field]);
+    if (value === serverInfoRef.current[field] && !proposed) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
@@ -328,6 +343,12 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
 
   const getDiseaseTabLabel = () =>
     ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", other: "Disease Specific" })[getDiseaseType()];
+
+  // The host app shows a patient their own record; wording is the patient's.
+  const provisionalValue = useMemo(
+    () => ({ marks: marksOf(editedInfo), patientMode: true }),
+    [editedInfo],
+  );
 
   if (isLoading) return <PatientInfoSkeleton />;
 
@@ -427,6 +448,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
         </div>
 
+        <ProvisionalContext.Provider value={provisionalValue}>
         <div>
           {activeTab === 0 && (
             <GeneralTab
@@ -473,6 +495,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
             />
           )}
         </div>
+        </ProvisionalContext.Provider>
       </div>
     </div>
   );

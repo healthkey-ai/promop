@@ -1,9 +1,11 @@
 import BrandLogo from '@/components/Branding/BrandLogo';
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
+import { marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -392,7 +394,7 @@ export default function PatientDetail({
   // edits. Edits not yet saved are kept on top of the fresh record, so a refresh
   // landing inside the autosave window neither drops them nor shows them reverted.
   const adoptServerRecord = useCallback((raw: Record<string, unknown>, readRevision?: number) => {
-    const fresh = normalizeRecord(raw);
+    let fresh = normalizeRecord(raw);
     // A read begun before our PATCH can arrive after it and carry old values.
     // Keep confirmed writes until a read begun after that PATCH acknowledges
     // them. Child components that hand back a record without a request marker
@@ -400,6 +402,9 @@ export default function PatientDetail({
     if (readRevision !== undefined && readRevision === saveRevisionRef.current) {
       confirmedWritesRef.current = {};
     } else {
+      // A confirmed write is approved data, whatever an older read says: its
+      // proposal mark must not come back with the stale record.
+      fresh = withoutMarks(fresh, Object.keys(confirmedWritesRef.current));
       for (const [field, value] of Object.entries(confirmedWritesRef.current)) {
         if (fresh[field] === value) delete confirmedWritesRef.current[field];
         else fresh[field] = value;
@@ -409,14 +414,16 @@ export default function PatientDetail({
     const unsaved: Record<string, unknown> = {};
     if (pending) {
       for (const field of dirtyFieldsRef.current) {
-        if (!LIFECYCLE.has(field) && pending.info[field] !== fresh[field]) {
+        // A touched proposal is kept even when the user ended on the proposed
+        // value: that is confirming it, and the refresh must not undo it.
+        if (!LIFECYCLE.has(field) && (pending.info[field] !== fresh[field] || field in marksOf(fresh))) {
           unsaved[field] = pending.info[field];
         } else {
           dirtyFieldsRef.current.delete(field);
         }
       }
     }
-    const edited = { ...fresh, ...unsaved };
+    const edited = withoutMarks({ ...fresh, ...unsaved }, Object.keys(unsaved));
 
     patientInfoRef.current = { ...fresh };
     setPatientInfo(fresh);
@@ -493,8 +500,14 @@ export default function PatientDetail({
       const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
 
+      // A field the server filled with a proposal holds that value in the
+      // baseline, so an untouched one never differs from it and is never sent.
+      // A proposal the user touched is sent even when they land on the same
+      // value: that is confirming it, and it becomes approved data (#2659).
+      const proposed = marksOf(baseline);
       for (const [f, v] of Object.entries(info)) {
-        if (LIFECYCLE.has(f) || v === baseline[f]) continue;
+        const confirmed = f in proposed && dirtyFieldsRef.current.has(f);
+        if (LIFECYCLE.has(f) || (v === baseline[f] && !confirmed)) continue;
         const desc = descriptors[f];
         if (desc?.writable && desc.target === 'patient_record') {
           patchFields[f] = v;
@@ -511,6 +524,9 @@ export default function PatientDetail({
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
         );
         saveRevisionRef.current += 1;
+        if (patientInfoRef.current) {
+          patientInfoRef.current = withoutMarks(patientInfoRef.current, Object.keys(patchFields));
+        }
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
@@ -627,8 +643,11 @@ export default function PatientDetail({
 
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
-    const updated = { ...base, [field]: value };
-    if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
+    // Touching a proposed field makes it the user's answer, so its indicator goes
+    // and it is sent as an edit even if they end up on the proposed value.
+    const proposed = field in marksOf(patientInfoRef.current);
+    const updated = withoutMarks({ ...base, [field]: value }, [field]);
+    if (value === patientInfoRef.current?.[field] && !proposed) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
@@ -731,6 +750,11 @@ export default function PatientDetail({
 
   const getDiseaseTabLabel = () =>
     ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()];
+
+  const provisionalValue = useMemo(
+    () => ({ marks: marksOf(editedInfo), patientMode }),
+    [editedInfo, patientMode],
+  );
 
   if (loading) return <PatientDetailSkeleton />;
 
@@ -961,6 +985,7 @@ export default function PatientDetail({
                 {addFieldLink}
               </div>
 
+              <ProvisionalContext.Provider value={provisionalValue}>
               <div key={activeTab} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
                   <>
@@ -1013,6 +1038,9 @@ export default function PatientDetail({
                         // reading these derived moves as edits to read-only
                         // columns — the failure #627 fixed.
                         adoptServerRecord(info);
+                        // That payload is the approved record; read again for the
+                        // proposals the page shows over it.
+                        reloadPatientInfo();
                       }}
                     />
                     {patientMode && (
@@ -1043,6 +1071,7 @@ export default function PatientDetail({
                 )}
                 {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
               </div>
+              </ProvisionalContext.Provider>
             </div>
           </>
         )}
