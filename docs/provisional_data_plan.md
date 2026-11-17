@@ -125,7 +125,16 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
   inventory code with no row under a qualifying proposal (unscoped, `proposed`, a
   destination, a confidence at or above the floor); and every holder of any
   provisional row, so a proposal that stopped qualifying with no hook to say so
-  gets its rows taken back. Idempotent (a person already provisional at the
+  gets its rows taken back. Each person's resolve is limited to the codes that
+  can change (`person_scope`): the person's own spellings of a qualifying code
+  (matched case-insensitively, as the resolver matches a proposal), as rows or
+  inventory, plus the codes of rows already provisional. Unrestricted it re-walked
+  the whole inventory (thousands of resolved codes, about 5 minutes a person on
+  HealthTree, #2663); restricted it costs one query per clinical table plus one
+  for the inventory, whatever the size of the chart or of the qualifying set. The
+  full sweep therefore no longer re-resolves rows of codes under an approved
+  mapping that carry no provisional mark; Generate OMOP and the per-patient
+  resolve own those. Idempotent (a person already provisional at the
   current proposal is "already resolved"), never touches a real row, and the
   counts land on a `SourceCodeResolveRun`. It is resumed by its cursor, the last
   person id a chunk finished, which travels in the Celery task arguments (a
