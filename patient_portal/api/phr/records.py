@@ -15,6 +15,7 @@ from django.utils.text import slugify
 
 from omop_core.models import DrugExposure, Measurement, PatientDocument, ProcedureOccurrence, Provider
 from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
+from omop_core.services.provisional import real_or_provisional, without_shadowed
 
 from patient_portal.models import PatientStatement
 
@@ -52,7 +53,9 @@ def _is_current(row: DrugExposure, today: date) -> bool:
 
 def _exposures(person):
     return list(
-        DrugExposure.objects.filter(person=person, is_erroneous=False)
+        # Real rows only: a medication is asked about and answered against its
+        # row, which a proposal must not stand in for.
+        real_or_provisional(DrugExposure.objects.filter(person=person, is_erroneous=False))
         .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('-drug_exposure_start_date', '-drug_exposure_id')
     )
@@ -238,13 +241,17 @@ def medication_detail(person, key: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------- procedures
 
 
-def procedures(person, record) -> dict[str, Any]:
-    rows = list(
+def procedures(person, record, provisional: bool = False) -> dict[str, Any]:
+    """The procedures list. ``provisional``: also list those from proposed
+    mappings, each with its ``confidence``."""
+    rows = without_shadowed(list(
         # Imaging studies are listed under Imaging (promop#1731).
-        ProcedureOccurrence.objects.filter(person=person, is_erroneous=False, image_occurrences__isnull=True)
+        real_or_provisional(
+            ProcedureOccurrence.objects.filter(person=person, is_erroneous=False, image_occurrences__isnull=True),
+            provisional)
         .select_related('procedure_concept', 'procedure_source_concept', 'visit_occurrence')
         .order_by('-procedure_date', '-procedure_occurrence_id')
-    )
+    ), 'procedure_concept_id')
     sources = row_sources(ProcedureOccurrence, rows, type_attr='procedure_type_concept', date_attr='procedure_date')
     provider_ids = {r.provider_id for r in rows if r.provider_id}
     providers = dict(
@@ -273,6 +280,7 @@ def procedures(person, record) -> dict[str, Any]:
             else None,
             'performed_by': (providers.get(row.provider_id) or '').strip() or None,
             'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
+            'confidence': row.confidence,
         }
         items.append({k: v for k, v in item.items() if v is not None})
     return {'procedures': items}

@@ -350,7 +350,15 @@ class PatientListSerializer(serializers.ModelSerializer):
         return ', '.join(str(value).strip() for value in (obj.city, obj.region, obj.country) if value and str(value).strip())
 
     def to_representation(self, instance):
+        # With the site switch on, a column the record leaves empty shows its
+        # proposal (omop_core.services.provisional_record.overlay), and
+        # ``provisional_fields`` says which. The page's queryset carries the
+        # provisional rows (select_related), so this adds no query per row.
+        from omop_core.services.provisional_record import overlay
+        instance, marks = overlay(instance)
         data = super().to_representation(instance)
+        if marks:
+            data['provisional_fields'] = marks
         # A reader without curation access -- a demo-org browse by an
         # analyst or a patient-role grant (#2460) -- is withheld every
         # patient's demographics, as if each had opted in; otherwise only
