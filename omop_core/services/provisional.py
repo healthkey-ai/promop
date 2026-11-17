@@ -30,12 +30,17 @@ def real_or_provisional(queryset, provisional: bool = False):
     return queryset if provisional_shown(provisional) else queryset.filter(confidence__isnull=True)
 
 
-def without_shadowed(rows, concept_attr):
-    """Drop a provisional row whose concept a real row already answers.
+def without_shadowed(rows, concept_attr, date_attr=None):
+    """Drop a provisional row that a real row already answers.
 
     Real beats provisional: if the record holds an approved row for the same
-    concept, a proposal for it adds nothing and would only show twice. *rows* is
-    a list of model instances; order is kept.
+    concept, a proposal for it adds nothing and would only show twice. With
+    *date_attr* the real row must also be on the same date, for an event that
+    repeats (a second bone marrow biopsy is not the first). *rows* is a list of
+    model instances; order is kept.
     """
-    real = {getattr(r, concept_attr) for r in rows if r.confidence is None}
-    return [r for r in rows if r.confidence is None or getattr(r, concept_attr) not in real]
+    def key(row):
+        return (getattr(row, concept_attr), getattr(row, date_attr) if date_attr else None)
+
+    real = {key(r) for r in rows if r.confidence is None}
+    return [r for r in rows if r.confidence is None or key(r) not in real]

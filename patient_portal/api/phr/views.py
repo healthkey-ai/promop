@@ -475,6 +475,16 @@ def _transitions(rows, name_of=None) -> list[dict]:
     return steps if len(steps) > 1 else []
 
 
+def _proposed(rows, name_of) -> list[dict]:
+    """Proposed conditions set apart from a family a real row already answers."""
+    items = []
+    for row in rows:
+        name = name_of(row)
+        if name:
+            items.append({'name': name, 'date': row.condition_start_date.isoformat(), 'confidence': row.confidence})
+    return items
+
+
 def _same_disease(families: dict[str, list]) -> tuple[dict[str, list], dict[int, str]]:
     """One entry per disease, however specifically it was coded (#119).
 
@@ -595,6 +605,13 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
             key=lambda r: (r.condition_start_date, r.pk))
         other_rows = [r for r in other_rows if r.pk not in chronic_reasons]
     families, general_names = _same_disease(families)
+    # A real row names a disease and dates it: a proposal never headlines a
+    # family that has one, it is listed apart with its confidence.
+    set_apart = {}
+    for key, family_rows in list(families.items()):
+        if any(r.confidence is None for r in family_rows):
+            set_apart[key] = [r for r in family_rows if r.confidence is not None]
+            families[key] = [r for r in family_rows if r.confidence is None]
 
     def name_of(row):
         return general_names.get(row.pk) or _condition_name(row)
@@ -613,6 +630,8 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
     primary_rows = families.pop(primary_family, [])
     primary = primary_cancer(record, _transitions(primary_rows, name_of)) if record else None
     if primary:
+        if set_apart.get(primary_family):
+            primary['proposed'] = _proposed(set_apart[primary_family], name_of)
         _apply_cancer_details(primary, details.get(primary_family, {}), detail_sources, primary_family)
         if primary_rows:
             primary['condition_id'] = primary_rows[-1].pk
@@ -640,6 +659,7 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
             'transitions': _transitions(family_rows, name_of),
             'source': sources[latest.pk],
             'confidence': latest.confidence,
+            'proposed': _proposed(set_apart.get(family, []), name_of),
         }
         _apply_cancer_details(entry, details.get(family, {}), detail_sources, family)
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})

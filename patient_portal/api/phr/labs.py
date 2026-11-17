@@ -165,6 +165,12 @@ def _grouped(rows) -> dict[int, list[Measurement]]:
     return groups
 
 
+def _latest(group: list[Measurement]) -> Measurement:
+    """The result a test is headlined by: the newest real one, whatever the
+    proposals' dates. A proposal is the headline only when no real result exists."""
+    return next((row for row in group if row.confidence is None), group[0])
+
+
 def _test_meta(concept, markers: dict[str, LabMarker]) -> dict[str, Any]:
     marker = markers.get(concept.concept_code) if (concept.vocabulary_id or '') == 'LOINC' else None
     analyte, specimen = split_name(concept.concept_name)
@@ -208,13 +214,13 @@ def labs(person, record, diagnosed: dict | None = None, provisional: bool = Fals
     ``provisional``: also list results from proposed mappings, each with its ``confidence``."""
     rows = list(_rows(person, provisional))
     groups = _grouped(rows)
-    latest_rows = [group[0] for group in groups.values()]
+    latest_rows = [_latest(group) for group in groups.values()]
     sources = row_sources(Measurement, latest_rows, type_attr='measurement_type_concept', date_attr='measurement_date')
     markers = _markers()
 
     tests = []
     for concept_id, group in groups.items():
-        latest = group[0]
+        latest = _latest(group)
         tests.append({
             **_test_meta(effective_concept(latest), markers),
             'latest': result(latest, sources[latest.pk]),

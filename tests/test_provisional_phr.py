@@ -11,6 +11,7 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
+from omop_core.services import provisional_record
 from omop_core.models import (
     DrugExposure, GroupAccess, PatientRecordConfidence, PatientRecordProvisional, ProcedureOccurrence,
 )
@@ -104,6 +105,20 @@ def test_a_section_with_only_proposals_is_ready_only_while_the_switch_is_on(pati
     assert client.get('/api/v1/phr/status/').json()['sections']['labs'] == 'empty'
 
 
+def test_a_newer_proposed_lab_never_becomes_the_latest_over_a_real_one(patient):
+    record, client = patient
+    hgb = loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    lab(record, hgb, '2024-03-01', 11.0)
+    lab(record, hgb, '2024-04-01', 5.0, confidence=82)
+
+    test = client.get('/api/v1/phr/labs/').json()['tests'][0]
+
+    assert test['latest']['value'] == 11 and 'confidence' not in test['latest']
+    assert test['latest']['date'] == '2024-03-01'
+    assert [r.get('confidence') for r in test['recent']] == [82, None]     # listed alongside
+    assert test['count'] == 2
+
+
 # --- diagnoses and procedures --------------------------------------------------------------
 
 def test_a_proposed_condition_is_listed_with_its_confidence_unless_a_real_one_answers_it(patient):
@@ -118,6 +133,31 @@ def test_a_proposed_condition_is_listed_with_its_confidence_unless_a_real_one_an
     shown = {c['name']: c for c in body['other']}
     assert set(shown) == {'Type 2 diabetes', 'Gout'}
     assert 'confidence' not in shown['Type 2 diabetes'] and shown['Gout']['confidence'] == 88
+
+
+def test_a_proposed_condition_never_renames_a_real_cancer_entry(patient):
+    record, client = patient
+    record.disease, record.disease_slug = 'Multiple myeloma', 'myeloma'
+    record.save()
+    condition(record, icd10('C90.00', 'Multiple myeloma not having achieved remission'), '2020-01-01')
+    condition(record, icd10('C90.01', 'Multiple myeloma in remission'), '2024-01-01', confidence=60)
+
+    cancer = client.get('/api/v1/phr/diagnoses/').json()['cancer']
+
+    assert len(cancer) == 1 and cancer[0]['id'] == 'primary'
+    assert 'transitions' not in cancer[0] and 'confidence' not in cancer[0]
+    assert cancer[0]['proposed'] == [
+        {'name': 'Multiple myeloma in remission', 'date': '2024-01-01', 'confidence': 60}]
+
+
+def test_a_cancer_only_a_proposal_answers_is_headlined_by_it_with_its_confidence(patient):
+    record, client = patient
+    condition(record, icd10('C90.01', 'Multiple myeloma in remission'), '2024-01-01', confidence=60)
+
+    cancer = client.get('/api/v1/phr/diagnoses/').json()['cancer']
+
+    assert cancer[0]['name'] == 'Multiple myeloma in remission' and cancer[0]['confidence'] == 60
+    assert not cancer[0].get('proposed')
 
 
 def test_proposed_conditions_are_absent_with_the_switch_off(patient, settings):
@@ -156,6 +196,21 @@ def test_the_share_options_never_offer_a_proposed_cancer(patient):
     assert 'diagnoses' not in sections
 
 
+def test_the_overlay_never_touches_an_identity_or_redacted_field(patient, monkeypatch):
+    from patient_portal.api.serializers import PatientRecordSerializer as S
+    assert set(S.WITHHELD_IDENTIFIER_FIELDS) <= provisional_record.NEVER_OVERLAID
+    assert {'email', 'phone_number', 'suppress_demographics_for_others', 'death_date', 'patient_age',
+            'consent_capability', 'date_of_birth'} <= provisional_record.NEVER_OVERLAID
+
+    record, _ = patient
+    pair(record, stage=('II', 74))
+    shown, marks = provisional_record.overlay(record)
+    assert shown.stage == 'II' and marks == {'stage': 74}
+    monkeypatch.setattr(provisional_record, 'NEVER_OVERLAID', frozenset({'stage'}))
+    shown, marks = provisional_record.overlay(record)
+    assert not shown.stage and marks == {}
+
+
 def test_a_field_the_record_answers_is_never_overlaid(patient):
     record, client = patient
     record.disease, record.disease_slug, record.stage = 'Breast cancer', 'breast-cancer', 'III'
@@ -184,6 +239,22 @@ def _procedure(record, pk, name, **extra):
         procedure_occurrence_id=pk, person=record.person, procedure_date='2024-05-01',
         procedure_concept=ConceptFactory(concept_name=name, concept_code=f'P{pk}'),
         procedure_type_concept=ConceptFactory(concept_name='EHR', concept_code='EHR'), **extra)
+
+
+def test_a_repeat_procedure_on_another_date_is_not_shadowed_by_the_real_one(patient):
+    record, client = patient
+    _procedure(record, 9101, 'Bone marrow biopsy')                                      # 2024-05-01
+    again = _procedure(record, 9102, 'Bone marrow biopsy', confidence=79)
+    ProcedureOccurrence.objects.filter(pk=again.pk).update(procedure_concept=ProcedureOccurrence.objects.get(
+        pk=9101).procedure_concept, procedure_date='2024-09-01')
+    same_day = _procedure(record, 9103, 'Bone marrow biopsy', confidence=71)
+    ProcedureOccurrence.objects.filter(pk=same_day.pk).update(procedure_concept=ProcedureOccurrence.objects.get(
+        pk=9101).procedure_concept)
+
+    items = client.get('/api/v1/phr/procedures/').json()['procedures']
+
+    assert sorted((p['date'], p.get('confidence')) for p in items) == [
+        ('2024-05-01', None), ('2024-09-01', 79)]          # the same-day proposal is the real one's
 
 
 def test_a_proposed_procedure_is_listed_with_its_confidence_only_while_on(patient, settings):
@@ -269,6 +340,17 @@ def test_the_list_shows_a_proposal_in_an_empty_column_and_says_which(patient):
     assert row['stage'] == 'II' and row['ecog_performance_status'] == 1
     assert row['provisional_fields'] == {'stage': 74, 'ecog_performance_status': 66}
     assert 'Stage' not in row['data_gaps'] and 'ECOG' not in row['data_gaps']
+
+
+def test_list_filters_and_sort_are_approved_only_while_the_shown_value_is_overlaid(patient):
+    """Documented (docs/provisional_data_plan.md): a filter reads the approved column."""
+    record, _ = patient
+    pair(record, stage=('II', 74))
+    staff = _staff()
+
+    shown = next(r for r in staff.get(LIST).json() if r['person_id'] == record.person_id)
+    assert shown['stage'] == 'II'
+    assert [r for r in staff.get(LIST, {'stage': 'II'}).json() if r['person_id'] == record.person_id] == []
 
 
 def test_the_list_is_the_record_with_the_switch_off(patient, settings):

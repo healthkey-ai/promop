@@ -251,7 +251,7 @@ def procedures(person, record, provisional: bool = False) -> dict[str, Any]:
             provisional)
         .select_related('procedure_concept', 'procedure_source_concept', 'visit_occurrence')
         .order_by('-procedure_date', '-procedure_occurrence_id')
-    ), 'procedure_concept_id')
+    ), 'procedure_concept_id', 'procedure_date')
     sources = row_sources(ProcedureOccurrence, rows, type_attr='procedure_type_concept', date_attr='procedure_date')
     provider_ids = {r.provider_id for r in rows if r.provider_id}
     providers = dict(

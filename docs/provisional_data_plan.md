@@ -281,6 +281,25 @@ The same proposals, to the same audiences, on the other screens.
   (`test_the_list_costs_the_same_queries_for_one_patient_or_many`). Access is
   the list's own: a reader who cannot list a patient, an analyst included,
   gets no proposal for them.
+- **Rules the review added.** A real result is a test's `latest` whatever the
+  proposals' dates (a proposal is the headline only when no real result
+  exists); proposals are listed beside it in `recent` and `history` with
+  `confidence`. A real condition names and dates a cancer entry; proposals in
+  that family are listed apart under `proposed` (name, date, confidence) and a
+  family only a proposal answers is headlined by it with its `confidence`.
+  A proposed procedure is hidden only by a real one with the same concept **and
+  the same date** (a repeat biopsy shows); a proposed condition is hidden by a
+  real one of the same concept. `provisional_record.NEVER_OVERLAID` is an
+  explicit denylist (identity, contact, and every field the record serializer
+  redacts or withholds; a test holds it to those sets) that the overlay never
+  touches, whether or not a mark exists for the field.
+- **List filters and sort are approved-only.** The patient list shows an
+  overlaid stage or disease status, but its filters (`stage`, `disease`, the
+  status filter) and ordering read the stored columns, so `?stage=II` does not
+  return a patient whose stage II is only a proposal. Making them follow the
+  overlay would need a join to the provisional pair and a coalesce in every
+  filter and sort, which is not flat or cheap at list scale; the simpler rule
+  is chosen, pinned by a test, and the provisional picture is the row's display.
 - Tests: `tests/test_provisional_phr.py`.
 
 ### As built in phase 1b (#2530)
