@@ -134,25 +134,56 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
   covers the ones that stay candidates (a provisional row is rewritten, never
   done). A retried chunk can double-count in the run's totals; the rows do not
   change.
-- **Trigger.** A `post_save` on `SourceCodeConceptMapping` queues a sweep of that
-  mapping's code, after commit, when the mapping is `proposed` with a destination
-  in a clinical table and the save touched the destination, confidence, status or
-  table. Every writer that calls `.save()` is covered (Suggest, group Suggest,
-  reverse Suggest, suggest-one accept, Concept to Code, the dialog and Calc); a
-  `.update()`/`bulk_update()` is not, and the sweep covers it. On Celery the
-  chunks chain; with no broker a trigger resolves one bounded chunk (50 persons)
-  in the request and leaves the rest to the command. Approval and rejection are
-  unchanged (#2530): approval promotes, rejection or a moved destination reverts.
+- **Trigger.** A `pre_save`/`post_save` pair on `SourceCodeConceptMapping`
+  compares what the mapping said before the save with what it says after (does it
+  qualify, its destination, its confidence, its table) and queues a sweep of its
+  code, after commit, when it qualifies now or did before **and** the answer
+  changed. A new or changed proposal reaches patients; a withdrawn one (rejected,
+  destination cleared, confidence below the floor) is taken back; a save that only
+  changed notes, or a proposal with no ranker confidence, queues nothing. Every
+  writer that calls `.save()` is covered (Suggest, group Suggest, reverse
+  Suggest, suggest-one accept, Concept to Code, the dialog and Calc); a
+  `.update()`/`bulk_update()` is not, and the sweep covers it. Approval and
+  rejection are unchanged (#2530): approval promotes, rejection or a moved
+  destination reverts.
+- **Only with a broker, never in a request.** A trigger or the ingest hook below
+  resolves nothing (and so derives no record) inside a request. With no
+  `CELERY_BROKER_URL` they do nothing (logged at debug) and
+  `manage.py sweep_provisional_rows` is the way to run it, which also makes it
+  the path on a developer machine.
+- **Coalesced.** One pending sweep per code and one pending job per person: a
+  cache key is taken when the job is queued and dropped when it starts, so a
+  batch of saves for one code, or twenty ingest POSTs for one patient, queue one
+  job, and a change after the job has started queues another. The qualifying code
+  set is cached for 60 seconds for the ingest check.
 - **After ingest.** The bulk OMOP write and the FHIR sync call
-  `queue_person_resolve(person_id)` once per request: one cheap candidate check
-  for that person, and only when a proposal covers a code they hold, a resolve
-  job after commit. New patients do not wait for a sweep; with the switch off it
-  costs no query.
-- **Scope.** Only unscoped proposals qualify, as `provisional_proposal` already
+  `queue_person_resolve(person_id)` once per request: a cheap check that this
+  person would change (an unresolved row, an inventory code with no row, or a
+  provisional row that no longer matches its code's proposal, judged by the
+  resolver's own proposal rule, so never for a proposal it would reject), and
+  only then a resolve job after commit. It counts a write that only **updated**
+  rows too: an ETL replay re-posts a row at concept 0 and the upsert rewrites the
+  provisional row to unresolved, and the queued resolve makes it provisional
+  again (tested end to end). New patients do not wait for a sweep; with the
+  switch off, or no broker, it costs no query.
+- **Safe to run concurrently and for long.** A chunk stops on a 600 s budget (and
+  on a soft time limit) and hands its cursor on, saving progress every ten
+  persons, so it stays inside `CELERY_TASK_TIME_LIMIT`; an enqueue that fails
+  marks the run FAILED rather than leaving it pending; and the per-person resolve
+  takes a Postgres advisory lock on the person id first, so two resolves cannot
+  both see "no row yet" and both create one.
+- **Never made provisional:** a row entered in error. Taking a provisional row
+  back still applies to one.
+- **Only unscoped proposals qualify.** As `provisional_proposal` already
   required: the per-patient inventory cannot say which hospital a code came from,
-  so an organization-scoped proposal writes no provisional rows. Candidate
-  selection matches the source code exactly (the resolver then matches
-  case-insensitively for the persons it finds).
+  so **an organization-scoped proposal writes no provisional rows**. A mapping is
+  scoped only when the caller passes an organization for a code system such as
+  Epic or Cerner; staging has none, but HealthTree's ETL may pass
+  `organization_id`, which must be confirmed before enabling on HealthTree.
+  Candidate selection matches the source code exactly (the resolver then matches
+  case-insensitively for the persons it finds). Not guarded: a code whose
+  proposal under one code system was rejected can still fall back to a proposal
+  for the same code under another system, as the resolver already behaves.
 
 ## Approval, rejection and a moved proposal
 

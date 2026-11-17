@@ -1398,7 +1398,9 @@ def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv
     # What an earlier proposal wrote, if it is not what this one says.
     stale = Q(confidence__isnull=False) & ~Q(**{concept_col: concept.pk, 'confidence': percent})
     with transaction.atomic(), suppress_patient_record_refresh():
-        changed = rows.filter(
+        # A row entered in error is nobody's fact, proposed or approved: it is
+        # never made provisional (taking one back, above, still applies).
+        changed = rows.filter(is_erroneous=False).filter(
             (Q(confidence__isnull=True) & unresolved) | stale,
         ).update(**{concept_col: concept.pk, 'confidence': percent})
     if not changed:

@@ -3,18 +3,21 @@
 The ETL does not propose concepts; Code to Concept and Concept to Code do, and
 store the ranker's confidence on the mapping. The sweep, the mapping trigger and
 the after-ingest job make a patient's unresolved rows provisional from such a
-proposal without any ETL change.
+proposal without any ETL change. The sweep is the manual path (no broker); the
+trigger and the ingest hook queue Celery jobs and never resolve in a request.
 """
 from datetime import date
 
 import pytest
+from celery.exceptions import SoftTimeLimitExceeded
+from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
+from omop_core import tasks
 from omop_core.mapping.code_resolution import (
-    NO_MATCHING_CONCEPT_ID, promote_provisional_rows, resolve_person_source_codes,
-    revert_provisional_rows,
+    NO_MATCHING_CONCEPT_ID, promote_provisional_rows, revert_provisional_rows,
 )
 from omop_core.models import (
     Measurement, PatientSourceCode, SourceCodeConceptMapping, SourceCodeResolveRun,
@@ -28,6 +31,14 @@ from tests.factories import (
 pytestmark = pytest.mark.django_db
 
 CODE = 'GLU-1'
+BROKER = 'redis://example.invalid/0'
+
+
+@pytest.fixture(autouse=True)
+def _clean_cache():
+    cache.clear()
+    yield
+    cache.clear()
 
 
 @pytest.fixture()
@@ -41,7 +52,17 @@ def world(settings):
     return ConceptFactory(concept_name='Proposed glucose')
 
 
-def _person(with_row=True, code=CODE):
+@pytest.fixture()
+def broker(world, settings, monkeypatch):
+    """A broker is set and every task `.delay` is captured instead of sent."""
+    settings.CELERY_BROKER_URL = BROKER
+    sent = {'sweep': [], 'person': []}
+    monkeypatch.setattr(tasks.provisional_sweep_task, 'delay', lambda *a: sent['sweep'].append(a))
+    monkeypatch.setattr(tasks.provisional_resolve_person_task, 'delay', lambda pid: sent['person'].append(pid))
+    return sent
+
+
+def _person(with_row=True, code=CODE, erroneous=False):
     """A person holding the code unresolved (the way an ETL load leaves it)."""
     person = PersonFactory()
     PatientRecordFactory(person=person)
@@ -50,7 +71,8 @@ def _person(with_row=True, code=CODE):
     if with_row:
         MeasurementFactory(
             person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
-            measurement_source_value=code, measurement_date=date(2026, 1, 1), confidence=None)
+            measurement_source_value=code, measurement_date=date(2026, 1, 1), confidence=None,
+            is_erroneous=erroneous)
     return person
 
 
@@ -69,7 +91,7 @@ def _row(person):
     return _rows(person).get()
 
 
-# --- the sweep -------------------------------------------------------------------------
+# --- the sweep (the manual path) --------------------------------------------------------
 
 def test_the_sweep_makes_rows_provisional_from_a_proposal_above_the_floor(world):
     person = _person()
@@ -107,6 +129,15 @@ def test_nothing_below_the_floor_approved_rejected_or_unmapped_is_made_provision
         assert (row.measurement_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None), code
 
 
+def test_a_proposal_the_resolver_would_reject_selects_no_candidates(world):
+    _person()
+    unusable = ConceptFactory(concept_name='Non-standard glucose', standard_concept=None)
+    _proposal(unusable)
+
+    assert provisional_sweep.qualifying_codes() == {}
+    assert provisional_sweep.candidate_person_ids(include_provisional_holders=False) == []
+
+
 def test_the_sweep_is_idempotent(world):
     person = _person()
     _proposal(world)
@@ -134,6 +165,40 @@ def test_a_killed_sweep_resumes_from_its_cursor(world):
     assert all(_row(person).confidence == 85 for person in people)
     run.refresh_from_db()
     assert run.state == SourceCodeResolveRun.COMPLETED and run.done == 3
+
+
+def test_a_chunk_stops_on_its_time_budget_and_hands_on_its_cursor(world):
+    people = sorted((_person() for _ in range(3)), key=lambda p: p.person_id)
+    _proposal(world)
+    run = provisional_sweep.start_run_record()
+
+    cursor = provisional_sweep.run_sweep(run.id, after=0, limit=10, budget_seconds=-1)
+
+    assert cursor == people[0].person_id                             # one person, then it yields
+    run.refresh_from_db()
+    assert run.done == 1 and run.state == SourceCodeResolveRun.RUNNING
+
+
+def test_a_soft_time_limit_saves_progress_and_returns_the_cursor(world, monkeypatch):
+    people = sorted((_person() for _ in range(3)), key=lambda p: p.person_id)
+    _proposal(world)
+    run = provisional_sweep.start_run_record()
+    real = provisional_sweep.locked_resolve
+    calls = []
+
+    def resolve(person, **kwargs):
+        calls.append(person.person_id)
+        if len(calls) == 2:
+            raise SoftTimeLimitExceeded()
+        return real(person, **kwargs)
+    monkeypatch.setattr(provisional_sweep, 'locked_resolve', resolve)
+
+    cursor = provisional_sweep.run_sweep(run.id, after=0, limit=10)
+
+    assert cursor == people[0].person_id
+    run.refresh_from_db()
+    assert run.done == 1 and run.provisional == 1 and run.errors == 0
+    assert run.state == SourceCodeResolveRun.RUNNING                 # not failed: the next chunk goes on
 
 
 def test_an_organization_scoped_proposal_is_left_to_its_own_hospital(world):
@@ -174,6 +239,27 @@ def test_a_proposal_that_stopped_qualifying_gets_its_rows_taken_back(world):
     assert (row.measurement_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None)
 
 
+def test_a_row_entered_in_error_is_never_made_provisional(world):
+    person = _person(erroneous=True)
+    _proposal(world)
+
+    provisional_sweep.start_sweep()
+
+    row = _row(person)
+    assert (row.measurement_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None)
+
+
+def test_the_resolver_itself_leaves_an_erroneous_row_alone(world):
+    from omop_core.mapping.code_resolution import resolve_person_source_codes
+    person = _person(erroneous=True)
+    _proposal(world)
+
+    resolve_person_source_codes(person)
+
+    row = _row(person)
+    assert (row.measurement_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None)
+
+
 def test_candidates_cost_a_fixed_number_of_queries(world):
     _proposal(world)
     for _ in range(2):
@@ -188,7 +274,27 @@ def test_candidates_cost_a_fixed_number_of_queries(world):
     assert len(large) == len(small)
 
 
-# --- approval and rejection after a sweep ------------------------------------------------
+def test_two_resolves_of_one_person_back_to_back_make_one_row(world):
+    person = _person(with_row=False)
+    _proposal(world)
+    person = type(person).objects.get(pk=person.pk)
+
+    provisional_sweep.locked_resolve(person)
+    provisional_sweep.locked_resolve(person)
+
+    assert _rows(person).count() == 1
+
+
+def test_a_resolve_takes_the_person_lock_first(world):
+    person = _person()
+    _proposal(world)
+
+    with CaptureQueriesContext(connection) as queries:
+        provisional_sweep.locked_resolve(person)
+
+    first = next(q['sql'] for q in queries if 'SAVEPOINT' not in q['sql'])
+    assert 'pg_advisory_xact_lock' in first                      # before any read of the person's rows
+
 
 def test_approval_after_a_sweep_promotes_the_rows(world):
     person = _person()
@@ -227,70 +333,25 @@ def test_a_real_row_is_never_touched(world):
     assert _rows(person, 'OTHER').get().measurement_concept_id == real.concept_id
 
 
-# --- the trigger -----------------------------------------------------------------------
-
-def test_saving_a_proposal_resolves_the_persons_holding_its_code(world, django_capture_on_commit_callbacks):
-    person = _person()
-
-    with django_capture_on_commit_callbacks(execute=True):
-        _proposal(world)
-
-    row = _row(person)
-    assert (row.measurement_concept_id, row.confidence) == (world.concept_id, 85)
-
-
-def test_a_change_of_confidence_requeues_and_an_unrelated_save_does_not(world, monkeypatch,
-                                                                       django_capture_on_commit_callbacks):
-    queued = []
-    monkeypatch.setattr(provisional_sweep, 'dispatch_mapping_sweep', queued.append)
-    mapping = _proposal(world, confidence=None)
+def test_a_failed_enqueue_marks_the_run_failed_not_pending(broker, monkeypatch, django_capture_on_commit_callbacks):
+    def boom(*args):
+        raise RuntimeError('queue down')
+    monkeypatch.setattr(tasks.provisional_sweep_task, 'delay', boom)
 
     with django_capture_on_commit_callbacks(execute=True):
-        mapping.suggestion_confidence = 0.9
-        mapping.save(update_fields=['suggestion_confidence'])
-        mapping.notes = 'curator note'
-        mapping.save(update_fields=['notes'])
+        run = provisional_sweep.start_sweep()
 
-    assert queued == [mapping.pk]
-
-
-def test_approved_rejected_scoped_and_switched_off_saves_queue_nothing(world, settings, monkeypatch,
-                                                                      django_capture_on_commit_callbacks):
-    queued = []
-    monkeypatch.setattr(provisional_sweep, 'dispatch_mapping_sweep', queued.append)
-
-    with django_capture_on_commit_callbacks(execute=True):
-        _proposal(world, status='approved', code='A')
-        _proposal(world, status='rejected', code='B')
-        _proposal(world, organization=OrganizationFactory(), code='C')
-        settings.PROVISIONAL_DATA_ENABLED = False
-        _proposal(world, code='D')
-
-    assert queued == []
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.FAILED
+    assert 'queue down' in run.error_detail[0]['error']
 
 
-def test_with_a_broker_the_trigger_queues_a_task_not_inline_work(world, settings, monkeypatch,
-                                                                 django_capture_on_commit_callbacks):
-    settings.CELERY_BROKER_URL = 'redis://example.invalid/0'
-    delayed = []
-    from omop_core import tasks
-    monkeypatch.setattr(tasks.provisional_sweep_task, 'delay', lambda *a: delayed.append(a))
-    person = _person()
-
-    with django_capture_on_commit_callbacks(execute=True):
-        mapping = _proposal(world)
-
-    assert [a[1:3] for a in delayed] == [(0, mapping.pk)]
-    assert _row(person).confidence is None            # nothing ran inline
-
-
-def test_a_chunk_chains_the_next_with_its_cursor(world, settings, monkeypatch):
-    settings.CELERY_BROKER_URL = 'redis://example.invalid/0'
-    from omop_core import tasks
+def test_a_chunk_chains_the_next_with_its_cursor(broker, monkeypatch):
     chained = []
     monkeypatch.setattr(tasks.provisional_sweep_task, 'delay', lambda *a: chained.append(a))
+    world_concept = ConceptFactory(concept_name='Chain glucose')
     people = sorted((_person() for _ in range(3)), key=lambda p: p.person_id)
-    _proposal(world)
+    _proposal(world_concept)
     run = provisional_sweep.start_run_record()
 
     tasks.provisional_sweep_task.run(str(run.id), 0, None, 2)
@@ -298,60 +359,270 @@ def test_a_chunk_chains_the_next_with_its_cursor(world, settings, monkeypatch):
     assert chained == [(str(run.id), people[1].person_id, None, 2)]
 
 
+# --- the trigger (broker only, coalesced, take-backs) -----------------------------------------
+
+def test_saving_a_qualifying_proposal_queues_one_sweep_of_its_code(broker, world,
+                                                                  django_capture_on_commit_callbacks):
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping = _proposal(world)
+
+    assert [(a[1], a[2]) for a in broker['sweep']] == [(0, mapping.pk)]
+
+
+def test_a_proposal_with_no_ranker_confidence_queues_nothing(broker, world, django_capture_on_commit_callbacks):
+    with django_capture_on_commit_callbacks(execute=True):
+        _proposal(world, confidence=None)
+        _proposal(world, confidence=0.3, code='LOW')
+
+    assert broker['sweep'] == []
+
+
+def test_a_notes_only_save_queues_nothing(broker, world, django_capture_on_commit_callbacks):
+    mapping = _proposal(world)
+    broker['sweep'].clear()
+    cache.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping.notes = 'curator note'
+        mapping.save()
+
+    assert broker['sweep'] == []
+
+
+def test_a_change_of_confidence_requeues(broker, world, django_capture_on_commit_callbacks):
+    mapping = _proposal(world)
+    broker['sweep'].clear()
+    cache.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping.suggestion_confidence = 0.95
+        mapping.save(update_fields=['suggestion_confidence'])
+
+    assert len(broker['sweep']) == 1
+
+
+def test_a_withdrawn_proposal_queues_its_take_back(broker, world, django_capture_on_commit_callbacks):
+    rejected, cleared, lowered = _proposal(world, code='R'), _proposal(world, code='C'), _proposal(world, code='L')
+    broker['sweep'].clear()
+    cache.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        rejected.status = 'rejected'
+        rejected.save()
+        cleared.target_concept = None
+        cleared.save()
+        lowered.suggestion_confidence = 0.4
+        lowered.save()
+
+    assert sorted(a[2] for a in broker['sweep']) == sorted([rejected.pk, cleared.pk, lowered.pk])
+
+
+def test_a_withdrawn_proposal_gets_its_rows_back_when_the_sweep_runs(broker, world,
+                                                                    django_capture_on_commit_callbacks):
+    person = _person()
+    mapping = _proposal(world)
+    provisional_sweep.locked_resolve(person)
+    assert _row(person).confidence == 85
+    broker['sweep'].clear()
+    cache.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping.status = 'rejected'
+        mapping.save()
+    run_id, after, mapping_id, limit = broker['sweep'][0]
+    tasks.provisional_sweep_task.run(run_id, after, mapping_id, limit)
+
+    row = _row(person)
+    assert (row.measurement_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None)
+
+
+def test_saves_for_one_code_before_the_sweep_runs_queue_one_sweep(broker, world, django_capture_on_commit_callbacks):
+    mapping = _proposal(world)
+    broker['sweep'].clear()
+    cache.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping.suggestion_confidence = 0.9
+        mapping.save()
+        mapping.suggestion_confidence = 0.95
+        mapping.save()
+        mapping.suggestion_confidence = 0.99
+        mapping.save()
+
+    assert len(broker['sweep']) == 1
+
+
+def test_a_change_after_the_sweep_has_started_queues_another(broker, world, django_capture_on_commit_callbacks):
+    person = _person()
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping = _proposal(world)
+    run_id, after, mapping_id, limit = broker['sweep'].pop()
+    tasks.provisional_sweep_task.run(run_id, after, mapping_id, limit)      # the sweep starts and finishes
+    assert _row(person).confidence == 85
+
+    with django_capture_on_commit_callbacks(execute=True):
+        mapping.suggestion_confidence = 0.95
+        mapping.save()
+
+    assert len(broker['sweep']) == 1
+
+
+def test_approved_scoped_and_switched_off_saves_queue_nothing(broker, world, settings,
+                                                             django_capture_on_commit_callbacks):
+    with django_capture_on_commit_callbacks(execute=True):
+        _proposal(world, status='approved', code='A')
+        _proposal(world, organization=OrganizationFactory(), code='C')
+        settings.PROVISIONAL_DATA_ENABLED = False
+        _proposal(world, code='D')
+
+    assert broker['sweep'] == []
+
+
+def test_with_no_broker_a_save_does_nothing_automatic(world, monkeypatch, django_capture_on_commit_callbacks):
+    person = _person()
+    ran = []
+    monkeypatch.setattr(provisional_sweep, 'start_sweep', lambda **kw: ran.append(kw))
+
+    with django_capture_on_commit_callbacks(execute=True) as callbacks:
+        _proposal(world)
+
+    assert callbacks == [] and ran == []
+    assert _row(person).confidence is None                      # nothing resolved in the request
+
+
 # --- after ingest ------------------------------------------------------------------------
 
-def test_an_ingested_person_is_resolved_when_a_proposal_covers_their_code(world,
-                                                                         django_capture_on_commit_callbacks):
+def test_an_ingested_person_queues_one_resolve_when_a_proposal_covers_their_code(broker, world,
+                                                                                django_capture_on_commit_callbacks):
     person = _person()
     _proposal(world)
 
     with django_capture_on_commit_callbacks(execute=True):
+        for _ in range(20):                                      # twenty POSTs for one patient
+            provisional_sweep.queue_person_resolve(person.person_id)
+
+    assert broker['person'] == [person.person_id]
+
+
+def test_a_later_write_queues_another_once_the_job_has_started(broker, world, django_capture_on_commit_callbacks):
+    person = _person()
+    _proposal(world)
+    with django_capture_on_commit_callbacks(execute=True):
+        provisional_sweep.queue_person_resolve(person.person_id)
+    tasks.provisional_resolve_person_task.run(person.person_id)
+    assert _row(person).confidence == 85
+    MeasurementFactory(person=person, measurement_concept_id=NO_MATCHING_CONCEPT_ID,
+                       measurement_source_value=CODE, measurement_date=date(2026, 2, 1), confidence=None)
+
+    with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
 
-    assert _row(person).confidence == 85
+    assert broker['person'] == [person.person_id, person.person_id]
 
 
-def test_a_person_no_proposal_covers_is_not_queued(world, monkeypatch, django_capture_on_commit_callbacks):
-    called = []
-    monkeypatch.setattr(provisional_sweep, 'dispatch_person_resolve', called.append)
+def test_a_person_already_provisional_at_the_current_proposal_queues_nothing(broker, world,
+                                                                            django_capture_on_commit_callbacks):
+    person = _person()
+    _proposal(world)
+    provisional_sweep.locked_resolve(person)
+    cache.clear()
+
+    with django_capture_on_commit_callbacks(execute=True):
+        provisional_sweep.queue_person_resolve(person.person_id)
+
+    assert broker['person'] == []
+
+
+def test_a_person_no_proposal_covers_is_not_queued(broker, world, django_capture_on_commit_callbacks):
     person = _person(code='OTHER')
     _proposal(world)
 
     with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
 
-    assert called == []
+    assert broker['person'] == []
 
 
-def test_the_ingest_check_costs_nothing_with_the_switch_off(world, settings):
+def test_a_proposal_the_resolver_rejects_is_not_queued_for(broker, world, django_capture_on_commit_callbacks):
     person = _person()
-    settings.PROVISIONAL_DATA_ENABLED = False
+    _proposal(ConceptFactory(concept_name='Non-standard', standard_concept=None))
 
-    with CaptureQueriesContext(connection) as queries:
+    with django_capture_on_commit_callbacks(execute=True):
         provisional_sweep.queue_person_resolve(person.person_id)
 
-    assert len(queries) == 0
+    assert broker['person'] == []
 
 
-def test_a_bulk_write_makes_the_new_rows_provisional(world, django_capture_on_commit_callbacks):
-    person = PersonFactory()
-    PatientRecordFactory(person=person)
-    PatientSourceCode.objects.create(
-        person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='Local')
+def test_the_qualifying_set_is_cached_not_loaded_per_post(broker, world):
+    person = _person()
     _proposal(world)
+
+    def mapping_queries():
+        with CaptureQueriesContext(connection) as queries:
+            provisional_sweep.person_needs_resolve(person.person_id)
+        return sum('source_code_concept_mapping' in q['sql'] for q in queries)
+
+    cold = mapping_queries()          # loads the qualifying set, then asks about the one code held
+    warm = mapping_queries()          # the set comes from the cache
+
+    assert warm == cold - 1
+
+
+def test_the_ingest_check_costs_nothing_with_the_switch_off_or_no_broker(broker, world, settings):
+    person = _person()
+    settings.PROVISIONAL_DATA_ENABLED = False
+    with CaptureQueriesContext(connection) as off:
+        provisional_sweep.queue_person_resolve(person.person_id)
+    settings.PROVISIONAL_DATA_ENABLED = True
+    settings.CELERY_BROKER_URL = ''
+    with CaptureQueriesContext(connection) as no_broker:
+        provisional_sweep.queue_person_resolve(person.person_id)
+
+    assert len(off) == 0 and len(no_broker) == 0
+
+
+def _etl_client():
     client = APIClient()
     client.force_authenticate(Identity.objects.create_user(
         email='sweep-etl@example.org', password='test', is_staff=True))
-    row = {
+    return client
+
+
+def _etl_row(person):
+    return {
         'person': person.person_id, 'measurement_concept': NO_MATCHING_CONCEPT_ID,
         'measurement_date': '2026-11-01', 'measurement_datetime': '2026-11-01T08:00:00Z',
         'measurement_type_concept': 32817, 'measurement_source_value': CODE,
         'value_as_number': '5.1', 'value_source_value': '5.1', 'unit_source_value': 'mmol/L',
     }
 
-    with django_capture_on_commit_callbacks(execute=True):
-        response = client.post('/api/v1/measurements/?skip_refresh=true', [row], format='json')
 
-    assert response.status_code == 201, response.content
-    written = _rows(person).get()
-    assert (written.measurement_concept_id, written.confidence) == (world.concept_id, 85)
+def test_a_bulk_write_queues_the_resolve_and_a_replay_is_made_provisional_again(
+        broker, world, django_capture_on_commit_callbacks):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    PatientSourceCode.objects.create(
+        person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='Local')
+    _proposal(world)
+    client = _etl_client()
+    url = '/api/v1/measurements/?skip_refresh=true'
+
+    with django_capture_on_commit_callbacks(execute=True):
+        first = client.post(url, [_etl_row(person)], format='json')
+    assert first.status_code == 201, first.content
+    assert broker['person'] == [person.person_id]
+    tasks.provisional_resolve_person_task.run(person.person_id)
+    assert (_row(person).measurement_concept_id, _row(person).confidence) == (world.concept_id, 85)
+
+    # The ETL re-posts the same row at concept 0: the upsert rewrites the
+    # provisional row to unresolved, and the hook queues the resolve again.
+    with django_capture_on_commit_callbacks(execute=True):
+        replay = client.post(url, [_etl_row(person)], format='json')
+    assert replay.status_code == 201, replay.content
+    assert replay.json()['created'] == 0 and replay.json()['updated'] == 1
+    assert (_row(person).measurement_concept_id, _row(person).confidence) == (NO_MATCHING_CONCEPT_ID, None)
+    assert broker['person'] == [person.person_id, person.person_id]
+    tasks.provisional_resolve_person_task.run(person.person_id)
+
+    assert (_row(person).measurement_concept_id, _row(person).confidence) == (world.concept_id, 85)
+    assert _rows(person).count() == 1

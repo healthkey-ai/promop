@@ -1419,13 +1419,18 @@ code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
 With `PROVISIONAL_DATA_ENABLED` on, a mapping saved as `proposed` with a
 destination and a `suggestion_confidence` at or above
 `PROVISIONAL_CONFIDENCE_FLOOR` makes the matching rows provisional for the
-patients who hold its code, with no ETL change: a `post_save` receiver on the
-mapping queues a sweep of its code (`omop_core/services/provisional_sweep.py`),
-the bulk OMOP write and the FHIR sync queue a one-person resolve after ingest,
-and `manage.py sweep_provisional_rows` covers everything else (an `update()` fires
-no signal). All three call `resolve_person_source_codes`, so approval, rejection
-and a moved destination behave as in #2530. Only unscoped proposals qualify.
-Off, nothing is queried, queued or written. See
+patients who hold its code, with no ETL change: a save that changes a proposal's
+answer (new, changed, or withdrawn) queues a sweep of its code
+(`omop_core/services/provisional_sweep.py`), the bulk OMOP write and the FHIR sync
+queue a one-person resolve after ingest (an ETL replay included), and
+`manage.py sweep_provisional_rows` covers everything else (an `update()` fires no
+signal). All three call `resolve_person_source_codes`, so approval, rejection and
+a moved destination behave as in #2530. The automatic ones need a Celery broker
+and are coalesced per code and per person; with no broker nothing runs in a
+request and the command is the path. **Only unscoped proposals qualify:
+organization-scoped ones (set when the caller passes an organization for Epic or
+Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
+before enabling it there.** Off, nothing is queried, queued or written. See
 [the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
 
 ### Replace re-answers rows, it does not delete them
