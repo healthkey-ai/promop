@@ -1414,6 +1414,20 @@ code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
 - The per-patient inventory (`PatientSourceCode`) is re-filed under the new
   table, merging into a row the patient already has there.
 
+### A saved proposal makes provisional rows; the ETL sends no confidence
+
+With `PROVISIONAL_DATA_ENABLED` on, a mapping saved as `proposed` with a
+destination and a `suggestion_confidence` at or above
+`PROVISIONAL_CONFIDENCE_FLOOR` makes the matching rows provisional for the
+patients who hold its code, with no ETL change: a `post_save` receiver on the
+mapping queues a sweep of its code (`omop_core/services/provisional_sweep.py`),
+the bulk OMOP write and the FHIR sync queue a one-person resolve after ingest,
+and `manage.py sweep_provisional_rows` covers everything else (an `update()` fires
+no signal). All three call `resolve_person_source_codes`, so approval, rejection
+and a moved destination behave as in #2530. Only unscoped proposals qualify.
+Off, nothing is queried, queued or written. See
+[the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
+
 ### Replace re-answers rows, it does not delete them
 
 It used to delete: while the candidate set came from a clinical scan, a deleted

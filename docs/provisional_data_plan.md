@@ -108,6 +108,52 @@ proposals are ranked, and a curator can run it from the patient page today.
 The lookup contract is second: the ETL repository has to change with it. FHIR
 sync is third and is gated per organization.
 
+### As built in #2662: the server makes the rows
+
+The ETL does not propose concepts. Proposals come from Code to Concept and
+Concept to Code, each stored with a confidence on the mapping
+(`suggestion_confidence`). An ETL load leaves the rows for such a code at concept
+0, so the ETL needs no change and the lookup/`confidence` contract above is not
+on HealthTree's path: the server resolves them with the per-person resolver that
+Generate OMOP already uses (`resolve_person_source_codes`), and
+`omop_core/services/provisional_sweep.py` decides for whom and when. Off with
+`PROVISIONAL_DATA_ENABLED`: nothing is queried, queued or written.
+
+- **Sweep.** `manage.py sweep_provisional_rows` (also queued on the worker, and
+  `--dry-run`, `--mapping-id`, `--after-person-id`) resolves, in person-id chunks
+  of 200, every person holding an unresolved row, a provisional row or an
+  inventory code with no row under a qualifying proposal (unscoped, `proposed`, a
+  destination, a confidence at or above the floor); and every holder of any
+  provisional row, so a proposal that stopped qualifying with no hook to say so
+  gets its rows taken back. Idempotent (a person already provisional at the
+  current proposal is "already resolved"), never touches a real row, and the
+  counts land on a `SourceCodeResolveRun`. It is resumed by its cursor, the last
+  person id a chunk finished, which travels in the Celery task arguments (a
+  killed task retries its own chunk) and is printed by the command; no cursor is
+  stored, because the selection shrinks as persons are resolved and the cursor
+  covers the ones that stay candidates (a provisional row is rewritten, never
+  done). A retried chunk can double-count in the run's totals; the rows do not
+  change.
+- **Trigger.** A `post_save` on `SourceCodeConceptMapping` queues a sweep of that
+  mapping's code, after commit, when the mapping is `proposed` with a destination
+  in a clinical table and the save touched the destination, confidence, status or
+  table. Every writer that calls `.save()` is covered (Suggest, group Suggest,
+  reverse Suggest, suggest-one accept, Concept to Code, the dialog and Calc); a
+  `.update()`/`bulk_update()` is not, and the sweep covers it. On Celery the
+  chunks chain; with no broker a trigger resolves one bounded chunk (50 persons)
+  in the request and leaves the rest to the command. Approval and rejection are
+  unchanged (#2530): approval promotes, rejection or a moved destination reverts.
+- **After ingest.** The bulk OMOP write and the FHIR sync call
+  `queue_person_resolve(person_id)` once per request: one cheap candidate check
+  for that person, and only when a proposal covers a code they hold, a resolve
+  job after commit. New patients do not wait for a sweep; with the switch off it
+  costs no query.
+- **Scope.** Only unscoped proposals qualify, as `provisional_proposal` already
+  required: the per-patient inventory cannot say which hospital a code came from,
+  so an organization-scoped proposal writes no provisional rows. Candidate
+  selection matches the source code exactly (the resolver then matches
+  case-insensitively for the persons it finds).
+
 ## Approval, rejection and a moved proposal
 
 `repoint_clinical_rows` is the one place rows change concept after the fact,
@@ -662,6 +708,10 @@ existing-mapping view) is the same number and lands with this.
   refused; an untouched form sends an empty PATCH; React badge render and edit.
 
 ### Phase 2: the ETL path
+
+Superseded for HealthTree by the server-side sweep, trigger and after-ingest job
+(#2662, above): the ETL does not propose concepts and sends no `confidence`. The
+lookup contract below remains for a caller that does want to write rows itself.
 
 - `code-mappings/lookup/` `include_provisional` and the response fields.
 - ETL repository change to write `confidence` and to re-send after approval.

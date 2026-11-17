@@ -29,7 +29,7 @@ from django.dispatch import receiver
 from .models import (
     ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement,
     Observation, ProcedureOccurrence,
-    PersonLanguageSkill,
+    PersonLanguageSkill, SourceCodeConceptMapping,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,3 +217,16 @@ def _dispatch_projection(mapping_pk):
     except Exception:
         logger.warning('Failed to dispatch OMOP projection task; running inline')
         _project_field_sync(mapping_pk)
+
+
+@receiver(post_save, sender=SourceCodeConceptMapping)
+def source_code_mapping_saved(sender, instance, **kwargs):
+    """A mapping saved as a proposal queues provisional rows for the persons holding its code (#2662).
+
+    Imported lazily: the job module imports the resolver, which imports this one.
+    Does nothing with ``PROVISIONAL_DATA_ENABLED`` off. A save that goes through
+    ``update()`` or ``bulk_update()`` fires no signal; ``manage.py
+    sweep_provisional_rows`` covers those.
+    """
+    from omop_core.services.provisional_sweep import mapping_saved
+    mapping_saved(sender, instance, **kwargs)
