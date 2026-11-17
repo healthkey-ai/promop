@@ -101,6 +101,9 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
     **dict.fromkeys((
         'omop_core.LoincClass', 'omop_core.LoincCodeClass', 'omop_core.LoincRelease',
     ), 'sync_loinc_release'),
+    # AHRQ's release table; the bundled CSV is loaded by migration 0349 and
+    # `load_chronic_condition_indicators` (#2512).
+    'omop_core.ChronicConditionIndicator': 'load_chronic_condition_indicators',
     # Imported evidence comes from the pinned hospital inventory. Curator
     # decisions on these rows are instance-local; do not copy the whole
     # registry and duplicate the seed evidence on another instance.

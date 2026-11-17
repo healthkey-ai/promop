@@ -3179,6 +3179,26 @@ class ChronicConditionOverride(models.Model):
         return f"{self.code} → {'chronic' if self.is_chronic else 'not chronic'}"
 
 
+class ChronicConditionIndicator(models.Model):
+    """AHRQ's Chronic Condition Indicator Refined (CCIR) for one ICD-10-CM code
+    (#2512). 1 is chronic, 0 not chronic, 9 no determination. Loaded from the
+    release CSV by ``load_chronic_condition_indicators``; HealthTree's own say
+    is ``ChronicConditionOverride``, applied over this."""
+    CHRONIC, NOT_CHRONIC, NO_DETERMINATION = 1, 0, 9
+    code = models.CharField(max_length=10, unique=True, help_text="ICD-10-CM code, dotted (E03.9)")
+    indicator = models.PositiveSmallIntegerField(
+        choices=[(1, 'Chronic'), (0, 'Not chronic'), (9, 'No determination')])
+    description = models.CharField(max_length=255, blank=True, default='')
+    release = models.CharField(max_length=40, blank=True, default='')
+
+    class Meta:
+        db_table = 'chronic_condition_indicator'
+        ordering = ['code']
+
+    def __str__(self):
+        return f'{self.code} -> {self.indicator}'
+
+
 class CancerStage(VocabularyLookup):
     class Meta:
         db_table = 'vocabulary_cancer_stage'
