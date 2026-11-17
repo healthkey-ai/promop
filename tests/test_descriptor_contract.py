@@ -79,6 +79,17 @@ def test_form_enrichment_does_not_turn_the_envelope_into_a_field(descriptor):
     assert enriched['hemoglobin_g_dl']['control']
 
 
+def test_the_clinical_dates_keep_their_reviewed_labels(descriptor):
+    """#2601: the fallback title-cases the verbose name, acronyms included.
+
+    The label is read by CB, which derives its precision companions from the
+    date's own label, so "Sct date precision" would travel with it.
+    """
+    enriched = patient_form_descriptors(descriptor)
+    assert enriched['sct_date']['label'] == 'SCT date'
+    assert enriched['dlbcl_transformation_date']['label'] == 'DLBCL transformation date'
+
+
 def test_aliases_are_one_way(descriptor):
     by_name = fields(descriptor)
     for name, entry in by_name.items():

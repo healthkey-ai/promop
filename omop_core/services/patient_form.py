@@ -298,6 +298,11 @@ FORM_LABELS = {
     'mipi_risk': ('MIPI Risk', None),
     'mipi_c_risk': ('MIPI-C Risk', None),
     'date_of_birth': ('Date of birth', None),
+    # Acronyms the fallback would flatten to "Sct date"/"Dlbcl transformation
+    # date": `capitalize()` lower-cases the rest of the verbose name, and CB
+    # derives its precision companions from these labels (#2601).
+    'sct_date': ('SCT date', None),
+    'dlbcl_transformation_date': ('DLBCL transformation date', None),
     'hiv_status': ('HIV status', None),
     'hepatitis_b_status': ('Hepatitis B status', None),
     'hepatitis_c_status': ('Hepatitis C status', None),
