@@ -30,6 +30,7 @@ from omop_core.models import (
     ProcedureOccurrence,
 )
 from patient_portal.models import PatientStatement, PatientUser
+from omop_core.services.chronic_conditions import chronic_filter
 from omop_core.services.condition_context import condition_contexts
 from omop_core.services.cancer_details import cancer_details, cancer_family, SLUG_FAMILY
 from omop_core.services.patient_record_service import NOT_CANCER_NAME
@@ -168,6 +169,10 @@ HIDDEN_REASONS = {
     'not_confirmed': 'Not confirmed',
     'care_plan_item': 'Care-plan item',
     'resolved': 'Resolved',
+    # From the chronic-condition filter (#2512).
+    'not_chronic': 'Not a long-term condition',
+    'no_code': 'No diagnosis code',
+    'less_specific': 'Covered by a more specific record',
 }
 _NOT_CONFIRMED = {'unconfirmed', 'provisional', 'differential'}
 _RESOLVED = {'resolved', 'inactive', 'remission'}
@@ -532,6 +537,15 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
             hidden_rows.append(row)
         else:
             other_rows.append(row)
+    # Of the active conditions, keep the long-term ones (AHRQ's indicator, then
+    # HealthTree's overrides); the rest are listed apart with the reason (#2512).
+    patient_typed = {r.pk for r in other_rows if r.condition_type_concept_id == PATIENT_SELF_REPORT_TYPE_CONCEPT_ID}
+    chronic_reasons, earliest = chronic_filter(other_rows, self_reported=patient_typed)
+    if chronic_reasons:
+        hidden_rows = sorted(
+            hidden_rows + [r for r in other_rows if r.pk in chronic_reasons],
+            key=lambda r: (r.condition_start_date, r.pk))
+        other_rows = [r for r in other_rows if r.pk not in chronic_reasons]
     families, general_names = _same_disease(families)
 
     def name_of(row):
@@ -610,12 +624,12 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
                 'id': f'condition-{row.pk}',
                 **contexts.get(row.pk, {}),
                 'name': name,
-                'date': row.condition_start_date.isoformat() if dated else None,
+                'date': earliest.get(row.pk, row.condition_start_date).isoformat() if dated else None,
                 'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
                 'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
             }
             if reasons:
-                reason = hidden_reason(row, today)
+                reason = hidden_reason(row, today) or chronic_reasons[row.pk]
                 entry.update(reason=reason, reason_label=HIDDEN_REASONS[reason])
             cards.append({k: v for k, v in entry.items() if v is not None})
         cards.sort(key=lambda e: e.get('date') or '9999', reverse=True)
