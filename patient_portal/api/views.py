@@ -8793,6 +8793,14 @@ class _OmopBulkCreateMixin:
             if not skip_refresh:
                 refresh_patient_record(person)
 
+        # Rows an ETL just wrote for a code that has a proposal sit at concept 0
+        # until resolved; queue the person's resolve so they are provisional
+        # without waiting for a sweep (#2662). A replay counts too: it rewrites
+        # an existing provisional row back to concept 0, and the resolve puts it
+        # right again. Off, no broker, or nothing covered is free.
+        if new_ids or updated:
+            from omop_core.services.provisional_sweep import queue_person_resolve
+            queue_person_resolve(person.person_id)
         data = {'created': len(new_ids), 'updated': updated,
                 'unattributed_matches': unattributed_matches, 'ids': list(ids)}
         if model_name in _KEYED_MODELS:

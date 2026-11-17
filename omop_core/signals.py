@@ -23,13 +23,13 @@ import threading
 from contextlib import contextmanager
 
 from django.conf import settings
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 
 from .models import (
     ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement,
     Observation, ProcedureOccurrence,
-    PersonLanguageSkill,
+    PersonLanguageSkill, SourceCodeConceptMapping,
 )
 
 logger = logging.getLogger(__name__)
@@ -217,3 +217,23 @@ def _dispatch_projection(mapping_pk):
     except Exception:
         logger.warning('Failed to dispatch OMOP projection task; running inline')
         _project_field_sync(mapping_pk)
+
+
+@receiver(pre_save, sender=SourceCodeConceptMapping)
+def source_code_mapping_pre_save(sender, instance, **kwargs):
+    """Remember what the mapping said before the save, so a withdrawn proposal is noticed (#2662)."""
+    from omop_core.services.provisional_sweep import mapping_pre_save
+    mapping_pre_save(sender, instance, **kwargs)
+
+
+@receiver(post_save, sender=SourceCodeConceptMapping)
+def source_code_mapping_saved(sender, instance, **kwargs):
+    """A proposal that changed queues provisional rows (or their take-back) for its code (#2662).
+
+    Imported lazily: the job module imports the resolver, which imports this one.
+    Does nothing with ``PROVISIONAL_DATA_ENABLED`` off, and nothing automatic
+    without a broker. A save that goes through ``update()`` or ``bulk_update()``
+    fires no signal; ``manage.py sweep_provisional_rows`` covers those.
+    """
+    from omop_core.services.provisional_sweep import mapping_saved
+    mapping_saved(sender, instance, **kwargs)

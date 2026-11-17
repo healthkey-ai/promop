@@ -1472,6 +1472,28 @@ code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
 - The per-patient inventory (`PatientSourceCode`) is re-filed under the new
   table, merging into a row the patient already has there.
 
+### A saved proposal makes provisional rows; the ETL sends no confidence
+
+With `PROVISIONAL_DATA_ENABLED` on, a mapping saved as `proposed` with a
+destination and a `suggestion_confidence` at or above
+`PROVISIONAL_CONFIDENCE_FLOOR` makes the matching rows provisional for the
+patients who hold its code, with no ETL change: a save that changes a proposal's
+answer (new, changed, or withdrawn) queues a sweep of its code
+(`omop_core/services/provisional_sweep.py`), the bulk OMOP write and the FHIR sync
+queue a one-person resolve after ingest (an ETL replay included), and
+`manage.py sweep_provisional_rows` covers everything else (an `update()` fires no
+signal). All three call `resolve_person_source_codes`, so approval, rejection and
+a moved destination behave as in #2530. The automatic ones need a Celery broker
+and are coalesced per code and per person (best effort: a cache outage never
+fails a save or an ingest); the per-person resolve takes a session advisory lock
+and keeps its own short transactions, never one outer one (that deadlocked with
+the ETL's keyed write); with no broker nothing runs in a request and the command
+is the path. **Only unscoped proposals qualify:
+organization-scoped ones (set when the caller passes an organization for Epic or
+Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
+before enabling it there.** Off, nothing is queried, queued or written. See
+[the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
+
 ### Replace re-answers rows, it does not delete them
 
 It used to delete: while the candidate set came from a clinical scan, a deleted

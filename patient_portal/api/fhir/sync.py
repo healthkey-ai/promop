@@ -466,6 +466,10 @@ class FhirSyncView(APIView):
         # First-cut display reads the OMOP tables directly; PatientRecord
         # derivation is part of the deferred oncology enrichment (fhir_importers
         # #10) and should run out-of-band, not inside this request.
+        # Rows written for a code that has a proposal become provisional without
+        # waiting for a sweep (#2662); a no-op with the switch off.
+        from omop_core.services.provisional_sweep import queue_person_resolve
+        queue_person_resolve(person.person_id)
         return Response(result, status=status.HTTP_201_CREATED)
 
     # ------------------------------------------------------------------ #

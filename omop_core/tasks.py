@@ -3,8 +3,9 @@
 from typing import Any
 
 import requests
-from celery import shared_task
+from celery import Task, shared_task
 from celery.signals import worker_ready, worker_shutting_down
+from django.conf import settings
 from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
@@ -363,3 +364,61 @@ def refresh_axis_variants_task(self, request_id: int) -> dict[str, Any]:
     recorded on the row and raised, so Celery reports FAILURE as well.
     """
     return _axis_variant_jobs.run_refresh(request_id)
+
+
+class _SweepTask(Task):
+    """A sweep task that marks its run FAILED once its retries are spent."""
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        from omop_core.services.provisional_sweep import fail_run
+
+        run_id = args[0] if args else kwargs.get('run_id')
+        if run_id:
+            fail_run(run_id, f'The sweep task failed: {exc}')
+
+
+# Below CELERY_TASK_TIME_LIMIT, so SoftTimeLimitExceeded can fire and the chunk
+# can save its progress before the hard limit kills it.
+_SOFT_TIME_LIMIT = max(60, int(settings.CELERY_TASK_TIME_LIMIT) - 60)
+
+
+@shared_task(base=_SweepTask, name='omop_core.provisional_sweep', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3, soft_time_limit=_SOFT_TIME_LIMIT)
+def provisional_sweep_task(run_id: str, after: int = 0, mapping_id: int | None = None,
+                           limit: int = 200) -> dict[str, Any]:
+    """Make provisional rows for one chunk of persons, then queue the next (#2662).
+
+    The cursor (the last person id finished) travels in the arguments, so a
+    task killed at its time limit retries the same chunk, which is idempotent.
+    """
+    from omop_core.services.provisional_sweep import run_sweep
+
+    next_after = run_sweep(run_id, after=after, mapping_id=mapping_id, limit=limit)
+    if next_after is not None:
+        provisional_sweep_task.delay(run_id, next_after, mapping_id, limit)
+    return {'run_id': run_id, 'after': after, 'next_after': next_after}
+
+
+@shared_task(name='omop_core.provisional_resolve_person', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3, soft_time_limit=_SOFT_TIME_LIMIT)
+def provisional_resolve_person_task(person_id: int) -> dict[str, Any]:
+    """Resolve one person's unresolved rows against the current proposals (#2662).
+
+    A person another worker is resolving raises ``PersonBusy`` and is retried.
+    """
+    from omop_core.services.provisional_sweep import run_person_resolve
+
+    result = run_person_resolve(person_id) or {}
+    return {'person_id': person_id, 'provisional': result.get('provisional', 0)}
+
+
+@shared_task(name='omop_core.provisional_warm_index', soft_time_limit=_SOFT_TIME_LIMIT)
+def provisional_warm_index_task() -> None:
+    """Build and cache the qualifying-proposal index the ingest check reads (#2662).
+
+    A request never builds it (it loads every proposal); the check queues this
+    when it finds none.
+    """
+    from omop_core.services.provisional_sweep import warm_index
+
+    warm_index()
