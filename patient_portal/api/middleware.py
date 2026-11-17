@@ -292,6 +292,9 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
 )
 
 
+_PUBLIC_VOTE_PREFIX = '/api/v1/public/mapping-votes/'
+
+
 class ForcePasswordChangeMiddleware:
     """
     Enforce Identity.must_change_password (HL7 PHR-S FM TI.1.1#09).
@@ -323,6 +326,10 @@ class ForcePasswordChangeMiddleware:
     def _is_blocked(request):
         path = request.path
         if not path.startswith('/api/'):
+            return False
+        # The public voting pages authenticate nobody; a visitor who happens
+        # to hold a flagged session here is still only a visitor there.
+        if path.startswith(_PUBLIC_VOTE_PREFIX):
             return False
         user = getattr(request, 'user', None)
         if not (user and user.is_authenticated):

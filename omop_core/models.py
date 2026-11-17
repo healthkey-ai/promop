@@ -6138,3 +6138,132 @@ class PersonMergeCandidate(models.Model):
 
     def __str__(self) -> str:  # pragma: no cover - admin/debug convenience
         return f'merge candidate {self.claimed_id}/{self.provisioned_id}'
+
+
+class MappingVoteShare(models.Model):
+    """A public link to a page where people without an account vote on the
+    wearable mapping proposals (#2678).
+
+    The token is the credential and is stored as issued, so a curator can
+    copy the link again. What it opens is reference data and an email-confirmed
+    vote form; no patient data is reachable through it. Revoking sets
+    ``revoked_at`` and keeps the votes already confirmed. System data: a link
+    belongs to this deployment and is never copied.
+    """
+    token = models.CharField(max_length=64, unique=True)
+    title = models.CharField(max_length=200)
+    note = models.TextField(blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'mapping_vote_share'
+        ordering = ['-created_at', '-id']
+
+    def __str__(self):
+        return f'vote share {self.pk}: {self.title}'
+
+
+class MappingVoteSubmission(models.Model):
+    """What a visitor sent from a vote page, waiting for its email confirmation.
+
+    Not a vote: nothing here is counted or shown to a curator. The
+    confirmation token is made when the email is sent and only its hash is
+    stored, so ``token_hash`` is null until then. The row is deleted when the
+    visitor confirms, when it expires, and when the email could not be sent.
+    """
+    share = models.ForeignKey(
+        MappingVoteShare, on_delete=models.CASCADE, related_name='submissions',
+    )
+    email = models.CharField(max_length=254)
+    # A keyed digest of the address as the limits count it (lowercase, without
+    # a "+tag"), so forty plus-addresses of one inbox are one sender.
+    email_key = models.CharField(max_length=64)
+    # [{"mapping": id, "concept": id, "choice": "yes"|"no"|"", "comment": str}]
+    payload = models.JSONField(default=list)
+    token_hash = models.CharField(max_length=64, unique=True, null=True, blank=True)
+    created_at = models.DateTimeField()
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'mapping_vote_submission'
+        indexes = [
+            models.Index(fields=['share', 'email_key', 'created_at'], name='ix_vote_submission_sender'),
+            models.Index(fields=['expires_at'], name='ix_vote_submission_expires'),
+        ]
+
+    def __str__(self):
+        return f'pending vote submission {self.pk} on share {self.share_id}'
+
+
+class MappingVoteEmail(models.Model):
+    """One confirmation email sent for a vote submission.
+
+    What the limits on outgoing mail count: per address, per share and for the
+    deployment. Kept apart from the submission so an email whose submission
+    was confirmed, and so deleted, still counts, and kept when its share is
+    deleted so deleting a share buys no fresh allowance. ``email_key`` is a
+    keyed digest of the address, not the address. A row whose email could not
+    be sent is removed; rows older than the limits' window are purged.
+    """
+    email_key = models.CharField(max_length=64)
+    share = models.ForeignKey(
+        MappingVoteShare, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    submission = models.OneToOneField(
+        MappingVoteSubmission, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='email_record',
+    )
+    sent_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'mapping_vote_email'
+        indexes = [
+            models.Index(fields=['email_key', 'sent_at'], name='ix_vote_email_key_sent'),
+            models.Index(fields=['share', 'sent_at'], name='ix_vote_email_share_sent'),
+            models.Index(fields=['sent_at'], name='ix_vote_email_sent'),
+        ]
+
+    def __str__(self):
+        return f'vote confirmation email at {self.sent_at:%Y-%m-%d %H:%M}'
+
+
+class MappingVote(models.Model):
+    """A confirmed vote on one mapping proposal, from one email address.
+
+    Written only when the voter confirms from the emailed link. One vote per
+    share, voter and mapping: a later confirmed submission replaces it. A vote
+    never changes a mapping. ``concept_id`` is the destination the voter was
+    shown; a vote whose mapping has since moved to another destination is
+    stale and is left out of the mapping's tally.
+    """
+    YES, NO = 'yes', 'no'
+    CHOICES = [(YES, 'Yes'), (NO, 'No')]
+
+    share = models.ForeignKey(
+        MappingVoteShare, on_delete=models.CASCADE, related_name='votes',
+    )
+    voter_email = models.CharField(max_length=254)
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.CASCADE, related_name='votes',
+    )
+    choice = models.CharField(max_length=3, choices=CHOICES, blank=True, default='')
+    comment = models.TextField(blank=True, default='')
+    concept_id = models.IntegerField()
+    created_at = models.DateTimeField(help_text='When the vote was submitted.')
+    confirmed_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'mapping_vote'
+        constraints = [models.UniqueConstraint(
+            fields=['share', 'voter_email', 'mapping'], name='uq_mapping_vote_share_voter_mapping',
+        )]
+        indexes = [models.Index(fields=['mapping', 'concept_id'], name='ix_mapping_vote_mapping')]
+
+    def __str__(self):
+        return f'vote {self.pk} on mapping {self.mapping_id}'

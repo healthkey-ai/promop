@@ -29,6 +29,7 @@ import type { SnomedSettings } from "./snomed";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
 import { destinationError as describeDestinationError, searchDestinationConcepts } from "./destinationSearch";
 import MintConceptDialog from "./MintConceptDialog";
+import MappingVotesSection from "./MappingVotesSection";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
@@ -1535,6 +1536,9 @@ export default function EditMappingDialog({
                 {mode === "edit" && selectedRow?.mapping_id && <SnomedEvidencePanel
                   key={`snomed-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} canEdit
                   onSettingsChange={settings => setSnomedSettings({ mappingId: selectedRow.mapping_id!, settings })} />}
+                {/* Public votes are cast on wearable proposals only (#2678). */}
+                {mode === "edit" && selectedRow?.mapping_id && showMetricFields && <MappingVotesSection
+                  key={`votes-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} />}
                 {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
                   activity={individualSuggestion.activity} running={individualSuggestion.running}
                   variant={individualSuggestion.axisKey ? variantLabel(individualSuggestion.axisKey) : undefined}

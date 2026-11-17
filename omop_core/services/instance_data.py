@@ -40,6 +40,12 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.RecordShare', 'patient_portal.ShareScan',
     # A curator's claim on a concept names this deployment's user (#2390).
     'omop_core.ConceptMappingLock',
+    # Public voting on wearable mapping proposals (#2678): this deployment's
+    # links, the addresses that voted through them, and what is waiting on a
+    # confirmation email. A link opens nothing elsewhere and a voter's address
+    # is personal data, so none of it follows the mappings.
+    'omop_core.MappingVoteShare', 'omop_core.MappingVoteSubmission',
+    'omop_core.MappingVoteEmail', 'omop_core.MappingVote',
     # Tenancy and access.
     'omop_core.ApplicationOrganization', 'omop_core.GroupAccess',
     'omop_core.InterchangeAgreement', 'omop_core.OrgInvitation', 'omop_core.OrgTrust',

@@ -6,6 +6,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
+from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
@@ -226,6 +227,27 @@ urlpatterns = [
     path('code-mappings/unit-search/', code_mapping_unit_search, name='v1-code-mapping-unit-search'),
     path('code-mappings/vocabularies/', code_mapping_vocabularies, name='v1-code-mapping-vocabularies'),
     path('code-mappings/wearables-export/', wearable_mapping_export, name='v1-wearable-mapping-export'),
+    # Public voting on the wearable mapping proposals (#2678). The first five
+    # need a session. The public/ ones take none, carry their token in the
+    # request body and never in the URL, and are here only, never on the
+    # legacy /api/ router.
+    path('code-mappings/vote-shares/', mapping_votes.vote_share_list, name='v1-mapping-vote-shares'),
+    path('code-mappings/vote-shares/<int:share_id>/', mapping_votes.vote_share_detail,
+         name='v1-mapping-vote-share-detail'),
+    path('code-mappings/vote-shares/<int:share_id>/revoke/', mapping_votes.vote_share_revoke,
+         name='v1-mapping-vote-share-revoke'),
+    path('code-mappings/vote-shares/<int:share_id>/votes-export/', mapping_votes.vote_share_votes_export,
+         name='v1-mapping-vote-share-votes-export'),
+    path('code-mappings/<int:mapping_id>/votes/', mapping_votes.code_mapping_votes,
+         name='v1-code-mapping-votes'),
+    path('public/mapping-votes/', mapping_votes.PublicVotePageView.as_view(),
+         name='v1-public-mapping-vote-page'),
+    path('public/mapping-votes/submit/', mapping_votes.PublicVoteSubmitView.as_view(),
+         name='v1-public-mapping-vote-submit'),
+    path('public/mapping-votes/confirm/preview/', mapping_votes.PublicVotePreviewView.as_view(),
+         name='v1-public-mapping-vote-preview'),
+    path('public/mapping-votes/confirm/', mapping_votes.PublicVoteConfirmView.as_view(),
+         name='v1-public-mapping-vote-confirm'),
     path('code-mappings/<int:mapping_id>/', code_mapping_detail, name='v1-code-mapping-detail'),
     path('code-mappings/<int:mapping_id>/lock/', code_mapping_lock, name='v1-code-mapping-lock'),
     path('code-mappings/<int:mapping_id>/loinc-axes/', code_mapping_loinc_axes, name='v1-code-mapping-loinc-axes'),
