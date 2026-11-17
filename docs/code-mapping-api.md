@@ -353,43 +353,59 @@ Copy exact codes from the CSV, not from the document.
 
 ## Public voting on the wearable proposals
 
-A curator can put the wearable mapping proposals to a vote by people who have
-no account, such as a standards working group. The curator makes a link
-(Share, on the Wearables tab); a voter opens it, chooses Yes or No or writes
-a comment on any proposal, gives an email address and submits.
+A mapping administrator can put the wearable mapping proposals to a vote by
+people who have no account, such as a standards working group. The
+administrator makes a link (Share, on the Wearables tab); a voter opens it,
+chooses Yes or No or writes a comment on any proposal, gives an email address
+and submits.
 
 **Votes are not recorded until the voter confirms them from an email**, and
 **a vote never changes a mapping**: curators read the votes and approve or
 reject as before.
 
-### For curators (session required)
+### Signed in
 
 ```
-GET  /api/v1/code-mappings/vote-shares/
-POST /api/v1/code-mappings/vote-shares/                 {"title": "...", "note": "...", "expires_at": "2027-01-31"}
-POST /api/v1/code-mappings/vote-shares/<id>/revoke/
-GET  /api/v1/code-mappings/vote-shares/<id>/votes-export/
-GET  /api/v1/code-mappings/<mapping_id>/votes/
+GET    /api/v1/code-mappings/vote-shares/
+POST   /api/v1/code-mappings/vote-shares/                 {"title": "...", "note": "...", "expires_at": "2027-01-31"}
+POST   /api/v1/code-mappings/vote-shares/<id>/revoke/
+DELETE /api/v1/code-mappings/vote-shares/<id>/
+GET    /api/v1/code-mappings/vote-shares/<id>/votes-export/
+GET    /api/v1/code-mappings/<mapping_id>/votes/
 ```
 
-Reading needs a role that reads the mapping pages; creating, revoking and the
-CSV need one that writes mappings (staff, org admin or analyst), and so does
-seeing a share's `url` or a voter's address. `title` is required, at most 200
-characters, and is shown to voters; `note` (at most 2,000) is shown under it;
-`expires_at` is optional, a date (through the end of that day, UTC) or an
-RFC 3339 instant, and must be in the future.
+Reading the list of shares and a mapping's votes needs a role that reads the
+mapping pages. Everything else is for **staff and org admins**, the people
+who approve mappings: creating, revoking and deleting a share, the CSV, a
+share's `url`, and a voter's address. An analyst writes mappings and manages
+no share. A service token reaches none of these endpoints.
 
-A share:
+`title` is required, one line, at most 200 characters, shown to voters and
+quoted in the confirmation email, so it may not contain a link (`http://`,
+`https://`, `www.`). `note` (at most 2,000) is shown on the page under the
+title and is not in the email. `expires_at` is optional: a date (through the
+end of that day, UTC) or an RFC 3339 instant with its offset, in the future
+and within two years.
+
+The list:
 
 ```json
-{"id": 4, "title": "HL7 PHR working group review", "note": "", "created_at": "...",
- "expires_at": null, "revoked_at": null, "active": true, "voters": 7, "votes": 61,
- "url": "https://<app>/vote/<token>"}
+{"results": [{"id": 4, "title": "HL7 PHR working group review", "note": "", "created_at": "...",
+              "expires_at": null, "revoked_at": null, "active": true, "voters": 7, "votes": 61,
+              "url": "https://<app>/vote#<token>"}],
+ "can_manage": true, "email_configured": true, "base_url_configured": true}
 ```
 
-`voters` is the number of addresses that confirmed at least one vote.
-Revoking stops the link at once, keeps the confirmed votes and discards
-submissions still waiting for confirmation.
+`voters` is the number of addresses that confirmed at least one vote. `url`
+is present only for an administrator. `email_configured` is false when the
+deployment has no real mail backend, in which case no voter can receive a
+confirmation link; `base_url_configured` is false when the links would point
+at `localhost`.
+
+**Revoke** stops the link at once, keeps the confirmed votes and discards
+submissions still waiting for confirmation. **Delete** (204) erases the share
+with its votes, the voters' addresses on them and anything pending. Use it
+for junk votes and when a voter asks to be removed.
 
 A mapping's votes:
 
@@ -403,7 +419,7 @@ A mapping's votes:
 `choice` is `yes`, `no` or `""` for a comment alone. `stale` is true for a
 vote cast on a destination the mapping has since moved off; stale votes are
 kept and are not in `tally`. `voter_email` is absent, and `emails_included`
-false, for a reader who cannot write mappings. Each row of the mapping list
+false, for anyone but an administrator. Each row of the mapping list
 (`GET /api/v1/code-mappings/`, browse and flat, for a session) carries the
 same tally as `votes`; a single-mapping response and a service token's read
 do not.
@@ -417,68 +433,108 @@ which matters here because comments are whatever a stranger typed.
 
 ### For voters (no account)
 
+The links a voter is given are pages of the app, with the token as the URL
+fragment:
+
 ```
-GET  /api/v1/public/mapping-votes/<token>/
-POST /api/v1/public/mapping-votes/<token>/submit/       {"email": "...", "votes": [{"mapping": 12, "choice": "yes", "comment": ""}]}
-GET  /api/v1/public/mapping-votes/confirm/<confirm_token>/
-POST /api/v1/public/mapping-votes/confirm/<confirm_token>/
+https://<app>/vote#<share token>
+https://<app>/vote/confirm#<confirmation token>
 ```
 
-These read no session, set no cookie and are never cached. In the app they
-are the pages `/vote/<token>` and `/vote/confirm/<confirm_token>`.
+A browser does not send a fragment to any server, so a token is in no access
+log or Referer. The pages send it in a request body, and for that reason
+every public endpoint is a `POST` with a JSON object, the read included:
+
+```
+POST /api/v1/public/mapping-votes/                  {"token": "..."}
+POST /api/v1/public/mapping-votes/submit/           {"token": "...", "email": "...", "votes": [{"mapping": 12, "choice": "yes", "comment": ""}]}
+POST /api/v1/public/mapping-votes/confirm/preview/  {"token": "..."}
+POST /api/v1/public/mapping-votes/confirm/          {"token": "..."}
+```
+
+These read no session, set no cookie, answer JSON only and are never cached.
+No token is accepted in a path or a query string.
 
 The page lists the proposals open for voting: wearable mappings that are
-proposed, not hospital-specific, and have a destination concept. It is read
-live, so a proposal approved or rejected later drops off and a new one
-appears. Each proposal carries `id`, `metric_key`, `measure_class`, `source`,
-`source_code`, `description`, `destination_vocabulary`, `destination_code`,
-`destination_name` and `unit`, grouped by category in the Wearables
-download's order. Nothing else about a mapping is public.
+proposed, not hospital-specific, described (they carry a metric key) and have
+a destination concept. It is read live, so a proposal approved or rejected
+later drops off and a new one appears. Each proposal carries `id`,
+`metric_key`, `measure_class`, `source`, `source_code`, `description`,
+`destination_vocabulary`, `destination_code`, `destination_name` and `unit`,
+grouped by category in the Wearables download's order. Nothing else about a
+mapping is public.
 
 A submission names only the proposals the voter acted on. `choice` is `yes`,
 `no` or `""`; `comment` is at most 1,000 characters; an entry with neither is
-ignored, and a submission with none is a 400. So are an invalid address, an
-id that is not on the page (the answer does not say which), and more votes
-than there are proposals. A body over 200 KB is a 413. Otherwise the answer
-is always
+ignored, and a submission with none is a 400. So are an address that is
+invalid or cannot receive mail, an id that is not on the page (the answer
+does not say which), more votes than there are proposals, and text that is
+not valid Unicode. A body over 200 KB is a 413. Otherwise the answer is
 
 ```
 202 {"detail": "Check your email to confirm your votes. They are not recorded until you confirm."}
 ```
 
-whether or not that address has voted before, and whether or not an email was
-sent. The email holds the share's title, the number of votes and comments and
-the confirmation link, and nothing the voter typed.
+whether or not that address has voted before, and whether or not it has
+reached its own daily limit. The email holds the share's title, the number
+of votes and comments and the confirmation link, and nothing the voter typed.
 
-Opening the link (`GET`) returns the pending votes and records nothing.
-`POST` records them, once, and answers `{"recorded": n, "skipped": m}`:
-`skipped` counts proposals that were approved, rejected, deleted or pointed at
-another destination since the voter read the page. One vote is kept per
-share, address and mapping, so confirming a later submission replaces the
-voter's earlier vote on the mappings it names and leaves the rest. The link
-is valid for 48 hours.
+`confirm/preview/` returns the pending votes and records nothing, however
+often it is called; the confirmation page calls it when it opens. `confirm/`
+records them, once, and answers `{"recorded": n, "skipped": m}`: `skipped`
+counts proposals that were approved, rejected, deleted or pointed at another
+destination since the voter read the page. One vote is kept per share,
+address and mapping, so confirming a later submission replaces the voter's
+earlier vote on the mappings it names and leaves the rest. The link is valid
+for 48 hours.
 
-A share link that is unknown, revoked or expired is the same
-`404 {"detail": "This link is not available."}`; a confirmation link that is
-unknown, used or expired is the same
+A share token that is unknown, malformed, revoked or expired is the same
+`404 {"detail": "This link is not available."}`; a confirmation token that is
+unknown, malformed, used or expired is the same
 `404 {"detail": "This confirmation link is no longer valid."}`.
 
 ### Limits
 
-Per client address, as `429`s: reading 60 a minute, submitting 5 an hour,
-the confirmation endpoints 20 an hour
+Per client address, as `429`s: reading 60 a minute, submitting 30 an hour,
+the two confirmation endpoints together 60 an hour
 (`MAPPING_VOTE_READ_THROTTLE_RATE`, `MAPPING_VOTE_SUBMIT_THROTTLE_RATE`,
-`MAPPING_VOTE_CONFIRM_THROTTLE_RATE`). Counted in the database, so they hold
-across workers: at most 3 unconfirmed submissions per share and address
-(`MAPPING_VOTE_MAX_PENDING_PER_EMAIL`), 5 confirmation emails per address in
-24 hours across all shares (`MAPPING_VOTE_MAX_EMAILS_PER_DAY`), and 500
-confirmation emails in 24 hours in total
-(`MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL`). Past a database limit the answer
-is the usual 202 and no email is sent.
+`MAPPING_VOTE_CONFIRM_THROTTLE_RATE`). The client address is taken from
+`REMOTE_ADDR`, or, behind proxies, from the entry of `X-Forwarded-For` that
+`MAPPING_VOTE_PROXY_HOPS` names (see below).
 
-Voting needs working outbound email: the links are built from `APP_BASE_URL`
-and sent through the deployment's mail backend (`MAILGUN_API_KEY`,
-`MAILGUN_SENDER_DOMAIN`, `DEFAULT_FROM_EMAIL`).
+Counted in the database, so they hold across workers:
+
+| Limit | Default | Setting | Over it |
+|---|---|---|---|
+| unconfirmed submissions per share and address | 3 | `MAPPING_VOTE_MAX_PENDING_PER_EMAIL` | the oldest is replaced by the new one |
+| confirmation emails per address in 24 hours, across shares | 5 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY` | the usual 202; no email |
+| confirmation emails per share in 24 hours | 200 | `MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY` | 503 |
+| confirmation emails in 24 hours in total | 500 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL` | 503 |
+
+The 503 is `{"detail": "Voting is temporarily unavailable. Please try again
+later."}`. An address is counted without a `+tag` on its local part, so
+`a+1@x.org` and `a+2@x.org` share one allowance; each still votes under the
+address as typed.
+
+### Running it
+
+- **Mail.** Voting needs working outbound email: the links are built from
+  `APP_BASE_URL` and sent through the deployment's mail backend
+  (`MAILGUN_API_KEY`, `MAILGUN_SENDER_DOMAIN`, `DEFAULT_FROM_EMAIL`). When
+  `CELERY_BROKER_URL` is set the worker sends the email, so the worker needs
+  those variables and `APP_BASE_URL` too; without a broker it is sent in the
+  request. `MAPPING_VOTE_EMAIL_TIMEOUT` (10 seconds) bounds the mail
+  service's call for these messages only.
+- **`MAPPING_VOTE_PROXY_HOPS`.** How many trusted proxies stand between a
+  voter and the app: `0` (the default) reads the socket's peer; `N` reads the
+  Nth entry from the right of `X-Forwarded-For`. Find the right value on each
+  platform by looking at the header a real request arrives with. Too high
+  and the entry read is one the client typed, so the limits can be dodged
+  with a made-up header; too low and it is a proxy's own address, so every
+  voter shares one bucket and a busy meeting gets 429s.
+- **Clearing unconfirmed submissions.** Every submission and every read of a
+  voting page deletes the expired ones. On a deployment nobody is voting on,
+  run `python manage.py purge_expired_vote_submissions` from a scheduler.
 
 ## Uploading a source-code inventory
 

@@ -1822,41 +1822,59 @@ Tests: `tests/test_wearable_mapping_export.py`,
 
 ## Code Mapping — Public Voting on Wearable Proposals
 
-A curator shares a link; people with no account (an HL7 working group) vote
-Yes or No, or comment, on the wearable mapping proposals (#2678). Rules in
-`omop_core/services/mapping_votes.py`, endpoints in
+A mapping administrator shares a link; people with no account (an HL7 working
+group) vote Yes or No, or comment, on the wearable mapping proposals (#2678).
+Rules in `omop_core/services/mapping_votes.py`, endpoints in
 `patient_portal/api/mapping_votes.py`, on `/api/v1/` only.
 
-**A vote never changes a mapping.** Approval stays with curators
+**A vote never changes a mapping.** Approval stays with staff and org admins
 (`_can_approve_mappings`); votes are advice they read.
 
 **A submission is not a vote. Nothing is recorded until the voter confirms
-from the emailed link.** The public page stores a `MappingVoteSubmission`
-(the share, the lowercased address, the JSON payload, the SHA-256 of the
-confirmation token) and emails the link. Pending submissions are never
-counted and never shown to a curator; they live 48 hours and are deleted when
-confirmed, when expired (each new submission purges; `manage.py
-purge_expired_vote_submissions` for a quiet instance) and when their share is
-revoked. Only `POST public/mapping-votes/confirm/<token>/` writes
-`MappingVote` rows. The `GET` of that URL shows the pending votes and changes
-nothing, because mail scanners follow links.
+from the emailed link.** The public page stores a `MappingVoteSubmission` (the
+share, the lowercased address, the JSON payload) and a confirmation link is
+emailed. Pending submissions are never counted and never shown to a curator;
+they live 48 hours and are deleted when confirmed, when expired, when the
+email could not be sent, and when their share is revoked or deleted. Only
+`POST public/mapping-votes/confirm/` writes `MappingVote` rows, and the page
+calls it only from the Confirm button. Loading the page calls
+`confirm/preview/`, which changes nothing however often it is called.
+
+**Tokens are never in a URL the server sees.** The links are `/vote#<token>`
+and `/vote/confirm#<token>`: the token is the fragment, which a browser sends
+to no server, so it is in no access log, Referer, audit row or error report.
+The pages send it in a JSON body, and every public endpoint is a `POST` for
+that reason, the read of the page included. A token is checked against
+`[A-Za-z0-9_-]{20,128}` before any query; anything else is the neutral 404.
 
 | Endpoint | Who | What |
 |---|---|---|
-| `GET code-mappings/vote-shares/` | `_can_view_mappings` | the shares, with confirmed voter counts; `url` only for `_can_manage_mappings` |
-| `POST code-mappings/vote-shares/` | `_can_manage_mappings` | `{title, note?, expires_at?}` -> a share and its public `url` |
-| `POST code-mappings/vote-shares/<id>/revoke/` | `_can_manage_mappings` | the link stops opening; confirmed votes are kept |
-| `GET code-mappings/vote-shares/<id>/votes-export/` | `_can_manage_mappings` | CSV, one line per vote, with voter addresses |
-| `GET code-mappings/<id>/votes/` | `_can_view_mappings` | a mapping's votes and current tally; `voter_email` only for `_can_manage_mappings` |
-| `GET public/mapping-votes/<token>/` | anyone | the page: title, note, proposals by category |
-| `POST public/mapping-votes/<token>/submit/` | anyone | `{email, votes: [{mapping, choice, comment}]}` -> 202 and the same message every time |
-| `GET`, `POST public/mapping-votes/confirm/<confirm_token>/` | anyone | the pending summary; the confirmation |
+| `GET code-mappings/vote-shares/` | `_can_view_mappings` | the shares with confirmed voter counts, `can_manage`, `email_configured`, `base_url_configured`; a share's `url` only for an administrator |
+| `POST code-mappings/vote-shares/` | `_can_approve_mappings` | `{title, note?, expires_at?}` -> a share and its public `url` |
+| `POST code-mappings/vote-shares/<id>/revoke/` | `_can_approve_mappings` | the link stops opening; confirmed votes are kept |
+| `DELETE code-mappings/vote-shares/<id>/` | `_can_approve_mappings` | erases the share with its votes, the addresses on them and anything pending |
+| `GET code-mappings/vote-shares/<id>/votes-export/` | `_can_approve_mappings` | CSV, one line per vote, with voter addresses |
+| `GET code-mappings/<id>/votes/` | `_can_view_mappings` | a mapping's votes and current tally; `voter_email` only for an administrator |
+| `POST public/mapping-votes/` | anyone | `{token}` -> the page: title, note, proposals by category |
+| `POST public/mapping-votes/submit/` | anyone | `{token, email, votes: [{mapping, choice, comment}]}` -> 202 |
+| `POST public/mapping-votes/confirm/preview/` | anyone | `{token}` -> the pending votes; records nothing |
+| `POST public/mapping-votes/confirm/` | anyone | `{token}` -> records the votes, once |
 
+- **Who manages a share.** Creating, revoking and deleting one, the CSV, a
+  share's link and a voter's address are for staff and org admins
+  (`_can_approve_mappings`), not for everyone who writes mappings: an
+  `analyst` grant can be a self-signup at a public demo org, and a share
+  sends mail from this deployment and gathers strangers' addresses. An
+  analyst or a doctor sees that shares exist, the tallies, the choices and
+  the comments. A machine credential reaches none of it
+  (`is_machine_request`), whatever its scopes.
 - **What is put to the vote.** Read live, never snapshotted: rows of the
   `WEARABLE_SOURCE_VOCABULARIES` that are `proposed`, global (`organization`
-  null) and have a destination concept loaded here
-  (`mapping_votes.votable_rows`, in the export's order). A proposal approved
-  or rejected later leaves the page; a new one joins it.
+  null), carry a `metric_key`, and have a destination concept loaded here
+  (`mapping_votes.votable_rows`, in the export's order). The metric key is
+  what says somebody described the row: ingest queues codes under these
+  vocabularies from producer text, and Suggest can give one a destination.
+  A proposal approved or rejected later leaves the page; a new one joins it.
 - **The public payload is reference data only**: metric key, measure class,
   source, source code, description, destination vocabulary, code and name,
   and the curated destination unit. No notes, reviewer, counts, organization,
@@ -1869,77 +1887,127 @@ nothing, because mail scanners follow links.
   A vote stores the destination it was cast on (`concept_id`). Once the
   mapping moves to another destination the vote is **stale**: kept, marked,
   and left out of the tally (and counted again if the destination returns).
-  At confirmation a proposal that was approved, rejected, deleted or moved
-  since the page was read is skipped and the thank-you page says how many.
-  Deleting a mapping deletes its votes (`copy_reference_data --prune`
-  included).
+  At confirmation a proposal that was approved, rejected, deleted, moved or
+  lost its metric key since the page was read is skipped and the thank-you
+  page says how many. Deleting a mapping deletes its votes
+  (`copy_reference_data --prune` included).
+- **Confirming.** One transaction, a fixed number of queries whatever the
+  number of votes: the proposals are read once and the votes written as one
+  upsert in mapping order. A voter's confirmations on a share take turns
+  (an advisory lock on the share and address, taken before any row), so two
+  submissions naming the same proposals cannot deadlock, and one token
+  confirmed twice at once records once.
 - **Public views authenticate nobody** (`authentication_classes = []`): no
   session is read or created, no cookie set, no CSRF check, and a stale or
-  flagged session changes nothing (`ForcePasswordChangeMiddleware` exempts the
-  prefix). Every response is `Cache-Control: no-store`.
-- **One answer, whoever asks.** Unknown, revoked and expired shares are the
-  same 404 body; used, expired and unknown confirmation tokens, and a token
-  whose share has since closed, are the same 404 body. A submission gets the
-  same 202 whether the address is new, returning, over a limit, or the send
-  failed. A mapping id that is not on the page is a 400 that names no id.
-- **The confirmation email is fixed wording**: the curator's title, the
-  number of votes and comments, the link, the expiry. Nothing a voter typed
-  is in it, or anyone could make promop send their text to an address of
-  their choosing. Comments and addresses are not logged.
-- **Tokens are credentials.** The share token is `secrets.token_urlsafe(32)`,
-  stored as issued so the curator can copy the link again. The confirmation
-  token is the same shape, stored only as its SHA-256, single-use, 48 hours.
-  Both travel in URL paths, so `AuditLogMiddleware` records the path with the
-  token replaced (`_audit_path`) and `sentry.redact_path` drops any URL-safe
-  segment of 40 characters or more.
+  flagged session changes nothing (`ForcePasswordChangeMiddleware` exempts
+  `/api/v1/public/mapping-votes/`; a test holds every route under that prefix
+  to these views). They parse and render JSON only: the browsable API would
+  draw a form around the visitor's own submission. Every response is
+  `Cache-Control: no-store`.
+- **One answer, whoever asks.** Unknown, malformed, revoked and expired
+  share tokens are the same 404 body; used, expired, malformed and unknown
+  confirmation tokens, and one whose share has since closed, are the same
+  404 body. A submission gets the same 202 whether the address is new,
+  returning, over its own daily limit, or the send failed. A mapping id that
+  is not on the page is a 400 that names no id.
+- **Refused, not crashed.** JSON nested past the parser's stack is a 400
+  (`RecursionError` is caught around `request.data`); text that is not valid
+  Unicode (a lone surrogate from a JSON escape) is a 400 in a comment, an
+  address, a title or a note; a body over 200 KB is a 413; an expiry is
+  converted to UTC and must fall within two years.
+- **The confirmation email is fixed wording**: the share's title, the number
+  of votes and comments, the link, the expiry. Nothing a voter typed is in
+  it, nor the share's note, or anyone could make promop send their text to
+  an address of their choosing. The title is one line and may hold no link
+  (`http://`, `https://`, `www.`). Comments, addresses and tokens are not
+  logged; a failed send logs the kind of error only, since a mail library's
+  message names the recipient.
+- **The email is sent off the request** (`mapping_vote_jobs.py`, the
+  `derivation_jobs` rule): a worker task when `CELERY_BROKER_URL` is set,
+  inline otherwise. The task's only argument is the submission's id. The
+  confirmation token is made by whoever sends the email
+  (`send_confirmation`), stored only as its SHA-256, and so is never in a
+  task argument, the broker or a report that quotes them. A job delivered
+  twice mails once. A send that fails deletes the submission and its email
+  record: an email that never left counts against nobody. The mail backend
+  gets this message's own timeout (`MAPPING_VOTE_EMAIL_TIMEOUT`, 10 s),
+  passed to the connection, so no other sender's changes.
 - **Voter addresses are personal data.** Returned by the votes endpoint and
-  the CSV only to `_can_manage_mappings` (staff included); a read-only doctor
-  sees choices and comments. The voting page says beside the email field
-  that curators see the address. All four models are **system** data in
-  `instance_data.py`: never copied between instances.
-- **Limits.** Three `ScopedRateThrottle` scopes keyed by client address (DRF's
-  `get_ident`, as every anonymous endpoint here), env-tunable:
+  the CSV only to staff and org admins. The voting page says beside the
+  email field that the address and comments are stored and shown to the
+  organisation's mapping administrators, and that votes are advisory.
+  **Delete** on a share erases its votes and their addresses; that is how a
+  voter's request to be removed is met, and how junk votes go. All four
+  models are **system** data in `instance_data.py`: never copied between
+  instances.
+- **Limits by client address.** Three scopes on `PublicVoteThrottle`,
+  env-tunable:
 
   | Scope | Default | Variable |
   |---|---|---|
   | `mapping_vote_read` | 60/minute | `MAPPING_VOTE_READ_THROTTLE_RATE` |
-  | `mapping_vote_submit` | 5/hour | `MAPPING_VOTE_SUBMIT_THROTTLE_RATE` |
-  | `mapping_vote_confirm` | 20/hour | `MAPPING_VOTE_CONFIRM_THROTTLE_RATE` |
+  | `mapping_vote_submit` | 30/hour | `MAPPING_VOTE_SUBMIT_THROTTLE_RATE` |
+  | `mapping_vote_confirm` (preview and confirm) | 60/hour | `MAPPING_VOTE_CONFIRM_THROTTLE_RATE` |
 
-  Those count in the cache, and the client address is only what the proxy
-  reports (`NUM_PROXIES` is unset, so a forged `X-Forwarded-For` is a new
-  client). What must hold regardless is counted in the database, under a
-  per-address advisory lock (`mapping_votes.submit`):
+  Submitting is generous on purpose: a working group voting from one meeting
+  room is one address. The client address is read where the deployment says,
+  `MAPPING_VOTE_PROXY_HOPS`: 0 (the default) is `REMOTE_ADDR`; N is the Nth
+  entry from the right of `X-Forwarded-For`, the one the outermost of N
+  trusted proxies wrote. **Measure N per platform** (Render, Cloud Run) by
+  looking at the header a request arrives with: one too many and the entry
+  is whatever the client typed, so a forged header is a fresh bucket; one
+  too few and it is a proxy's own address, so every voter shares one bucket.
+  DRF's `NUM_PROXIES` is left unset for every other throttle. These count in
+  the cache (`CACHE_URL` or a Redis broker, else per worker).
+- **Limits on outgoing mail, counted in the database** under advisory locks
+  taken in one order (the address, the share, the deployment), so
+  simultaneous submissions cannot each read "one below the limit":
 
-  | Limit | Default | Setting |
-  |---|---|---|
-  | pending submissions per share and address | 3 | `MAPPING_VOTE_MAX_PENDING_PER_EMAIL` |
-  | confirmation emails per address per 24 h, all shares | 5 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY` |
-  | confirmation emails per 24 h, every address together | 500 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL` |
+  | Limit | Default | Setting | Over it |
+  |---|---|---|---|
+  | pending submissions per share and address | 3 | `MAPPING_VOTE_MAX_PENDING_PER_EMAIL` | the oldest is replaced |
+  | confirmation emails per address per 24 h, all shares | 5 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY` | the usual 202, nothing sent |
+  | confirmation emails per share per 24 h | 200 | `MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY` | 503 |
+  | confirmation emails per 24 h, every address | 500 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL` | 503 |
 
-  The per-address count is of emails sent (`MappingVoteEmail`, a keyed digest
-  of the address), not of submissions waiting, so confirming does not buy
-  more. Over any of them the answer is still the 202 and nothing is stored or
-  sent. Also: body at most 200 KB (413), no more votes than proposals, a
-  comment at most 1,000 characters with control characters removed.
+  The two that concern no particular address answer 503 "Voting is
+  temporarily unavailable", rather than tell voters to wait for mail that
+  will not come; they are checked first, so an address over its own limit
+  gets the same 503 as everyone else. At the pending limit the oldest
+  submission gives way, because refusing the new one would let anybody who
+  knows a voter's address lock that voter out for two days. Counting is of
+  emails sent (`MappingVoteEmail`, a keyed digest of the address, kept when
+  its submission or share is deleted), so neither confirming nor deleting a
+  share buys more. **An address is counted without its `+tag`**
+  (`canonical_email`), so plus-addresses of one inbox share one allowance;
+  each still votes under the address as typed. Addresses no mail can reach
+  are refused: IP-literal and single-label domains, `localhost`, control
+  characters in the local part.
+- **Purging.** Nothing in the project schedules jobs. Expired submissions and
+  email records past 24 h are deleted on every submission and on every read
+  of a voting page; `manage.py purge_expired_vote_submissions` does the same
+  for a cron on a deployment nobody is voting on.
 - **Where curators see votes.** The list queries are annotated with each
   row's current tally (`with_vote_counts`: three subqueries on the page's own
   query, no query per row; a service token's read is not annotated) and the
   Wearables tab shows "3 yes · 1 no · 2 comments" under the destination. The
   Edit Mapping dialog has a collapsed Votes section on wearable rows
   (`MappingVotesSection.tsx`). Share, on the Wearables tab beside the
-  download and only for `canWriteMappings`, lists the shares with Copy link,
-  Revoke and Download votes (CSV) (`WearableVoteShare.tsx`).
-- **The pages.** `/vote/<token>` and `/vote/confirm/<token>` are routed in
-  `App.tsx` before `useAuth()` is called: that hook asks who is signed in and
-  sends a stranger to the login page. They use `publicApi` only and render
-  everything as text.
+  download and only for staff and org admins (`isStaffOrOrgAdmin`), lists the
+  shares with Copy link, Download votes (CSV), Revoke and Delete
+  (`WearableVoteShare.tsx`), and warns when `email_configured` or
+  `base_url_configured` is false.
+- **The pages.** `/vote` and `/vote/confirm` are routed in `App.tsx` before
+  `useAuth()` is called: that hook asks who is signed in and sends a stranger
+  to the login page. They read the token from `location.hash`, use
+  `publicApi` only and render everything as text.
 - **Deployment.** The links are built from `APP_BASE_URL`, which must be the
-  public origin that serves the SPA. Email goes through the project's mail
-  backend: without `MAILGUN_API_KEY` and `MAILGUN_SENDER_DOMAIN` (or an
-  `EMAIL_BACKEND`) it is the console backend and no voter ever receives a
-  link. The throttles need the shared cache (`CACHE_URL` or a Redis
-  `CELERY_BROKER_URL`) to be per deployment rather than per worker.
+  public origin that serves the SPA. Email needs a real backend
+  (`MAILGUN_API_KEY` and `MAILGUN_SENDER_DOMAIN`, or an `EMAIL_BACKEND`):
+  with the console backend no voter ever receives a link, and the Share
+  dialog says so. With a broker, the **worker** sends the mail, so it needs
+  the mail variables, `APP_BASE_URL` and `DEFAULT_FROM_EMAIL` as well as the
+  web service. Set `MAPPING_VOTE_PROXY_HOPS` on the web service.
 
 Tests: `tests/test_mapping_votes.py`; `PublicVotePage.test.tsx`,
 `ConfirmVotesPage.test.tsx`, `WearableVoteShare.test.tsx`,
