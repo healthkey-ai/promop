@@ -679,3 +679,141 @@ def test_a_bulk_write_queues_the_resolve_and_a_replay_is_made_provisional_again(
 
     assert (_row(person).measurement_concept_id, _row(person).confidence) == (world.concept_id, 85)
     assert _rows(person).count() == 1
+
+
+# --- the full sweep resolves only a person's qualifying and provisional codes (#2663) ---
+
+def _unrelated_rows(person, count, concept=NO_MATCHING_CONCEPT_ID):
+    """*count* rows of codes no proposal covers, the bulk of a loaded patient's chart."""
+    from omop_core.services.pk import next_pk_batch
+    from omop_core.models import Concept
+    type_concept = Concept.objects.get(concept_id=32817)
+    ids = next_pk_batch(Measurement, 'measurement_id', count)
+    Measurement.objects.bulk_create([
+        Measurement(
+            measurement_id=pk, person=person, measurement_concept_id=concept,
+            measurement_source_value=f'OTHER-{n}', measurement_date=date(2026, 1, 1),
+            measurement_type_concept=type_concept)
+        for n, pk in enumerate(ids)])
+
+
+@pytest.fixture()
+def resolver_calls(monkeypatch):
+    """Every resolve the sweep asks for: the person and the arguments it gave."""
+    real = provisional_sweep.locked_resolve
+    calls = []
+
+    def spy(person, **kwargs):
+        calls.append((person.person_id, kwargs))
+        return real(person, **kwargs)
+    monkeypatch.setattr(provisional_sweep, 'locked_resolve', spy)
+    return calls
+
+
+def test_the_full_sweep_resolves_only_the_codes_a_proposal_covers(world, resolver_calls):
+    person = _person()
+    _unrelated_rows(person, 40)
+    _proposal(world)
+
+    run = provisional_sweep.start_sweep()
+
+    assert resolver_calls == [(person.person_id, {
+        'source_values': [CODE], 'omop_tables': ['measurement']})]
+    assert _row(person).confidence == 85
+    run.refresh_from_db()
+    # The unrelated chart is never walked: not counted as skipped or already resolved.
+    assert (run.skipped, run.already_resolved, run.provisional) == (0, 0, 1)
+    assert Measurement.objects.filter(
+        person=person, measurement_source_value__startswith='OTHER-',
+        measurement_concept_id=NO_MATCHING_CONCEPT_ID, confidence__isnull=True).count() == 40
+
+
+def test_the_scope_adds_a_provisional_code_whose_proposal_stopped_qualifying(world, resolver_calls):
+    person = _person(code='OLD')
+    old = _proposal(world, code='OLD')
+    provisional_sweep.start_sweep()
+    assert _rows(person, 'OLD').get().confidence == 85
+    SourceCodeConceptMapping.objects.filter(pk=old.pk).update(suggestion_confidence=0.4)  # no hook fires
+    PatientSourceCode.objects.create(
+        person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='Local')
+    _proposal(world)                                              # another code does qualify
+    resolver_calls.clear()
+
+    run = provisional_sweep.start_sweep()
+
+    (_pid, kwargs), = resolver_calls
+    assert kwargs == {'source_values': ['GLU-1', 'OLD'], 'omop_tables': ['measurement']}
+    row = _rows(person, 'OLD').get()
+    assert (row.measurement_concept_id, row.confidence) == (NO_MATCHING_CONCEPT_ID, None)
+    assert _rows(person).get().confidence == 85                   # the inventory code got its row
+    run.refresh_from_db()
+    assert (run.provisional, run.reverted) == (1, 1)
+
+
+def test_an_inventory_code_with_no_row_is_in_the_scope_and_gets_one(world, resolver_calls):
+    person = _person(with_row=False)
+    _unrelated_rows(person, 5)
+    _proposal(world)
+
+    provisional_sweep.start_sweep()
+
+    assert resolver_calls == [(person.person_id, {
+        'source_values': [CODE], 'omop_tables': ['measurement']})]
+    assert _row(person).confidence == 85
+
+
+def test_the_scope_is_each_persons_own_codes(world):
+    holder = _person(code='held')                                 # stored in lower case
+    stranger = _person(code='NOT-PROPOSED')
+    _proposal(world, code='HELD')
+    codes = provisional_sweep.qualifying_codes()
+
+    assert provisional_sweep.person_scope(holder.person_id, codes) == (['held'], ['measurement'])
+    assert provisional_sweep.person_scope(stranger.person_id, codes) == ([], [])
+
+
+def test_a_candidate_with_nothing_to_resolve_never_reaches_the_resolver(world, resolver_calls, monkeypatch):
+    person = _person(code='UNRELATED')
+    _proposal(world)
+    # A stale candidate: nothing about this person is a qualifying or provisional code.
+    monkeypatch.setattr(provisional_sweep, 'candidate_person_ids', lambda **kw: [person.person_id])
+    run = provisional_sweep.start_run_record()
+
+    assert provisional_sweep.run_sweep(run.id) is None
+
+    assert resolver_calls == []                                   # an empty list would mean "no limit"
+    run.refresh_from_db()
+    assert run.done == 1 and run.errors == 0 and run.state == SourceCodeResolveRun.COMPLETED
+    assert _rows(person, 'UNRELATED').get().measurement_concept_id == NO_MATCHING_CONCEPT_ID
+
+
+def test_a_mapping_sweep_still_resolves_its_one_code(world, resolver_calls):
+    person = _person()
+    _unrelated_rows(person, 5)
+    mapping = _proposal(world)
+    run = provisional_sweep.start_run_record()
+
+    provisional_sweep.run_sweep(run.id, mapping_id=mapping.pk)
+
+    assert resolver_calls == [(person.person_id, {
+        'source_values': [CODE], 'omop_tables': ['measurement']})]
+    assert _row(person).confidence == 85
+
+
+def test_a_loaded_chart_costs_the_same_queries_as_a_bare_one(world):
+    """The walk is gone: 2,000 unrelated codes add no queries to a person's resolve."""
+    bare, loaded = _person(), _person()
+    _unrelated_rows(loaded, 2000)
+    _proposal(world)
+    codes = provisional_sweep.qualifying_codes()
+
+    counts = {}
+    for name, person in (('bare', bare), ('loaded', loaded)):
+        source_values, omop_tables = provisional_sweep.person_scope(person.person_id, codes)
+        with CaptureQueriesContext(connection) as queries:
+            provisional_sweep.locked_resolve(
+                person, source_values=source_values, omop_tables=omop_tables)
+        counts[name] = len(queries)
+
+    assert counts['loaded'] == counts['bare']
+    assert _row(loaded).confidence == 85
