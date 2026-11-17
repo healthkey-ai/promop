@@ -119,6 +119,7 @@ _MEASUREMENT_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
+    ('HealthConnect', 'Health Connect — Android Health Connect record types'),
     ('CPT4', 'CPT-4 — billed lab panels'),
     ('UCUM', 'UCUM — units of measure'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -133,6 +134,7 @@ _OBSERVATION_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
+    ('HealthConnect', 'Health Connect — Android Health Connect record types'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
     ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
@@ -181,9 +183,9 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
-    # Wearable metrics (includes Apple, Garmin and HL7-PHR) come first. The
-    # page opens on the first tab with proposed rows, so this is also where a
-    # curator lands while the Wearables tab has any.
+    # Wearable metrics (includes Apple, Garmin, HL7-PHR and HealthConnect) come
+    # first. The page opens on the first tab with proposed rows, so this is also
+    # where a curator lands while the Wearables tab has any.
     'OpenWearables',
     'EPIC', 'CERNER',  # Hospital-local codes are the largest curation queues
     'ICD10CM',
@@ -209,8 +211,11 @@ SOURCE_TAB_LABELS = {
 
 # Wearable vocabularies that are consolidated under the single "Wearables"
 # tab (OpenWearables) on the Code Mapping page. HL7-PHR holds the HL7 PHR
-# code values for metrics no device vocabulary carries yet.
-WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR'}
+# code values, Apple the HealthKit identifiers and HealthConnect the Android
+# Health Connect record types the HL7 PHR table maps those codes from.
+WEARABLE_SOURCE_VOCABULARIES = {
+    'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect',
+}
 
 # The metric categories a wearable mapping may carry, in the order the Edit
 # Mapping dialog offers them: those of the wearable mapping proposal, plus the
