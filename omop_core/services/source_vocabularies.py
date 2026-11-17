@@ -117,6 +117,7 @@ _MEASUREMENT_SYSTEMS = (
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
     ('CPT4', 'CPT-4 — billed lab panels'),
     ('UCUM', 'UCUM — units of measure'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -130,6 +131,7 @@ _OBSERVATION_SYSTEMS = (
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
     ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
@@ -178,13 +180,16 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
+    # Wearable metrics (includes Apple, Garmin and HL7-PHR) come first. The
+    # page opens on the first tab with proposed rows, so this is also where a
+    # curator lands while the Wearables tab has any.
+    'OpenWearables',
     'EPIC', 'CERNER',  # Hospital-local codes are the largest curation queues
     'ICD10CM',
     'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
-    'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
 ]
@@ -201,9 +206,10 @@ SOURCE_TAB_LABELS = {
     # Others use vocabulary_id as-is.
 }
 
-# Wearable device vocabularies that are consolidated under the single
-# "Wearables" tab (OpenWearables) on the Code Mapping page.
-WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
+# Wearable vocabularies that are consolidated under the single "Wearables"
+# tab (OpenWearables) on the Code Mapping page. HL7-PHR holds the HL7 PHR
+# code values for metrics no device vocabulary carries yet.
+WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR'}
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.

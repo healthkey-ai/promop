@@ -230,8 +230,9 @@ has set its destination or curated it:
   Suggest candidate or score (Suggest stamps its own `origin_system` when it proposes a
   destination, which takes the row out),
 - no curator has saved it: `decision_surface` is blank, `updated_by` is empty, and it has no
-  curator note, destination unit, LOINC axes or SNOMED attributes. The last four matter on an
-  instance loaded by `copy_reference_data`, which clears `updated_by`.
+  curator note, LOINC axes or SNOMED attributes, and no destination unit other than one the
+  seed assigns. The note, axes and attributes matter on an instance loaded by
+  `copy_reference_data`, which clears `updated_by`.
 
 A row Suggest tried and declined has no destination and is still the seed's; filling it drops the
 note that run left. A target a curator has locked on the Concept to Code tab is not written to.
@@ -243,6 +244,81 @@ the metric under; otherwise it is reported (`Concept not found`, `Concept is ret
 It never clears a destination. The run lists each row it does not bring into line:
 `[LEFT ALONE]` where the seed names a target and the row keeps another destination, with the
 reason, and `[KEPT]` where the seed names no target and the row has one.
+
+### Units
+
+Each metric's unit is seeded twice over, from the proposal's "Unit" and "UCUM Unit" columns
+(`UCUM_BY_UNIT` in the seed: `bpm` → `/min`, `mmHg` → `mm[Hg]`, `°C` → `Cel`, `count` → `1`, …):
+
+- as the row's **source unit** (`source_unit_evidence`, one entry with the UCUM code and the
+  display unit), which is what the list's Units column shows. It carries no count, so the
+  approval unit check does not treat it as a sighting, and no source, so a rebuild from patient
+  data keeps it;
+- as the mapping's **destination unit** (`destination_unit_concept`, a standard UCUM concept),
+  set whether or not the metric has a destination concept yet. A unit whose UCUM concept is not
+  loaded is left unset and listed at the end of the run by display unit and code (`U ([IU])`,
+  `score ({score})` and `μS (uS)` on a standard Athena load).
+
+The three temperature *deviation* metrics (`skin_temperature_deviation`,
+`skin_temperature_trend_deviation`, `garmin_skin_temperature`) get a source unit and no
+destination unit: the temperature conversion is for absolute readings, and applied to a
+difference in °F it would be wrong.
+
+`--update-seeded` also fills what is blank on a row that exists:
+
+- a missing source unit, on any row, whatever its status (`[SOURCE UNIT]`). It is a sighting, so
+  `updated_at` is not stamped;
+- a missing destination unit (`[UNIT]`), on a proposed row no curator has saved. This does not
+  need the row to be the seed's: a row whose destination Suggest proposed gets its unit too. It
+  leaves alone a row that is approved or rejected, a row a curator has saved (including one
+  with only LOINC axes or SNOMED attributes entered), a row whose destination a curator has
+  locked, and any unit that is already set.
+
+A run without the flag says how many rows it would fill.
+
+A destination unit does nothing while the mapping is proposed. Once it is approved, for a
+Measurement row whose unit is one promop converts between (`m`, `cm`, `kg`, `g`, `mg`, `L`,
+`mL`, `min`, `h`, `Cel`, `mg/dL`), the bulk measurement write converts incoming values to it
+(see AGENTS.md, "Write-time conversion of stored rows"), and the lookup API reports a source
+unit it does not recognise as the same unit (`bpm` against `/min`, `mmHg` against `mm[Hg]`) as
+`incompatible`. Both look a mapping up by source code alone, so an approved `weight` row would
+also apply to another producer's rows whose source value is "weight". Check both before
+approving a seeded row for a source that is about to send data.
+
+The Apple and Garmin seed (`seed_wearable_device_mappings`) records the source unit its
+adapters report in (`km`, `km/hr`, `bpm`, …), filling it on rows seeded before units were
+recorded. It sets no destination unit: those rows are approved, and the proposal's metres and
+m/s differ from the kilometres and km/h the adapters store.
+
+## HL7 PHR: metrics with no device code yet
+
+The HL7 PHR Code Mapping table names metrics that no OpenWearables, Apple or Garmin code
+carries: total energy burned, six dietary nutrients, steps cadence, R-R interval, three heart
+rhythm events, basal body temperature, hip circumference, bone mass, sleep arousal index and
+snore index. `manage.py seed_hl7_phr_mappings` creates one **proposed** mapping for each
+(`HL7_PHR_METRICS`, 17 of them):
+
+- source vocabulary `HL7-PHR`, which sits on the Wearables tab with OpenWearables, Apple and
+  Garmin (`WEARABLE_SOURCE_VOCABULARIES`);
+- source code is the HL7 PHR code value (`totalEnergyBurned`, `dietaryCalcium`, `rrInterval`, …);
+- provenance (`origin_system`) is `HL7 PHR`;
+- where the HL7 PHR table gives a LOINC code it is the proposed destination; the other ten have
+  no destination and wait for Suggest or a curator.
+
+| HL7 PHR code | Proposed destination |
+|---|---|
+| `totalEnergyBurned` | LOINC 41981-2 |
+| `dietaryCalcium` | LOINC 9045-6 |
+| `dietaryCarbohydrates` | LOINC 9059-7 |
+| `dietaryEnergyConsumed` | LOINC 9052-2 |
+| `dietaryFatTotal` | LOINC 9066-2 |
+| `dietaryProtein` | LOINC 9079-5 |
+| `dietarySodium` | LOINC 9086-0 |
+
+It is the OpenWearables command run over another list, so everything above about re-running,
+`--dry-run`, `--update-seeded` and units applies, with `HL7 PHR` as the provenance that marks a
+row as this seed's. Nothing ingests under these codes yet: the rows record the agreed
+destination so a source that starts sending the HL7 PHR codes finds a curated mapping waiting.
 
 ---
 
