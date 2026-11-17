@@ -28,7 +28,9 @@ The selected concept has two views, and opens on the second (#2010):
   status. Approved mappings come first, folded, then the proposed mappings
   open for review, then rejected ones, folded. Each group is fetched and paged
   on its own; the group headers carry the counts of all three under the current
-  search and Seen filter.
+  search and note filter. Every mapped code is listed, whatever its Seen count
+  (#2686), so the groups hold what the concept list counts; the summary line
+  says how many of them have Seen 0.
 - Suggested Codes: a saved preview retrieved from local vocabulary
   evidence. No SCCM rows change when this search runs, with one exception: a
   candidate whose units imply several LOINC axis sets (the blue "n axis
@@ -43,8 +45,15 @@ The API still serves `mode=available` (other proposed rows with a compatible or
 unspecified source domain/table); the dialog no longer shows that list, since
 Suggest reaches the same rows with the ranker's evidence attached.
 
-Source rows default to Seen > 0 and sort by Seen descending. The checkbox above
-the Seen header includes zero-Seen rows when unchecked. Seen represents the
+Source rows sort by Seen descending. Suggested Codes defaults to Seen > 0, and
+the "> 0 only" checkbox above its Seen header includes zero-Seen rows when
+unchecked; under the Wearables domain it starts unchecked, because a platform's
+own codes have no sightings on an instance that holds no wearable data. The
+filter narrows what could be mapped, never what is: Mapped Codes has no such
+checkbox and its requests carry no `seen_only`, as the Code to Concept page
+applies Seen > 0 only to its Unmapped section (#1648). On the API, `seen_only`
+narrows `mode=available` and does not narrow `mode=linked` (a malformed value is a 400 in both), which still returns
+`zero_seen`. Seen represents the
 stored occurrence counter, not a count of distinct patients. On a seeded
 instance it starts as the hospital-code extract's record count, which counts
 each coding of an observation; the rebuild walk (#2043, #2121) replaces it

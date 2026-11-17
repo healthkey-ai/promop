@@ -169,6 +169,41 @@ def test_wearables_domain_lists_only_concepts_wearable_codes_map_to(client, conc
     assert client.get(BASE, {'domain': 'wearable'}).status_code == 400
 
 
+def test_mapped_codes_list_every_code_the_concept_list_counts(client):
+    """A platform's own code has Seen 0 until a patient sends it; it is still a mapped code (#2686)."""
+    steps = ConceptFactory(concept_name='Steps')
+    seeded = (
+        ('Apple', 'HKQuantityTypeIdentifierStepCount', 'approved'),
+        ('Garmin', 'steps', 'approved'),
+        ('HealthConnect', 'StepsRecord', 'proposed'),
+        ('OpenWearables', 'steps', 'proposed'),
+        ('HL7-PHR', 'stepCount', 'proposed'),
+    )
+    for vocabulary, code, status in seeded:
+        source(code, source_vocabulary_id=vocabulary, target_concept=steps, status=status, occurrence_count=0)
+    listed = client.get(BASE, {'domain': 'wearables'}).data['results']
+    assert [item['sccm_counts'] for item in listed] == [{'approved': 2, 'proposed': 3, 'rejected': 0}]
+    # Whatever a caller sends for seen_only, it does not narrow this list.
+    for params in ({}, {'seen_only': '1'}, {'seen_only': '0'}):
+        data = client.get(f'{BASE}{steps.pk}/', params).data
+        assert data['total'] == 5
+        assert data['status_counts'] == {'approved': 2, 'proposed': 3, 'rejected': 0}
+        assert {(row['source_vocabulary_id'], row['source_code']) for row in data['results']} == {
+            (vocabulary, code) for vocabulary, code, _status in seeded}
+    proposed = client.get(f'{BASE}{steps.pk}/', {'status': 'proposed', 'seen_only': '1'}).data
+    assert {row['source_code'] for row in proposed['results']} == {'StepsRecord', 'steps', 'stepCount'}
+    # The work queue still honours it: only codes not yet on this concept, seen or not as asked.
+    source('unseen-candidate', source_vocabulary_id='OpenWearables', occurrence_count=0)
+    source('seen-candidate', source_vocabulary_id='OpenWearables', occurrence_count=3)
+    queue = lambda **params: {row['source_code'] for row in client.get(  # noqa: E731
+        f'{BASE}{steps.pk}/', {'mode': 'available', **params}).data['results']}
+    assert queue(seen_only='1') == {'seen-candidate'}
+    assert queue(seen_only='0') == {'seen-candidate', 'unseen-candidate'}
+    # A malformed value is still refused in both modes.
+    assert client.get(f'{BASE}{steps.pk}/', {'seen_only': 'true'}).status_code == 400
+    assert client.get(f'{BASE}{steps.pk}/', {'mode': 'available', 'seen_only': 'true'}).status_code == 400
+
+
 def test_wearables_domain_keeps_the_ranked_only_filter(client):
     from omop_core.models import ConceptMappingPriority
     ranked = ConceptFactory(concept_name='Ranked wearable')
@@ -198,8 +233,9 @@ def test_wearables_domain_is_narrowed_by_a_disease(client):
 def test_list_and_detail_paginate_before_serialization(client, concept):
     for index in range(52):
         source(f'C{index:02}', target_concept=concept, occurrence_count=index)
+    # Mapped codes are all listed, whatever their Seen count (#2686).
     data = client.get(f'{BASE}{concept.pk}/', {'seen_only': '1'}).data
-    assert data['total'] == 51 and len(data['results']) == 50
+    assert data['total'] == 52 and len(data['results']) == 50
     assert data['results'][0]['source_code'] == 'C51'
     assert data['zero_seen'] == 1
     second = client.get(f'{BASE}{concept.pk}/', {'seen_only': '1', 'page': 2}).data
@@ -1042,8 +1078,9 @@ def test_linked_sources_filter_by_status_and_count_every_status(client, concept)
     data = client.get(f'{BASE}{concept.pk}/', {'status': 'proposed', 'seen_only': '1'}).data
     assert [row['source_code'] for row in data['results']] == ['MAYBE']
     assert data['total'] == 1
-    # Counts follow the Seen filter, so a collapsed group announces what it would show.
-    assert data['status_counts'] == {'approved': 1, 'proposed': 1, 'rejected': 1}
+    # The Seen filter does not narrow stored mappings (#2686): a collapsed
+    # group announces every code it holds, as the concept list counts them.
+    assert data['status_counts'] == {'approved': 2, 'proposed': 1, 'rejected': 1}
     unfiltered = client.get(f'{BASE}{concept.pk}/', {'seen_only': '0'}).data
     assert unfiltered['total'] == 4
     assert unfiltered['status_counts'] == {'approved': 2, 'proposed': 1, 'rejected': 1}

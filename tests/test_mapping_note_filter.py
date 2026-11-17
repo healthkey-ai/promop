@@ -237,17 +237,19 @@ def test_concept_to_code_source_list_filters_by_curator_note_before_it_counts(cu
     client.force_authenticate(curator)
     url = f'/api/v1/concept-to-code/{concept.pk}/'
 
+    # A concept's mapped codes are all listed, whatever their Seen count (#2686).
     everything = client.get(url, {'seen_only': '1'}).data
-    assert everything['total'] == 3
+    assert everything['total'] == 4
     assert {r['source_code']: r['curator_note'] for r in everything['results']} == {
         'C-NOTED': 'Waiting on the lab to confirm the specimen.',
+        'C-NOTED-UNSEEN': 'Waiting on the lab to confirm the specimen.',
         'C-APPROVED': 'Waiting on the lab to confirm the specimen.',
         'C-MACHINE': '',
     }
 
     filtered = client.get(url, {'seen_only': '1', 'with_notes': '1'}).data
-    assert sorted(r['source_code'] for r in filtered['results']) == ['C-APPROVED', 'C-NOTED']
-    # The counts describe what the filter leaves, not the whole concept.
-    assert (filtered['total'], filtered['zero_seen']) == (2, 1)
-    assert filtered['status_counts'] == {'proposed': 1, 'approved': 1, 'rejected': 0}
+    assert sorted(r['source_code'] for r in filtered['results']) == ['C-APPROVED', 'C-NOTED', 'C-NOTED-UNSEEN']
+    # The counts describe what the note filter leaves, not the whole concept.
+    assert (filtered['total'], filtered['zero_seen']) == (3, 1)
+    assert filtered['status_counts'] == {'proposed': 2, 'approved': 1, 'rejected': 0}
     assert client.get(url, {'with_notes': 'on'}).status_code == 400
