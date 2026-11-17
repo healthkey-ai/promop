@@ -1,6 +1,7 @@
 import type { AxiosInstance } from 'axios';
 import { clientTimezoneHeaders } from '@/api/clientTimezone';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { resolveEditField } from './editBinding';
 import { diseaseToDiseaseCode, plannedTherapyRound } from '@/api/therapyContext';
 import { parseWritableDescriptor } from './descriptorVersion';
 
@@ -249,8 +250,7 @@ export class PatientFormStore {
 
   private reloadSequence = 0;
   resolve(name: string): string | undefined {
-    if (name in this.snapshot.fields) return name;
-    return Object.keys(this.snapshot.fields).find((key) => this.snapshot.fields[key].bindings?.includes(name));
+    return resolveEditField(this.snapshot.fields, name);
   }
   /** Merge an explicit server acknowledgement that did not go through the queue. */
   applyServerValues(values: Record<string, unknown>) {
