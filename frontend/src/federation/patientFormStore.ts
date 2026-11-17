@@ -53,6 +53,11 @@ export interface FormFieldDescriptor extends FieldDescriptor {
   options_source?: 'therapy_regimens';
   /** Why a writable picker has no choices; never leave a blank panel unexplained. */
   options_note?: string;
+  /** The column is the participant's own entry in canonical units, derived from
+   *  a source pair (`hemoglobin_level` + unit), not a verdict computed over
+   *  other facts. The row still edits through the pair; it must not be labelled
+   *  "(computed)" as if it were uneditable. */
+  normalised_read_model?: boolean;
   /** The choices could not be fetched; the editor offers `store.load()` again. */
   retryable?: boolean;
 }

@@ -167,6 +167,43 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Circular field dependency');
   });
 
+  it('honours a date field\'s precision companion, not just DOB (#2688)', async () => {
+    const { store } = await setup({
+      sct_date: {
+        writable: true, target: 'patient_record', control: 'date', label: 'SCT date',
+        value_kind: 'date',
+      },
+      sct_date_precision: { writable: true, target: 'patient_record', control: 'select' },
+    }, { sct_date: '2018-01-01', sct_date_precision: 'year' });
+    render(<PatientFieldEditor store={store} name="sct_date" />);
+
+    // DateControl renders a year box for `precision: 'year'`; a calendar input
+    // means the companion never reached it.
+    expect(await screen.findByPlaceholderText('YYYY')).toBeVisible();
+    expect(screen.queryByDisplayValue('2018-01-01')).not.toBeInTheDocument();
+  });
+
+  it('does not label a unit-normalised lab column as computed (#2688)', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: {
+        writable: false, kind: 'computed', label: 'Hemoglobin (g/dL)',
+        normalised_read_model: true, inputs: ['hemoglobin_level'],
+        reason: 'Normalised from hemoglobin_level in the default unit (g/dL).',
+      },
+      hemoglobin_level: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Hemoglobin level',
+      },
+    }, { hemoglobin_g_dl: 14.2, hemoglobin_level: 14.2 });
+
+    const { unmount } = render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+    expect(await screen.findByText(/Hemoglobin \(g\/dL\)/)).toBeVisible();
+    expect(screen.queryByText('(computed)')).not.toBeInTheDocument();
+    unmount();
+
+    render(<PatientFieldEditor store={store} name="bmi" />);
+    expect(await screen.findByText('(computed)')).toBeVisible();
+  });
+
   it('shows the recorded result date as the calendar day it names (#2684)', async () => {
     const { store } = await setup({
       hemoglobin_g_dl: {
