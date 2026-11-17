@@ -688,19 +688,19 @@ describe("CodeMappingPage", () => {
     expect(await screen.findByText("10000001", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
-  it("files Apple, Garmin and HL7-PHR rows under the one Wearables tab", async () => {
+  it("files Apple, Garmin, HL7-PHR and HealthConnect rows under the one Wearables tab", async () => {
     const wearable = (mapping_id: number, source_vocabulary_id: string, source_code: string) =>
       ({ ...proposedRow, mapping_id, source_vocabulary_id, source_code });
     renderPage([wearable(301, "Apple", "apple_steps"), wearable(302, "Garmin", "garmin_steps"),
-      wearable(303, "HL7-PHR", "phr_steps")]);
+      wearable(303, "HL7-PHR", "phr_steps"), wearable(304, "HealthConnect", "StepsRecord")]);
     const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
-    // One tab for the three vocabularies, and none of its own for HL7-PHR.
+    // One tab for the four vocabularies, and none of its own for HL7-PHR or HealthConnect.
     const wearables = await tabs.findByRole("tab", { name: /OpenWearables/ });
-    expect(tabs.queryByRole("tab", { name: /HL7-PHR/ })).not.toBeInTheDocument();
+    expect(tabs.queryByRole("tab", { name: /HL7-PHR|HealthConnect/ })).not.toBeInTheDocument();
     expect(tabs.queryByRole("tab", { name: /Apple|Garmin/ })).not.toBeInTheDocument();
     fireEvent.click(wearables);
     expect(wearables).toHaveAttribute("aria-selected", "true");
-    for (const code of ["apple_steps", "garmin_steps", "phr_steps"]) {
+    for (const code of ["apple_steps", "garmin_steps", "phr_steps", "StepsRecord"]) {
       expect(await screen.findByText(code, { selector: '[data-testid=source-code]' })).toBeInTheDocument();
     }
   });
@@ -3092,7 +3092,7 @@ describe("server mapping pages", () => {
           ...reference,
           wearable_metric_categories: ["Activity", "Heart & Cardiovascular", "Sleep"],
           wearable_measure_classes: ["Direct measurement", "Aggregate over interval"],
-          wearable_source_vocabularies: ["Apple", "Garmin", "HL7-PHR", "OpenWearables"],
+          wearable_source_vocabularies: ["Apple", "Garmin", "HL7-PHR", "HealthConnect", "OpenWearables"],
         } : {} });
       });
       render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);

@@ -44,7 +44,7 @@ const reference: Reference = {
   omop_tables: { Measurement: "measurement" },
   wearable_metric_categories: CATEGORIES,
   wearable_measure_classes: MEASURE_CLASSES,
-  wearable_source_vocabularies: ["Apple", "Garmin", "HL7-PHR", "OpenWearables"],
+  wearable_source_vocabularies: ["Apple", "Garmin", "HL7-PHR", "HealthConnect", "OpenWearables"],
 };
 
 const wearableRow: CodeMappingRow = {
@@ -220,7 +220,7 @@ describe("EditMappingDialog wearable metric fields", () => {
     }
   });
 
-  it.each(["Apple", "Garmin", "HL7-PHR"])("shows them for a %s row too", (vocabulary) => {
+  it.each(["Apple", "Garmin", "HL7-PHR", "HealthConnect"])("shows them for a %s row too", (vocabulary) => {
     const { source } = renderDialog({ ...wearableRow, source_vocabulary_id: vocabulary });
     expect(source.getByLabelText("Category")).toHaveValue("Heart & Cardiovascular");
     expect(source.getByLabelText("Measure Class")).toBeInTheDocument();

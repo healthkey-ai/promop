@@ -292,7 +292,7 @@ export const TIP = {
   category:
     "The kind of wearable metric this is -- Activity, Sleep, Nutrition and so on. It groups and sorts the Wearables tab.",
   metric_key:
-    "The vendor-neutral key of this metric, e.g. resting_hr: the same for the Apple, Garmin, OpenWearables and HL7 PHR codes that report it, which is what ties them together. Lowercase snake case.",
+    "The vendor-neutral key of this metric, e.g. resting_hr: the same for the Apple, Garmin, OpenWearables, HL7 PHR and Health Connect codes that report it, which is what ties them together. Lowercase snake case.",
   measure_class:
     "How the source produces the value: a direct sensor reading, an aggregate over an interval, an algorithmic estimate, a vendor's own score, environmental context, or something the user or device logged. It describes this source metric, not the destination concept: two sources of one concept can differ.",
   destination_concept_id:

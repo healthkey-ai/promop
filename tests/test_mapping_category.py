@@ -1,6 +1,7 @@
 """Category, Measure Class and Metric Key of a wearable code mapping: model,
 API, sort, rollup and copy. All three describe the source metric and follow one
 set of rules, so most tests run once per field."""
+import re
 from collections import defaultdict
 from types import SimpleNamespace
 
@@ -136,19 +137,27 @@ def test_metric_key_shape():
 # ── Seeds: every seeded code has a category, a measure class and a key ──
 
 def _seed_lists():
+    """Everything the three seeds write, one entry per source vocabulary."""
     from omop_core.management.commands import (
         seed_hl7_phr_mappings as hl7, seed_openwearables_mappings as ow,
         seed_wearable_device_mappings as device,
     )
+    phr = {vocabulary: lists for vocabulary, *lists in hl7.SEED_SETS}
+    apple_metrics, apple_categories, apple_classes, apple_keys = phr['Apple']
+    # Apple is seeded by two commands: the device seed's approved codes and the
+    # HealthKit identifiers of the HL7 PHR table. They share no code.
+    assert not set(device.APPLE_METRIC_KEYS) & set(apple_keys)
     return (
         ('OpenWearables', ow.OPENWEARABLES_METRICS, ow.OPENWEARABLES_CATEGORIES,
          ow.OPENWEARABLES_MEASURE_CLASSES, ow.OPENWEARABLES_METRIC_KEYS),
-        ('HL7-PHR', hl7.HL7_PHR_METRICS, hl7.HL7_PHR_CATEGORIES,
-         hl7.HL7_PHR_MEASURE_CLASSES, hl7.HL7_PHR_METRIC_KEYS),
-        ('Apple', device.APPLE_METRICS, device.APPLE_CATEGORIES,
-         device.APPLE_MEASURE_CLASSES, device.APPLE_METRIC_KEYS),
+        ('HL7-PHR', *phr['HL7-PHR']),
+        ('Apple', device.APPLE_METRICS + apple_metrics,
+         {**device.APPLE_CATEGORIES, **apple_categories},
+         {**device.APPLE_MEASURE_CLASSES, **apple_classes},
+         {**device.APPLE_METRIC_KEYS, **apple_keys}),
         ('Garmin', device.GARMIN_METRICS, device.GARMIN_CATEGORIES,
          device.GARMIN_MEASURE_CLASSES, device.GARMIN_METRIC_KEYS),
+        ('HealthConnect', *phr['HealthConnect']),
     )
 
 
@@ -185,19 +194,33 @@ def test_codes_for_one_metric_share_its_key_category_and_measure_class():
     # The key is what ties the vocabularies together.
     assert sources('steps') == {
         ('OpenWearables', 'steps'), ('Apple', 'HKQuantityTypeIdentifierStepCount'),
-        ('Garmin', 'steps')}
+        ('Garmin', 'steps'), ('HL7-PHR', 'stepCount'), ('HealthConnect', 'StepsRecord')}
     assert sources('resting_hr') == {
         ('OpenWearables', 'resting_heart_rate'),
-        ('Apple', 'HKQuantityTypeIdentifierRestingHeartRate'), ('Garmin', 'resting_hr')}
+        ('Apple', 'HKQuantityTypeIdentifierRestingHeartRate'), ('Garmin', 'resting_hr'),
+        ('HL7-PHR', 'restingHeartRate'), ('HealthConnect', 'RestingHeartRateRecord')}
     assert sources('body_mass') == {
-        ('OpenWearables', 'weight'), ('Apple', 'HKQuantityTypeIdentifierBodyMass')}
+        ('OpenWearables', 'weight'), ('Apple', 'HKQuantityTypeIdentifierBodyMass'),
+        ('HL7-PHR', 'bodyMass'), ('HealthConnect', 'WeightRecord')}
     assert sources('sleep_duration') == {
-        ('Apple', 'HKCategoryTypeIdentifierSleepAnalysis'), ('Garmin', 'sleep_duration')}
-    # A metric only OpenWearables carries is keyed by its own code.
-    assert sources('heart_rate') == {('OpenWearables', 'heart_rate')}
+        ('Apple', 'HKCategoryTypeIdentifierSleepAnalysis'), ('Garmin', 'sleep_duration'),
+        ('HL7-PHR', 'sleepAnalysis'), ('HealthConnect', 'SleepSessionRecord')}
+    # A metric the proposal gives no key takes its OpenWearables code as the key
+    # of every vocabulary's code for it.
+    assert sources('heart_rate') == {
+        ('OpenWearables', 'heart_rate'), ('Apple', 'HKQuantityTypeIdentifierHeartRate'),
+        ('HL7-PHR', 'heartRate'), ('HealthConnect', 'HeartRateRecord')}
+    assert sources('power') == {
+        ('OpenWearables', 'power'), ('HL7-PHR', 'power'), ('HealthConnect', 'PowerRecord')}
+    # HL7's one glucose code is blood glucose's; CGM glucose is OpenWearables' alone.
+    assert ('HL7-PHR', 'bloodGlucose') in sources('blood_glucose')
     assert sources('cgm_glucose') == {('OpenWearables', 'cgm_glucose')}
     assert sources('rr_interval') == {('HL7-PHR', 'rrInterval')}
-    assert sources('total_energy_burned') == {('HL7-PHR', 'totalEnergyBurned')}
+    assert sources('total_energy_burned') == {
+        ('HL7-PHR', 'totalEnergyBurned'), ('HealthConnect', 'TotalCaloriesBurnedRecord')}
+    # HL7's generic 'distance' is not the walking + running metric keyed 'distance'.
+    assert ('HL7-PHR', 'distance') in sources('distance_other')
+    assert ('HL7-PHR', 'distanceWalkingRunning') in sources('distance')
 
 
 def test_the_hl7_seed_runs_over_its_own_lists():
@@ -207,9 +230,84 @@ def test_the_hl7_seed_runs_over_its_own_lists():
     assert ow.Command.categories is ow.OPENWEARABLES_CATEGORIES
     assert ow.Command.measure_classes is ow.OPENWEARABLES_MEASURE_CLASSES
     assert ow.Command.metric_keys is ow.OPENWEARABLES_METRIC_KEYS
-    assert hl7.Command.categories is hl7.HL7_PHR_CATEGORIES
-    assert hl7.Command.measure_classes is hl7.HL7_PHR_MEASURE_CLASSES
-    assert hl7.Command.metric_keys is hl7.HL7_PHR_METRIC_KEYS
+    assert ow.Command.origin_system == 'open-wearables-seed'
+    assert not ow.Command.require_standard_target
+    # One provenance for the three vocabularies it seeds, none of them
+    # OpenWearables, and the first list of HL7 PHR codes unchanged within it.
+    assert hl7.Command.origin_system == 'HL7 PHR'
+    assert hl7.Command.require_standard_target
+    assert [vocabulary for vocabulary, *_lists in hl7.SEED_SETS] == [
+        'HL7-PHR', 'Apple', 'HealthConnect']
+    _vocabulary, metrics, categories, measure_classes, metric_keys = hl7.SEED_SETS[0]
+    assert metrics[:len(hl7.HL7_PHR_METRICS)] == hl7.HL7_PHR_METRICS
+    for first, seeded in ((hl7.HL7_PHR_CATEGORIES, categories),
+                          (hl7.HL7_PHR_MEASURE_CLASSES, measure_classes),
+                          (hl7.HL7_PHR_METRIC_KEYS, metric_keys)):
+        assert {code: seeded[code] for code in first} == first
+
+
+# The proposal's categories that are not wearable metrics, and the two keys
+# left out of its remaining categories.
+NOT_WEARABLE_METRICS = {
+    'Nutrition', 'Symptoms', 'Reproductive Health', 'Self-care', 'Mental Wellbeing', 'Hearing'}
+
+
+def test_the_phr_source_table_is_one_row_per_wearable_metric():
+    from omop_core.management.commands import (
+        seed_hl7_phr_mappings as hl7, seed_openwearables_mappings as ow,
+        seed_wearable_device_mappings as device,
+    )
+    from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+    rows = hl7.PHR_SOURCE_METRICS
+    keys = [row[0] for row in rows]
+    assert len(keys) == len(set(keys))
+    assert set(hl7.PHR_SOURCE_CATEGORIES) == set(hl7.PHR_SOURCE_MEASURE_CLASSES) == set(keys)
+    # Wearable metrics only.
+    assert not set(hl7.PHR_SOURCE_CATEGORIES.values()) & NOT_WEARABLE_METRICS
+    assert not {'food', 'medication_adherence'} & set(keys)
+    for column, shape in ((6, r'[a-z][A-Za-z0-9]*'), (7, r'HK[A-Za-z0-9]+'),
+                          (8, r'[A-Z][A-Za-z0-9]*Record')):
+        codes = [row[column] for row in rows if row[column]]
+        # One code names one metric, and is a single code value. Duplicate
+        # detection on the tab compares codes case-insensitively.
+        assert len(codes) == len({code.upper() for code in codes}), column
+        for code in codes:
+            assert re.fullmatch(shape, code), code
+    for key, display, unit, domain, target_vocab, target_code, *codes in rows:
+        assert clean_metric_key(key) == key
+        assert display and any(codes), key
+        assert domain in ('Measurement', 'Observation') and DOMAIN_TO_TABLE[domain], key
+        assert bool(target_vocab) == bool(target_code), key
+        # Standard UCUM only: a unit the seed cannot name in UCUM is not listed.
+        assert not unit or unit in ow.UCUM_BY_UNIT, key
+    # A code another list seeds belongs to the same metric there.
+    for key, *_described, hl7_code, healthkit, _health_connect in rows:
+        if hl7_code in hl7.HL7_PHR_METRIC_KEYS:
+            assert hl7.HL7_PHR_METRIC_KEYS[hl7_code] == key
+        if healthkit in device.APPLE_METRIC_KEYS:
+            assert device.APPLE_METRIC_KEYS[healthkit] == key
+    # All 17 of the device seed's HealthKit codes are in the table, and none of
+    # them is seeded by this command.
+    assert {row[7] for row in rows} >= set(device.APPLE_METRIC_KEYS)
+    assert len(device.APPLE_METRIC_KEYS) == 17
+    for vocabulary, metrics, *_maps in hl7.SEED_SETS:
+        seeded = [metric[0].upper() for metric in metrics]
+        if vocabulary == 'Apple':
+            seeded += [code.upper() for code in device.APPLE_METRIC_KEYS]
+        assert len(seeded) == len(set(seeded)), vocabulary
+    counts = {vocabulary: len(metrics) for vocabulary, metrics, *_maps in hl7.SEED_SETS}
+    assert counts == {'HL7-PHR': 122, 'Apple': 60, 'HealthConnect': 35}
+
+
+def test_a_metric_has_one_target_domain_and_unit_in_every_vocabulary():
+    """What the proposal says of a metric is said of each of its codes, so the
+    seeds agree wherever two of them carry the same metric key."""
+    from omop_core.management.commands import seed_hl7_phr_mappings as hl7
+    by_key = defaultdict(set)
+    for vocabulary, metrics, _categories, _classes, metric_keys in hl7.SEED_SETS:
+        for code, _display, unit, domain, target_vocab, target_code in metrics:
+            by_key[metric_keys[code]].add((unit, domain, target_vocab, target_code))
+    assert {key: found for key, found in by_key.items() if len(found) > 1} == {}
 
 
 def test_no_code_is_listed_under_two_values():
@@ -229,7 +327,8 @@ def test_no_code_is_listed_under_two_values():
                          for code in group]
                 assert len(codes) == len(set(codes)), module.__name__
                 checked += 1
-    assert checked == 8  # a category and a measure class list for each of four metric lists
+    # A category and a measure class list for each of five metric lists.
+    assert checked == 10
 
 
 # ── API: read ───────────────────────────────────────────────────────────
@@ -264,6 +363,7 @@ def test_reference_carries_the_allowed_lists_and_their_vocabularies(curator):
     assert data['wearable_measure_classes'] == list(WEARABLE_MEASURE_CLASSES)
     assert data['wearable_source_vocabularies'] == sorted(WEARABLE_SOURCE_VOCABULARIES)
     assert 'HL7-PHR' in data['wearable_source_vocabularies']
+    assert 'HealthConnect' in data['wearable_source_vocabularies']
 
 
 # ── API: write ──────────────────────────────────────────────────────────
