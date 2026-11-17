@@ -38,11 +38,23 @@ interface Props {
    *  "Your Value" cell is 200px wide, so an inline form there crowds out the
    *  comparison against the trial's threshold (#5903). */
   pairEditor?: 'inline' | 'dialog';
+  /** The host already draws the cell outline (EXACT's "Your Value" cell). A
+   *  bordered control inside it reads as two nested boxes; the embedded mount
+   *  keeps the control borderless so the cell is the only outline (#5904). */
+  embedded?: boolean;
 }
 
 /** A value/unit pair is one clinical fact, so the two controls share one height
  * and baseline (#2609). The select carried its own padding against the input's
  * fixed height; the spinners are removed so the number reads as text. */
+const EMBEDDED_CONTROL = [
+  // The host cell owns the outline; the control inside it must not draw one.
+  '[&_button[role=combobox]]:border-0 [&_button[role=combobox]]:bg-transparent',
+  '[&_button[role=combobox]]:px-0 [&_button[role=combobox]]:shadow-none',
+  '[&_input]:border-0 [&_input]:bg-transparent [&_input]:px-0 [&_input]:shadow-none',
+  '[&_select]:border-0 [&_select]:bg-transparent [&_select]:px-0 [&_select]:shadow-none',
+].join(' ');
+
 const ROW_CLASS = 'space-y-1 [&_input[type=number]]:[appearance:textfield] '
   + '[&_input[type=number]::-webkit-inner-spin-button]:appearance-none '
   + '[&_input[type=number]::-webkit-outer-spin-button]:appearance-none';
@@ -149,7 +161,7 @@ function dedicatedSurface(
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
-export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions, controlType, pairEditor = 'inline' }: Props) {
+export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions, controlType, pairEditor = 'inline', embedded = false }: Props) {
   const state = usePatientFormSnapshot(store);
   const renew = useContext(PatientFormRenewContext);
   const [open, setOpen] = useState(false);
@@ -636,7 +648,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
         </p>}
 </>;
-  return <div className={ROW_CLASS} data-field={canonical}>
+  return <div className={`${ROW_CLASS}${embedded ? ` ${EMBEDDED_CONTROL}` : ''}`}
+    data-field={canonical} data-promop-embedded={embedded ? '' : undefined}>
     {inputs.length && !inputsUnavailable && editPath ? <>
       {!compact && <div className="text-sm font-medium">{shownLabel}
         {showComputed && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}

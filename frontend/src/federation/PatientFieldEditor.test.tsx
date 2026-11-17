@@ -1775,3 +1775,24 @@ describe('pair rows edited in a dialog (#5903)', () => {
     expect(body?.platelet_count).toMatchObject({ value: 150, date: '2026-08-02' });
   });
 });
+
+describe('embedded mount (#5904)', () => {
+  it('marks the row so the host cell is the only outline', async () => {
+    const { store } = await setup({}, { height: 170 });
+    const { container } = render(<PatientFieldEditor store={store} name="height"
+      label="Height" embedded />);
+    const row = container.querySelector('[data-field="height"]');
+    expect(row).toHaveAttribute('data-promop-embedded');
+    // The control inside the cell draws no border of its own.
+    expect(row?.className).toContain('[&_button[role=combobox]]:border-0');
+    expect(row?.className).toContain('[&_input]:border-0');
+  });
+
+  it('leaves the standalone patient form bordered', async () => {
+    const { store } = await setup({}, { height: 170 });
+    const { container } = render(<PatientFieldEditor store={store} name="height" label="Height" />);
+    const row = container.querySelector('[data-field="height"]');
+    expect(row).not.toHaveAttribute('data-promop-embedded');
+    expect(row?.className).not.toContain('[&_input]:border-0');
+  });
+});

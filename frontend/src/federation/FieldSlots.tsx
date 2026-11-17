@@ -56,7 +56,10 @@ export default function FieldSlots({ runtime, opts, slots }: {
       /* A trial row's "Your Value" cell is 200px wide: a value/unit pair (and
          its result date) is edited in a dialog, and the row keeps the stored
          value for comparison (#5903). */
-      pairEditor="dialog" />,
+      pairEditor="dialog"
+      /* The host's "Your Value" cell owns the outline; the control must not
+         draw a second one inside it (#5904). */
+      embedded />,
     slot, `${index}:${generation}`,
   ))}</PatientFormRenewContext.Provider>;
 }
