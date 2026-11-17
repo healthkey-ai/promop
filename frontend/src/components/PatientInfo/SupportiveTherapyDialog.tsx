@@ -4,6 +4,7 @@ import { listTherapyRegimens, THERAPY_INTENT_CHOICES, DISCONTINUATION_REASON_CHO
 import { saveSupportiveTherapy, type SupportiveTherapyCourse } from '@/api/supportiveTherapies';
 import type { TherapyRegimen } from '@/types/therapy';
 import { today } from '@/api/clinicalFacts';
+import { intentLabel, valueLabel } from '@/api/therapyLabels';
 
 interface Props {
   personId: number;
@@ -68,14 +69,17 @@ export default function SupportiveTherapyDialog({ personId, diseaseCode, course,
           <div><label htmlFor="supportive-intent">Therapy intent</label>
             <select id="supportive-intent" className={inputClass} value={intent} onChange={(e) => setIntent(e.target.value)}>
               <option value="">Not recorded</option><option value="Supportive">Supportive</option>
-              {intent && intent !== 'Supportive' && !THERAPY_INTENT_CHOICES.some((o) => o.value === intent) && <option>{intent}</option>}
+              {intentLabel(intent) && intent !== 'Supportive'
+                && !THERAPY_INTENT_CHOICES.some((o) => o.value === intent)
+                && <option value={intent}>{intentLabel(intent)}</option>}
               {THERAPY_INTENT_CHOICES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
           <div><label htmlFor="supportive-reason">Reason for discontinuation</label>
             <select id="supportive-reason" className={inputClass} value={reason} onChange={(e) => setReason(e.target.value)}>
               <option value="">Not recorded</option>
-              {reason && !DISCONTINUATION_REASON_CHOICES.some((o) => o.value === reason) && <option>{reason}</option>}
+              {valueLabel(reason) && !DISCONTINUATION_REASON_CHOICES.some((o) => o.value === reason)
+                && <option value={reason}>{valueLabel(reason)}</option>}
               {DISCONTINUATION_REASON_CHOICES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>

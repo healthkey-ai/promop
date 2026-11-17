@@ -18,6 +18,7 @@ import type { EditableTherapyLine } from '@/api/therapyLines';
 import type { SupportiveTherapyCourse } from '@/api/supportiveTherapies';
 import { TAB_LAYOUT } from './tabLayout.generated';
 import type { TabLayoutSection } from './tabLayoutTypes';
+import { intentLabel, valueLabel } from '@/api/therapyLabels';
 import { displayUnitLabel } from '@/federation/unitPresentation';
 
 export type DiseaseType = 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
@@ -253,8 +254,8 @@ export function buildPatientReport(input: {
         table: {
           columns: ['Line', 'Regimen', 'Intent', 'Start', 'End', 'Outcome', 'Reason stopped'],
           rows: [...lines].sort((a, b) => a.line - b.line).map((l) => [
-            String(l.line), l.regimen || 'Unnamed regimen', l.intent || '', date(l.start_date),
-            l.end_date ? date(l.end_date) : 'Present', l.outcome || '', l.discontinuation_reason || '',
+            String(l.line), l.regimen || 'Unnamed regimen', intentLabel(l.intent) || '', date(l.start_date),
+            l.end_date ? date(l.end_date) : 'Present', valueLabel(l.outcome) || '', valueLabel(l.discontinuation_reason) || '',
           ]),
         },
       } : null,
@@ -264,8 +265,8 @@ export function buildPatientReport(input: {
         table: {
           columns: ['Therapy', 'Intent', 'Start', 'End', 'Reason stopped'],
           rows: courses.map((c) => [
-            c.regimen_title, c.intent || '', date(c.start_date), c.end_date ? date(c.end_date) : 'Present',
-            c.discontinuation_reason || '',
+            c.regimen_title, intentLabel(c.intent) || '', date(c.start_date), c.end_date ? date(c.end_date) : 'Present',
+            valueLabel(c.discontinuation_reason) || '',
           ]),
         },
       } : supportiveText ? { title: 'Supportive Therapy', fields: [{ label: 'Supportive Therapies', value: supportiveText }] } : null,

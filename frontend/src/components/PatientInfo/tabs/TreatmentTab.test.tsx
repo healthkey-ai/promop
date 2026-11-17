@@ -130,11 +130,49 @@ describe('TreatmentTab', () => {
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByText(/Line 1: VRd/)).toBeInTheDocument();
-    expect(screen.getByText('Curative')).toBeInTheDocument();
+    expect(screen.getByText(/Intent: Curative/)).toBeInTheDocument();
     expect(screen.getByText('Partial Response')).toBeInTheDocument();
     expect(screen.getByText(/Line 2: DRd/)).toBeInTheDocument();
-    expect(screen.getByText('Palliative')).toBeInTheDocument();
+    expect(screen.getByText(/Intent: Palliative/)).toBeInTheDocument();
     expect(screen.getByText(/Reason: Progressive Disease/)).toBeInTheDocument();
+  });
+
+  it('shows reviewed wording instead of stored therapy codes (#2613)', async () => {
+    renderTab({
+      ...THREE_LINES,
+      person_id: 262,
+      lines_of_therapy: [{
+        line: 1,
+        episode_id: 901,
+        regimen: 'Palbociclib+AI',
+        start_date: '2025-01-01',
+        end_date: null,
+        outcome: 'PARTIAL_RESPONSE',
+        intent: 'DEFINITIVE_LOCAL',
+        discontinuation_reason: null,
+        drugs: [],
+      }, {
+        line: 2,
+        episode_id: 902,
+        regimen: 'R-CHOP',
+        start_date: '2025-04-01',
+        end_date: null,
+        outcome: null,
+        intent: 'SOME_NEW_CODE',
+        discontinuation_reason: null,
+        drugs: [],
+      }],
+    });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText(/Line 1: Palbociclib\+AI/)).toBeInTheDocument();
+    expect(screen.getByText(/Intent: Definitive local/)).toBeInTheDocument();
+    expect(screen.getByText('Partial response')).toBeInTheDocument();
+    expect(screen.getByText(/Intent: Some new code/)).toBeInTheDocument();
+    // No database token reaches the reader, known or unknown.
+    expect(screen.queryByText(/DEFINITIVE_LOCAL/)).toBeNull();
+    expect(screen.queryByText(/PARTIAL_RESPONSE/)).toBeNull();
+    expect(screen.queryByText(/SOME_NEW_CODE/)).toBeNull();
   });
 
   it('renders read-only when the descriptor cannot be fetched', async () => {

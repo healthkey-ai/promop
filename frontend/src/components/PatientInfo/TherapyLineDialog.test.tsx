@@ -196,6 +196,23 @@ describe('TherapyLineDialog', () => {
     expect((body as { outcome: string }).outcome).toBe('Partial Response');
   });
 
+  it('keeps and names a stored intent the reviewed list does not carry (#2634 review)', async () => {
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={1}
+        line={{ episode_id: 98, line: 1, start_date: '2025-01-01',
+          intent: 'DEFINITIVE_LOCAL', drugs: [LENALIDOMIDE] }}
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+    const intent = await screen.findByLabelText(/^intent$/i) as HTMLSelectElement;
+    // The select must not show "not recorded" for a value the tab above shows.
+    expect(intent.value).toBe('DEFINITIVE_LOCAL');
+    expect(intent.selectedOptions[0].textContent).toBe('Definitive local');
+  });
+
   it('hands the re-derived record back and closes', async () => {
     open();
     await addDrug('lenalidomide');
