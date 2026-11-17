@@ -158,6 +158,97 @@ it("sends the current patient when saving a mapping", async () => {
   ));
 });
 
+describe("PatientSourceCodesTab and the mapping's destination unit", () => {
+  // A patient row says nothing about the mapping's unit; the mapping's own
+  // GET does. A save from here used to send "no unit" over a curated one.
+  const stored = { mapping_id: 78, notes: "", destination_options: [],
+    destination_unit_concept_id: 8582, destination_unit_code: "cm", destination_unit_name: "centimeter" };
+  const withMapping = (detail: () => Promise<unknown>, units: unknown[] = []) =>
+    vi.spyOn(api, "get").mockImplementation((url: string) => (
+      url === "/v1/code-mappings/78/" ? detail()
+        : Promise.resolve({ data: url.includes("unit-search") ? { results: units }
+          : url.includes("source-codes") ? sourceCodes : {} })) as never);
+  const lastPatch = () => vi.mocked(api.patch).mock.calls
+    .filter(([url]) => url === "/v1/code-mappings/78/").at(-1)![1] as Record<string, unknown>;
+  const save = async () => {
+    vi.mocked(api.patch).mockClear();
+    vi.mocked(api.patch).mockResolvedValueOnce({ data: { mapping_id: 78 } } as never);
+    fireEvent.submit(screen.getByRole("button", { name: "Update Mapping" }).closest("form")!);
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith("/v1/code-mappings/78/", expect.any(Object)));
+    return lastPatch();
+  };
+
+  it("shows the mapping's stored unit and sends it back with an untouched save", async () => {
+    const getSpy = withMapping(() => Promise.resolve({ data: stored }));
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Pulse"));
+      const unit = await screen.findByTestId("destination-unit-field");
+      await waitFor(() => expect(within(unit).getByText("cm")).toBeInTheDocument());
+      expect(within(unit).getByText("centimeter")).toBeInTheDocument();
+      expect(await save()).toHaveProperty("destination_unit_concept_id", 8582);
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("matches nothing from the source unit until the mapping's unit is known", async () => {
+    // The patient's unit has an exact UCUM match, which an empty picker takes.
+    const exact = [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match: "exact" }];
+    let answer: (value: unknown) => void = () => {};
+    const getSpy = withMapping(() => new Promise(resolve => { answer = resolve; }), exact);
+    const original = sourceCodes.source_codes[2].source_unit;
+    sourceCodes.source_codes[2].source_unit = "mg/dL";
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Pulse"));
+      expect(await screen.findByRole("textbox", { name: "Search UCUM units" })).toHaveValue("mg/dL");
+      // Past the picker's debounce: it has not searched, so it has not matched.
+      await new Promise(resolve => setTimeout(resolve, 450));
+      expect(getSpy.mock.calls.some(([url]) => String(url).includes("unit-search"))).toBe(false);
+      answer({ data: stored });
+      const unit = await screen.findByTestId("destination-unit-field");
+      await waitFor(() => expect(within(unit).getByText("cm")).toBeInTheDocument());
+      expect(await save()).toHaveProperty("destination_unit_concept_id", 8582);
+    } finally {
+      sourceCodes.source_codes[2].source_unit = original;
+      getSpy.mockRestore();
+    }
+  });
+
+  it("still matches the source unit once the mapping is known to have none", async () => {
+    const exact = [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match: "exact" }];
+    const getSpy = withMapping(() => Promise.resolve({ data: { ...stored, destination_unit_concept_id: null,
+      destination_unit_code: "", destination_unit_name: "" } }), exact);
+    const original = sourceCodes.source_codes[2].source_unit;
+    sourceCodes.source_codes[2].source_unit = "mg/dL";
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Pulse"));
+      const unit = await screen.findByTestId("destination-unit-field");
+      await waitFor(() => expect(within(unit).getByText("milligrams per deciliter")).toBeInTheDocument(), { timeout: 2000 });
+      expect(await save()).toHaveProperty("destination_unit_concept_id", 8840);
+    } finally {
+      sourceCodes.source_codes[2].source_unit = original;
+      getSpy.mockRestore();
+    }
+  });
+
+  it("leaves the unit out of a save when the mapping could not be read", async () => {
+    const getSpy = withMapping(() => Promise.reject(new Error("down")));
+    try {
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Pulse"));
+      await screen.findByText(/Could not load source evidence/);
+      const payload = await save();
+      expect(payload.destination_unit_concept_id).toBeUndefined();
+      expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty("destination_unit_concept_id");
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+});
+
 describe("PatientSourceCodesTab source context correction", () => {
   it("lets a curator compare FHIR metadata and save a source-unit correction separately", async () => {
     render(<PatientSourceCodesTab personId="48095" />);
@@ -244,5 +335,58 @@ describe("PatientSourceCodesTab mapping filed under another table (#2347)", () =
       "/v1/code-mappings/555/",
       expect.objectContaining({ patient_id: 48095, omop_table: "measurement", domain_id: "Measurement", rows_omop_table: "measurement" }),
     ));
+    // That mapping's unit is not this form's to clear: the key is not sent.
+    const body = vi.mocked(api.patch).mock.calls.find(([url]) => url === "/v1/code-mappings/555/")![1] as Record<string, unknown>;
+    expect(JSON.parse(JSON.stringify(body))).not.toHaveProperty("destination_unit_concept_id");
+  });
+
+  const conflict = () => ({ response: { data: {
+    source_code: ["'8716-3' is already mapped."],
+    existing_mapping: { id: "555", omop_table: "observation", domain_id: "Observation", status: "approved",
+      target_concept_id: "3004249", target_concept_name: "Blood pressure panel", requested_omop_table: "measurement" },
+  } } });
+  const movedBody = async () => {
+    fireEvent.click(within(await screen.findByRole("alert")).getByRole("button", { name: "Move it from Observation to Measurement" }));
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith("/v1/code-mappings/555/", expect.any(Object)));
+    const body = vi.mocked(api.patch).mock.calls.filter(([url]) => url === "/v1/code-mappings/555/").at(-1)![1];
+    return JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+  };
+  const unitSearch = (match: "exact" | "close") => vi.spyOn(api, "get").mockImplementation((url: string) => Promise.resolve({
+    data: url.includes("unit-search")
+      ? { results: [{ concept_id: 8840, concept_code: "mg/dL", concept_name: "milligrams per deciliter", match }] }
+      : url.includes("source-codes") ? sourceCodes : {},
+  }) as never);
+
+  it("does not put a unit matched from the patient's source unit on the mapping it moves", async () => {
+    const getSpy = unitSearch("exact");
+    try {
+      vi.mocked(api.patch).mockClear();
+      vi.mocked(api.post).mockRejectedValueOnce(conflict());
+      vi.mocked(api.patch).mockResolvedValueOnce({ data: { mapping_id: 555 } } as never);
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Blood Pressure"));
+      // The empty picker takes the exact match for the patient's mg/dL.
+      await waitFor(() => expect(screen.queryByRole("textbox", { name: "Search UCUM units" })).not.toBeInTheDocument());
+      fireEvent.submit(screen.getByRole("button", { name: "Save Mapping" }).closest("form")!);
+      expect(await movedBody()).not.toHaveProperty("destination_unit_concept_id");
+    } finally {
+      getSpy.mockRestore();
+    }
+  });
+
+  it("moves a unit the curator chose here along with the mapping", async () => {
+    const getSpy = unitSearch("close");
+    try {
+      vi.mocked(api.patch).mockClear();
+      vi.mocked(api.post).mockRejectedValueOnce(conflict());
+      vi.mocked(api.patch).mockResolvedValueOnce({ data: { mapping_id: 555 } } as never);
+      render(<PatientSourceCodesTab personId="48095" />);
+      fireEvent.click(await screen.findByText("Blood Pressure"));
+      fireEvent.click(await screen.findByText("milligrams per deciliter"));
+      fireEvent.submit(screen.getByRole("button", { name: "Save Mapping" }).closest("form")!);
+      expect(await movedBody()).toHaveProperty("destination_unit_concept_id", 8840);
+    } finally {
+      getSpy.mockRestore();
+    }
   });
 });

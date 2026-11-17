@@ -685,3 +685,46 @@ def test_expanding_a_group_costs_no_query_per_member_unit(api):
     with CaptureQueriesContext(connection) as large:
         assert len(members(label='albumin', section='Proposed', queue_sections='1').data['results']) == 16
     assert len(large) == len(small)
+
+
+def test_a_grouped_page_reads_its_units_once_whatever_the_number_of_groups(concept_pair):
+    """The section-wide aggregate carries only the unit's id. Its code and name
+    are read for the page's own groups, in one query, so the grouped query
+    does not join concept a second time across rows the page never shows."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    one, _ = concept_pair
+    qs = SourceCodeConceptMapping.objects.all()
+    row('A0', 'Label 0', seen=1, target_concept=one, destination_unit_concept=_ucum('u0', 'unit 0'))
+    with CaptureQueriesContext(connection) as small:
+        assert [e['destination_unit_code'] for e in group_entries(qs, 1, 100)] == ['u0']
+    for i in range(1, 12):
+        row(f'A{i}', f'Label {i}', seen=1, target_concept=one, destination_unit_concept=_ucum(f'u{i}', f'unit {i}'))
+    with CaptureQueriesContext(connection) as large:
+        found = group_entries(qs, 1, 100)
+    assert sorted(e['destination_unit_code'] for e in found) == sorted(f'u{i}' for i in range(12))
+    assert len(large) == len(small) == 2
+    aggregate = large[0]['sql']
+    assert aggregate.count('JOIN "concept"') == 1, aggregate   # the destination's, not the unit's
+
+    # Only the page's groups are looked up: a page of one reads one unit.
+    with CaptureQueriesContext(connection) as paged:
+        assert len(group_entries(qs, 1, 1)) == 1
+    assert len(paged) == 2
+    assert paged[1]['sql'].count(',') < large[1]['sql'].count(',')
+
+    # And a page with no unanimous unit asks nothing more.
+    SourceCodeConceptMapping.objects.update(destination_unit_concept=None)
+    with CaptureQueriesContext(connection) as none:
+        assert {e['destination_unit_code'] for e in group_entries(qs, 1, 100)} == {''}
+    assert len(none) == 1
+
+
+def test_a_group_whose_unit_concept_is_not_loaded_names_no_unit(concept_pair):
+    one, _ = concept_pair
+    mapping = row('A', 'Albumin', seen=1, target_concept=one)
+    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(destination_unit_concept_id=987654321)
+    found, _ = entries()
+    assert found[0]['destination_unit_code'] == ''
+    assert found[0]['destination_unit_name'] == ''
+    assert found[0]['mixed_destination_units'] is False

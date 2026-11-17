@@ -1270,8 +1270,9 @@ export default function CodeMappingPage() {
                 </>
               ) : <span className="text-xs text-slate-500">—</span>}
               <AxisVariantList variants={row.axis_variants} canApprove={false} />
+              {/* The suggested unit is the Dest. unit column's to show. */}
               {(row.measurement_type || row.suggested_unit) && (
-                <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
+                <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} example_units={row.example_units} />
               )}
               {canWrite && section !== "Approved" && row.mapping_id && <button type="button"
                 aria-label={`Choose destination for ${row.source_code}`}
@@ -1316,7 +1317,9 @@ export default function CodeMappingPage() {
       </Fragment>
     );
     return (
-    <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
+    // Scrolls sideways instead of clipping the last column where the page is
+    // narrower than the table's columns; at ordinary widths nothing changes.
+    <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
@@ -1328,7 +1331,7 @@ export default function CodeMappingPage() {
             <th className="px-4 py-3 font-semibold">Qty</th>
             <th className="px-4 py-3 font-semibold">Units</th>
             {header("Destination", "destination_concept_name")}
-            <th className="whitespace-nowrap px-4 py-3 font-semibold" aria-label="Destination unit">Dest. unit</th>
+            <th className="whitespace-nowrap px-4 py-3 font-semibold" aria-label="Destination unit"><abbr title="Destination unit">Dest. unit</abbr></th>
             <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
           </tr>
         </thead>
