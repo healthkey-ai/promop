@@ -66,10 +66,28 @@ type Run = {
 /** How many concepts a page may show: more per page lets a curator drag a
  * concept from what would be a later page into the priority order. */
 const PAGE_SIZES = [50, 100, 250, 500];
+/** Not an OMOP domain: the concepts a wearable source code is mapped to, so the
+ * HealthKit, Health Connect, OpenWearables, Garmin and HL7 PHR codes of one
+ * metric can be reviewed against the one concept they should share (#2656). */
+const WEARABLES_DOMAIN = 'wearables';
 const domains = [
-  ['', 'All domains'], ['measurement', 'Measurement'], ['observation', 'Observation'],
+  ['', 'All domains'], [WEARABLES_DOMAIN, 'Wearables'], ['measurement', 'Measurement'], ['observation', 'Observation'],
   ['condition', 'Condition'], ['drug_exposure', 'Drug'], ['procedure', 'Procedure'],
 ];
+/** The chosen domain is saved per account in this browser, as the patient
+ * list's filters are, and restored the next time the tab opens (#2656). */
+const domainPreferenceKey = (userId?: number | string | null) => `promop-concept-to-code:${userId ?? 'session'}`;
+function loadDomain(key: string): string {
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || '{}');
+    return domains.some(([value]) => value === saved?.domain) ? saved.domain : '';
+  } catch {
+    return '';
+  }
+}
+function saveDomain(key: string, domain: string) {
+  try { localStorage.setItem(key, JSON.stringify({ domain })); } catch { /* Storage may be disabled. */ }
+}
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
 const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
 const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
@@ -101,7 +119,7 @@ type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
 
-export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange, initialConceptId, onInitialConceptHandled }: {
+export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange, initialConceptId, onInitialConceptHandled, userId }: {
   canApprove: boolean;
   /** A doctor reads the tab (#2416): no priority, Done, Lock, notes or mapping. */
   canWrite: boolean;
@@ -110,9 +128,19 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   initialConceptId?: number;
   /** Called once the linked concept is opened or reported, so it is not reopened. */
   onInitialConceptHandled?: () => void;
+  /** Whose domain choice to restore and save. */
+  userId?: number | string | null;
 }) {
   const [diseases, setDiseases] = useState<[string, string][]>([['', 'All diseases']]);
-  const [domain, setDomain] = useState('');
+  const preferenceKey = domainPreferenceKey(userId);
+  const [domain, setDomain] = useState(() => loadDomain(preferenceKey));
+  // The account can arrive after the first render: read its own choice then,
+  // rather than keep (and later save over it) the one read before it was known.
+  const [loadedKey, setLoadedKey] = useState(preferenceKey);
+  if (loadedKey !== preferenceKey) {
+    setLoadedKey(preferenceKey);
+    setDomain(loadDomain(preferenceKey));
+  }
   const [disease, setDisease] = useState('');
   const [scope, setScope] = useState('fields');
   const [search, setSearch] = useState('');
@@ -278,12 +306,15 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
     <div className="flex flex-wrap gap-3">
       <input className={`${input} min-w-64 flex-1`} aria-label="Search standard concepts" placeholder="Concept name, code, OMOP ID or patient field"
         value={search} disabled={writing} onChange={event => { setSearch(event.target.value); setPage(1); }} />
-      <select aria-label="Concept scope" className={input} disabled={writing} value={scope}
+      {/* Wearables is its own scope: the server lists every concept a wearable
+          code maps to, patient field or not, so this choice does not apply. */}
+      <select aria-label="Concept scope" className={input} disabled={writing || domain === WEARABLES_DOMAIN} value={scope}
+        title={domain === WEARABLES_DOMAIN ? 'Wearables lists every concept a wearable code is mapped to' : undefined}
         onChange={event => { setScope(event.target.value); setPage(1); }}>
         <option value="fields">Patient field concepts</option><option value="all">All standard concepts</option>
       </select>
       <select aria-label="Concept domain" className={input} disabled={writing} value={domain}
-        onChange={event => { setDomain(event.target.value); setPage(1); }}>
+        onChange={event => { setDomain(event.target.value); saveDomain(preferenceKey, event.target.value); setPage(1); }}>
         {domains.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
       <select aria-label="Disease category" className={input} disabled={writing} value={disease}

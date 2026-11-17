@@ -1472,6 +1472,22 @@ returns it, the icon is filled when one exists and shows it on hover. A note
 is commentary, not a mapping write, so another curator's lock does not refuse
 it. Reference data: it travels with `copy_reference_data`, author cleared.
 
+The tab's domain list has one entry that is not an OMOP domain: **Wearables**
+(`domain=wearables`, `concept_to_code.WEARABLES_DOMAIN`, #2656). It lists the
+standard concepts that a source code in `WEARABLE_SOURCE_VOCABULARIES` is
+mapped to by a proposed or approved mapping, so the HealthKit, Health Connect,
+OpenWearables, Garmin and HL7 PHR codes of one metric can be reviewed against
+the one concept they should share. It is its own scope: the "Patient field
+concepts" choice is set aside (few wearable concepts back a field), while a
+disease, the search and "ranked only" still narrow it. A wearable code with no
+destination has no concept to appear under, and the local, non-standard
+`HK-Wearable` concepts are not listed, as on every other domain. The domain a
+curator chooses, Wearables or any other, is saved per account in the browser
+(`promop-concept-to-code:<user id>`, as the patient list's filters are) and
+restored when the tab next opens. The page mounts the tab only once
+`useAuth()` has loaded the account, so the first list request already carries
+the saved domain and no choice is filed under no account.
+
 ### The six LOINC axes decide which candidates are the same test
 
 A LOINC code is defined by component, property, time aspect, system, scale and

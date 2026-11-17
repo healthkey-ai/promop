@@ -127,6 +127,74 @@ def test_disease_filter_forces_fields_scope(client):
     assert concept.pk not in mm_ids
 
 
+def test_wearables_domain_lists_only_concepts_wearable_codes_map_to(client, concept):
+    """Wearables is not an OMOP domain: it is the concepts wearable codes reach (#2656)."""
+    from omop_core.services.source_vocabularies import WEARABLE_SOURCE_VOCABULARIES
+    steps = ConceptFactory(concept_name='Steps')
+    by_vocabulary = {
+        vocabulary: ConceptFactory(concept_name=f'Metric from {vocabulary}')
+        for vocabulary in sorted(WEARABLE_SOURCE_VOCABULARIES)
+    }
+    rejected_only = ConceptFactory(concept_name='Rejected for wearables')
+    hospital = ConceptFactory(concept_name='Hospital only')
+    nonstandard = ConceptFactory(concept_name='Local wearable concept', standard_concept=None)
+    # Two sources of one metric converge on one concept: it is listed once.
+    source('steps', source_vocabulary_id='OpenWearables', target_concept=steps)
+    source('HKQuantityTypeIdentifierStepCount', source_vocabulary_id='Apple', target_concept=steps, status='approved')
+    for vocabulary, target in by_vocabulary.items():
+        source(f'code-{vocabulary}', source_vocabulary_id=vocabulary, target_concept=target)
+    source('resting_hr', source_vocabulary_id='Garmin', target_concept=rejected_only, status='rejected')
+    source('EPIC-1', source_vocabulary_id='EPIC', target_concept=hospital)
+    source('basal_energy', source_vocabulary_id='OpenWearables', target_concept=nonstandard)
+    source('unmapped', source_vocabulary_id='OpenWearables')
+
+    expected = {steps.pk, *(target.pk for target in by_vocabulary.values())}
+    # The default scope is patient-field concepts, and none of these backs a
+    # field: Wearables ignores the scope, whichever is sent.
+    for params in ({'domain': 'wearables'}, {'domain': 'wearables', 'scope': 'all'},
+                   {'domain': 'wearables', 'scope': 'fields'}):
+        response = client.get(BASE, params)
+        assert response.status_code == 200
+        assert {item['concept_id'] for item in response.data['results']} == expected
+        assert response.data['total'] == len(expected)
+    listed = {item['concept_id']: item for item in client.get(BASE, {'domain': 'wearables'}).data['results']}
+    assert listed[steps.pk]['sccm_counts'] == {'approved': 1, 'proposed': 1, 'rejected': 0}
+    # Search still narrows inside it.
+    assert [item['concept_id'] for item in client.get(
+        BASE, {'domain': 'wearables', 'search': 'Steps'}).data['results']] == [steps.pk]
+    # A patient-field concept with no wearable mapping is not a wearable concept.
+    assert concept.pk not in expected
+    # The other domains are unchanged, and an unknown one is still refused.
+    assert {item['concept_id'] for item in client.get(BASE, {'domain': 'measurement'}).data['results']} == {concept.pk}
+    assert client.get(BASE, {'domain': 'wearable'}).status_code == 400
+
+
+def test_wearables_domain_keeps_the_ranked_only_filter(client):
+    from omop_core.models import ConceptMappingPriority
+    ranked = ConceptFactory(concept_name='Ranked wearable')
+    unranked = ConceptFactory(concept_name='Unranked wearable')
+    for index, target in enumerate((ranked, unranked)):
+        source(f'metric-{index}', source_vocabulary_id='OpenWearables', target_concept=target)
+    ConceptMappingPriority.objects.create(concept=ranked, position=1)
+    response = client.get(BASE, {'domain': 'wearables', 'prioritized': '1'})
+    assert [item['concept_id'] for item in response.data['results']] == [ranked.pk]
+
+
+@pytest.mark.usefixtures('disease_extensions')
+def test_wearables_domain_is_narrowed_by_a_disease(client):
+    """A disease narrows Wearables as it narrows every other domain."""
+    in_disease = ConceptFactory(concept_name='M-protein')
+    elsewhere = ConceptFactory(concept_name='Steps')
+    FieldConceptMapping.objects.create(
+        concept=in_disease, field_name='monoclonal_protein_serum', omop_table='measurement')
+    for index, target in enumerate((in_disease, elsewhere)):
+        source(f'metric-{index}', source_vocabulary_id='OpenWearables', target_concept=target)
+    assert {item['concept_id'] for item in client.get(
+        BASE, {'domain': 'wearables'}).data['results']} == {in_disease.pk, elsewhere.pk}
+    assert [item['concept_id'] for item in client.get(
+        BASE, {'domain': 'wearables', 'disease': 'MM'}).data['results']] == [in_disease.pk]
+
+
 def test_list_and_detail_paginate_before_serialization(client, concept):
     for index in range(52):
         source(f'C{index:02}', target_concept=concept, occurrence_count=index)
