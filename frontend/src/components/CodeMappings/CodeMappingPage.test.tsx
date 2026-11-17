@@ -155,6 +155,7 @@ type TestMappingRow = Omit<typeof proposedRow, "status"> & {
   source_retirement_evidence?: string[];
   source_evidence?: Record<string, unknown>;
   source_system_context?: SourceSystemContext;
+  suggestion_confidence?: number | null;
 };
 
 /** A /suggest-runs/<id>/ payload, defaulted to a finished run. */
@@ -790,6 +791,100 @@ describe("CodeMappingPage", () => {
       await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ decision_surface: "code2concept" })));
       const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
       expect(payload).not.toHaveProperty("decision_confidence");
+    });
+
+    describe("confidence and Calc (#2668)", () => {
+      const open = async (rows: TestMappingRow[]) => {
+        renderPage(rows);
+        const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+        fireEvent.click(cell.closest("tr")!);
+        return within(await screen.findByRole("dialog"));
+      };
+      const calcRun = (scored: Record<string, unknown>) => ({
+        data: suggestRun({ state: "success", activity: [{ stage: "result", suggested: null, scored }] }),
+      });
+
+      it("shows the stored confidence as a bare percent beside the status, and sends it back on save", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.82 }]);
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^82$/);
+        expect(dialog.getByTestId("mapping-confidence")).toHaveAttribute("aria-label", "Confidence");
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/",
+          expect.objectContaining({ suggestion_confidence: 0.82 })));
+      });
+
+      it("computes it with Calc for the destination chosen, and saves it", async () => {
+        const dialog = await open([proposedRow]);
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+        mockPost.mockResolvedValue(calcRun({ concept_id: proposedRow.destination_concept_id, confidence: 0.64, ranked: true, note: "" }));
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        await waitFor(() => expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^64$/));
+        expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/score/", expect.objectContaining({
+          async: true, destination_concept_id: proposedRow.destination_concept_id, mapping_id: 7,
+        }));
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/",
+          expect.objectContaining({ suggestion_confidence: 0.64, decision_confidence: 0.64 })));
+      });
+
+      it("says why when the ranker gives no number, and leaves the confidence empty", async () => {
+        const dialog = await open([proposedRow]);
+        mockPost.mockResolvedValue(calcRun({ concept_id: 1, confidence: null, ranked: false, note: "The ranking model is unavailable." }));
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        expect(await dialog.findByTestId("calc-note")).toHaveTextContent("The ranking model is unavailable.");
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+      });
+
+      it("recomputes over a stored number", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.5 }]);
+        mockPost.mockResolvedValue(calcRun({ concept_id: proposedRow.destination_concept_id, confidence: 0.9, ranked: true, note: "" }));
+
+        fireEvent.click(dialog.getByRole("button", { name: "Calc" }));
+
+        await waitFor(() => expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^90$/));
+      });
+
+      it("disables Calc, with a reason, until there is a destination", async () => {
+        const dialog = await open([{ ...proposedRow, destination_concept_id: 0, destination_concept_name: "" }]);
+        const calc = dialog.getByRole("button", { name: "Calc" });
+        expect(calc).toBeDisabled();
+        expect(calc).toHaveAttribute("title", expect.stringMatching(/Choose a destination/));
+      });
+
+      it("clears the number when the destination changes, and never sends a stale one", async () => {
+        const dialog = await open([{ ...proposedRow, suggestion_confidence: 0.82 }]);
+        fireEvent.change(dialog.getByLabelText("Destination Concept ID"), { target: { value: "555" } });
+
+        expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent("");
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/",
+          expect.objectContaining({ suggestion_confidence: null })));
+      });
+
+      it("takes the score a Suggest run gave the winner", async () => {
+        const dialog = await open([proposedRow]);
+        mockPost.mockResolvedValue({ data: suggestRun({ state: "success", activity: [{
+          stage: "result", suggested: loincHit, candidates: [loincHit],
+          alternatives: [{ concept_id: loincHit.concept_id, confidence: 0.9 }],
+        }] }) });
+
+        fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+
+        await waitFor(() => expect(dialog.getByTestId("mapping-confidence")).toHaveTextContent(/^90$/));
+      });
+
+      it("leaves the stored confidence alone for a row that did not carry one", async () => {
+        // The Concept to Code tab's rows say nothing about it: a save must not clear it.
+        const dialog = await open([proposedRow]);
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+        const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+        expect(payload.suggestion_confidence).toBeUndefined();
+      });
     });
 
     it("sends the note only when the curator changed it, against the stored one (#2423)", async () => {

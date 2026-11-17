@@ -12945,6 +12945,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'suggest_strategy': mapping.suggest_strategy if mapping else '',
             'decision_surface': mapping.decision_surface if mapping else '',
             'decision_confidence': mapping.decision_confidence if mapping else None,
+            'suggestion_confidence': mapping.suggestion_confidence if mapping else None,
             'umls_cui': mapping.umls_cui if mapping else '',
             'created_by': _mapping_author(mapping),
             # Who signed it off, which survives every later edit -- unlike
@@ -13033,6 +13034,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         'suggest_strategy': mapping.suggest_strategy if mapping else '',
         'decision_surface': mapping.decision_surface if mapping else '',
         'decision_confidence': mapping.decision_confidence if mapping else None,
+        'suggestion_confidence': mapping.suggestion_confidence if mapping else None,
         'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
         # Who signed it off, which survives every later edit -- unlike
@@ -13273,6 +13275,29 @@ def _decision_confidence(data, mapping, concept, previous_concept_id):
             })
         return confidence
     return mapping.suggestion_confidence if destination_stands else None
+
+
+def _saved_confidence(data):
+    """The confidence the dialog sends to keep on the mapping (``suggestion_confidence``).
+
+    0-1, ``None`` to clear. Unlike ``decision_confidence`` (the ranker's belief
+    when the curator saved, for the accuracy analytics) this is the number the
+    mapping carries: it stays when the mapping is approved and is what
+    provisional data reads. Raises a 400 for anything else.
+    """
+    raw = data.get('suggestion_confidence')
+    if raw in (None, ''):
+        return None
+    try:
+        # float(True) is 1.0: a boolean is not a score.
+        value = None if isinstance(raw, bool) else float(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not 0.0 <= value <= 1.0:
+        raise serializers.ValidationError({
+            'suggestion_confidence': 'Confidence must be a number between 0 and 1.',
+        })
+    return value
 
 
 def _table_label(omop_table):
@@ -13648,6 +13673,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     # The ranker's confidence was in the destination it chose, not this one.
     if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
         values['suggestion_confidence'] = None
+    # The dialog shows the mapping's confidence and sends what it shows (a
+    # Suggest run's score, or a Calc): that is the number to keep, whether the
+    # destination moved or not. Left out, the rules above stand.
+    if 'suggestion_confidence' in data:
+        values['suggestion_confidence'] = _saved_confidence(data)
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
@@ -14895,6 +14925,36 @@ def code_mapping_suggest_run(request, run_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest_one(request):
+    return _suggest_one(request)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_score(request):
+    """Score a chosen destination for a source: the dialog's Calc (#2668).
+
+    Takes suggest-one's body plus ``destination_concept_id`` and runs the same
+    retrieval and ranking with that concept guaranteed in the pool. The result
+    event carries ``scored``: ``{confidence, ranked, note}``, with ``confidence``
+    ``null`` (never a guess) when no ranker scored it. Writes nothing: the
+    curator's save stores the number.
+    """
+    if not _can_manage_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    raw = request.data.get('destination_concept_id')
+    try:
+        destination_id = None if isinstance(raw, bool) else int(raw)
+    except (TypeError, ValueError):
+        destination_id = None
+    if not destination_id or destination_id < 0:
+        return Response({'destination_concept_id': 'Choose a destination concept to score.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    if not Concept.objects.filter(concept_id=destination_id).exists():
+        return Response({'destination_concept_id': 'Concept not found.'}, status=status.HTTP_400_BAD_REQUEST)
+    return _suggest_one(request, score_concept_id=destination_id)
+
+
+def _suggest_one(request, score_concept_id=None):
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     source_code = str(request.data.get('source_code') or '').strip()
@@ -15015,6 +15075,7 @@ def code_mapping_suggest_one(request):
         'strategies': strategies,
         'lexical_limit': lexical_limit,
         'ranking_model': ranking_model,
+        **({'score_concept_id': score_concept_id} if score_concept_id is not None else {}),
     }
     if request.data.get('async') is True:
         from omop_core.services.suggest_jobs import get_dispatcher
@@ -15024,7 +15085,9 @@ def code_mapping_suggest_one(request):
             created_by=request.user,
             selection={
                 'mode': 'individual', 'dry_run': True, 'limit': 1,
-                'order': 'The source code currently open in the mapping dialog.',
+                'order': ('The destination currently chosen in the mapping dialog, scored.'
+                          if score_concept_id is not None
+                          else 'The source code currently open in the mapping dialog.'),
                 'strategies': strategies, 'source_vocabulary_id': params['source_vocabulary_id'],
             },
         )

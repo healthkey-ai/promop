@@ -1342,6 +1342,36 @@ moves a destination outside the writer (a code-mapping upload, Athena
 destination recovery) clears both, as it clears `suggestion_confidence`. Both
 travel with `copy_reference_data`.
 
+### A mapping's confidence: stored, kept, recomputed (#2668)
+
+`SourceCodeConceptMapping.suggestion_confidence` (0-1) is the number a mapping
+carries, and what provisional data reads (`code_resolution`: a proposal with a
+destination and a confidence at or above `PROVISIONAL_CONFIDENCE_FLOOR`). Only
+Code to Concept and Concept to Code propose concepts (the ETL does not), so
+those are the writers: Suggest and its group/reverse runs store the ranker's
+score, a Concept to Code proposal stores its preview's, and the Edit Mapping
+dialog sends the number it shows as `suggestion_confidence` (a Suggest run's
+score for the winner or a chosen candidate, or a Calc). **Approval keeps it**;
+it is cleared only when a destination moves without the dialog saying otherwise
+(it described the machine's pick), or a file upload re-points the code. A
+Concept to Code *apply* that moves a proposal's destination stores none: Calc
+in the dialog computes it. `_saved_confidence` validates it (0-1, `null`
+clears); a caller that omits the key leaves the rules above in force, and the
+dialog omits it for a row that did not carry the field. It is separate from
+`decision_confidence`, the ranker's belief at the moment of a curator save
+(#2382), which a Calc for the destination saved also sets.
+
+**Calc** is the dialog's button beside the number: `POST /api/v1/code-mappings/score/`
+takes suggest-one's body plus `destination_concept_id`, runs the same retrieval
+and ranking (queued and polled like suggest-one, as an `individual` run so the
+page's "latest run" never shows it) with that concept guaranteed in the pool
+before enrichment and the axis rules, one ranking with no expansion retry, and
+returns `scored: {confidence, ranked, note}` in the result event. The number is
+the rankers' score for that concept (the higher of both). It is `null`, with a
+note, when the concept conflicts with the source's evidence, the ranking model
+is unavailable (the retrieval-order stand-in is never scored), the rankers
+declined, or they preferred another concept. It writes nothing; Save stores it.
+
 ### Which notes are a curator's
 
 `SourceCodeConceptMapping.notes` is one column that Suggest (its rationale),

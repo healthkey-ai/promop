@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { buildEditForm, emptyReference, rankedConfidence, type CodeMappingRow } from "./codeMappingTypes";
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildEditForm, confidencePercent, emptyReference, pollSuggestRun, rankedConfidence,
+  type CodeMappingRow, type SuggestRunProgress,
+} from "./codeMappingTypes";
 
 const row = (destination: number | null) => ({
   mapping_id: 1, domain_id: "Measurement", source_vocabulary_id: "LOINC", source_code: "9279-1",
@@ -17,6 +20,48 @@ describe("buildEditForm destination", () => {
 
   it("keeps a real destination", () => {
     expect(buildEditForm(row(3024171), emptyReference).destination_concept_id).toBe("3024171");
+  });
+});
+
+describe("the form's confidence (#2668)", () => {
+  it("carries the stored one for a destination, and none for a row with no destination", () => {
+    expect(buildEditForm({ ...row(3024171), suggestion_confidence: 0.82 }, emptyReference).suggestion_confidence).toBe(0.82);
+    expect(buildEditForm({ ...row(null), suggestion_confidence: 0.82 }, emptyReference).suggestion_confidence).toBeNull();
+  });
+
+  it("is left undefined, not cleared, when the row did not say", () => {
+    expect(buildEditForm(row(3024171), emptyReference).suggestion_confidence).toBeUndefined();
+  });
+
+  it("is shown as a whole percent, or nothing", () => {
+    expect(confidencePercent(0.824)).toBe("82");
+    expect(confidencePercent(1)).toBe("100");
+    expect(confidencePercent(0)).toBe("0");
+    expect(confidencePercent(null)).toBe("");
+    expect(confidencePercent(undefined)).toBe("");
+  });
+});
+
+describe("pollSuggestRun", () => {
+  const run = (state: "queued" | "running" | "success" | "failure") => ({ run_id: "r", state }) as SuggestRunProgress;
+
+  it("returns a run that is already finished without polling", async () => {
+    const poll = vi.fn();
+    expect((await pollSuggestRun(run("success"), poll, () => true))?.state).toBe("success");
+    expect(poll).not.toHaveBeenCalled();
+  });
+
+  it("returns null once the caller has moved on", async () => {
+    expect(await pollSuggestRun(run("running"), vi.fn(), () => false)).toBeNull();
+  });
+
+  it("gives up after repeated poll failures", async () => {
+    vi.useFakeTimers();
+    const poll = vi.fn().mockRejectedValue(new Error("down"));
+    const settled = pollSuggestRun(run("running"), poll, () => true).catch((e) => e);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await settled).toBeInstanceOf(Error);
+    vi.useRealTimers();
   });
 });
 

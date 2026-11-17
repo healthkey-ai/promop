@@ -49,6 +49,8 @@ export interface CodeMappingRow {
   /** The surface of the last curator save and the ranker's confidence in its destination (#2382). */
   decision_surface?: MappingSurface | "";
   decision_confidence?: number | null;
+  /** The ranker's confidence (0-1) in the destination; stays when the mapping is approved (#2668). */
+  suggestion_confidence?: number | null;
   suggest_strategy: string;
   suggested_action?: string;
   umls_cui: string;
@@ -195,6 +197,9 @@ export interface MappingForm {
   destination_unit_concept_code: string;
   destination_unit_concept_name: string;
   unit_match_type: "exact" | "close" | "none" | "";
+  /** The confidence (0-1) the mapping carries. ``undefined`` means the row this form was
+   *  built from did not say, so a save leaves the stored value alone; ``null`` clears it. */
+  suggestion_confidence?: number | null;
 }
 
 // ── Constants ───────────────────────────────────────────────────────
@@ -383,7 +388,43 @@ export function buildEditForm(row: CodeMappingRow, reference: Reference): Mappin
     destination_unit_concept_code: row.destination_unit_code || "",
     destination_unit_concept_name: row.destination_unit_name || "",
     unit_match_type: "",
+    suggestion_confidence: row.destination_concept_id ? row.suggestion_confidence : null,
   };
+}
+
+/** A confidence (0-1) as the whole percent the dialog shows, or "" when there is none. */
+export function confidencePercent(confidence: number | null | undefined): string {
+  return typeof confidence === "number" && Number.isFinite(confidence)
+    ? String(Math.round(confidence * 100))
+    : "";
+}
+
+/**
+ * Follow a queued Suggest run to its end, as the dialog and the page both do.
+ * Returns the finished run, or null once ``shouldContinue`` says the caller moved on.
+ * Throws when the run does not finish in time or the polls keep failing.
+ */
+export async function pollSuggestRun(
+  started: SuggestRunProgress,
+  poll: (runId: string) => Promise<SuggestRunProgress>,
+  shouldContinue: () => boolean,
+): Promise<SuggestRunProgress | null> {
+  let current = started;
+  const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+  let failures = 0;
+  while (shouldContinue()) {
+    if (current.state !== "queued" && current.state !== "running") return current;
+    if (Date.now() > deadline) throw new Error("Suggestion timed out");
+    await new Promise((resolve) => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+    if (!shouldContinue()) return null;
+    try {
+      current = await poll(started.run_id);
+      failures = 0;
+    } catch (fetchError) {
+      if (++failures > SUGGEST_POLL_MAX_FAILURES) throw fetchError;
+    }
+  }
+  return null;
 }
 
 /** Progress of one queued Suggest run, as /suggest-runs/<id>/ reports it. */
