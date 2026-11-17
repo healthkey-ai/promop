@@ -72,6 +72,12 @@ def _grouped(queryset):
             destination_name=Max('target_concept__concept_name'),
             destination_code=Max('target_concept__concept_code'),
             destination_vocabulary=Max('target_concept__vocabulary_id'),
+            destination_domain=Max('target_concept__domain_id'),
+            # The curated unit follows the destination's rule: "no unit"
+            # against "this unit" is a disagreement, so NULL folds onto 0.
+            destination_units=Count(Coalesce('destination_unit_concept_id', Value(0)), distinct=True),
+            destination_unit_code=Max('destination_unit_concept__concept_code'),
+            destination_unit_name=Max('destination_unit_concept__concept_name'),
             statuses=Count('status', distinct=True),
             # Not named `status`: an annotation shadows the column of the same
             # name, so Q(status='proposed') below would resolve against
@@ -116,6 +122,11 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
                 else F(field).asc(nulls_last=True))
     grouped = _grouped(queryset).order_by(ordering, 'group_key')
     start = (page - 1) * page_size
+    from omop_core.services.concept_unit_info import suggested_unit
+
+    def unanimous_unit(entry, key):
+        return (entry[key] or '') if entry['destination_units'] == 1 else ''
+
     return [
         {
             'label': entry['label'],
@@ -131,6 +142,16 @@ def group_entries(queryset, page, page_size, order='-occurrence_count'):
             'destination_concept_code': entry['destination_code'] if entry['destinations'] == 1 else None,
             'destination_vocabulary_id': entry['destination_vocabulary'] if entry['destinations'] == 1 else None,
             'mixed_destinations': entry['destinations'] > 1,
+            # The unit the members' values will be stored in, when they agree.
+            'destination_unit_code': unanimous_unit(entry, 'destination_unit_code'),
+            'destination_unit_name': unanimous_unit(entry, 'destination_unit_name'),
+            'mixed_destination_units': entry['destination_units'] > 1,
+            # What a unanimous LOINC Measurement destination is usually
+            # reported in; shown only where no unit is curated.
+            'suggested_unit': suggested_unit(
+                entry['destination_vocabulary'], entry['destination_domain'],
+                entry['destination_code'],
+            ) if entry['destinations'] == 1 and entry['destination'] is not None else '',
             'status': entry['only_status'] if entry['statuses'] == 1 else None,
             'mixed_statuses': entry['statuses'] > 1,
             'suggested_action': (

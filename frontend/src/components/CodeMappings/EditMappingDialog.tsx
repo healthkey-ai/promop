@@ -1416,13 +1416,27 @@ export default function EditMappingDialog({
                   value={form.standard_concept}
                   testId="standard-concept"
                 />
-                <ReadOnlyField
-                  id="destination_status"
-                  label="Destination Status"
-                  tip="Active concepts can be used as destinations. A retired concept is no longer current; select an active replacement when one is available."
-                  value={form.destination_invalid_reason ? `Retired / invalid (reason ${form.destination_invalid_reason})` : form.destination_concept_id ? "Active" : ""}
-                  testId="destination-status"
-                />
+                {(form.omop_table === "measurement" || effectiveSourceUnit) && (
+                  <DestinationUnitPicker
+                    key={effectiveSourceUnit}
+                    sourceUnit={effectiveSourceUnit}
+                    selectedConceptId={form.destination_unit_concept_id}
+                    selectedConceptCode={form.destination_unit_concept_code}
+                    selectedConceptName={form.destination_unit_concept_name}
+                    matchType={form.unit_match_type}
+                    autoPopulated={unitAutoPopulated}
+                    needsReview={unitSelectionNeedsReview}
+                    onSelect={(unit, auto = false) => {
+                      setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
+                      setField("destination_unit_concept_code", unit?.concept_code || "");
+                      setField("destination_unit_concept_name", unit?.concept_name || "");
+                      setField("unit_match_type", unit?.match || "");
+                      setUnitSelectionAuto(Boolean(unit && auto));
+                      setUnitSelectionNeedsReview(false);
+                    }}
+                    onMintUnit={() => setMintUnitOpen(true)}
+                  />
+                )}
                 <ReadOnlyField
                   id="omop_table"
                   label="Destination Table"
@@ -1442,29 +1456,21 @@ export default function EditMappingDialog({
               </div>
               {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
                 <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
-              {(form.omop_table === "measurement" || effectiveSourceUnit) && (
-                <DestinationUnitPicker
-                  key={effectiveSourceUnit}
-                  sourceUnit={effectiveSourceUnit}
-                  selectedConceptId={form.destination_unit_concept_id}
-                  selectedConceptCode={form.destination_unit_concept_code}
-                  selectedConceptName={form.destination_unit_concept_name}
-                  matchType={form.unit_match_type}
-                  autoPopulated={unitAutoPopulated}
-                  needsReview={unitSelectionNeedsReview}
-                  onSelect={(unit, auto = false) => {
-                    setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
-                    setField("destination_unit_concept_code", unit?.concept_code || "");
-                    setField("destination_unit_concept_name", unit?.concept_name || "");
-                    setField("unit_match_type", unit?.match || "");
-                    setUnitSelectionAuto(Boolean(unit && auto));
-                    setUnitSelectionNeedsReview(false);
-                  }}
-                  onMintUnit={() => setMintUnitOpen(true)}
-                />
-              )}
-              <div className="mt-3 flex justify-end gap-2">
-                <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
+              {/* The destination's standing is a fact about the concept, not
+                  a field: plain text on the line of the mint button. */}
+              <div className="mt-3 flex items-center gap-2">
+                {form.destination_concept_id && (
+                  <p data-testid="destination-status"
+                    title={form.destination_invalid_reason
+                      ? `Retired / invalid (reason ${form.destination_invalid_reason}). A retired concept is no longer current; select an active replacement when one is available.`
+                      : "Active concepts can be used as destinations."}
+                    className={form.destination_invalid_reason ? "text-sm font-semibold text-red-700" : "text-sm text-slate-700"}>
+                    <span className="sr-only">Destination status: </span>
+                    {form.destination_invalid_reason ? "Retired" : "Active"}
+                    {form.destination_invalid_reason && <span className="sr-only"> (reason {form.destination_invalid_reason})</span>}
+                  </p>
+                )}
+                <button type="button" onClick={() => setMintOpen(true)} className="ml-auto rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
               </div>
               {form.destination_invalid_reason && (
                 <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
@@ -1714,6 +1720,8 @@ interface UnitResult {
   match: "exact" | "close";
 }
 
+const DESTINATION_UNIT_TIP = "UCUM concept linked to this mapping. Used for unit conversion during ETL.";
+
 interface DestinationUnitPickerProps {
   sourceUnit: string;
   selectedConceptId: string;
@@ -1792,11 +1800,14 @@ function DestinationUnitPicker({
           : null;
 
   return (
-    <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+    <div data-testid="destination-unit-field" className="grid content-start gap-1">
       {selectedConceptId ? (
         <>
-          <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Destination Unit</span>
-          <div className="flex items-center gap-2 text-sm">
+          <div className="flex items-center gap-1">
+            <span className="text-sm font-medium text-slate-700">Destination Unit</span>
+            <HelpTip tip={DESTINATION_UNIT_TIP} />
+          </div>
+          <div className="flex min-h-10 items-center gap-2 rounded-md border border-slate-300 px-3 text-sm">
             <span className="font-mono">{selectedConceptCode}</span>
             <span className="text-slate-500">{selectedConceptName}</span>
             {matchIndicator}
@@ -1806,7 +1817,7 @@ function DestinationUnitPicker({
           {needsReview && <p className="mt-2 text-xs text-amber-700">Source unit changed. Review this destination unit before saving the mapping.</p>}
         </>
       ) : (
-        <Field id="destination_unit_search" label="Destination Unit" tip="UCUM concept linked to this mapping. Used for unit conversion during ETL.">
+        <Field id="destination_unit_search" label="Destination Unit" tip={DESTINATION_UNIT_TIP}>
           <div className="flex items-center gap-2">
             <input
               id="destination_unit_search"

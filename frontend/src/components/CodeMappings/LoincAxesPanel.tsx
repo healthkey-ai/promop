@@ -6,6 +6,7 @@
 import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useRef, useState } from "react";
 import api from "@/api/axios";
 import { destinationError, searchDestinationConcepts, type DestinationConcept } from "./destinationSearch";
+import SectionToggle from "./SectionToggle";
 import {
   AXIS_BASIS_LABELS, LOINC_AXES, axisLabel, axisValueText, describeAxisValues,
   type AxisVariant, type LoincAxesPayload, type LoincAxis, type LoincAxisOverrides,
@@ -30,6 +31,9 @@ type Props = {
    * off screen while loading, so a Condition or Drug row gets no flash of a
    * section the server is about to say does not apply. */
   mayApply?: boolean;
+  /** The section is closed until its heading is clicked: most codes settle
+   * little here. Everything still loads and reports to the dialog while closed. */
+  defaultOpen?: boolean;
 };
 
 const AXIS_VALUE_DEBOUNCE_MS = 250;
@@ -49,9 +53,10 @@ export type LoincAxesPanelHandle = {
 };
 
 const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxesPanel(
-  { mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants, mayApply = true }, ref,
+  { mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants, mayApply = true, defaultOpen = false }, ref,
 ) {
   const listPrefix = useId();
+  const [open, setOpen] = useState(defaultOpen);
   const [payload, setPayload] = useState<LoincAxesPayload | null>(null);
   const [overrides, setOverrides] = useState<LoincAxisOverrides>({});
   const [loadError, setLoadError] = useState("");
@@ -148,6 +153,8 @@ const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxe
     setVariantDestination: async (axisKey, conceptId) => {
       const variant = (payload?.variants ?? []).find(v => v.axis_key === axisKey);
       if (!variant) return false;
+      // The outcome, and the Approve it leads to, are shown in this section.
+      setOpen(true);
       if (variant.status === "approved" && !canApprove) {
         setError("This variant is approved; only an approver can point it at another LOINC.");
         return false;
@@ -168,10 +175,11 @@ const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxe
   if (!payload) {
     if (!loadError && !mayApply) return null;
     return <section aria-label="LOINC axes" aria-busy={loading || undefined} className={SECTION}>
-      <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
+      <SectionToggle title="LOINC axes" open={open} onToggle={() => setOpen(value => !value)}
+        marker={loadError ? "" : (expectedVariants ?? 0) >= 2 ? `loading ${expectedVariants} axis values…` : "loading…"} />
       {loadError
         ? <p role="alert" className="mt-0.5 text-rose-700">{loadError}</p>
-        : <p role="status" className="mt-0.5 text-slate-500">{waiting}</p>}
+        : open && <p role="status" className="mt-0.5 text-slate-500">{waiting}</p>}
     </section>;
   }
   if (!payload.applies) return null;
@@ -243,6 +251,17 @@ const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxe
   // carries something: a curator's entry (which Suggest still applies, so it
   // must be visible and clearable here) or a metadata hint (#2037).
   const sharedAxesShown = variants.length < 2 || Object.keys(saved).length > 0 || hints.length > 0 || dirty;
+  // What the closed heading says the section holds: the variants the queue
+  // flags, the curator's entries, and what the source settles by itself.
+  const curatorSet = LOINC_AXES.filter(axis => axis in overrides && overrides[axis] !== null
+    && (overrides[axis] !== "" || axis === "method_type")).length;
+  const inferredCount = LOINC_AXES.filter(axis => !(axis in overrides) && payload.source_axes?.axes?.[axis]).length;
+  const marker = [
+    variants.length >= 2 ? `${variants.length} axis values` : "",
+    curatorSet ? `${curatorSet} set` : "",
+    inferredCount ? `${inferredCount} inferred` : "",
+    dirty ? "unsaved" : "",
+  ].filter(Boolean).join(" · ");
 
   const renderAxesTable = () => <>
     <table className="mt-2 w-full text-left">
@@ -290,14 +309,16 @@ const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxe
   </>;
 
   return <section aria-label="LOINC axes" aria-busy={loading || undefined} className={SECTION}>
-    <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
+    <SectionToggle title="LOINC axes" open={open} onToggle={() => setOpen(value => !value)} marker={marker} />
+    {/* A failure is said whether or not the section is open. */}
+    {loadError && <p role="alert" className="mt-1 text-rose-700">{loadError}</p>}
+    {error && <p role="alert" className="mt-1 text-rose-700">{error}</p>}
+    {open && <>
     <p role="status" className="mt-0.5 text-slate-500">{loading
       ? "Re-reading the axes and variants…"
       : variants.length >= 2
       ? "This code's units imply more than one LOINC axis set. Each is a variant with its own destination; approve one to route its units."
       : "Settled axes are constraints: a LOINC that differs on any of them is a different test and is not suggested."}</p>
-    {loadError && <p role="alert" className="mt-1 text-rose-700">{loadError}</p>}
-    {error && <p role="alert" className="mt-1 text-rose-700">{error}</p>}
     {message && <p role="status" className="mt-1 text-green-800">{message}</p>}
     {variants.length >= 2
       ? <>
@@ -377,6 +398,7 @@ const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxe
       </button>
       {dirty && <span className="text-slate-500">Unsaved axes still apply to Suggest from this dialog.</span>}
     </div>}
+    </>}
   </section>;
 });
 

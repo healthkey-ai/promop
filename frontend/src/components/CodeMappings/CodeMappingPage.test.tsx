@@ -661,6 +661,23 @@ describe("CodeMappingPage", () => {
     expect(await screen.findByText("10000001", { selector: '[data-testid=source-code]' })).toBeInTheDocument();
   });
 
+  it("files Apple, Garmin and HL7-PHR rows under the one Wearables tab", async () => {
+    const wearable = (mapping_id: number, source_vocabulary_id: string, source_code: string) =>
+      ({ ...proposedRow, mapping_id, source_vocabulary_id, source_code });
+    renderPage([wearable(301, "Apple", "apple_steps"), wearable(302, "Garmin", "garmin_steps"),
+      wearable(303, "HL7-PHR", "phr_steps")]);
+    const tabs = within(await screen.findByRole("tablist", { name: "Source vocabularies" }));
+    // One tab for the three vocabularies, and none of its own for HL7-PHR.
+    const wearables = await tabs.findByRole("tab", { name: /OpenWearables/ });
+    expect(tabs.queryByRole("tab", { name: /HL7-PHR/ })).not.toBeInTheDocument();
+    expect(tabs.queryByRole("tab", { name: /Apple|Garmin/ })).not.toBeInTheDocument();
+    fireEvent.click(wearables);
+    expect(wearables).toHaveAttribute("aria-selected", "true");
+    for (const code of ["apple_steps", "garmin_steps", "phr_steps"]) {
+      expect(await screen.findByText(code, { selector: '[data-testid=source-code]' })).toBeInTheDocument();
+    }
+  });
+
   it("has no All tab", async () => {
     renderPage();
     await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
@@ -811,6 +828,9 @@ describe("CodeMappingPage", () => {
       await screen.findByText("Edit Mapping");
       const panel = await screen.findByRole("region", { name: "LOINC axes" });
       expect(panel).toHaveAttribute("aria-busy", "true");
+      // Closed by default: the heading says what is coming, the section says it once opened.
+      expect(within(panel).getByTestId("section-marker")).toHaveTextContent("loading 2 axis values…");
+      fireEvent.click(within(panel).getByRole("button", { name: /LOINC axes/ }));
       expect(within(panel).getByRole("status")).toHaveTextContent(
         "Loading the 2 axis values the queue flagged for this code, and their destinations…");
       answer({ data: {
@@ -851,6 +871,7 @@ describe("CodeMappingPage", () => {
       });
       fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
       const panel = await screen.findByRole("region", { name: "LOINC axes" });
+      fireEvent.click(within(panel).getByRole("button", { name: /LOINC axes/ }));
       await within(panel).findByRole("table", { name: "Axis variants" });
       const dialog = within(screen.getByRole("dialog"));
       fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
@@ -872,6 +893,94 @@ describe("CodeMappingPage", () => {
       expect(screen.queryByTestId("variant-suggestion")).not.toBeInTheDocument();
     });
 
+    describe("LOINC axes and SNOMED evidence sections", () => {
+      const openWithEvidence = async () => {
+        renderPage();
+        const originalGet = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation((url: string, ...rest: unknown[]) => {
+          if (url === "/v1/code-mappings/7/loinc-axes/") return Promise.resolve({ data: {
+            mapping_id: 7, applies: true, loinc_axes: { system: "Ser" },
+            source_axes: { axes: { scale_type: { value: "Qn", basis: "value_type", evidence: "valueQuantity" } }, hints: {} },
+            axis_variant_count: 0, variants: [], variant_notes: [],
+          } });
+          if (url === "/v1/code-mappings/7/snomed-attributes/") return Promise.resolve({ data: {
+            mapping_id: 7, applies: true, snomed_attributes: { laterality: "Left" }, source: null,
+            hierarchies: { Disorder: "disorder" }, lateralities: ["Left", "Right", "Right and left"],
+          } });
+          return originalGet(url, ...rest);
+        });
+        fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+        return {
+          axes: await screen.findByRole("region", { name: "LOINC axes" }),
+          snomed: await screen.findByRole("region", { name: "SNOMED evidence" }),
+        };
+      };
+
+      it("opens with both collapsed, each heading saying what it holds", async () => {
+        const { axes, snomed } = await openWithEvidence();
+        const axesToggle = within(axes).getByRole("button", { name: /LOINC axes/ });
+        const snomedToggle = within(snomed).getByRole("button", { name: /SNOMED evidence/ });
+        expect(axesToggle).toHaveAttribute("aria-expanded", "false");
+        expect(snomedToggle).toHaveAttribute("aria-expanded", "false");
+        await waitFor(() => expect(within(axes).getByTestId("section-marker")).toHaveTextContent("1 set · 1 inferred"));
+        expect(within(snomed).getByTestId("section-marker")).toHaveTextContent("1 set");
+        expect(within(axes).queryByTestId("axis-value-system")).not.toBeInTheDocument();
+        expect(within(axes).queryByRole("button", { name: "Save axes" })).not.toBeInTheDocument();
+        expect(within(snomed).queryByLabelText("Hierarchy")).not.toBeInTheDocument();
+      });
+
+      it("reveals a section's fields when its heading is clicked, and hides them again", async () => {
+        const { axes, snomed } = await openWithEvidence();
+        const axesToggle = within(axes).getByRole("button", { name: /LOINC axes/ });
+        await waitFor(() => expect(within(axes).getByTestId("section-marker")).toHaveTextContent("1 set"));
+        fireEvent.click(axesToggle);
+        expect(axesToggle).toHaveAttribute("aria-expanded", "true");
+        expect(within(axes).getByTestId("axis-value-system")).toHaveTextContent("Ser");
+        expect(within(axes).getByTestId("axis-value-scale_type")).toHaveTextContent("Qn");
+        expect(within(axes).queryByTestId("section-marker")).not.toBeInTheDocument();
+        fireEvent.click(within(snomed).getByRole("button", { name: /SNOMED evidence/ }));
+        expect(within(snomed).getByLabelText("Laterality")).toHaveValue("Left");
+        fireEvent.click(axesToggle);
+        expect(axesToggle).toHaveAttribute("aria-expanded", "false");
+        expect(within(axes).queryByTestId("axis-value-system")).not.toBeInTheDocument();
+      });
+
+      it("shows no marker on a section that holds nothing", async () => {
+        renderPage();
+        const originalGet = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/loinc-axes/"
+          ? Promise.resolve({ data: { mapping_id: 7, applies: true, loinc_axes: {}, source_axes: { axes: {}, hints: {} },
+            axis_variant_count: 0, variants: [], variant_notes: [] } })
+          : originalGet(url, ...rest));
+        fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+        const axes = await screen.findByRole("region", { name: "LOINC axes" });
+        await waitFor(() => expect(axes).not.toHaveAttribute("aria-busy"));
+        expect(within(axes).queryByTestId("section-marker")).not.toBeInTheDocument();
+      });
+
+      it("sends the axes and SNOMED settings with Suggest though neither section was opened", async () => {
+        const { axes } = await openWithEvidence();
+        await waitFor(() => expect(within(axes).getByTestId("section-marker")).toHaveTextContent("1 set"));
+        mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+        const dialog = within(screen.getByRole("dialog"));
+        fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+        await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({
+          loinc_axes: { system: "Ser" }, snomed_attributes: { laterality: "Left" } })));
+      });
+
+      it("saves the mapping the same whether or not the sections were opened", async () => {
+        // Axes and SNOMED settings are saved by their own sections, never by
+        // the mapping's Save, so a closed section cannot drop them.
+        await openWithEvidence();
+        const dialog = within(screen.getByRole("dialog"));
+        fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+        await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.any(Object)));
+        const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+        expect(payload).not.toHaveProperty("loinc_axes");
+        expect(payload).not.toHaveProperty("snomed_attributes");
+      });
+    });
+
     it("sends the SNOMED evidence settings with Suggest only while the source is unchanged", async () => {
       renderPage();
       const originalGet = mockGet.getMockImplementation()!;
@@ -881,6 +990,7 @@ describe("CodeMappingPage", () => {
         : originalGet(url, ...rest));
       fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
       const panel = await screen.findByRole("region", { name: "SNOMED evidence" });
+      fireEvent.click(within(panel).getByRole("button", { name: /SNOMED evidence/ }));
       fireEvent.change(within(panel).getByLabelText("Hierarchy"), { target: { value: "__none__" } });
       mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
       const dialog = within(screen.getByRole("dialog"));
@@ -1155,9 +1265,38 @@ describe("CodeMappingPage", () => {
         "Destination Vocabulary ID",
         "Destination Concept Class",
         "Standard Concept",
-        "Destination Status",
+        "Destination Unit",
         "Destination Table",
       ]);
+    });
+
+    it("shows the mapping's destination unit in the destination block, once", async () => {
+      renderPage([{ ...proposedRow, destination_unit_concept_id: 8582, destination_unit_code: "cm", destination_unit_name: "centimeter" }]);
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      const unit = within(screen.getByTestId("destination-fields")).getByTestId("destination-unit-field");
+      expect(unit).toHaveTextContent("Destination Unit");
+      expect(within(unit).getByText("cm")).toBeInTheDocument();
+      expect(within(unit).getByText("centimeter")).toBeInTheDocument();
+      expect(within(unit).getByRole("button", { name: "Clear" })).toBeInTheDocument();
+      expect(within(screen.getByRole("dialog")).getAllByText("Destination Unit")).toHaveLength(1);
+      // Clearing it offers the search in the same place.
+      fireEvent.click(within(unit).getByRole("button", { name: "Clear" }));
+      expect(within(screen.getByTestId("destination-fields")).getByRole("textbox", { name: "Search UCUM units" })).toBeInTheDocument();
+    });
+
+    it("states an active destination as plain text beside Mint new concept, with no field name", async () => {
+      await openDialog();
+      const status = screen.getByTestId("destination-status");
+      expect(status.tagName).toBe("P");
+      expect(status).toHaveTextContent("Destination status: Active");
+      expect(status).toHaveAttribute("title", "Active concepts can be used as destinations.");
+      expect(screen.queryByText("Destination Status")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Destination Status")).not.toBeInTheDocument();
+      // Same line: the text on the left, the button after it.
+      const mint = screen.getByRole("button", { name: "Mint new concept" });
+      expect(mint.parentElement).toBe(status.parentElement);
+      expect(status.compareDocumentPosition(mint) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
 
     it("edits only the destination id; the rest follow from the concept", async () => {
@@ -1235,8 +1374,11 @@ describe("CodeMappingPage", () => {
 
       expect(screen.getByTestId("destination-concept-class")).toHaveValue("Undefined");
       expect(screen.getByTestId("standard-concept")).toHaveValue("");
-      expect(screen.getByTestId("destination-status"))
-        .toHaveValue("Retired / invalid (reason U)");
+      const status = screen.getByTestId("destination-status");
+      expect(status).toHaveTextContent("Destination status: Retired (reason U)");
+      expect(status).toHaveAttribute("title", expect.stringContaining("Retired / invalid (reason U)"));
+      expect(screen.queryByText("Destination Status")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Mint new concept" }).parentElement).toBe(status.parentElement);
       expect(screen.getByRole("button", { name: "Find replacement" })).toBeInTheDocument();
     });
 
@@ -2409,6 +2551,77 @@ describe("server mapping pages", () => {
     expect(within(table).getByText("2,557 codes")).toBeInTheDocument();
     expect(within(table).getByText("141,875")).toBeInTheDocument();
     expect(within(table).getByText("Albumin")).toBeInTheDocument();
+  });
+
+  describe("destination unit column", () => {
+    const unitCell = async (section = "Proposed") =>
+      within(await screen.findByRole("table", { name: `${section} mappings` })).getByTestId("destination-unit");
+
+    it("has its own header, told apart from the source Units", async () => {
+      renderBrowse();
+      const table = await screen.findByRole("table", { name: "Proposed mappings" });
+      expect(within(table).getByRole("columnheader", { name: "Destination unit" })).toHaveTextContent("Dest. unit");
+      expect(within(table).getByRole("columnheader", { name: "Units" })).toBeInTheDocument();
+    });
+
+    it("shows the mapping's curated unit, named on hover, over a suggested one", async () => {
+      renderBrowse({ results: [{ ...proposedRow, destination_unit_concept_id: 9546, destination_unit_code: "m",
+        destination_unit_name: "meter", suggested_unit: "cm" }] });
+      const cell = await unitCell();
+      expect(cell).toHaveTextContent(/^m$/);
+      expect(within(cell).getByText("m")).toHaveAttribute("title", "meter");
+    });
+
+    it("falls back to the destination's suggested unit, marked as suggested", async () => {
+      renderBrowse({ results: [{ ...proposedRow, destination_unit_concept_id: null, destination_unit_code: "",
+        destination_unit_name: "", suggested_unit: "mg/dL" }] });
+      const cell = await unitCell();
+      expect(cell).toHaveTextContent("mg/dL suggested");
+      expect(within(cell).getByText("mg/dL").parentElement).toHaveAttribute("title",
+        "LOINC example unit for the destination concept. No destination unit is set on this mapping.");
+      expect(within(cell).getByText("mg/dL").parentElement?.className).toMatch(/text-slate-500/);
+    });
+
+    it("shows a dash when the mapping has no unit and none is suggested", async () => {
+      renderBrowse();
+      expect(await unitCell()).toHaveTextContent(/^—$/);
+    });
+
+    it("says Mixed for a group whose members disagree on the unit", async () => {
+      renderBrowse({ results: [], rollup: true, groups: { Unmapped: [entry({
+        mixed_destination_units: true, destination_unit_code: "", suggested_unit: "g/dL",
+      })] } });
+      expect(await unitCell("Unmapped")).toHaveTextContent(/^Mixed$/);
+    });
+
+    it("shows a group's unit when every member agrees, else its suggested one", async () => {
+      renderBrowse({ results: [], rollup: true, groups: { Unmapped: [
+        entry({ destination_unit_code: "g/dL", destination_unit_name: "gram per deciliter", mixed_destination_units: false }),
+        entry({ label: "ferritin", description: "Ferritin", destination_unit_code: "", suggested_unit: "ng/mL" }),
+        entry({ label: "sodium", description: "Sodium" }),
+      ] } });
+      const table = await screen.findByRole("table", { name: "Unmapped mappings" });
+      const cells = within(table).getAllByTestId("destination-unit");
+      expect(cells.map(cell => cell.textContent)).toEqual(["g/dL", "ng/mL suggested", "—"]);
+      expect(within(cells[0]).getByText("g/dL")).toHaveAttribute("title", "gram per deciliter");
+    });
+
+    it("shows the unit on a group's expanded member rows", async () => {
+      mockGet.mockImplementation((url: string) => {
+        if (url.includes("/group/")) return Promise.resolve({ data: {
+          results: [{ ...proposedRow, source_code: "MEMBER-1", destination_unit_code: "g/L", destination_unit_name: "gram per liter" }],
+        } });
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({ results: [], rollup: true, groups: { Unmapped: [entry()] } }) });
+        return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      });
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+      fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
+      const member = (await screen.findByText("MEMBER-1", { selector: '[data-testid=source-code]' })).closest("tr")!;
+      expect(within(member).getByTestId("destination-unit")).toHaveTextContent(/^g\/L$/);
+      // The member row lines up under the group row, cell for cell.
+      const group = screen.getByRole("button", { name: "Collapse Albumin" }).closest("tr")!;
+      expect(member.querySelectorAll("td")).toHaveLength(group.querySelectorAll("td").length);
+    });
   });
 
   it("names no concept for a group whose members disagree", async () => {

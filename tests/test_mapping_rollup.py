@@ -561,3 +561,127 @@ def test_multiple_units_per_label_form_one_group():
     assert total == 1
     assert found[0]['members'] == 2
     assert found[0]['group_key'] == 'albumin'
+
+
+# --- Destination unit on a group --------------------------------------------
+
+def _ucum(code, name):
+    from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
+    return ConceptFactory(concept_code=code, concept_name=name,
+                          vocabulary=VocabularyFactory(vocabulary_id='UCUM'),
+                          domain=DomainFactory(domain_id='Unit'))
+
+
+def test_a_group_reports_a_unit_only_when_every_member_agrees(concept_pair):
+    one, _ = concept_pair
+    mg, mmol = _ucum('mg/dL', 'milligram per deciliter'), _ucum('mmol/L', 'millimole per liter')
+    row('A', 'Albumin', seen=1, target_concept=one, destination_unit_concept=mg)
+    row('B', 'ALBUMIN', seen=1, target_concept=one, destination_unit_concept=mg)
+    found, _ = entries()
+    assert found[0]['destination_unit_code'] == 'mg/dL'
+    assert found[0]['destination_unit_name'] == 'milligram per deciliter'
+    assert found[0]['mixed_destination_units'] is False
+
+    row('C', 'albumin', seen=1, target_concept=one, destination_unit_concept=mmol)
+    found, _ = entries()
+    # Naming one side of a disagreement is worse than naming neither.
+    assert found[0]['destination_unit_code'] == ''
+    assert found[0]['destination_unit_name'] == ''
+    assert found[0]['mixed_destination_units'] is True
+    # The destination itself is still unanimous: the two are judged apart.
+    assert found[0]['mixed_destinations'] is False
+
+
+def test_a_member_without_a_unit_disagrees_with_one_that_has_it(concept_pair):
+    """Count(distinct) skips NULL, so "one unit + one blank" would otherwise
+    read as every member storing in that unit."""
+    one, _ = concept_pair
+    row('A', 'Albumin', seen=1, target_concept=one, destination_unit_concept=_ucum('g/dL', 'gram per deciliter'))
+    row('B', 'ALBUMIN', seen=1, target_concept=one)
+    found, _ = entries()
+    assert found[0]['mixed_destination_units'] is True
+    assert found[0]['destination_unit_code'] == ''
+
+
+def test_a_group_with_no_units_is_not_mixed(concept_pair):
+    one, _ = concept_pair
+    row('A', 'Albumin', seen=1, target_concept=one)
+    row('B', 'ALBUMIN', seen=1, target_concept=one)
+    found, _ = entries()
+    assert found[0]['mixed_destination_units'] is False
+    assert found[0]['destination_unit_code'] == ''
+    assert found[0]['destination_unit_name'] == ''
+
+
+def test_a_unanimous_loinc_measurement_group_carries_its_suggested_unit():
+    """Glucose 2345-7 is reported in mg/dL. The group says so while no member
+    has a curated unit, the way a row does."""
+    from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
+    glucose = ConceptFactory(concept_code='2345-7', concept_name='Glucose [Mass/volume] in Serum or Plasma')
+    assert (glucose.vocabulary_id, glucose.domain_id) == ('LOINC', 'Measurement')
+    row('A', 'Glucose', seen=1, target_concept=glucose)
+    row('B', 'GLUCOSE', seen=1, target_concept=glucose)
+    found, _ = entries()
+    assert found[0]['suggested_unit'] == 'mg/dL'
+    assert found[0]['destination_unit_code'] == ''
+
+    # Not unanimous: no destination is named, so no unit is suggested for one.
+    other = ConceptFactory(concept_code='2339-0')
+    row('C', 'glucose', seen=1, target_concept=other)
+    found, _ = entries()
+    assert found[0]['mixed_destinations'] is True
+    assert found[0]['suggested_unit'] == ''
+
+    # Not a LOINC Measurement: a code LOINC has a unit for suggests nothing
+    # in another vocabulary, or filed under another domain.
+    snomed = ConceptFactory(concept_code='2345-7', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'))
+    observation = ConceptFactory(concept_code='2160-0', domain=DomainFactory(domain_id='Observation'))
+    from omop_core.services.concept_unit_info import suggested_unit
+    assert suggested_unit('LOINC', 'Measurement', '2160-0') == 'mg/dL'
+    row('S', 'Sodium', seen=1, target_concept=snomed)
+    row('F', 'Ferritin', seen=1, target_concept=observation)
+    by_label = {entry['label']: entry for entry in entries()[0]}
+    assert by_label['sodium']['destination_concept_id'] == snomed.concept_id
+    assert by_label['sodium']['suggested_unit'] == ''
+    assert by_label['ferritin']['destination_concept_id'] == observation.concept_id
+    assert by_label['ferritin']['suggested_unit'] == ''
+
+
+def test_a_group_with_no_destination_suggests_no_unit():
+    row('A', 'Albumin', seen=1)
+    found, _ = entries()
+    assert found[0]['suggested_unit'] == ''
+    assert found[0]['mixed_destination_units'] is False
+
+
+def test_rollup_and_its_members_carry_the_unit_through_the_api(api, concept_pair):
+    browse, members = api
+    one, _ = concept_pair
+    unit = _ucum('g/dL', 'gram per deciliter')
+    row('LOW', 'Albumin', seen=1, target_concept=one, destination_unit_concept=unit)
+    row('HIGH', 'ALBUMIN', seen=9, target_concept=one, destination_unit_concept=unit)
+    group = browse(rollup='1', queue_sections='1').data['groups']['Proposed'][0]
+    assert group['destination_unit_code'] == 'g/dL'
+    assert group['mixed_destination_units'] is False
+    data = members(label='albumin', section='Proposed', queue_sections='1').data
+    assert [(r['source_code'], r['destination_unit_code'], r['destination_unit_name']) for r in data['results']] == [
+        ('HIGH', 'g/dL', 'gram per deciliter'), ('LOW', 'g/dL', 'gram per deciliter')]
+
+
+def test_expanding_a_group_costs_no_query_per_member_unit(api):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from tests.factories import ConceptFactory, VocabularyFactory
+    _, members = api
+    # Not LOINC: a LOINC Measurement destination looks up its example units,
+    # which is a query a row while that table is empty, as it is here.
+    one = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='SNOMED'))
+    units = [_ucum(f'u{i}', f'unit {i}') for i in range(3)]
+    row('M0', 'Albumin', seen=1, target_concept=one, destination_unit_concept=units[0])
+    with CaptureQueriesContext(connection) as small:
+        assert len(members(label='albumin', section='Proposed', queue_sections='1').data['results']) == 1
+    for i in range(1, 16):
+        row(f'M{i}', 'Albumin', seen=1, target_concept=one, destination_unit_concept=units[i % 3])
+    with CaptureQueriesContext(connection) as large:
+        assert len(members(label='albumin', section='Proposed', queue_sections='1').data['results']) == 16
+    assert len(large) == len(small)

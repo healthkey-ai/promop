@@ -1001,3 +1001,92 @@ def test_proxy_ssl_header_is_trusted_on_cloud_run(k_service, expected):
                             env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == expected
+
+
+# --- Destination unit on a list row -----------------------------------------
+
+def _ucum(code, name):
+    from tests.factories import DomainFactory, VocabularyFactory
+    return ConceptFactory(concept_code=code, concept_name=name,
+                          vocabulary=VocabularyFactory(vocabulary_id='UCUM'),
+                          domain=DomainFactory(domain_id='Unit'))
+
+
+def test_a_row_reports_its_curated_destination_unit(browse):
+    """The unit a mapping stores values in is on the list row, so a curator
+    sees it before approving instead of opening the dialog to find out."""
+    unit = _ucum('mg/dL', 'milligram per deciliter')
+    row('WITH-UNIT', target_concept=ConceptFactory(), destination_unit_concept=unit)
+    row('NO-UNIT', target_concept=ConceptFactory())
+    # The no-destination branch of the serializer carries the same keys.
+    row('UNIT-NO-DEST', destination_unit_concept=unit)
+    row('NOTHING')
+    rows = {r['source_code']: r for r in browse(queue_sections='1').data['results']}
+
+    assert rows['WITH-UNIT']['destination_unit_concept_id'] == unit.concept_id
+    assert rows['WITH-UNIT']['destination_unit_code'] == 'mg/dL'
+    assert rows['WITH-UNIT']['destination_unit_name'] == 'milligram per deciliter'
+    assert rows['UNIT-NO-DEST']['destination_unit_code'] == 'mg/dL'
+    assert rows['UNIT-NO-DEST']['destination_unit_name'] == 'milligram per deciliter'
+    for code in ('NO-UNIT', 'NOTHING'):
+        assert rows[code]['destination_unit_concept_id'] is None
+        assert rows[code]['destination_unit_code'] == ''
+        assert rows[code]['destination_unit_name'] == ''
+
+
+def test_a_unit_whose_concept_is_not_loaded_reads_as_no_unit(browse):
+    """The column has no database constraint, so the id can outlive its
+    concept. That is an empty cell, on the list and on the detail alike."""
+    mapping = row('DANGLING', target_concept=ConceptFactory())
+    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(destination_unit_concept_id=987654321)
+    listed = browse(queue_sections='1').data['results'][0]
+    assert listed['destination_unit_concept_id'] == 987654321
+    assert listed['destination_unit_code'] == ''
+    assert listed['destination_unit_name'] == ''
+
+    # A row loaded without the join (a save's response) reads the same.
+    from patient_portal.api.views import _serialize_code_mapping_row
+    unjoined = SourceCodeConceptMapping.objects.get(pk=mapping.pk)
+    assert _serialize_code_mapping_row(unjoined.target_concept, unjoined)['destination_unit_code'] == ''
+
+
+def test_the_curated_unit_is_on_the_detail_and_the_plain_list(browse):
+    unit = _ucum('g/L', 'gram per liter')
+    mapping = row('DETAIL', target_concept=ConceptFactory(), destination_unit_concept=unit)
+    user = Identity.objects.create_user(email='unit-detail@example.test', is_staff=True)
+
+    request = APIRequestFactory().get(f'/api/v1/code-mappings/{mapping.pk}/')
+    force_authenticate(request, user=user)
+    detail = code_mapping_detail(request, mapping_id=mapping.pk).data
+    assert (detail['destination_unit_code'], detail['destination_unit_name']) == ('g/L', 'gram per liter')
+
+    request = APIRequestFactory().get('/api/v1/code-mappings/')
+    force_authenticate(request, user=user)
+    listed = code_mapping_list(request).data[0]
+    assert (listed['destination_unit_code'], listed['destination_unit_name']) == ('g/L', 'gram per liter')
+
+
+def test_destination_units_cost_no_query_per_row(browse):
+    """The unit rides the page's own join. Read lazily it is one query a row,
+    on a page of 100."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from tests.factories import VocabularyFactory
+    units = [_ucum(f'u{i}', f'unit {i}') for i in range(3)]
+    # Not LOINC: a LOINC Measurement destination looks up its example units,
+    # which is a query a row while that table is empty, as it is here.
+    destination = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='SNOMED'))
+    row('FIRST', target_concept=destination, destination_unit_concept=units[0])
+    with CaptureQueriesContext(connection) as small:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    for i in range(20):
+        row(f'NEXT-{i}', target_concept=destination, destination_unit_concept=units[i % 3])
+    with CaptureQueriesContext(connection) as large:
+        data = browse(queue_sections='1', include_duplicates='0').data
+    assert sum(1 for r in data['results'] if r['destination_unit_code']) == 21
+    assert len(large) == len(small)
+    # And without units at all the page costs the same: the join is the page's.
+    SourceCodeConceptMapping.objects.update(destination_unit_concept=None)
+    with CaptureQueriesContext(connection) as none:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    assert len(none) == len(large)

@@ -37,7 +37,7 @@ beforeEach(() => {
 
 describe("SnomedEvidencePanel", () => {
   it("shows the reference concept with its basis, hierarchy, laterality and attributes", async () => {
-    render(<SnomedEvidencePanel mappingId={7} canEdit />);
+    render(<SnomedEvidencePanel defaultOpen mappingId={7} canEdit />);
     expect(await screen.findByRole("region", { name: "SNOMED evidence" })).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith("/v1/code-mappings/7/snomed-attributes/");
     expect(screen.getByTestId("snomed-reference")).toHaveTextContent("Fracture of femur SNOMED:71620000");
@@ -51,7 +51,7 @@ describe("SnomedEvidencePanel", () => {
 
   it("sets a reference, a hierarchy and no side, reports them unsaved, and PUTs them", async () => {
     const onSettingsChange = vi.fn();
-    render(<SnomedEvidencePanel mappingId={7} canEdit onSettingsChange={onSettingsChange} />);
+    render(<SnomedEvidencePanel defaultOpen mappingId={7} canEdit onSettingsChange={onSettingsChange} />);
     await screen.findByRole("region", { name: "SNOMED evidence" });
     expect(onSettingsChange).toHaveBeenLastCalledWith({});
     expect(screen.getByRole("button", { name: "Save SNOMED evidence" })).toBeDisabled();
@@ -81,7 +81,7 @@ describe("SnomedEvidencePanel", () => {
 
   it("sends a null hierarchy for None and drops a key returned to Inferred", async () => {
     get.mockImplementation(() => Promise.resolve({ data: payload({ snomed_attributes: { laterality: "Left" } }) }));
-    render(<SnomedEvidencePanel mappingId={7} canEdit />);
+    render(<SnomedEvidencePanel defaultOpen mappingId={7} canEdit />);
     await screen.findByRole("region", { name: "SNOMED evidence" });
     expect(screen.getByTestId("snomed-laterality-why")).toHaveTextContent("Set by curator");
     fireEvent.change(screen.getByLabelText("Hierarchy"), { target: { value: "__none__" } });
@@ -93,16 +93,41 @@ describe("SnomedEvidencePanel", () => {
   it("renders nothing when SNOMED judging does not apply", async () => {
     get.mockImplementation(() => Promise.resolve({ data: payload({ applies: false, source: null }) }));
     const onSettingsChange = vi.fn();
-    const { container } = render(<SnomedEvidencePanel mappingId={7} canEdit onSettingsChange={onSettingsChange} />);
+    const { container } = render(<SnomedEvidencePanel defaultOpen mappingId={7} canEdit onSettingsChange={onSettingsChange} />);
     await waitFor(() => expect(get).toHaveBeenCalled());
     await waitFor(() => expect(container).toBeEmptyDOMElement());
     expect(onSettingsChange).not.toHaveBeenCalled();
   });
 
   it("hides edit controls without edit permission", async () => {
-    render(<SnomedEvidencePanel mappingId={7} canEdit={false} />);
+    render(<SnomedEvidencePanel defaultOpen mappingId={7} canEdit={false} />);
     await screen.findByRole("region", { name: "SNOMED evidence" });
     expect(screen.queryByRole("button", { name: "Set reference concept" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Hierarchy")).not.toBeInTheDocument();
+  });
+
+  describe("closed by default", () => {
+    it("loads and reports its settings while closed, and says what it holds on the heading", async () => {
+      get.mockResolvedValue({ data: payload({ snomed_attributes: { laterality: "Left" } }) });
+      const onSettingsChange = vi.fn();
+      render(<SnomedEvidencePanel mappingId={7} canEdit onSettingsChange={onSettingsChange} />);
+      const toggle = await screen.findByRole("button", { name: /SNOMED evidence/ });
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(screen.getByTestId("section-marker")).toHaveTextContent("1 set · evidence found");
+      expect(onSettingsChange).toHaveBeenLastCalledWith({ laterality: "Left" });
+      expect(screen.queryByTestId("snomed-reference")).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("Laterality")).not.toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByLabelText("Laterality")).toHaveValue("Left");
+      expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
+    });
+
+    it("shows no marker when the source brought no evidence and the curator set nothing", async () => {
+      get.mockResolvedValue({ data: payload({ source: null }) });
+      render(<SnomedEvidencePanel mappingId={7} canEdit />);
+      await screen.findByRole("button", { name: /SNOMED evidence/ });
+      expect(screen.queryByTestId("section-marker")).not.toBeInTheDocument();
+    });
   });
 });

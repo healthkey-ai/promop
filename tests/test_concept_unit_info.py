@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from omop_core.services.concept_unit_info import (
     concept_unit_fields,
+    suggested_unit,
     get_loinc_to_unit,
     get_loinc_example_units,
     measurement_input_type,
@@ -71,6 +72,29 @@ class TestConceptUnitFields:
         result = concept_unit_fields(c)
         # No unit, no recognizable name marker → empty dict.
         assert result == {}
+
+
+@pytest.mark.django_db
+class TestSuggestedUnit:
+    """The same answer concept_unit_fields gives, from the three columns."""
+
+    def test_loinc_measurement_code(self):
+        # Glucose is curated in LAB_FIELD_TO_LOINC with mg/dL.
+        assert suggested_unit("LOINC", "Measurement", "2345-7") == "mg/dL"
+        assert concept_unit_fields(_make_concept(concept_code="2345-7"))["suggested_unit"] == "mg/dL"
+
+    def test_unknown_code(self):
+        assert suggested_unit("LOINC", "Measurement", "99999-9") == ""
+
+    @pytest.mark.parametrize(("vocabulary", "domain", "code"), [
+        ("SNOMED", "Measurement", "2345-7"),
+        ("LOINC", "Observation", "2345-7"),
+        ("LOINC", "Measurement", ""),
+        ("LOINC", "Measurement", None),
+        (None, None, None),
+    ])
+    def test_anything_else_suggests_nothing(self, vocabulary, domain, code):
+        assert suggested_unit(vocabulary, domain, code) == ""
 
 
 @pytest.mark.django_db

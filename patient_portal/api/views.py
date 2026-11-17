@@ -12798,6 +12798,25 @@ def _concept_unit_fields(concept):
     return concept_unit_fields(concept)
 
 
+def _destination_unit_fields(mapping):
+    """The mapping's curated destination unit, as the list shows it.
+
+    '' for both when the mapping has none. The column has no database
+    constraint, so an id whose concept is not loaded reads as no unit rather
+    than failing the page.
+    """
+    unit = None
+    if mapping is not None and mapping.destination_unit_concept_id:
+        try:
+            unit = mapping.destination_unit_concept
+        except Concept.DoesNotExist:
+            unit = None
+    return {
+        'destination_unit_code': unit.concept_code if unit else '',
+        'destination_unit_name': unit.concept_name if unit else '',
+    }
+
+
 def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
                                 destination_count=None, include_source_evidence=False):
     """One row of the Code Mapping list: a source code and where it lands.
@@ -12909,6 +12928,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'domain': '',
             'concept_class_id': '',
             'destination_unit_concept_id': mapping.destination_unit_concept_id if mapping else None,
+            **_destination_unit_fields(mapping),
             'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
             'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
@@ -12993,6 +13013,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         # mapping quality without opening a concept search.
         **_concept_unit_fields(concept),
         'destination_unit_concept_id': mapping.destination_unit_concept_id if mapping else None,
+        **_destination_unit_fields(mapping),
         # Edit lock
         'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
         'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
@@ -13836,7 +13857,7 @@ def code_mapping_group(request):
         return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
     ).prefetch_related('axis_variants__target_concept'))
     # Same tab, search and provenance narrowing browse applied before it
     # counted the entry. Without this, an entry reading "3 codes" under a
@@ -14279,7 +14300,7 @@ def code_mapping_list(request):
     if request.method == 'GET':
         from omop_core.services.mapping_source_units import SourceUnits
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+            'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
         ).prefetch_related(
             'axis_variants__target_concept',
         ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
@@ -14385,7 +14406,7 @@ def code_mapping_detail(request, mapping_id):
         return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
+        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
     if request.method != 'GET':
         mappings = mappings.select_for_update(of=('self',))
     mapping = mappings.first()

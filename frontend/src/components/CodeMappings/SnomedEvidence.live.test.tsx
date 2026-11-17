@@ -52,6 +52,8 @@ describeLive("SNOMED evidence against a live backend", () => {
     fireEvent.click(code.closest("tr")!);
 
     const panel = await screen.findByRole("region", { name: "SNOMED evidence" }, { timeout: 20000 });
+    // The section opens on its heading; it is closed until asked for.
+    fireEvent.click(within(panel).getByRole("button", { name: /SNOMED evidence/ }));
     // From the server: Athena's "Maps to", and the side named in the code's text.
     await waitFor(() => expect(within(panel).getByTestId("snomed-reference")).toHaveTextContent("Osteoarthritis of knee"));
     expect(within(panel).getByTestId("snomed-laterality")).toHaveTextContent("Right");

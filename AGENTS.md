@@ -1699,6 +1699,28 @@ no `unit_conversion` key in the response. Unresolved codes never get the block.
 - `patient_portal/api/views.py` — `code_mapping_lookup()` batch-fetches `destination_unit_concept` and attaches the block
 - Tests: `patient_portal.tests.CodeMappingLookupUnitConversionTest` (9 cases)
 
+### The destination unit on the Code to Concept list
+
+Every tab's list has a "Dest. unit" column after Destination, so a curator
+sees the unit a mapping will store values in before approving it. The cell
+shows, in order: the mapping's curated `destination_unit_concept`
+(`destination_unit_code`, with `destination_unit_name` on hover); else the
+destination concept's `suggested_unit`, muted and marked "suggested", which is
+a LOINC example unit and converts nothing until a curator sets a unit; else a
+dash. A grouped row names a unit only when every member has the same one
+(`mapping_rollup`, the destination's own rule: no unit against a unit is a
+disagreement) and says "Mixed" otherwise (`mixed_destination_units`); its
+`suggested_unit` is that of a unanimous LOINC Measurement destination
+(`concept_unit_info.suggested_unit`). List querysets join
+`destination_unit_concept`, so the column costs no query per row. In the Edit
+Mapping dialog, Destination Unit sits among the destination fields where
+Destination Status was, and the status is plain text ("Active" or "Retired",
+the reason on hover) on the line of the Mint new concept button. The dialog's
+LOINC axes and SNOMED evidence sections open closed (`SectionToggle`), with a
+marker on the heading for what they hold; they load and report to the dialog
+either way, so Suggest sends the same axes and settings whether or not they
+were opened.
+
 ### Write-time conversion of stored rows
 
 The bulk measurement write, repoint and resolve convert a stored
