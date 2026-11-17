@@ -12716,11 +12716,12 @@ def _can_manage_mappings(user):
     """Whether a user may create or change a mapping (#2398, #2416).
 
     Creating, editing, proposing and uploading code and field mappings,
-    synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis
-    variants, LOINC axes, SNOMED attributes, concept minting and source-system
-    facility review. Staff, org admins and analysts; a doctor needs an analyst
-    grant as well, since roles are additive and mapping is the analyst's.
-    Approval is narrower still: ``_can_approve_mappings``.
+    synonyms and choices, Suggest, Lock, Done, priority, axis variants, LOINC
+    axes, SNOMED attributes, concept minting and source-system facility
+    review. Staff, org admins and analysts; a doctor needs an analyst grant
+    as well, since roles are additive and mapping is the analyst's. Approval
+    is narrower still, ``_can_approve_mappings``, and so is adding a field to
+    PatientRecord, which creates an approved mapping (#721).
     """
     return bool(getattr(user, 'is_staff', False) or has_mapping_write_access(user))
 

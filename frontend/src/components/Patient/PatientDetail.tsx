@@ -29,7 +29,9 @@ import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider, returnedTab } from "@/components/PatientInfo/fieldMappingLinks";
 import AddFieldLink from "@/components/PatientInfo/AddFieldLink";
 import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
-import { addedFieldTabs, diseaseCategoryCode } from "@/utils/fieldScope";
+import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
+import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
+import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -345,6 +347,9 @@ export default function PatientDetail({
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
+  // Fields added through Field Concept Mapping, read once for every tab.
+  const addedFields = useCustomPatientFields();
+  const { categoryForDisease } = useAllDiseaseMappings();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
 
@@ -798,8 +803,12 @@ export default function PatientDetail({
   const fieldTab = fieldTabs[activeTab];
   // The record's Disease Category, which scopes a field added from the
   // disease tab and decides which disease-specific added fields it shows.
-  const diseaseCode = diseaseCategoryCode(diseaseType);
-  const addFieldLink = fieldTab && personId ? (
+  const diseaseCode = recordDiseaseCategory(
+    typeof editedInfo.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
+    diseaseType,
+  );
+  // Offered to whoever sees the fields' globes; nobody else gets its markup.
+  const addFieldLink = canViewOmop && fieldTab && personId ? (
     <AddFieldLink
       tab={fieldTab}
       disease={fieldTab === "disease" ? diseaseCode : undefined}
@@ -952,7 +961,7 @@ export default function PatientDetail({
                 {addFieldLink}
               </div>
 
-              <div key={activeTab} className={`animate-tab-in px-8 ${fieldTab ? "pb-6" : "pb-10"}`}>
+              <div key={activeTab} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
                   <>
                     {patientMode && (
@@ -1022,21 +1031,18 @@ export default function PatientDetail({
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
-              </div>
-
-              {/* Fields added through Field Concept Mapping render last on
-                  their tab (#721). Outside the keyed tab body, so their
-                  definitions load once and not on every tab change. */}
-              {fieldTab && (
-                <div className="px-8 pb-10">
+                {/* Fields added through Field Concept Mapping render last on
+                    their tab, then the tab's second Add Field (#721). */}
+                {fieldTab && (
                   <CustomPatientFields
+                    fields={addedFields}
                     tabs={addedFieldTabs(fieldTab)}
                     diseases={diseaseCode ? [diseaseCode] : []}
                     formData={editedInfo}
                   />
-                  {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
-                </div>
-              )}
+                )}
+                {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
+              </div>
             </div>
           </>
         )}

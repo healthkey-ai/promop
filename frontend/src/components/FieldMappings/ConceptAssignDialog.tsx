@@ -124,7 +124,7 @@ const TIP = {
   value_type:
     "What kind of value the field holds.",
   field_mode:
-    "Editable: the value is read from the patient's OMOP facts for the concept. Computed: the value comes from a formula over other fields.",
+    "From OMOP data: the value is read from the patient's OMOP facts for the concept. Computed: the value comes from a formula over other fields. Either way the field is read-only on the patient tab.",
   formula:
     "An expression over other PatientRecord fields, e.g. weight / (height / 100) ^ 2.",
   tab:
@@ -276,8 +276,14 @@ export function ConceptAssignDialog({
 
   // What a new field needs before it can be created: its definition, a
   // concept, and the confirmation the create endpoint requires.
-  const createReady = !!displayName.trim() && !!newFieldName.trim() && !!selected && confirmed
-    && (fieldMode !== "computed" || !!formula.trim());
+  const createMissing = [
+    !displayName.trim() && "a display name",
+    !newFieldName.trim() && "a field name",
+    fieldMode === "computed" && !formula.trim() && "a formula",
+    !selected && "a concept",
+    !confirmed && "the confirmation",
+  ].filter(Boolean).join(", ");
+  const createReady = !createMissing;
 
   const handleSubmit = async () => {
     if (creating ? !createReady : scopeOnly && !scopeDirty) return;
@@ -370,14 +376,20 @@ export function ConceptAssignDialog({
     }
   };
 
+  // A create request cannot be taken back once sent: closing then would
+  // read as cancelling a field that is added all the same, so the dialog
+  // stays until the server answers.
+  const closeBlocked = creating && saving;
+
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && !closeBlocked) onClose(); };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, closeBlocked]);
 
   const handleOverlayClick = (e: React.MouseEvent) => {
-    if (e.target === overlayRef.current) onClose();
+    // A stray click beside a half-filled definition must not discard it.
+    if (!creating && e.target === overlayRef.current) onClose();
   };
 
   const handleUnitDropdownChange = (value: string) => {
@@ -413,7 +425,8 @@ export function ConceptAssignDialog({
         <div className="border-b border-slate-200 px-5 py-4">
           <button
             onClick={onClose}
-            className="absolute right-3 top-3 rounded p-1 text-slate-400 hover:text-slate-600"
+            disabled={closeBlocked}
+            className="absolute right-3 top-3 rounded p-1 text-slate-400 hover:text-slate-600 disabled:opacity-50"
           >
             <X size={16} />
           </button>
@@ -423,7 +436,8 @@ export function ConceptAssignDialog({
           </h2>
           {creating ? (
             <p className="mt-1 text-sm text-slate-500">
-              A new PatientRecord field. Choosing its concept and saving creates the field with an approved mapping.
+              A new PatientRecord field. Choosing its concept and saving creates the field with an approved
+              mapping. A patient shows a value for it once their record is next derived from their OMOP data.
             </p>
           ) : (
             <p className="mt-1 text-sm text-slate-500">
@@ -497,8 +511,8 @@ export function ConceptAssignDialog({
                     onChange={(e) => setFieldMode(e.target.value as FieldMode)}
                     className={`${INPUT_CLASS} w-full`}
                   >
-                    <option value="editable">Editable</option>
-                    <option value="computed">Computed</option>
+                    <option value="editable">From OMOP data</option>
+                    <option value="computed">Computed from a formula</option>
                   </select>
                 </Field>
                 {fieldMode === "computed" && (
@@ -813,14 +827,16 @@ export function ConceptAssignDialog({
             </label>
           )}
 
-          {error && <div className="mb-3 text-sm text-red-600">{error}</div>}
+          {error && <div role={creating ? "alert" : undefined} className="mb-3 text-sm text-red-600">{error}</div>}
         </div>
 
         {/* Footer — status at bottom-left, buttons at bottom-right */}
         <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-5 py-4">
           {creating ? (
-            <p className="text-sm text-slate-600">
-              Status: <span className="font-medium text-slate-900">Approved</span> when the field is added
+            <p id="add-field-status" className="text-sm text-slate-600">
+              {createMissing
+                ? `Still needed: ${createMissing}.`
+                : <>Status: <span className="font-medium text-slate-900">Approved</span> when the field is added</>}
             </p>
           ) : (
           <div className="flex items-center gap-2">
@@ -847,13 +863,15 @@ export function ConceptAssignDialog({
           <div className="flex gap-2">
             <button
               onClick={onClose}
-              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              disabled={closeBlocked}
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
             >
               Cancel
             </button>
             <button
               onClick={handleSubmit}
               disabled={(creating ? !createReady : scopeOnly && !scopeDirty) || saving}
+              aria-describedby={creating ? "add-field-status" : undefined}
               className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
               title={creating || canApprove ? undefined : "Only org admins and staff can approve mappings. This will be saved as a proposal for review."}
             >

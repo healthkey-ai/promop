@@ -122,12 +122,26 @@ cancelling a dialog the link opened returns to the patient tab.
 `CustomPatientFields.tsx` renders created fields last on their tab, for
 every reader of the record, in the app's patient page and in the federated
 editor (which offers no Add Field: the host has no Field Mappings page):
-those placed on the tab (a field placed on Blood
-shows on Labs, where the editor has blood counts) that are base or name the
-record's Disease Category. They are read-only there. A value is derived from
-the patient's OMOP facts for the field's concept on refresh
-(`_get_custom_patient_field_data`) or computed from its formula; the patient
-editor has no write path for one yet.
+those placed on the tab (a field placed on Blood shows on Labs, where the
+editor has blood counts) that are base or name the record's Disease
+Category. The definitions are read once per page
+(`useCustomPatientFields`). They are reference data, not an organization's:
+a field one instance's admin adds is part of every record it is scoped to.
+
+The record's Disease Category is what Disease Category management maps its
+disease to (`useAllDiseaseMappings`), with the editor's own disease-type
+match as the fallback for a name that mapping does not hold
+(`fieldScope.recordDiseaseCategory`); a disease mapped to `Other` has the
+base record only. Two limits remain with #2332: a record with several
+cancers is read by its primary disease, and a field placed on the disease
+tab shows only for a record the editor has a disease tab for.
+
+Created fields are read-only on the tab. A value is derived from the
+patient's OMOP facts for the field's concept (`_get_custom_patient_field_data`)
+when the record is next derived, or computed from its formula at creation,
+so a field added just now reads "Not recorded" on a record until then;
+`manage.py backfill_patient_records --all` derives every record. The patient
+editor has no write path for a created field yet.
 
 ### Whose record a field is part of: `FieldDiseaseMembership`
 

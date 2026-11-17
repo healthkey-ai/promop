@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import FieldMappingPage from "./FieldMappingPage";
 
 const mockGet = vi.fn();
@@ -799,11 +799,25 @@ describe("FieldMappingPage", () => {
       };
       function PatientProbe() {
         const location = useLocation();
-        return <div>patient page, tab {String((location.state as { tab?: string } | null)?.tab)}</div>;
+        const navigate = useNavigate();
+        return (
+          <div>
+            patient page, tab {String((location.state as { tab?: string } | null)?.tab)}
+            <button onClick={() => navigate(-1)}>Browser back</button>
+          </div>
+        );
       }
+      function SearchProbe() {
+        return <div data-testid="search">{useLocation().search}</div>;
+      }
+      // Arrived from the patient page, as the link does: it is the entry before.
       const renderNew = (search: string, state?: unknown) =>
         render(
-          <MemoryRouter initialEntries={[{ pathname: "/field-mappings", search, state }]}>
+          <MemoryRouter
+            initialEntries={["/patient/42", { pathname: "/field-mappings", search, state }]}
+            initialIndex={1}
+          >
+            <SearchProbe />
             <Routes>
               <Route path="/field-mappings" element={<FieldMappingPage />} />
               <Route path="/patient/:personId" element={<PatientProbe />} />
@@ -848,7 +862,7 @@ describe("FieldMappingPage", () => {
         fireEvent.click(within(dialog).getByLabelText(/I confirm/));
         fireEvent.click(within(dialog).getByRole("button", { name: "Add Field" }));
 
-        expect(await screen.findByText("patient page, tab disease")).toBeInTheDocument();
+        expect(await screen.findByText(/patient page, tab disease/)).toBeInTheDocument();
         expect(mockPost).toHaveBeenCalledWith("/v1/custom-patient-fields/", expect.objectContaining({
           field_name: "m_protein_note", tab: "disease", diseases: ["MM"], concept: 4112853,
         }));
@@ -858,16 +872,31 @@ describe("FieldMappingPage", () => {
         renderNew("?new=1&tab=general", FROM_PATIENT("general"));
         const dialog = await screen.findByRole("dialog");
         fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-        expect(await screen.findByText("patient page, tab general")).toBeInTheDocument();
+        expect(await screen.findByText(/patient page, tab general/)).toBeInTheDocument();
         expect(mockPost).not.toHaveBeenCalled();
+      });
+
+      it("does not come back to the dialog on browser Back", async () => {
+        renderNew("?new=1&tab=general", FROM_PATIENT("general"));
+        const dialog = await screen.findByRole("dialog");
+        fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+        await screen.findByText(/patient page, tab general/);
+        // The mapping page's entry was replaced, so Back is the patient page
+        // the admin started on, not the create dialog again.
+        fireEvent.click(screen.getByRole("button", { name: "Browser back" }));
+        expect(await screen.findByText(/patient page, tab undefined/)).toBeInTheDocument();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       });
 
       it("stays on the page when the link names no patient page to return to", async () => {
         renderNew("?new=1&tab=general", { addFieldReturn: { path: "https://elsewhere.example/", tab: "general" } });
         const dialog = await screen.findByRole("dialog");
+        expect(screen.getByTestId("search")).toHaveTextContent("?new=1&tab=general");
         fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
         expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+        // The request is spent, so a reload does not open the dialog again.
+        await waitFor(() => expect(screen.getByTestId("search")).toBeEmptyDOMElement());
       });
 
       it("falls back to General for a tab that is not one", async () => {

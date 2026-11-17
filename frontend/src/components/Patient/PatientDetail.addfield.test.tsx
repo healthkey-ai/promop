@@ -4,11 +4,12 @@
  * and org admins outside patient mode, and the fields added that way shown
  * last on their tab.
  */
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import PatientDetail, { PatientDetailRoute } from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
+import { __resetDiseaseCategoryCaches } from '@/hooks/useDiseaseCategories';
 import type { User } from '@/hooks/useAuth';
 
 vi.mock('@/api/axios', () => ({
@@ -51,10 +52,14 @@ const CUSTOM_FIELDS = [
 ];
 
 let record: Record<string, unknown>;
+// Disease Category management's mapping of disease names to categories.
+let diseaseMappings: Array<{ disease_name: string; category: string }>;
 
 beforeEach(() => {
   vi.clearAllMocks();
   __resetWritableFieldsCache();
+  __resetDiseaseCategoryCaches();
+  diseaseMappings = [];
   record = {
     person_id: 101, patient_name: 'Ada Lovelace', disease: 'Multiple Myeloma',
     custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Fit' },
@@ -62,6 +67,7 @@ beforeEach(() => {
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: {} });
     if (url.includes('custom-patient-fields')) return Promise.resolve({ data: CUSTOM_FIELDS });
+    if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
     if (url.includes('/patient-info/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
     return Promise.resolve({ data: [] });
   });
@@ -118,6 +124,29 @@ describe('PatientDetail — Add Field', () => {
     ]);
   });
 
+  it("uses Disease Category management's category for the record's disease over the editor's name match", async () => {
+    // The editor shows a diffuse large B-cell lymphoma on its lymphoma tab;
+    // the record's category is DLBCL, not FL.
+    record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma' };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    await renderPatient(STAFF);
+    openTab('Follicular Lymphoma');
+    await waitFor(() => expect(hrefs()).toEqual([
+      '/field-mappings?new=1&tab=disease&disease=DLBCL',
+      '/field-mappings?new=1&tab=disease&disease=DLBCL',
+    ]));
+  });
+
+  it("names no disease for a record Disease Category management maps to Other", async () => {
+    record = { ...record, disease: 'Mantle Cell Lymphoma' };
+    diseaseMappings = [{ disease_name: 'Mantle Cell Lymphoma', category: 'Other' }];
+    await renderPatient(STAFF);
+    openTab('Mantle Cell Lymphoma');
+    await waitFor(() => expect(hrefs()).toEqual([
+      '/field-mappings?new=1&tab=disease', '/field-mappings?new=1&tab=disease',
+    ]));
+  });
+
   it('has no Add Field on tabs that hold no PatientRecord fields', async () => {
     await renderPatient(STAFF);
     for (const label of ['History', 'Source Codes', 'OMOP']) {
@@ -126,11 +155,14 @@ describe('PatientDetail — Add Field', () => {
     }
   });
 
-  it('is offered to staff and org admins only, and never in patient mode', async () => {
+  it('is offered to staff and org admins only, and leaves nothing behind for anyone else', async () => {
     await renderPatient(DOCTOR);
     expect(addFieldLinks()).toHaveLength(0);
-    openTab('Labs');
+    // No empty row where the bottom link would be: the tab ends at its fields.
+    expect(screen.getByText('general fields').nextElementSibling).toBeNull();
+    openTab('Treatment');
     expect(addFieldLinks()).toHaveLength(0);
+    expect(screen.getByText('treatment fields').nextElementSibling).toBeNull();
   });
 
   it('is not offered in patient mode, even to a staff account', async () => {
@@ -180,6 +212,16 @@ describe('PatientDetail — added fields', () => {
     expect(fields.compareDocumentPosition(added) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("shows the fields of the record's mapped category, not of the tab it is shown on", async () => {
+    record = { ...record, disease: 'Plasma cell leukemia' };
+    diseaseMappings = [{ disease_name: 'Plasma Cell Leukemia', category: 'MM' }];
+    await renderPatient(DOCTOR);
+    // No disease tab for a name the editor does not recognise, so the MM
+    // field has no tab to show on; a base field still shows.
+    openTab('Labs');
+    expect(await screen.findByText('Frailty index')).toBeInTheDocument();
+  });
+
   it('shows a base field on its tab whatever the disease', async () => {
     record = { ...record, disease: 'Breast Cancer' };
     await renderPatient(DOCTOR);
@@ -196,6 +238,9 @@ describe('PatientDetail — added fields', () => {
     openTab('Labs');
     await screen.findByText('Frailty index');
     openTab('Treatment');
+    // A tab with no fields of its own, then back to one that has them.
+    openTab('History');
+    expect(screen.queryByTestId('custom-patient-fields')).not.toBeInTheDocument();
     openTab('Multiple Myeloma');
     await screen.findByText('M protein note');
     const reads = (api.get as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => String(url).includes('custom-patient-fields'));

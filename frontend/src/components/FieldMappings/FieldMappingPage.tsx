@@ -187,7 +187,7 @@ export default function FieldMappingPage() {
   const [categoryFilter, setCategoryFilter] = useState("");
   // ?field=<name>, from a patient-editor field's globe: open that field once,
   // on the first load. Later reloads (after a save) must not reopen it.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const linkedField = useRef(searchParams.get("field"));
   // ?new=1&tab=<tab>[&disease=<code>], from a patient tab's Add field link
   // (#721): open the dialog in create mode on that tab and scope. Read once,
@@ -435,10 +435,22 @@ export default function FieldMappingPage() {
     const returnTo = newField?.returnTo;
     setNewField(null);
     if (returnTo) {
-      navigate(returnTo.path, { state: { tab: returnTo.tab } });
-    } else if (created) {
-      void fetchDescriptors();
+      // Replacing this entry: Back from the patient page must not reopen
+      // the dialog on a field already added or abandoned.
+      navigate(returnTo.path, { state: { tab: returnTo.tab }, replace: true });
+      return;
     }
+    // Nowhere to go back to, so the link's request is spent: a reload must
+    // not ask again. `disease` stays, as the page's own filter parameter.
+    if (searchParams.has("new")) {
+      setSearchParams((previous) => {
+        const next = new URLSearchParams(previous);
+        next.delete("new");
+        next.delete("tab");
+        return next;
+      }, { replace: true });
+    }
+    if (created) void fetchDescriptors();
   };
 
   /**

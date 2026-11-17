@@ -409,10 +409,14 @@ describe("create mode", () => {
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
     expect(screen.getByLabelText("Field name")).toHaveValue("frailty_index");
     fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "number" } });
+    // The button says what it is waiting for.
     expect(addButton()).toBeDisabled();
+    expect(addButton()).toHaveAccessibleDescription("Still needed: a concept, the confirmation.");
     await pickConcept();
     expect(addButton()).toBeDisabled();
+    expect(addButton()).toHaveAccessibleDescription("Still needed: the confirmation.");
     fireEvent.click(screen.getByLabelText(/I confirm/));
+    expect(addButton()).toHaveAccessibleDescription("Status: Approved when the field is added");
     fireEvent.click(addButton());
 
     await waitFor(() => expect(props.onSaved).toHaveBeenCalled());
@@ -496,7 +500,7 @@ describe("create mode", () => {
     fireEvent.click(screen.getByLabelText(/I confirm/));
     fireEvent.click(addButton());
 
-    expect(await screen.findByText("field_name: A custom PatientRecord field already uses this name.")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("field_name: A custom PatientRecord field already uses this name.");
     expect(props.onSaved).not.toHaveBeenCalled();
     expect(addButton()).toBeEnabled();
   });
@@ -511,6 +515,37 @@ describe("create mode", () => {
     fireEvent.click(screen.getByLabelText(/I confirm/));
     fireEvent.click(addButton());
     expect(await screen.findByText("ZZ is not a Disease Category.")).toBeInTheDocument();
+  });
+
+  it("is not closed by a click beside it, only by Cancel or Escape", () => {
+    const props = createProps("general");
+    render(<ConceptAssignDialog {...props} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
+    fireEvent.click(screen.getByRole("dialog").parentElement!);
+    expect(props.onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("cannot be closed while the field is being created", async () => {
+    let finish: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const props = createProps("general");
+    render(<ConceptAssignDialog {...props} />);
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
+    await pickConcept();
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+    fireEvent.click(addButton());
+
+    // The request is out: closing now would look like cancelling a field
+    // that is added all the same.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled());
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    finish({ data: {} });
+    await waitFor(() => expect(props.onSaved).toHaveBeenCalledTimes(1));
+    expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it("seeds Suggest from the display name", async () => {
