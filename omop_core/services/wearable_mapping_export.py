@@ -59,7 +59,21 @@ CSV_COLUMNS = (
 
 
 class FormatError(ValueError):
-    """The caller asked for a file format this export does not write."""
+    """The caller asked for a file this export does not write."""
+
+
+# The Word document is built in memory inside the request: about 1.4 ms and
+# 35 KB a row, so 20,000 rows is 28 s and 900 MB against gunicorn's 30 s. The
+# tab holds a few hundred. The CSV has no such limit (20,000 rows in 0.1 s).
+DOCX_MAX_ROWS = 5000
+
+# What XML 1.0 cannot hold, and python-docx therefore refuses to write: one
+# such character in any stored code would fail the document for every reader.
+_XML_ILLEGAL = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')
+
+
+def xml_safe(text):
+    return _XML_ILLEGAL.sub('', text or '')
 
 
 @dataclass(frozen=True)
@@ -110,13 +124,16 @@ def _blank_last(value, order):
 def export_rows():
     """Every mapping the Wearables tab can show, rejected ones aside, in file order.
 
-    The tab's rows are the browse service's: every wearable vocabulary,
-    global and hospital-scoped alike (browse shows a reader every
-    organization's rows). The list endpoint's ICD-10-CM Athena guard is not
+    The tab's rows are the browse service's: every wearable vocabulary. A
+    hospital's own override of a code is left out: the file is for use outside
+    the app, where the hospital's row would read as a second, unexplained
+    line for the same code. The list endpoint's ICD-10-CM Athena guard is not
     applied, since it can only remove ICD10CM rows. One query, whatever the
     row count.
     """
-    found = tab_queryset(SourceCodeConceptMapping.objects.all(), WEARABLES_TAB).exclude(
+    found = tab_queryset(SourceCodeConceptMapping.objects.all(), WEARABLES_TAB).filter(
+        organization__isnull=True,
+    ).exclude(
         status='rejected',
     ).order_by().annotate(units=SourceUnits('source_unit_evidence')).values_list(
         'pk', 'category', 'measure_class', 'metric_key', 'source_vocabulary_id',
@@ -155,6 +172,10 @@ def export_file(file_format, day=None):
         raise FormatError(f"Unknown file format {file_format!r}. Use csv or docx.")
     day = day or localdate()
     rows = export_rows()
+    if file_format != FORMAT_CSV and len(rows) > DOCX_MAX_ROWS:
+        raise FormatError(
+            f'The Wearables tab holds {len(rows):,} mappings and the Word document is '
+            f'limited to {DOCX_MAX_ROWS:,}. Download the CSV instead.')
     body = csv_text(rows) if file_format == FORMAT_CSV else docx_bytes(rows, day)
     return f'wearable-mappings-{day.isoformat()}.{file_format}', CONTENT_TYPES[file_format], body
 
@@ -280,7 +301,7 @@ def docx_bytes(rows, day):
     if not rows:
         _text(document.add_paragraph(), 'There are no wearable mappings.', size=10, italic=True)
     for heading, members in sections(rows):
-        document.add_heading(f'{heading} ({len(members)})', level=1)
+        document.add_heading(f'{xml_safe(heading)} ({len(members)})', level=1)
         _category_table(document, members)
 
     buffer = io.BytesIO()
@@ -325,13 +346,15 @@ def _font(rPr, name):
     fonts = rPr.get_or_add_rFonts()
     for attribute in ('ascii', 'hAnsi', 'cs', 'eastAsia'):
         fonts.set(qn(f'w:{attribute}'), name)
-        fonts.attrib.pop(qn(f'w:{attribute}Theme'), None)
+        # The attribute is asciiTheme / hAnsiTheme / eastAsiaTheme, but cstheme.
+        for theme in (f'w:{attribute}Theme', f'w:{attribute}theme'):
+            fonts.attrib.pop(qn(theme), None)
 
 
 def _text(paragraph, text, *, size=_BODY_PT, bold=False, italic=False, color=None):
     from docx.shared import Pt, RGBColor
 
-    run = paragraph.add_run(text)
+    run = paragraph.add_run(xml_safe(text))
     run.font.size = Pt(size)
     run.font.bold = bold or None
     run.font.italic = italic or None

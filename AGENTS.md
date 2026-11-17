@@ -1774,9 +1774,14 @@ loaded.
   read-only doctor included. It is reference data: no patient value, no
   reviewer, and no `notes`, which hold Suggest's rationale and curators' text.
 - **Which rows.** The tab's own, through `mapping_browse.tab_queryset`: every
-  vocabulary in `WEARABLE_SOURCE_VOCABULARIES`, global and hospital-scoped
-  rows alike, in every section, **without `rejected` rows**. No search,
-  provenance or Seen filter applies. One query, whatever the row count.
+  vocabulary in `WEARABLE_SOURCE_VOCABULARIES`, in every section, **without
+  `rejected` rows and without a hospital's own override of a code** (the file
+  is for use outside the app, where that row would read as an unexplained
+  second line). No search, provenance or Seen filter applies. One query,
+  whatever the row count. The Word document is refused with a 400 above
+  `DOCX_MAX_ROWS` (5,000): it is built in memory in the request at about
+  1.4 ms a row; the CSV has no limit. Characters XML cannot hold are dropped
+  from the Word text, since one in any stored code would fail the file.
 - **Order.** Category in `WEARABLE_METRIC_CATEGORIES` order, blank last; then
   metric key, blank last; then source (HealthKit, Health Connect, Garmin,
   OpenWearables, HL7 PHR, then any other vocabulary by id); then source code.
