@@ -230,8 +230,9 @@ has set its destination or curated it:
   Suggest candidate or score (Suggest stamps its own `origin_system` when it proposes a
   destination, which takes the row out),
 - no curator has saved it: `decision_surface` is blank, `updated_by` is empty, and it has no
-  curator note, destination unit, LOINC axes or SNOMED attributes. The last four matter on an
-  instance loaded by `copy_reference_data`, which clears `updated_by`.
+  curator note, LOINC axes or SNOMED attributes, and no destination unit other than the one the
+  seed sets. These matter on an instance loaded by `copy_reference_data`, which clears
+  `updated_by`.
 
 A row Suggest tried and declined has no destination and is still the seed's; filling it drops the
 note that run left. A target a curator has locked on the Concept to Code tab is not written to.
@@ -243,6 +244,53 @@ the metric under; otherwise it is reported (`Concept not found`, `Concept is ret
 It never clears a destination. The run lists each row it does not bring into line:
 `[LEFT ALONE]` where the seed names a target and the row keeps another destination, with the
 reason, and `[KEPT]` where the seed names no target and the row has one.
+
+### Units
+
+Each metric is seeded with its unit as the mapping's **destination unit**: the UCUM concept for
+the unit the proposal gives (`UCUM_BY_UNIT` in the seed, the proposal's "UCUM Unit" column), for
+example `bpm` → `/min`, `mmHg` → `mm[Hg]`, `°C` → `Cel`, `count` → `1`. The unit is set whether or
+not the metric has a destination concept yet, so the curator who picks the concept sees the unit
+beside it. A unit with no UCUM concept loaded (`{score}`, `uS` and `[IU]` on a standard Athena
+load) is left unset and listed at the end of the run.
+
+`--update-seeded` also fills a unit that is still blank (`[UNIT]` in the output). Filling a blank
+overrides nothing, so this does not need the row to be the seed's: a row whose destination
+Suggest proposed gets its unit too. It leaves alone a row that is approved or rejected, a row a
+curator has saved, and any unit that is already set.
+
+The unit matters once a mapping is approved: the bulk measurement write converts incoming values
+to it (see AGENTS.md, "Write-time conversion of stored rows").
+
+## HL7 PHR: metrics with no device code yet
+
+The HL7 PHR Code Mapping table names metrics that no OpenWearables, Apple or Garmin code
+carries: total energy burned, six dietary nutrients, steps cadence, R-R interval, three heart
+rhythm events, basal body temperature, hip circumference, bone mass, sleep arousal index and
+snore index. `manage.py seed_hl7_phr_mappings` creates one **proposed** mapping for each
+(`HL7_PHR_METRICS`, 17 of them):
+
+- source vocabulary `HL7-PHR`, which sits on the Wearables tab with OpenWearables, Apple and
+  Garmin (`WEARABLE_SOURCE_VOCABULARIES`);
+- source code is the HL7 PHR code value (`totalEnergyBurned`, `dietaryCalcium`, `rrInterval`, …);
+- provenance (`origin_system`) is `HL7 PHR`;
+- where the HL7 PHR table gives a LOINC code it is the proposed destination; the other ten have
+  no destination and wait for Suggest or a curator.
+
+| HL7 PHR code | Proposed destination |
+|---|---|
+| `totalEnergyBurned` | LOINC 41981-2 |
+| `dietaryCalcium` | LOINC 9045-6 |
+| `dietaryCarbohydrates` | LOINC 9059-7 |
+| `dietaryEnergyConsumed` | LOINC 9052-2 |
+| `dietaryFatTotal` | LOINC 9066-2 |
+| `dietaryProtein` | LOINC 9079-5 |
+| `dietarySodium` | LOINC 9086-0 |
+
+It is the OpenWearables command run over another list, so everything above about re-running,
+`--dry-run`, `--update-seeded` and units applies, with `HL7 PHR` as the provenance that marks a
+row as this seed's. Nothing ingests under these codes yet: the rows record the agreed
+destination so a source that starts sending the HL7 PHR codes finds a curated mapping waiting.
 
 ---
 
