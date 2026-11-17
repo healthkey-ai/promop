@@ -53,7 +53,7 @@ const PATIENT = {
   person_id: 261,
   patient_name: 'Alishia Tawny Howell',
   date_of_birth: '1970-01-01',
-  hemoglobin_g_dl: 11.5,                       // a proposal, not approved data
+  hemoglobin_g_dl: '11.5',                     // a proposal, not approved data (DRF sends Decimal as a string)
   provisional_fields: { hemoglobin_g_dl: 82 },
   id: 7, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
   derivation_version: 1, user_edited_fields: [],
