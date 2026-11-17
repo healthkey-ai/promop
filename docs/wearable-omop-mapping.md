@@ -230,9 +230,9 @@ has set its destination or curated it:
   Suggest candidate or score (Suggest stamps its own `origin_system` when it proposes a
   destination, which takes the row out),
 - no curator has saved it: `decision_surface` is blank, `updated_by` is empty, and it has no
-  curator note, LOINC axes or SNOMED attributes, and no destination unit other than the one the
-  seed sets. These matter on an instance loaded by `copy_reference_data`, which clears
-  `updated_by`.
+  curator note, LOINC axes or SNOMED attributes, and no destination unit other than one the
+  seed assigns. The note, axes and attributes matter on an instance loaded by
+  `copy_reference_data`, which clears `updated_by`.
 
 A row Suggest tried and declined has no destination and is still the seed's; filling it drops the
 note that run left. A target a curator has locked on the Concept to Code tab is not written to.
@@ -247,20 +247,48 @@ reason, and `[KEPT]` where the seed names no target and the row has one.
 
 ### Units
 
-Each metric is seeded with its unit as the mapping's **destination unit**: the UCUM concept for
-the unit the proposal gives (`UCUM_BY_UNIT` in the seed, the proposal's "UCUM Unit" column), for
-example `bpm` → `/min`, `mmHg` → `mm[Hg]`, `°C` → `Cel`, `count` → `1`. The unit is set whether or
-not the metric has a destination concept yet, so the curator who picks the concept sees the unit
-beside it. A unit with no UCUM concept loaded (`{score}`, `uS` and `[IU]` on a standard Athena
-load) is left unset and listed at the end of the run.
+Each metric's unit is seeded twice over, from the proposal's "Unit" and "UCUM Unit" columns
+(`UCUM_BY_UNIT` in the seed: `bpm` → `/min`, `mmHg` → `mm[Hg]`, `°C` → `Cel`, `count` → `1`, …):
 
-`--update-seeded` also fills a unit that is still blank (`[UNIT]` in the output). Filling a blank
-overrides nothing, so this does not need the row to be the seed's: a row whose destination
-Suggest proposed gets its unit too. It leaves alone a row that is approved or rejected, a row a
-curator has saved, and any unit that is already set.
+- as the row's **source unit** (`source_unit_evidence`, one entry with the UCUM code and the
+  display unit), which is what the list's Units column shows. It carries no count, so the
+  approval unit check does not treat it as a sighting, and no source, so a rebuild from patient
+  data keeps it;
+- as the mapping's **destination unit** (`destination_unit_concept`, a standard UCUM concept),
+  set whether or not the metric has a destination concept yet. A unit whose UCUM concept is not
+  loaded is left unset and listed at the end of the run by display unit and code (`U ([IU])`,
+  `score ({score})` and `μS (uS)` on a standard Athena load).
 
-The unit matters once a mapping is approved: the bulk measurement write converts incoming values
-to it (see AGENTS.md, "Write-time conversion of stored rows").
+The three temperature *deviation* metrics (`skin_temperature_deviation`,
+`skin_temperature_trend_deviation`, `garmin_skin_temperature`) get a source unit and no
+destination unit: the temperature conversion is for absolute readings, and applied to a
+difference in °F it would be wrong.
+
+`--update-seeded` also fills what is blank on a row that exists:
+
+- a missing source unit, on any row, whatever its status (`[SOURCE UNIT]`). It is a sighting, so
+  `updated_at` is not stamped;
+- a missing destination unit (`[UNIT]`), on a proposed row no curator has saved. This does not
+  need the row to be the seed's: a row whose destination Suggest proposed gets its unit too. It
+  leaves alone a row that is approved or rejected, a row a curator has saved (including one
+  with only LOINC axes or SNOMED attributes entered), a row whose destination a curator has
+  locked, and any unit that is already set.
+
+A run without the flag says how many rows it would fill.
+
+A destination unit does nothing while the mapping is proposed. Once it is approved, for a
+Measurement row whose unit is one promop converts between (`m`, `cm`, `kg`, `g`, `mg`, `L`,
+`mL`, `min`, `h`, `Cel`, `mg/dL`), the bulk measurement write converts incoming values to it
+(see AGENTS.md, "Write-time conversion of stored rows"), and the lookup API reports a source
+unit it does not recognise as the same unit (`bpm` against `/min`, `mmHg` against `mm[Hg]`) as
+`incompatible`. Both look a mapping up by source code alone, so an approved `weight` row would
+also apply to another producer's rows whose source value is "weight". Check both before
+approving a seeded row for a source that is about to send data.
+
+The Apple and Garmin seed (`seed_wearable_device_mappings`) records the source unit its
+adapters report in (`km`, `km/hr`, `bpm`, …), filling it on rows seeded before units were
+recorded. It sets no destination unit: those rows are approved, and the proposal's metres and
+m/s differ from the kilometres and km/h the adapters store.
 
 ## HL7 PHR: metrics with no device code yet
 

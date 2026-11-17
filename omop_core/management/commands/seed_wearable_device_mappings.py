@@ -4,7 +4,9 @@ Creates one *approved* mapping per device-specific source code, derived from
 the existing hard-coded mapping tables in wearable_parsers.py and mappings.py.
 These mappings represent the code paths that are already proven in production.
 
-Idempotent: uses get_or_create on (source_vocabulary_id, source_code).
+Idempotent: uses get_or_create on (source_vocabulary_id, source_code). The one
+thing it adds to a row that exists is the metric's source unit, and only where
+the row records none.
 """
 
 import logging
@@ -12,6 +14,7 @@ import logging
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
+from omop_core.management.commands.seed_openwearables_mappings import unit_evidence
 from omop_core.models import Concept, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
@@ -92,7 +95,7 @@ class Command(BaseCommand):
             ('Garmin', GARMIN_METRICS, 'hk-wearables-garmin'),
         ]
 
-        total_created = total_existed = total_unresolved = 0
+        total_created = total_existed = total_unresolved = source_units_filled = 0
 
         with transaction.atomic():
             for source_vocab, metrics, origin_system in device_sets:
@@ -133,6 +136,7 @@ class Command(BaseCommand):
                             'target_concept': target,
                             'destination_vocabulary_id': d_vocab,
                             'omop_table': omop_table,
+                            'source_unit_evidence': unit_evidence(unit),
                             'status': 'approved',
                             'origin': 'import',
                             'origin_system': origin_system,
@@ -144,6 +148,12 @@ class Command(BaseCommand):
                         created += 1
                     else:
                         existed += 1
+                        # The unit the adapter reports in, on a row seeded before
+                        # units were recorded. Fills a blank and nothing else.
+                        source_units_filled += SourceCodeConceptMapping.objects.filter(
+                            organization=None, source_vocabulary_id=source_vocab,
+                            source_code=src_code, source_unit_evidence=[],
+                        ).update(source_unit_evidence=unit_evidence(unit))
 
                 total_created += created
                 total_existed += existed
@@ -172,3 +182,6 @@ class Command(BaseCommand):
                 f'\nDone: {total_created} created, {total_existed} already existed, '
                 f'{total_unresolved} without target concept (of {total} total).'
             ))
+            if source_units_filled:
+                self.stdout.write(
+                    f'Source units filled on {source_units_filled} existing rows.')
