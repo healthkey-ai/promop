@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { fetchDiseaseCategories } from '@/api/mappingHub';
 import { destinationError } from './destinationSearch';
-import { BarChart3, Lock, StickyNote, Unlock } from 'lucide-react';
+import { BarChart3, ChevronDown, ChevronRight, Lock, StickyNote, Unlock } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/shadcn/popover';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
@@ -16,6 +16,9 @@ type Concept = {
   concept_id: number; concept_name: string; concept_code: string;
   vocabulary_id: string; domain_id: string;
   concept_class_id?: string; standard_concept?: string | null;
+  /** What the list files the concept under: its wearable metric category under
+   * Wearables, else its LOINC class or concept class. Blank when it has none (#2690). */
+  category?: string;
   fields: { field_name: string; status: string; omop_table: string }[];
   sccm_counts: { approved: number; proposed: number; rejected: number };
   /** Curator priority (1 = map first), or null when unranked (#1914). */
@@ -58,6 +61,44 @@ type Source = {
 };
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
+type ConceptOrder = 'category' | 'priority';
+/** The concept list. `grouped` says its rows are in category order, and then
+ * `categories` holds every category of the whole filtered list with its size,
+ * in that order. A list too long to group, and one asked for in priority
+ * order, has neither (#2690). */
+type ConceptPage = Page<Concept> & {
+  prioritized?: number; order?: ConceptOrder; grouped?: boolean; group_limit?: number;
+  categories?: { category: string; count: number }[] | null;
+};
+/** The rows of one category on this page. */
+type ConceptGroup = {
+  category: string; rows: Concept[];
+  /** Concepts in the category across every page; null when the server did not count it. */
+  total: number | null;
+  /** The category began on an earlier page. */
+  continued: boolean;
+};
+/** The page's rows under one header per category, in the order they came.
+ * A category's place in the whole list is the sum of the counts before it,
+ * so the first header can say whether it began on an earlier page. */
+function groupByCategory(data: ConceptPage): ConceptGroup[] {
+  const groups: ConceptGroup[] = [];
+  const pageStart = (data.page - 1) * data.page_size;
+  for (const concept of data.results) {
+    const category = concept.category ?? '';
+    const last = groups.at(-1);
+    if (last && last.category === category) { last.rows.push(concept); continue; }
+    let before = 0;
+    let total: number | null = null;
+    for (const entry of data.categories ?? []) {
+      if (entry.category === category) { total = entry.count; break; }
+      before += entry.count;
+    }
+    groups.push({ category, rows: [concept], total, continued: !groups.length && total !== null && before < pageStart });
+  }
+  return groups;
+}
+const categoryLabel = (category: string) => category || 'Uncategorized';
 type Run = {
   run_id: string; state: string; error: string; done: number; total: number; destinations: number;
   selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string; auto_propose_threshold?: number | null };
@@ -74,20 +115,43 @@ const domains = [
   ['', 'All domains'], [WEARABLES_DOMAIN, 'Wearables'], ['measurement', 'Measurement'], ['observation', 'Observation'],
   ['condition', 'Condition'], ['drug_exposure', 'Drug'], ['procedure', 'Procedure'],
 ];
-/** The chosen domain is saved per account in this browser, as the patient
- * list's filters are, and restored the next time the tab opens (#2656). */
+/** What the tab remembers per account in this browser, as the patient list's
+ * filters are: the chosen domain (#2656), the list's order, and the categories
+ * the categories a curator has opened under each domain; every other category
+ * starts folded (#2690). */
+type Preferences = { domain: string; order: ConceptOrder; expanded: Record<string, string[]> };
 const domainPreferenceKey = (userId?: number | string | null) => `promop-concept-to-code:${userId ?? 'session'}`;
-function loadDomain(key: string): string {
+/** Each part is read on its own, and one of the wrong shape is ignored. */
+function loadPreferences(key: string): Preferences {
+  const preferences: Preferences = { domain: '', order: 'category', expanded: {} };
   try {
     const saved = JSON.parse(localStorage.getItem(key) || '{}');
-    return domains.some(([value]) => value === saved?.domain) ? saved.domain : '';
-  } catch {
-    return '';
-  }
+    if (!saved || typeof saved !== 'object') return preferences;
+    const isDomain = (value: unknown) => domains.some(([domain]) => domain === value);
+    if (isDomain(saved.domain)) preferences.domain = saved.domain;
+    if (saved.order === 'priority') preferences.order = 'priority';
+    // An older `collapsed` list is not read: it said what was shut, not what is open.
+    if (saved.expanded && typeof saved.expanded === 'object' && !Array.isArray(saved.expanded)) {
+      for (const [domain, names] of Object.entries(saved.expanded)) {
+        if (isDomain(domain) && Array.isArray(names) && names.every(name => typeof name === 'string')) {
+          preferences.expanded[domain] = names;
+        }
+      }
+    }
+  } catch { /* Not JSON: nothing is remembered. */ }
+  return preferences;
 }
-function saveDomain(key: string, domain: string) {
-  try { localStorage.setItem(key, JSON.stringify({ domain })); } catch { /* Storage may be disabled. */ }
+/** Only what differs from a fresh tab is written, beside the domain. */
+function savePreferences(key: string, { domain, order, expanded }: Preferences) {
+  const opened = Object.fromEntries(Object.entries(expanded).filter(([, names]) => names.length));
+  try {
+    localStorage.setItem(key, JSON.stringify({
+      domain, ...(order === 'category' ? {} : { order }), ...(Object.keys(opened).length ? { expanded: opened } : {}),
+    }));
+  } catch { /* Storage may be disabled. */ }
 }
+/** Category, Priority, Standard concept, Patient fields and the three counts. */
+const CONCEPT_COLUMNS = 7;
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
 const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
 const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
@@ -128,26 +192,33 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   initialConceptId?: number;
   /** Called once the linked concept is opened or reported, so it is not reopened. */
   onInitialConceptHandled?: () => void;
-  /** Whose domain choice to restore and save. */
+  /** Whose domain, order and opened categories to restore and save. */
   userId?: number | string | null;
 }) {
   const [diseases, setDiseases] = useState<[string, string][]>([['', 'All diseases']]);
   const preferenceKey = domainPreferenceKey(userId);
-  const [domain, setDomain] = useState(() => loadDomain(preferenceKey));
-  // The account can arrive after the first render: read its own choice then,
-  // rather than keep (and later save over it) the one read before it was known.
+  const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
+  // The account can arrive after the first render: read its own choices then,
+  // rather than keep (and later save over them) the ones read before it was known.
   const [loadedKey, setLoadedKey] = useState(preferenceKey);
   if (loadedKey !== preferenceKey) {
     setLoadedKey(preferenceKey);
-    setDomain(loadDomain(preferenceKey));
+    setPreferences(loadPreferences(preferenceKey));
   }
+  const { domain, order } = preferences;
+  // Saved when the curator changes one, never on load.
+  const remember = (change: Partial<Preferences>) => {
+    const next = { ...preferences, ...change };
+    setPreferences(next);
+    savePreferences(preferenceKey, next);
+  };
   const [disease, setDisease] = useState('');
   const [scope, setScope] = useState('fields');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [rankedOnly, setRankedOnly] = useState(false);
-  const [data, setData] = useState<(Page<Concept> & { prioritized?: number }) | null>(null);
+  const [data, setData] = useState<ConceptPage | null>(null);
   const [moving, setMoving] = useState(false);
   const [moveStatus, setMoveStatus] = useState('');
   const [dragged, setDragged] = useState<Concept | null>(null);
@@ -184,8 +255,10 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
     const timer = window.setTimeout(async () => {
       setLoading(true); setError('');
       try {
-        const response = await api.get<Page<Concept> & { prioritized?: number }>('/v1/concept-to-code/', {
-          params: { domain, scope, search, page, page_size: pageSize, ...(disease ? { disease } : {}), ...(rankedOnly ? { prioritized: '1' } : {}) },
+        const response = await api.get<ConceptPage>('/v1/concept-to-code/', {
+          // Category order is the server's default, so only the other choice is sent.
+          params: { domain, scope, search, page, page_size: pageSize, ...(disease ? { disease } : {}),
+            ...(rankedOnly ? { prioritized: '1' } : {}), ...(order === 'priority' ? { order } : {}) },
           signal: controller.signal,
         });
         if (active) setData(response.data);
@@ -194,7 +267,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       } finally { if (active) setLoading(false); }
     }, 250);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
-  }, [domain, disease, scope, search, page, pageSize, rankedOnly, revision]);
+  }, [domain, disease, scope, search, page, pageSize, rankedOnly, order, revision]);
 
   // One concept per move: the server renumbers the global list, so a move
   // from a filtered or later page needs nothing else from it (#1914).
@@ -261,6 +334,52 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
   };
   const lastPosition = data?.prioritized ?? 0;
 
+  // Rows sit under a header per category only when the server sent them in
+  // category order with the categories' sizes; an older or longer response
+  // is a plain list. Folding changes what is drawn of this page's rows (#2690).
+  const groups = data?.grouped === true && Array.isArray(data.categories) ? groupByCategory(data) : null;
+  const listCategories = groups ? (data?.categories ?? []).map(entry => entry.category) : [];
+  // A category is folded until the curator opens it; what they opened is
+  // remembered per domain, so a category never seen starts folded.
+  const expanded = new Set(preferences.expanded[domain] ?? []);
+  const setExpanded = (names: Iterable<string>) => remember({ expanded: { ...preferences.expanded, [domain]: [...new Set(names)] } });
+  const toggleCategory = (category: string) => setExpanded(
+    expanded.has(category) ? [...expanded].filter(name => name !== category) : [...expanded, category]);
+  const allFolded = Boolean(groups?.every(group => !expanded.has(group.category)));
+  // The whole filtered list is too long to sort and count by category.
+  const tooLongToGroup = Boolean(data && data.grouped === false && order === 'category'
+    && data.group_limit !== undefined && data.total > data.group_limit);
+
+  // One concept's row, the same under a category header and in a plain list.
+  const conceptRow = (concept: Concept) => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
+    draggable={canWrite && !writing && !moving && !concept.done}
+    onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
+    onDragEnd={() => { setDragged(null); setDropTarget(null); }}
+    onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
+    onDragLeave={() => setDropTarget(previous => previous === concept.concept_id ? null : previous)}
+    onDrop={event => { event.preventDefault(); dropOn(concept); }}
+    className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''} ${
+      concept.done ? 'italic text-slate-500' : ''} ${
+      dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
+    <td className="p-3 align-top text-xs text-slate-600">{concept.category
+      || <span className="text-slate-400" title="No category">—</span>}</td>
+    <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
+      disabled={!canWrite || writing || moving} onMove={position => void move(concept, position)}
+      onDone={done => void markDone(concept, done)} /></td>
+    <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
+      aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
+      onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
+      {canWrite ? <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
+        : concept.note && <span className="ml-2 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1 py-0.5 align-middle text-amber-700"
+          title={concept.note.text} aria-label={`Note for ${concept.concept_name}: ${concept.note.text}`}>
+          <StickyNote size={12} aria-hidden="true" className="fill-amber-200" /></span>}
+      {(canWrite || concept.lock) && <LockBadge concept={concept} disabled={!canWrite || writing || moving} onToggle={() => void toggleLock(concept)} />}
+      <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
+    <td className="p-3 text-xs text-slate-600">{concept.fields.length
+      ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
+    {(['approved', 'proposed', 'rejected'] as const).map(status => <td key={status} className="p-3 text-right tabular-nums">{concept.sccm_counts[status]}</td>)}
+  </tr>;
+
   useEffect(() => {
     if (!initialConceptId) return;
     let active = true;
@@ -314,7 +433,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
         <option value="fields">Patient field concepts</option><option value="all">All standard concepts</option>
       </select>
       <select aria-label="Concept domain" className={input} disabled={writing} value={domain}
-        onChange={event => { setDomain(event.target.value); saveDomain(preferenceKey, event.target.value); setPage(1); }}>
+        onChange={event => { remember({ domain: event.target.value }); setPage(1); }}>
         {domains.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
       <select aria-label="Disease category" className={input} disabled={writing} value={disease}
@@ -330,46 +449,60 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
           onChange={event => { setRankedOnly(event.target.checked); setPage(1); }} />
         Ranked only{data?.prioritized ? ` (${data.prioritized})` : ''}
       </label>
+      <select aria-label="Concept order" className={input} disabled={writing} value={order}
+        onChange={event => { remember({ order: event.target.value === 'priority' ? 'priority' : 'category' }); setPage(1); }}>
+        <option value="category">Category, then priority</option><option value="priority">Priority</option>
+      </select>
+      {groups && <div role="group" aria-label="Categories" className="flex items-center gap-2">
+        <button type="button" className={button} disabled={listCategories.every(name => expanded.has(name))}
+          onClick={() => setExpanded([...expanded, ...listCategories])}>Expand all</button>
+        <button type="button" className={button} disabled={!listCategories.some(name => expanded.has(name))}
+          onClick={() => setExpanded([...expanded].filter(name => !listCategories.includes(name)))}>Collapse all</button>
+      </div>}
     </div>
-    <p className="text-xs text-slate-500">Ranked concepts are mapped first and come first on every page. Drag a row, or type
+    <p className="text-xs text-slate-500">{order === 'category'
+      ? 'Concepts are listed by category and, inside a category, ranked ones first. Priority is one list across every category, and ranked concepts are mapped first.'
+      : 'Ranked concepts are mapped first and come first on every page.'} Drag a row, or type
       its priority (1 is first; clear it to unrank). Click a Priority cell for Done once a concept's codes are mapped; Done
-      concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.</p>
+      concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.
+      {groups && ' Categories start folded; dragging reorders the rows of the categories you have opened.'}</p>
+    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts, or Expand all.</p>}
+    {tooLongToGroup && data && <p className="text-xs text-slate-500">This list has {data.total.toLocaleString()} concepts, too
+      many to group by category (the limit is {data.group_limit?.toLocaleString()}), so it is in priority order. Choose a
+      domain or a disease, or search, to narrow it.</p>}
     {moveStatus && <p role="status" aria-live="polite" className="text-sm text-slate-700">{moveStatus}</p>}
     {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
     {loading && <p role="status" className="text-sm text-slate-500">Loading concepts…</p>}
     <div className="overflow-x-auto rounded border border-slate-200 bg-white">
       <table aria-label="Standard concept coverage" className="w-full text-left text-sm">
         <thead className="bg-slate-100 text-xs text-slate-600"><tr>
-          <th className="p-3">Priority</th>
-          <th className="p-3">Standard concept</th><th className="p-3">Patient fields</th>
-          <th className="p-3 text-right">Approved</th><th className="p-3 text-right">Proposed</th><th className="p-3 text-right">Rejected</th>
+          <th scope="col" className="p-3">Category</th>
+          <th scope="col" className="p-3">Priority</th>
+          <th scope="col" className="p-3">Standard concept</th><th scope="col" className="p-3">Patient fields</th>
+          <th scope="col" className="p-3 text-right">Approved</th><th scope="col" className="p-3 text-right">Proposed</th><th scope="col" className="p-3 text-right">Rejected</th>
         </tr></thead>
-        <tbody>{data?.results.map(concept => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
-          draggable={canWrite && !writing && !moving && !concept.done}
-          onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
-          onDragEnd={() => { setDragged(null); setDropTarget(null); }}
-          onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
-          onDragLeave={() => setDropTarget(previous => previous === concept.concept_id ? null : previous)}
-          onDrop={event => { event.preventDefault(); dropOn(concept); }}
-          className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''} ${
-            concept.done ? 'italic text-slate-500' : ''} ${
-            dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
-          <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
-            disabled={!canWrite || writing || moving} onMove={position => void move(concept, position)}
-            onDone={done => void markDone(concept, done)} /></td>
-          <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
-            aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
-            onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
-            {canWrite ? <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
-              : concept.note && <span className="ml-2 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1 py-0.5 align-middle text-amber-700"
-                title={concept.note.text} aria-label={`Note for ${concept.concept_name}: ${concept.note.text}`}>
-                <StickyNote size={12} aria-hidden="true" className="fill-amber-200" /></span>}
-            {(canWrite || concept.lock) && <LockBadge concept={concept} disabled={!canWrite || writing || moving} onToggle={() => void toggleLock(concept)} />}
-            <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
-          <td className="p-3 text-xs text-slate-600">{concept.fields.length
-            ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
-          {(['approved', 'proposed', 'rejected'] as const).map(status => <td key={status} className="p-3 text-right tabular-nums">{concept.sccm_counts[status]}</td>)}
-        </tr>)}</tbody>
+        {groups ? groups.map((group, index) => {
+          const open = expanded.has(group.category);
+          const shown = group.rows.length;
+          return <tbody key={`${index}:${group.category}`} data-testid={`concept-group-${group.category || 'none'}`}>
+            <tr className="border-t border-slate-200 bg-slate-50">
+              <th scope="rowgroup" colSpan={CONCEPT_COLUMNS} className="px-3 py-2 text-left font-normal">
+                <button type="button" aria-expanded={open} onClick={() => toggleCategory(group.category)}
+                  className="inline-flex items-center gap-2 rounded text-sm font-semibold text-slate-900 hover:underline">
+                  {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+                  {/* The spaces are for the button's name: the gap is only visual. */}
+                  <span className={group.category ? '' : 'italic text-slate-600'}>{categoryLabel(group.category)}</span>{' '}
+                  {group.continued && <span className="font-normal text-slate-500">(continued) </span>}
+                  <span className="font-normal tabular-nums text-slate-500">
+                    {(group.total ?? shown).toLocaleString()} {(group.total ?? shown) === 1 ? 'concept' : 'concepts'}
+                    {group.total !== null && shown < group.total ? `, ${shown.toLocaleString()} on this page` : ''}
+                  </span>
+                </button>
+              </th>
+            </tr>
+            {open && group.rows.map(conceptRow)}
+          </tbody>;
+        }) : <tbody>{data?.results.map(conceptRow)}</tbody>}
       </table>
       {data && !data.results.length && <p className="p-5 text-sm text-slate-500">No matching standard concepts. Try another search or All standard concepts.</p>}
     </div>

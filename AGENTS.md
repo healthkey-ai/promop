@@ -1577,6 +1577,58 @@ Unmapped section. Under the Wearables domain it starts unchecked
 (`seenOnlyByDefault`), because the codes to map there are the ones with no
 sightings; under every other domain it starts checked.
 
+Every concept on the list has a **Category**, the first column, and the list
+is grouped by it (#2690). One definition,
+`concept_to_code.concept_category(params)`, gives the expression the order,
+each row's `category`, the per-category counts and the `category=` filter all
+read; it is never stored. Under Wearables it is the metric category of the
+concept's wearable mappings: the most frequent non-blank
+`SourceCodeConceptMapping.category` among its non-rejected rows in
+`WEARABLE_SOURCE_VOCABULARIES`, a tie going to the earlier entry of
+`WEARABLE_METRIC_CATEGORIES`. Everywhere else a LOINC concept has its LOINC
+class's display name (`LoincCodeClass` by primary key; the class code when the
+name is blank), and a LOINC code with no class row, like every other concept,
+has its `concept_class_id`. It is a string, `''` for none.
+
+- **Order.** `order=category` (the default) is category, then today's order
+  inside it: curator priority, Done last, name. Wearables follows the
+  `WEARABLE_METRIC_CATEGORIES` order, every other domain is alphabetical
+  without regard to case, and no category comes last. `order=priority` is the
+  global ranked list as it was. Anything else is a 400. Priority stays one list
+  across categories: a move or a drop sets the global position.
+- **Grouping is bounded.** Sorting and counting by a computed value reads the
+  whole filtered list, and "All standard concepts" is millions of rows. At or
+  under `CONCEPT_CATEGORY_GROUP_LIMIT` (5,000) a category-ordered response is
+  `grouped: true` and carries `categories: [{category, count}]` for the whole
+  filtered list in display order, from one GROUP BY. Above it, and whenever
+  `order=priority`, `grouped` is false, `categories` is null and the rows are
+  in priority order; `order` in the response names the order in force and
+  `group_limit` the limit. The list is counted once (`_paginate(count=)`), a
+  count that does not filter on the category never computes it, and the
+  endpoint's query count does not grow with the concepts (8; 7 ungrouped).
+- **Filter.** `category=<value>` narrows to one category under the same
+  definition (`__none__` for none) and combines with every other filter; an
+  unknown value matches nothing.
+- **The page.** A grouped list shows one header row per category: a button
+  with the category ("Uncategorized" for none), its size across every page and,
+  when fewer, how many are on this page, and "(continued)" when the category
+  began on an earlier page (worked out from the counts before it). **Every
+  category starts folded**: only its header is drawn until the curator opens
+  it, and a one-line hint says so while all of them are folded. Folded rows
+  still belong to the page, so opening or folding changes what is drawn and
+  asks the server for nothing. Expand all and Collapse all act on the
+  categories of the filtered list. Drag-to-reorder needs visible rows, so it
+  works among the categories that are open (the help text says so); a drop on
+  a row of another open category still sets the global position. A list too
+  long to group says so and how to narrow it.
+- **Remembered.** The per-account object that holds the domain
+  (`promop-concept-to-code:<user id>`) is `{"domain", "order"?, "expanded"?}`:
+  `order` only when it is `priority`, and `expanded`, the categories the
+  curator has opened per domain (`{"wearables": ["Sleep", ""]}`, `""` being
+  Uncategorized). A category not listed is folded, so a new account, domain or
+  category starts folded. A part of the wrong shape is ignored on its own, and
+  an older `collapsed` list is not read.
+
 ### The six LOINC axes decide which candidates are the same test
 
 A LOINC code is defined by component, property, time aspect, system, scale and
