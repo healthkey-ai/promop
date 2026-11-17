@@ -340,6 +340,63 @@ def locked_resolve(person, **kwargs):
         _unlock(person.person_id)
 
 
+def person_scope(person_id, codes) -> tuple[list[str], list[str]]:
+    """``(source_values, omop_tables)`` a full sweep resolves for one person.
+
+    The codes the person holds that a sweep can change: a clinical row or an
+    inventory code that is a qualifying proposal's code in any spelling (the
+    resolver matches a proposal case-insensitively, so ``Hgb`` is covered by a
+    proposal for ``HGB``), or a row that already carries a provisional mark (a
+    proposal that stopped qualifying gets its rows taken back). The values
+    returned are the person's *actual* spellings, which is what the resolver
+    filters on. Restricting the resolver to these is the whole point:
+    unrestricted, it walks the person's entire inventory, which on a loaded
+    patient is thousands of already-resolved codes and minutes of queries for a
+    handful of rows that can change.
+
+    One query per clinical table for the person's distinct codes, one for the
+    provisional holders, and one for the inventory, whatever the size of
+    *codes*: the qualifying set is intersected in Python, never sent as an IN
+    list. Empty lists mean there is nothing to resolve, and the caller must not
+    call the resolver: it reads an empty ``source_values`` as no restriction.
+    """
+    wanted = {table: {code.upper() for code in spellings} for table, spellings in codes.items()}
+    values: set[str] = set()
+    tables: set[str] = set()
+
+    def covered(table, source_value):
+        return source_value.upper() in wanted.get(table, ())
+
+    def found(table, spellings):
+        spellings = {v for v in spellings if v}
+        if spellings:
+            values.update(spellings)
+            tables.add(table)
+
+    for table, (model, _concept_col, source_col) in CLINICAL_TABLES.items():
+        rows = model.objects.filter(person_id=person_id)
+        if wanted.get(table):
+            found(table, (v for v in rows.values_list(source_col, flat=True).distinct()
+                          if v and covered(table, v)))
+        found(table, rows.filter(confidence__isnull=False).values_list(source_col, flat=True).distinct())
+    if wanted:
+        found_inventory: dict[str, set[str]] = {}
+        for omop_table, value in PatientSourceCode.objects.filter(person_id=person_id).values_list(
+                'omop_table', 'source_value').distinct():
+            table = normalize_omop_table(omop_table)
+            if table in CLINICAL_TABLES and value and covered(table, value):
+                found_inventory.setdefault(table, set()).add(value)
+        for table, spellings in found_inventory.items():
+            found(table, spellings)
+    return sorted(values), sorted(tables)
+
+
+_NOTHING_RESOLVED = {
+    'resolved': 0, 'created': 0, 'provisional': 0, 'reverted': 0,
+    'skipped': 0, 'already_resolved': 0, 'code_details': [],
+}
+
+
 # ---- the sweep -------------------------------------------------------------------
 
 def _bump(run, **counts):
@@ -418,10 +475,9 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
         qualifying_index(refresh=True)
     else:
         _cache_delete(_INDEX_KEY)
+    codes = mapping_codes(mapping) if mapping else qualifying_codes(index)
     ids = candidate_person_ids(
-        after=after, limit=limit,
-        codes=mapping_codes(mapping) if mapping else qualifying_codes(index),
-        include_provisional_holders=mapping is None,
+        after=after, limit=limit, codes=codes, include_provisional_holders=mapping is None,
     )
     started = time.monotonic()
     last_done, errors, processed = after, [], 0
@@ -431,10 +487,17 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
                 break
             try:
                 person = Person.objects.get(person_id=pid)
-                kwargs = {} if mapping is None else {
-                    'source_values': [mapping.source_code],
-                    'omop_tables': [normalize_omop_table(mapping.omop_table)]}
-                result = locked_resolve(person, **kwargs)
+                if mapping is None:
+                    # Only this person's qualifying and provisional codes, never
+                    # the whole inventory (see person_scope).
+                    source_values, omop_tables = person_scope(pid, codes)
+                    kwargs = {'source_values': source_values, 'omop_tables': omop_tables}
+                else:
+                    source_values = [mapping.source_code]
+                    kwargs = {'source_values': source_values,
+                              'omop_tables': [normalize_omop_table(mapping.omop_table)]}
+                result = (locked_resolve(person, **kwargs) if source_values
+                          else dict(_NOTHING_RESOLVED))
                 _bump(run, resolved=result['resolved'], created=result.get('created', 0),
                       provisional=result.get('provisional', 0), reverted=result.get('reverted', 0),
                       skipped=result['skipped'], already_resolved=result['already_resolved'])

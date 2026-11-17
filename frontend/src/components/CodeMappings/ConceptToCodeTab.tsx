@@ -373,7 +373,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       </table>
       {data && !data.results.length && <p className="p-5 text-sm text-slate-500">No matching standard concepts. Try another search or All standard concepts.</p>}
     </div>
-    <p className="text-xs text-slate-500">Coverage counts include all linked source codes, including Seen = 0.</p>
+    <p className="text-xs text-slate-500">Coverage counts every mapped source code, whatever its Seen count; a concept's Mapped Codes lists the same ones.</p>
     {data && <Pagination data={data} disabled={loading || writing} change={setPage} />}
     </section>
     {selected && <Dialog.Portal>
@@ -392,6 +392,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
         <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={!canWrite || lockedByOther(selected)}
+          seenOnlyByDefault={domain !== WEARABLES_DOMAIN}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
           onEditingChange={setEditing} suggestCache={suggestCache} />
       </Dialog.Content>
@@ -611,13 +612,13 @@ function newMappingRow(source: Source, concept: Concept): CodeMappingRow {
 
 /** One status group of a concept's stored mappings, fetched while it is open. */
 function useSourceGroup(conceptId: number, status: Status, enabled: boolean, query: {
-  search: string; seenOnly: boolean; withNotes: boolean; order: ConfidenceOrder; revision: number;
+  search: string; withNotes: boolean; order: ConfidenceOrder; revision: number;
 }) {
   const [page, setPage] = useState(1);
   const [data, setData] = useState<SourcePage | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
-  const { search, seenOnly, withNotes, order, revision } = query;
+  const { search, withNotes, order, revision } = query;
   useEffect(() => {
     if (!enabled) return;
     let current = true;
@@ -626,7 +627,9 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
       setLoading(true); setFailed(false);
       try {
         const response = await api.get<SourcePage>(`/v1/concept-to-code/${conceptId}/`, {
-          params: { mode: 'linked', status, search, seen_only: seenOnly ? '1' : '0', page, ...(withNotes ? { with_notes: '1' } : {}), ...(order ? { order } : {}) },
+          // No Seen filter: a concept's mapped codes are all listed, so the
+          // groups' counts are the concept list's (#2686).
+          params: { mode: 'linked', status, search, page, ...(withNotes ? { with_notes: '1' } : {}), ...(order ? { order } : {}) },
           signal: controller.signal,
         });
         if (current) setData(response.data);
@@ -635,15 +638,19 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
       } finally { if (current) setLoading(false); }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [conceptId, status, enabled, search, seenOnly, withNotes, order, page, revision]);
+  }, [conceptId, status, enabled, search, withNotes, order, page, revision]);
   // Stale rows must not stay selectable while a changed query loads, and a
   // folded group's failure must not outlive the group.
   const reset = useCallback(() => { setData(null); setPage(1); setFailed(false); }, []);
   return { data, setData, page, setPage, loading, failed, reset };
 }
 
-function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWriting, onEditingChange, suggestCache }: {
+function SourceCoverage({ concept, canApprove, readOnly = false, seenOnlyByDefault = true, onSaved, onWriting, onEditingChange, suggestCache }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
+  /** Whether Suggested Codes starts on Seen > 0. Off under the Wearables
+   * domain: a platform's own codes have no sightings on an instance that
+   * holds no wearable data, and they are the codes to map (#2686). */
+  seenOnlyByDefault?: boolean;
   /** Another curator holds the concept (#2390): every write control is off. */
   readOnly?: boolean;
   onEditingChange?: (value: boolean) => void;
@@ -653,7 +660,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
   // Suggested Codes is the view a curator comes for, so it opens first (#2010).
   const [mode, setMode] = useState<SourceMode>('candidates');
   const [search, setSearch] = useState('');
-  const [seenOnly, setSeenOnly] = useState(true);
+  const [seenOnly, setSeenOnly] = useState(seenOnlyByDefault);
   // Only the source codes a curator has left a note on (#2423).
   const [withNotes, setWithNotes] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -693,7 +700,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
   const [progress, setProgress] = useState('');
   const [order, setOrder] = useState<ConfidenceOrder>('');
   const [threshold, setThreshold] = useState(80);
-  const groupQuery = { search, seenOnly, withNotes, order, revision };
+  const groupQuery = { search, withNotes, order, revision };
   const approvedGroup = useSourceGroup(concept.concept_id, 'approved', mode === 'linked' && open.approved, groupQuery);
   const proposedGroup = useSourceGroup(concept.concept_id, 'proposed', mode === 'linked' && open.proposed, groupQuery);
   const rejectedGroup = useSourceGroup(concept.concept_id, 'rejected', mode === 'linked' && open.rejected, groupQuery);
@@ -1145,7 +1152,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
       {canApprove && <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-800 hover:bg-red-50 disabled:opacity-40" disabled={busy || !pending.length}
         onClick={() => void reject()}>Reject selected ({pending.length})</button>}
       {mode === 'linked' && statusCounts && <span className="text-xs text-slate-500">
-        {STATUSES.reduce((sum, status) => sum + statusCounts[status], 0)} matching sources{seenOnly && zeroSeen !== undefined ? ` · ${zeroSeen} zero-Seen codes excluded` : ''}</span>}
+        {STATUSES.reduce((sum, status) => sum + statusCounts[status], 0)} matching sources{zeroSeen ? ` · ${zeroSeen} with Seen 0` : ''}</span>}
     </div>}
     <div className="overflow-x-auto"><table aria-label="Source codes for selected concept" className="w-full text-left text-sm">
       <thead className="border-y bg-slate-50 text-xs text-slate-600"><tr>
@@ -1165,9 +1172,10 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
             <input type="checkbox" aria-label="Only source codes with a curator note" checked={withNotes} disabled={viewBusy}
               title="Show only source codes a curator has left a note on"
               onChange={event => { setWithNotes(event.target.checked); resetView(); }} />with notes</label></th>
-        <th className="p-2" aria-sort={order ? 'none' : 'descending'}><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
-          <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={viewBusy}
-            onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>
+        <th className="p-2" aria-sort={order ? 'none' : 'descending'}>{/* The Seen filter narrows what could be mapped; mapped codes are all listed (#2686). */}
+          {mode === 'candidates' && <label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
+            <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={viewBusy}
+              onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>}
           {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={viewBusy} title="Order by Seen"
             onClick={() => { setOrder(''); resetView(); }}>Seen ↕</button> : 'Seen ↓'}</th>
         <th className="p-2">Current destination</th>
@@ -1191,7 +1199,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
           </tr>
           {open[status] && group.data?.results.map(renderRow)}
           {open[status] && group.data && !group.data.results.length && <tr><td colSpan={6} className="p-2 text-sm text-slate-500">
-            No {status} mappings{withNotes ? ' with a curator note' : ''}{search ? ' match this search' : ''}{seenOnly ? '; uncheck > 0 only to include zero-Seen codes' : ''}.</td></tr>}
+            No {status} mappings{withNotes ? ' with a curator note' : ''}{search ? ' match this search' : ''}.</td></tr>}
           {open[status] && group.data && <tr><td colSpan={6} className="p-0">
             <Pagination data={group.data} disabled={writing || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
         </tbody>;

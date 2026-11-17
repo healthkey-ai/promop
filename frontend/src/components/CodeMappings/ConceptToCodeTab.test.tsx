@@ -51,6 +51,28 @@ async function selectConcept(canApprove = true) {
   await screen.findByText('SNOMED:S1');
 }
 
+/** The "> 0 only" checkbox. It narrows what could be mapped, so only Suggested Codes has it (#2686). */
+const SEEN_FILTER = 'Only source codes with Seen greater than zero';
+
+/** Opens the concept and stays on Suggested Codes, the view the Seen filter belongs to. */
+async function openSuggested(canApprove = true) {
+  render(<ConceptToCodeTab canWrite canApprove={canApprove} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+  return screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
+}
+
+/** The params of every request for a concept's stored mappings (the Mapped Codes groups). */
+const linkedParams = (conceptId = 123) => get.mock.calls
+  .filter(([url, config]) => url === `/v1/concept-to-code/${conceptId}/` && config?.params?.mode === 'linked')
+  .map(([, config]) => config.params as Record<string, unknown>);
+
+/** Mapped Codes was read, and never narrowed by Seen: the request carries no such parameter. */
+function expectNoSeenFilterOnMappedCodes(conceptId = 123) {
+  const requests = linkedParams(conceptId);
+  expect(requests.length).toBeGreaterThan(0);
+  requests.forEach(params => expect(params).not.toHaveProperty('seen_only'));
+}
+
 describe('concept-first curation', () => {
   it('links to the mapping accuracy analytics page from the top of the tab (#2383)', async () => {
     render(<ConceptToCodeTab canWrite canApprove />);
@@ -105,18 +127,27 @@ describe('concept-first curation', () => {
     const second = { ...concept, concept_id: 456, concept_name: 'Total protein' };
     get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
       ? page([concept, second]) : page([{ ...source, source_code: url.includes('/456/') ? 'S2' : 'S1' }]) }));
-    await selectConcept();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    // Change a filter in each view, and select a row: the Seen filter is
+    // Suggested Codes' own (#2686), the note filter and the selection are Mapped Codes'.
+    const first = await openSuggested();
+    fireEvent.click(within(first).getByRole('checkbox', { name: SEEN_FILTER }));
+    expect(within(first).getByRole('checkbox', { name: SEEN_FILTER })).not.toBeChecked();
+    await showExisting(first);
+    await within(first).findByText('SNOMED:S1');
+    fireEvent.click(within(first).getByRole('checkbox', { name: 'Only source codes with a curator note' }));
+    await waitFor(() => expect(linkedParams(123).at(-1)).toMatchObject({ with_notes: '1' }));
+    fireEvent.click(await within(first).findByRole('checkbox', { name: 'Select SNOMED S1' }));
+    expect(within(first).getByRole('button', { name: 'Approve selected (1)' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Total protein' }));
     const dialog = screen.getByRole('dialog', { name: 'Source codes for Total protein' });
+    expect(within(dialog).getByRole('checkbox', { name: SEEN_FILTER })).toBeChecked();
     await showExisting(dialog);
     await within(dialog).findByText('SNOMED:S2');
     expect(within(dialog).queryByText('SNOMED:S1')).not.toBeInTheDocument();
-    expect(within(dialog).getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' })).toBeChecked();
+    expect(within(dialog).getByRole('checkbox', { name: 'Only source codes with a curator note' })).not.toBeChecked();
     expect(within(dialog).getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
-    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/456/', expect.objectContaining({ params: expect.objectContaining({ mode: 'linked', seen_only: '1', page: 1 }) }));
+    expect(linkedParams(456)).toEqual([{ mode: 'linked', status: 'proposed', search: '', page: 1 }]);
   });
 
   it('prevents dismissal during a batch save and allows closing when the whole batch completes', async () => {
@@ -161,14 +192,34 @@ describe('concept-first curation', () => {
     } })));
   });
 
-  it('defaults source rows to Seen > 0 and allows zero-Seen codes', async () => {
-    await selectConcept();
-    const checkbox = screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' });
-    expect(checkbox).toBeChecked();
-    expect(checkbox.closest('th')).toHaveAttribute('aria-sort', 'descending');
-    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ seen_only: '1' }) }));
-    fireEvent.click(checkbox);
-    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ seen_only: '0', page: 1 }) })));
+  it('defaults Suggested Codes to Seen > 0 and allows zero-Seen codes; Mapped Codes is never narrowed by Seen (#2686)', async () => {
+    const unseen = { ...source, mapping_id: null, status: 'unmapped', source_code: 'Z0', occurrence_count: 0 };
+    post.mockResolvedValueOnce({ data: { ...run(), activity: [{ concept: { concept_id: 123 },
+      candidates: [{ ...source, evidence: ['umls'], verdict: 'review' }, unseen] }] } });
+    const estimated = () => get.mock.calls.filter(([url]) => String(url).endsWith('/estimate/'))
+      .map(([, config]) => config.params.include_zero_seen);
+    await openSuggested();
+    const checkbox = () => screen.getByRole('checkbox', { name: SEEN_FILTER });
+    expect(checkbox()).toBeChecked();
+    expect(checkbox().closest('th')).toHaveAttribute('aria-sort', 'descending');
+    await waitFor(() => expect(estimated()).toEqual(['0']));
+    // The search asks for seen codes only, and the list shows only those.
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('SNOMED:S1');
+    expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ include_zero_seen: false }));
+    expect(screen.queryByText('SNOMED:Z0')).not.toBeInTheDocument();
+    // Unchecked, the zero-Seen candidate shows, the estimate counts such codes,
+    // and the run that was made without them is flagged.
+    fireEvent.click(checkbox());
+    expect(checkbox()).not.toBeChecked();
+    expect(screen.getByText('SNOMED:Z0')).toBeInTheDocument();
+    await waitFor(() => expect(estimated().at(-1)).toBe('1'));
+    expect(screen.getByText('Run Suggest source codes again to search with the changed Seen filter.')).toBeInTheDocument();
+    // None of it reaches the stored mappings.
+    expect(linkedParams()).toEqual([]);
+    await showExisting();
+    await screen.findByText('SNOMED:S1');
+    expectNoSeenFilterOnMappedCodes();
   });
 
   it('filters source codes to those with a curator note, off by default, and marks them (#2423)', async () => {
@@ -234,7 +285,9 @@ describe('concept-first curation', () => {
     expect(approved.compareDocumentPosition(proposed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(proposed.compareDocumentPosition(rejected) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByText('SNOMED:OK1')).not.toBeInTheDocument();
-    expect(screen.getByText('4 matching sources · 3 zero-Seen codes excluded')).toBeInTheDocument();
+    // Zero-Seen codes are counted and listed, not excluded (#2686).
+    expect(screen.getByText('4 matching sources · 3 with Seen 0')).toBeInTheDocument();
+    expectNoSeenFilterOnMappedCodes();
 
     fireEvent.click(approved);
     await screen.findByText('SNOMED:OK1');
@@ -280,8 +333,8 @@ describe('concept-first curation', () => {
     const fresh = { ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0, source_code: 'NEW1' };
     post.mockResolvedValueOnce({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
       activity: [{ concept: { concept_id: 123 }, candidates: [fresh] }] } });
-    await selectConcept();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await openSuggested();
+    fireEvent.click(screen.getByRole('checkbox', { name: SEEN_FILTER }));
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     await screen.findByText('Not yet mapped');
     const listLoads = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').length;
@@ -401,8 +454,8 @@ describe('concept-first curation', () => {
     const preview = { ...run(), selection: { limit: 25, include_zero_seen: true },
       activity: [{ concept: { concept_id: 123 }, candidates: [fresh, second] }] };
     post.mockResolvedValueOnce({ data: preview });
-    await selectConcept();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await openSuggested();
+    fireEvent.click(screen.getByRole('checkbox', { name: SEEN_FILTER }));
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     await screen.findByText('2 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ include_zero_seen: true }));
@@ -429,8 +482,8 @@ describe('concept-first curation', () => {
   it('retains a new vocabulary candidate when its preview is stale', async () => {
     post.mockResolvedValueOnce({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
       activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0 }] }] } });
-    await selectConcept();
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    await openSuggested();
+    fireEvent.click(screen.getByRole('checkbox', { name: SEEN_FILTER }));
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     await screen.findByText('Not yet mapped');
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
@@ -441,6 +494,189 @@ describe('concept-first curation', () => {
     expect(screen.getByText('Not yet mapped')).toBeInTheDocument();
     // The proposal failed, so no approval was attempted.
     expect(post.mock.calls.filter(([url]) => String(url).includes('/mappings/'))).toHaveLength(1);
+  });
+});
+
+describe('the Seen filter belongs to Suggested Codes; Mapped Codes lists every mapped code (#2686)', () => {
+  // One metric, mapped from five platforms' own codes. None has been sighted
+  // on an instance that holds no wearable data, so every Seen count is 0.
+  const steps = { ...concept, concept_id: 900, concept_name: 'Steps', concept_code: '41950-7', fields: [],
+    sccm_counts: { approved: 2, proposed: 3, rejected: 0 } };
+  const seeded = ([
+    ['Apple', 'HKQuantityTypeIdentifierStepCount', 'approved'], ['Garmin', 'steps', 'approved'],
+    ['HealthConnect', 'StepsRecord', 'proposed'], ['OpenWearables', 'steps', 'proposed'], ['HL7-PHR', 'stepCount', 'proposed'],
+  ] as const).map(([source_vocabulary_id, source_code, status], index) => ({
+    ...source, mapping_id: 100 + index, source_vocabulary_id, source_code, status, occurrence_count: 0,
+    source_code_description: 'Step count', origin_system: 'wearable-seed',
+    destination_concept_id: 900, destination_concept_name: 'Steps', destination_standard_concept: 'S',
+  }));
+  const estimates: Record<string, unknown>[] = [];
+  beforeEach(() => {
+    estimates.length = 0;
+    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([steps]) });
+      if (url === '/v1/concept-to-code/axis-variant-walk/') {
+        return Promise.resolve({ data: { active: null, last: null, completed: null, patients_since: 0, walked_at: null } });
+      }
+      if (url.endsWith('/estimate/')) {
+        estimates.push(config?.params ?? {});
+        return Promise.resolve({ data: { total: 5, seen: 0, umls: 0, lexical: 5, capped: false, timed_out: false } });
+      }
+      // The stored mappings of the concept: every one, as the server lists them.
+      const rows = seeded.filter(row => row.status === config?.params?.status);
+      return Promise.resolve({ data: { ...page(rows), zero_seen: seeded.length, status_counts: steps.sccm_counts } });
+    });
+  });
+  const openSteps = async (domain?: string) => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByRole('button', { name: 'Steps' });
+    if (domain !== undefined) {
+      fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: domain } });
+      await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/',
+        expect.objectContaining({ params: expect.objectContaining({ domain }) })));
+    }
+    fireEvent.click(await screen.findByRole('button', { name: 'Steps' }));
+    return screen.getByRole('dialog', { name: 'Source codes for Steps' });
+  };
+  const seenFilter = (dialog: HTMLElement) => within(dialog).queryByRole('checkbox', { name: SEEN_FILTER });
+  const codes = (group: HTMLElement) => within(group).getAllByRole('button', { name: /:/ }).map(item => item.textContent);
+
+  it('lists the zero-Seen codes of every wearable vocabulary under Mapped Codes, by status, as the concept list counts them', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByRole('button', { name: 'Steps' });
+    const listed = Array.from(screen.getByTestId('concept-row-900').querySelectorAll('td')).slice(-3).map(cell => cell.textContent);
+    expect(listed).toEqual(['2', '3', '0']);
+    fireEvent.click(screen.getByRole('button', { name: 'Steps' }));
+    const dialog = screen.getByRole('dialog', { name: 'Source codes for Steps' });
+    // The work queue is on Seen > 0, its default outside the Wearables domain; that is not Mapped Codes' filter.
+    expect(seenFilter(dialog)).toBeChecked();
+    await showExisting(dialog);
+    const proposed = within(dialog).getByTestId('mapping-group-proposed');
+    await within(proposed).findByText('HealthConnect:StepsRecord');
+    expect(codes(proposed)).toEqual(['HealthConnect:StepsRecord', 'OpenWearables:steps', 'HL7-PHR:stepCount']);
+    // Each is listed with the Seen count it has, and its status.
+    within(proposed).getAllByRole('row').slice(1, 4).forEach(row => {
+      expect(within(row).getByText('0')).toBeInTheDocument();
+      expect(within(row).getByText('proposed')).toBeInTheDocument();
+    });
+    // The group headers are the concept list's counts, and the summary says how many have no sightings.
+    expect(within(dialog).getByRole('button', { name: 'Approved mappings (2)' })).toHaveAttribute('aria-expanded', 'false');
+    expect(within(dialog).getByRole('button', { name: 'Proposed mappings (3)' })).toHaveAttribute('aria-expanded', 'true');
+    expect(within(dialog).getByRole('button', { name: 'Rejected mappings (0)' })).toBeInTheDocument();
+    expect(within(dialog).getByText('5 matching sources · 5 with Seen 0')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/excluded/)).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Approved mappings (2)' }));
+    const approved = within(dialog).getByTestId('mapping-group-approved');
+    await within(approved).findByText('Apple:HKQuantityTypeIdentifierStepCount');
+    expect(codes(approved)).toEqual(['Apple:HKQuantityTypeIdentifierStepCount', 'Garmin:steps']);
+    within(approved).getAllByRole('row').slice(1, 3).forEach(row => expect(within(row).getByText('approved')).toBeInTheDocument());
+
+    // A group with nothing in it says so without sending the curator to a Seen filter.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Rejected mappings (0)' }));
+    expect(await within(dialog).findByText('No rejected mappings.')).toBeInTheDocument();
+    expect(linkedParams(900).map(params => params.status)).toEqual(['proposed', 'approved', 'rejected']);
+    expectNoSeenFilterOnMappedCodes(900);
+  });
+
+  it('leaves the zero-Seen count out of the Mapped Codes summary when every mapped code has been seen', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept])
+      : { ...page([source]), zero_seen: 0, status_counts: { approved: 0, proposed: 1, rejected: 0 } } }));
+    await selectConcept();
+    expect(screen.getByText('1 matching sources')).toBeInTheDocument();
+    expect(screen.queryByText(/with Seen 0/)).not.toBeInTheDocument();
+  });
+
+  it('shows the "> 0 only" checkbox on Suggested Codes and not on Mapped Codes', async () => {
+    const dialog = await openSteps();
+    expect(within(dialog).getByRole('button', { name: 'Suggested Codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(seenFilter(dialog)).toBeInTheDocument();
+    expect(within(dialog).getByText('> 0 only')).toBeInTheDocument();
+    await showExisting(dialog);
+    await within(dialog).findByText('HealthConnect:StepsRecord');
+    expect(seenFilter(dialog)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText('> 0 only')).not.toBeInTheDocument();
+    // The column and its ordering stay; the note filter is both views'.
+    expect(within(dialog).getByRole('columnheader', { name: /Seen/ })).toHaveAttribute('aria-sort', 'descending');
+    expect(within(dialog).getByRole('checkbox', { name: 'Only source codes with a curator note' })).toBeInTheDocument();
+    // Back on Suggested Codes it is there again, as it was left.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Suggested Codes' }));
+    expect(seenFilter(dialog)).toBeChecked();
+  });
+
+  it('does not refetch or change the Mapped Codes query when "> 0 only" is switched on Suggested Codes', async () => {
+    const dialog = await openSteps();
+    await showExisting(dialog);
+    await within(dialog).findByText('HealthConnect:StepsRecord');
+    const query = { mode: 'linked', status: 'proposed', search: '', page: 1 };
+    expect(linkedParams(900)).toEqual([query]);
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Suggested Codes' }));
+    await waitFor(() => expect(estimates.at(-1)).toMatchObject({ include_zero_seen: '0' }));
+    fireEvent.click(seenFilter(dialog)!);
+    expect(seenFilter(dialog)).not.toBeChecked();
+    // The work queue's estimate follows the filter; that request is the only one it causes.
+    await waitFor(() => expect(estimates.at(-1)).toMatchObject({ include_zero_seen: '1' }));
+    // Longer than the groups' 250 ms debounce: a refetch would have gone out by now.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)); });
+    expect(linkedParams(900)).toEqual([query]);
+
+    // Returning reads the groups again, as every return does, with the same query and the same rows.
+    await showExisting(dialog);
+    await within(dialog).findByText('HealthConnect:StepsRecord');
+    expect(linkedParams(900)).toEqual([query, query]);
+    expect(codes(within(dialog).getByTestId('mapping-group-proposed')))
+      .toEqual(['HealthConnect:StepsRecord', 'OpenWearables:steps', 'HL7-PHR:stepCount']);
+    expect(within(dialog).getByRole('button', { name: 'Proposed mappings (3)' })).toBeInTheDocument();
+  });
+
+  it('starts Suggested Codes with "> 0 only" unchecked under the Wearables domain, and searches zero-Seen codes', async () => {
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
+      activity: [{ concept: { concept_id: 900 }, candidates: [
+        { ...source, mapping_id: null, status: 'unmapped', source_vocabulary_id: 'HealthConnect', source_code: 'StepsCadenceRecord', occurrence_count: 0 },
+      ] }] } });
+    const dialog = await openSteps('wearables');
+    expect(seenFilter(dialog)).not.toBeChecked();
+    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls,lexical', include_zero_seen: '1', include_declined: '0' }));
+    expect(estimates.every(params => params.include_zero_seen === '1')).toBe(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Suggest source codes' }));
+    // A platform's own code has no sightings and is shown, not filtered out of the preview.
+    expect(await within(dialog).findByText('HealthConnect:StepsCadenceRecord')).toBeInTheDocument();
+    expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ concept_ids: [900], include_zero_seen: true }));
+    expect(within(dialog).queryByText(/changed Seen filter/)).not.toBeInTheDocument();
+    // The curator can still narrow to seen codes.
+    fireEvent.click(seenFilter(dialog)!);
+    await waitFor(() => expect(estimates.at(-1)).toMatchObject({ include_zero_seen: '0' }));
+    expect(within(dialog).queryByText('HealthConnect:StepsCadenceRecord')).not.toBeInTheDocument();
+    // Mapped Codes is the same under this domain: no Seen filter, sent or shown.
+    await showExisting(dialog);
+    await within(dialog).findByText('HealthConnect:StepsRecord');
+    expect(seenFilter(dialog)).not.toBeInTheDocument();
+    expectNoSeenFilterOnMappedCodes(900);
+  });
+
+  it.each([['All domains', undefined], ['Measurement', 'measurement'], ['Observation', 'observation']] as const)(
+    'starts Suggested Codes with "> 0 only" checked under %s, and searches seen codes only', async (_label, domain) => {
+      post.mockResolvedValue({ data: { ...run(), activity: [{ concept: { concept_id: 900 }, candidates: [] }] } });
+      const dialog = await openSteps(domain);
+      expect(seenFilter(dialog)).toBeChecked();
+      await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0', include_declined: '0' }));
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Suggest source codes' }));
+      await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/',
+        expect.objectContaining({ concept_ids: [900], include_zero_seen: false })));
+    });
+
+  it('takes the default from the domain in force when the concept is opened, not from the one before', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByRole('button', { name: 'Steps' });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Steps' }));
+    expect(seenFilter(screen.getByRole('dialog'))).not.toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Steps' }));
+    expect(seenFilter(screen.getByRole('dialog'))).toBeChecked();
   });
 });
 
@@ -1169,7 +1405,7 @@ describe('concept priority (#1914)', () => {
       }
       return Promise.resolve({ data: page([source]) });
     });
-    await selectConcept();
+    await openSuggested();
     const estimate = await screen.findByTestId('source-estimate');
     expect(estimate).toHaveTextContent('About 60 candidate source codes (57 by name, 4 by UMLS) · about 3 runs of 25.');
     expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0', include_declined: '0' });
@@ -1181,7 +1417,7 @@ describe('concept priority (#1914)', () => {
     await waitFor(() => expect(screen.getByTestId('source-estimate'))
       .toHaveTextContent('Suggest source codes would find no candidate source codes with these settings.'));
     expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0', include_declined: '0' });
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: SEEN_FILTER }));
     await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1', include_declined: '0' }));
   });
 
@@ -1189,11 +1425,11 @@ describe('concept priority (#1914)', () => {
     let response: Record<string, unknown> = { total: 1000, seen: 1000, umls: 0, lexical: 1000, capped: true, timed_out: false };
     get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
       : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
-    await selectConcept();
+    await openSuggested();
     expect(await screen.findByTestId('source-estimate'))
       .toHaveTextContent('About 1,000+ candidate source codes (1,000+ by name) · about 40+ runs of 25.');
     response = { total: 12, umls: 0, lexical: 12, capped: true, partial: true, timed_out: false };
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: SEEN_FILTER }));
     await waitFor(() => expect(screen.getByTestId('source-estimate'))
       .toHaveTextContent('About 12+ candidate source codes (12+ by name) · about 1+ runs of 25. Vocabulary codes never seen were not all counted in time.'));
     response = { total: null, timed_out: true };
@@ -1205,11 +1441,11 @@ describe('concept priority (#1914)', () => {
     let response: Record<string, unknown> = { total: 6767, umls: 0, lexical: 6767, capped: false, partial: false, approximate: 'earlier', timed_out: false };
     get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
       : url.endsWith('/estimate/') ? Promise.resolve({ data: response }) : Promise.resolve({ data: page([source]) }));
-    await selectConcept();
+    await openSuggested();
     expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
       'About 6,767 candidate source codes (6,767 by name) · about 271 runs of 25. From an earlier count: this one took too long, so codes handled since may still be counted.');
     response = { total: 6400, umls: 0, lexical: 6400, capped: false, partial: true, approximate: 'sample', timed_out: false };
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: SEEN_FILTER }));
     await waitFor(() => expect(screen.getByTestId('source-estimate')).toHaveTextContent(
       'Roughly 6,400 candidate source codes (6,400 by name) · about 256 runs of 25. Estimated from a sample: the full count took too long. Vocabulary codes never seen were not counted.'));
     response = { total: 0, umls: 0, lexical: 0, capped: false, partial: false, approximate: 'sample', timed_out: false };

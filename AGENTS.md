@@ -1566,7 +1566,16 @@ curator chooses, Wearables or any other, is saved per account in the browser
 (`promop-concept-to-code:<user id>`, as the patient list's filters are) and
 restored when the tab next opens. The page mounts the tab only once
 `useAuth()` has loaded the account, so the first list request already carries
-the saved domain and no choice is filed under no account.
+the saved domain and no choice is filed under no account. A concept's Mapped
+Codes lists every code mapped to it, whatever its Seen count, so the list's
+counts and the dialog agree (#2686): `concept_to_code_detail` applies
+`seen_only` to `mode=available` only, and a platform's own seeded code, which
+has Seen 0 until a patient sends it, is listed like any other. The "> 0 only"
+checkbox belongs to Suggested Codes alone (the estimate's and Suggest's
+`include_zero_seen`), as the Code to Concept page applies Seen > 0 only to its
+Unmapped section. Under the Wearables domain it starts unchecked
+(`seenOnlyByDefault`), because the codes to map there are the ones with no
+sightings; under every other domain it starts checked.
 
 ### The six LOINC axes decide which candidates are the same test
 
