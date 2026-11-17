@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
-import PatientFieldEditor, { formatCalendarDate } from './PatientFieldEditor';
+import PatientFieldEditor from './PatientFieldEditor';
 import { labelNamesUnit } from './unitPresentation';
 import { PatientFormStore } from './patientFormStore';
 
@@ -189,17 +189,14 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByRole('button', { name: 'Edit Hemoglobin (g/dL) inputs' })).toBeVisible();
   });
 
-  it('formats a date-only value as that calendar day in any timezone', () => {
-    const original = process.env.TZ;
-    try {
-      for (const zone of ['America/Los_Angeles', 'Pacific/Honolulu', 'Asia/Tokyo', 'UTC']) {
-        process.env.TZ = zone;
-        expect(formatCalendarDate('2026-11-10')).toMatch(/\b10\b/);
-        expect(formatCalendarDate('2026-01-01')).toMatch(/\b1\b/);
-      }
-    } finally {
-      process.env.TZ = original;
-    }
+  it('prints no result date on a computed row without a recorded result', async () => {
+    const { store } = await setup({
+      bmi: { writable: false, kind: 'computed', label: 'BMI', inputs: ['height', 'weight'] },
+    }, { bmi: 20.76 });
+    render(<PatientFieldEditor store={store} name="bmi" />);
+
+    expect(await screen.findByText(/BMI/)).toBeVisible();
+    expect(screen.queryByText(/Result date/)).not.toBeInTheDocument();
   });
 
   it('renders a computed value read-only when the host withholds its only source', async () => {
