@@ -567,7 +567,7 @@ empty and nobody typed one; the lowest confidence among the rows that decide it)
 | Reader | Fields | Deciding rows |
 |---|---|---|
 | disease (`_get_disease_data` over provisional conditions) | `disease`, `disease_slug`, `diagnosis_date`, `diagnosis_date_precision`, `condition_clinical_status` | the cancer `_primary_cancer_condition` picks; its confidence is every field's |
-| medications (`recent_medications`, shared with the real reader) | `concomitant_medications` | the provisional exposures in the list (the five newest named of the last ten) |
+| medications (`recent_medications`, shared with the real reader) | `concomitant_medications` | the provisional exposures in the list: of the last ten, the five newest, a nameless one dropped (not replaced by an older row), so fewer than five are possible |
 
 The disease reader runs only when a provisional condition is a cancer, because
 without one its fallbacks take a diagnosis date from any condition and a status
@@ -582,6 +582,28 @@ confidence column until the JSON phase), and `active_infection_status` (a
 "none found" over a provisional-only view says nothing). A patient whose
 approved record already holds these fields, such as one with many approved
 rows, shows nothing new from them: real beats provisional.
+
+Rules worth knowing, each held by a test:
+
+- **The chosen cancer is the real ranking's, not the most confident.** The primary
+  cancer is picked by `_primary_cancer_condition` (not resolved, has a current
+  line, has a line, not in remission, newest). A 55% row that wins on recency
+  gives every disease field 55, and a 97% row that loses gives none.
+- **A typed disease blocks the whole group.** An edit of `disease` or
+  `disease_slug` (including a cleared disease) keeps all five fields real; the
+  PATCH mirror treats the group as edited together, so no field stays attributed
+  to a proposal's cancer. The reader fails closed: a typed disease with no slug
+  matches no proposal's slug, so it blocks the group too.
+- **A curated value for the same field wins.** A field a phase 1 reader (a curated
+  mapping) already proposed is not taken from a composite reader, as the real
+  refresh lets the curated value win.
+- **A reader costs only its own fields.** Each runs in its own savepoint, so an
+  exception, a database error included, leaves the other reader's proposals and
+  the pass's transaction alone.
+- **Cost.** The disease reader reads nothing when the record already holds every
+  field of the group, and a cancer's slug is worked out once per row.
+  `_condition_slug` memoizes on the row object (one snapshot), which also saves
+  the real refresh a category lookup per cancer per call.
 
 ### Computed fields
 

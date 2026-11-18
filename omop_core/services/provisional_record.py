@@ -302,7 +302,7 @@ DISEASE_FIELDS = (
 )
 
 
-def _disease_proposals(person, record, snapshot) -> tuple[dict, dict]:
+def _disease_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
     """(values, confidences) of the disease fields a provisional cancer decides.
 
     The real reader (``_get_disease_data``) runs over the provisional
@@ -313,15 +313,31 @@ def _disease_proposals(person, record, snapshot) -> tuple[dict, dict]:
     (same slug). Each field is then kept on its own rule, only where the record
     is empty. One row decides all of them, the cancer the real reader picks,
     so its confidence is theirs.
+
+    Nothing is offered, and nothing is read, when a person typed the disease or
+    its slug (the group would describe another cancer than the one they named),
+    or when the record already answers every field of the group. The reader
+    fails closed: a typed disease with no slug does not match any proposal's
+    slug, so it blocks the group too. The primary cancer is the real ranking's
+    choice (not currently resolved, has a line, not in remission, newest),
+    whatever the confidence: a 55% row that wins on recency gives every disease
+    field 55.
     """
     from omop_core.services.patient_record_service import (
         _cancer_conditions, _get_disease_data, _is_empty, _primary_cancer_condition,
     )
+    if 'disease' in blocked or 'disease_slug' in blocked:
+        return {}, {}
+    if not any(_is_empty(getattr(record, field, None)) and field not in blocked
+               for field in DISEASE_FIELDS):
+        return {}, {}
     conditions = snapshot.provisional_conditions
     cancers = _cancer_conditions(conditions)
     if not cancers:
         return {}, {}
-    view = dataclasses.replace(snapshot, conditions=conditions)
+    # The real observations answer the disease-status fallback; a provisional
+    # view has none of its own, so it gets none.
+    view = dataclasses.replace(snapshot, conditions=conditions, obs_by_source={}, obs_by_code={})
     primary = _primary_cancer_condition(person, view, cancers)
     read = _get_disease_data(person, view)
     if primary is None or _is_empty(read.get('disease')):
@@ -348,26 +364,29 @@ def _medication_proposals(snapshot) -> tuple[dict, dict]:
             {'concomitant_medications': min(row.confidence for row in rows)})
 
 
-def composite_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
+def composite_proposals(person, record, snapshot, blocked=(), taken=()) -> tuple[dict, dict]:
     """(values, confidences) the composite readers add from provisional conditions and drugs.
 
     Each reader runs over provisional rows only, exactly as the real refresh
-    runs it, and a field is kept only where the record has no answer and nobody
-    typed one: real beats provisional. A reader that raises costs only its own
-    fields.
+    runs it, and a field is kept only where the record has no answer, nobody
+    typed one (*blocked*) and no earlier reader proposed it (*taken*: a curated
+    mapping's value wins, as it does in the real refresh): real beats
+    provisional. Each reader runs in its own savepoint, so one that raises, even
+    on a database error, costs only its own fields.
     """
     from omop_core.services.patient_record_service import _is_empty
     names = _confidence_names()
     values, confidences = {}, {}
-    for reader in (lambda: _disease_proposals(person, record, snapshot),
+    for reader in (lambda: _disease_proposals(person, record, snapshot, blocked),
                    lambda: _medication_proposals(snapshot)):
         try:
-            found, marks = reader()
+            with transaction.atomic():
+                found, marks = reader()
         except Exception:  # noqa: BLE001 -- one reader must not cost the person's other proposals
             logger.exception('Provisional composite reader failed for person_id=%s.', person.person_id)
             continue
         for field, value in found.items():
-            if (field in names and field not in blocked and field not in values
+            if (field in names and field not in blocked and field not in values and field not in taken
                     and not _is_empty(value) and _is_empty(getattr(record, field, None))
                     and _storable(field, value)):
                 values[field], confidences[field] = value, marks[field]
@@ -403,7 +422,7 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
                 del kept[field]
         if kept:
             confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
-    composite, composite_marks = composite_proposals(person, record, snapshot, blocked)
+    composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept)
     if not (kept or composite):
         return {}, {}
     try:
@@ -460,6 +479,11 @@ def mirror_user_edit(record, edited_fields) -> None:
     confidence = PatientRecordConfidence.objects.filter(person_id=record.person_id).first()
     from omop_core.services.patient_record_service import _is_empty
     edited = set(edited_fields)
+    # The disease fields describe one cancer together: editing the disease or its
+    # slug makes the whole group the person's, so no field is left attributed to
+    # the cancer a proposal named.
+    if edited & {'disease', 'disease_slug'}:
+        edited |= set(DISEASE_FIELDS)
     names = _confidence_names()
     try:
         with transaction.atomic():

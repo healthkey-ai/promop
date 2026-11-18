@@ -1512,7 +1512,11 @@ Episodes, which a proposal must not create), staging/cytogenetics/SCT/cancer det
 (curator-written observation keys, not proposal-fed concepts), and every JSON field
 (`active_malignancies`, `disease_slugs`, `genetic_mutations`, `prior_procedures`, the
 `genomics_*` markers), which has no confidence column. A patient whose approved record
-already answers these fields shows nothing new: real beats provisional.
+already answers these fields shows nothing new: real beats provisional. The chosen
+cancer is the real ranking's, whatever the confidence (a 55% row that wins on recency
+gives every disease field 55); a typed disease or slug blocks the whole group, and the
+PATCH mirror takes the group back together; a curated phase 1 value for the same field
+wins; each reader runs in its own savepoint.
 
 ### One patient's full provisional view: `fill_provisional_record`
 

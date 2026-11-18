@@ -1625,9 +1625,16 @@ _CANONICAL_DISEASES = frozenset({
 
 
 def _condition_slug(condition) -> str:
-    concept_name = _usable_concept_name(condition.condition_concept) if condition.condition_concept_id else None
-    name = concept_name or condition.condition_source_value or ''
-    return _disease_name_to_slug(_canonicalize_disease(name)) if name.strip() else ''
+    # Canonicalizing a name reads the curated disease categories, and the ranking
+    # and the slug list both ask for every cancer's slug on each refresh: one
+    # answer per row object, which lives as long as one snapshot.
+    memo = condition.__dict__.get('_slug_memo')
+    if memo is None:
+        concept_name = _usable_concept_name(condition.condition_concept) if condition.condition_concept_id else None
+        name = concept_name or condition.condition_source_value or ''
+        memo = condition.__dict__['_slug_memo'] = (
+            _disease_name_to_slug(_canonicalize_disease(name)) if name.strip() else '')
+    return memo
 
 
 def _cancers_with_lines(person, snapshot: OmopSnapshot, today) -> tuple[set, set]:
@@ -1943,9 +1950,9 @@ def _disease_name_to_slug(name: str) -> str:
 def recent_medications(drug_exposures) -> tuple[list, list]:
     """(names, rows) of the medications ``concomitant_medications`` lists.
 
-    *drug_exposures* is ordered oldest first. The list is the names of the five
-    newest rows that have one, newest first (a nameless row is skipped, not
-    replaced by an older one). Shared with the
+    *drug_exposures* is ordered oldest first. Of the last ten rows, the five
+    newest are taken, newest first, and a nameless one among them is dropped
+    rather than replaced by an older row, so fewer than five names are possible. Shared with the
     provisional pass, which runs it over provisional rows only and needs the
     rows to say which proposals decided the field.
     """
