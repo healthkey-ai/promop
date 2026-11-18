@@ -307,7 +307,11 @@ class ResultsSummaryView(APIView):
            uc.concept_code AS unit_concept_code, uc.vocabulary_id AS unit_vocabulary_id
     FROM ranked r
     LEFT JOIN concept tc ON tc.concept_id = r.measurement_type_concept_id
-    LEFT JOIN concept uc ON uc.concept_id = r.unit_concept_id
+    -- Concept 0 is OMOP's "No matching concept" placeholder, not a unit: joining
+    -- it printed its code ("No matching concept") as the card's unit. The ORM
+    -- readers (ValuesView, MeasurementDetailView, phr/labs.py) already skip 0;
+    -- this keeps the summary agreeing with them for the same measurement.
+    LEFT JOIN concept uc ON uc.concept_id = NULLIF(r.unit_concept_id, 0)
     WHERE r.rn <= %s
     ORDER BY r.eff_id, r.measurement_date DESC, r.measurement_id DESC
     """

@@ -282,6 +282,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A zero unit concept is not a unit on the lab-results summary (#2481)** —
+  the summary SQL joined `concept` on `unit_concept_id` unconditionally, so a
+  result whose `unit_concept_id` is OMOP's concept 0 ("No matching concept")
+  printed that placeholder as its unit ("13.2 No matching concept"), and a
+  configured canonical unit could not convert against it. The join now skips
+  concept 0, so a result with no reported unit text shows no unit on the
+  summary and the same conversion warning as the values and measurement-detail
+  endpoints, which already read such a row as unitless.
 - **Acronym fields carry their reviewed labels in the shared form (#2652)** —
   `capitalize()` only upper-cases the first character, so the shared-form
   descriptor served to CB and Trial Details (`X-Patient-Form: 1`) read "Sct
