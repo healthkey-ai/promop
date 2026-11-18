@@ -19,6 +19,8 @@ export interface VotePage {
   note: string;
   expires_at: string | null;
   comment_max_length: number;
+  /** The source code systems this link is limited to, by name; every system is all of them. */
+  source_systems?: string[];
   groups: { category: string; proposals: VoteProposal[] }[];
 }
 

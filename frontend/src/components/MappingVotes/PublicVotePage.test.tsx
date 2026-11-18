@@ -86,6 +86,17 @@ describe("PublicVotePage", () => {
     expect(mockPrivate).not.toHaveBeenCalled();
   });
 
+  it("says which source systems a limited link is limited to, and nothing for an unlimited one", async () => {
+    mockPage.mockResolvedValue({ data: { ...PAGE, source_systems: ["HealthKit", "Garmin"] } });
+    const { unmount } = renderPage();
+    expect(await screen.findByTestId("vote-source-systems")).toHaveTextContent("Limited to: HealthKit, Garmin");
+    unmount();
+    mockPage.mockResolvedValue({ data: { ...PAGE, source_systems: [] } });
+    renderPage();
+    await screen.findByRole("heading", { level: 1, name: PAGE.title });
+    expect(screen.queryByTestId("vote-source-systems")).not.toBeInTheDocument();
+  });
+
   it("takes the token from the URL fragment and sends it only in a request body", async () => {
     renderPage("/vote#share-token");
     await screen.findByRole("heading", { level: 1, name: PAGE.title });

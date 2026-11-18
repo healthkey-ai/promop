@@ -313,10 +313,19 @@ class PublicVoteExportView(_PublicVoteView):
                 or file_format not in export.CONTENT_TYPES or destination not in export.DESTINATIONS):
             return Response({'detail': 'Unknown file format or destination.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        # A stored system that has since left the tab is dropped, but a share
+        # left with none is not turned into "every system": it holds nothing now.
+        scope = list(share.source_vocabularies or [])
+        known = {system['id'] for system in export.source_systems()}
+        usable = [system for system in scope if system in known]
+        if scope and not usable:
+            return Response({'detail': 'The source systems of this link are no longer available.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         try:
             filename, content_type, content = export.export_file(
-                file_format, destination=destination, public=True,
-                sources=share.source_vocabularies)
+                file_format, destination=destination, public=True, sources=usable)
+        except export.SourceTargetError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
         except export.FormatError:
             # What is left is the Word document's row limit.
             return Response({'detail': 'This file is too large to build. Download the CSV instead.'},

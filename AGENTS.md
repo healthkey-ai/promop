@@ -2078,7 +2078,10 @@ loaded.
   `SOURCE_LABELS` order). The limit is applied last, after a CDISC Biomedical
   Concept has been linked to each code, so it never changes which BCs a code
   reaches. A limited file's name ends with the lower-cased ids and the Word
-  document says "Source code systems: ..." under its title. The Download menu
+  document says "Source code systems: ..." under its title. The CDISC BC
+  system is refused with the CDISC Biomedical Concept target (`SourceTargetError`,
+  a 400): the target maps *to* those concepts, so the file would be empty; the
+  select hides that option under that target. The Download menu
   shows a "Source code system" select beside "Map codes to" (default "All
   source systems") on both Wearables controls; the public vote page has none,
   since its share already decides (below).
@@ -2177,7 +2180,11 @@ that reason, the read of the page included. A token is checked against
   from another system is the same "not on the page" 400, and a vote already
   pending for one that left is skipped at confirmation), and the public
   download, which the visitor cannot widen. The public page names the systems
-  (`source_systems`, labels). The Share dialog's "Source code system" select
+  of a limited link (`source_systems`, labels; empty for every system) as
+  "Limited to: ...". A stored system that has since left the tab is dropped
+  from the public download; a share left with none answers 400 rather than
+  becoming every system. `votable_mappings`, `votable_rows` and `clean_votes`
+  take the share as a required argument, so none can default to every system. The Share dialog's "Source code system" select
   defaults to all systems and a listed share says "HealthKit, Garmin only".
   The share's own votes CSV is unaffected. Editing a share's systems is not
   offered: make another link.

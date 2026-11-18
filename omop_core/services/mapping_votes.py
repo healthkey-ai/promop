@@ -299,7 +299,7 @@ def serialize_share(share, *, with_link, now=None):
 
 # ── The proposals ────────────────────────────────────────────────────────
 
-def votable_mappings(share=None):
+def votable_mappings(share):
     """The mappings a share puts to the vote: global wearable proposals that
     name a destination and carry a metric key.
 
@@ -309,16 +309,18 @@ def votable_mappings(share=None):
     published to strangers without a curator ever having looked at it.
 
     A share limited to some source code systems puts only those to the vote.
+    *share* is required: a default that meant "every system" would be one slip
+    away from putting a limited share's voters outside its scope.
     """
     mappings = export.tab_mappings().filter(
         status='proposed', organization__isnull=True, target_concept_id__gt=0,
     ).exclude(metric_key='')
-    if share is not None and share.source_vocabularies:
+    if share.source_vocabularies:
         mappings = mappings.filter(source_vocabulary_id__in=share.source_vocabularies)
     return mappings
 
 
-def votable_rows(ids=None, share=None):
+def votable_rows(share, ids=None):
     """Those mappings as export rows, in the export's order. One query.
 
     A destination whose concept is not loaded here has no code or name to
@@ -348,12 +350,13 @@ def _proposal(row):
 
 def public_payload(share):
     """What the public voting page shows for *share*. One query."""
-    rows = votable_rows(share=share)
+    rows = votable_rows(share)
     return {
         'title': share.title,
         'note': share.note,
+        # The systems a limited link is limited to, by name; none for every system.
         'source_systems': [system['label'] for system in export.source_systems()
-                           if not share.source_vocabularies or system['id'] in share.source_vocabularies],
+                           if system['id'] in (share.source_vocabularies or ())],
         'expires_at': share.expires_at.isoformat() if share.expires_at else None,
         'comment_max_length': COMMENT_MAX_LENGTH,
         'groups': [
@@ -418,7 +421,7 @@ def clean_comment(value):
     return text
 
 
-def clean_votes(votes, share=None):
+def clean_votes(votes, share):
     """The submitted list as ``[{mapping, concept, choice, comment}]``.
 
     Raises ``SubmissionError`` for anything that is not a vote on a proposal
@@ -449,7 +452,7 @@ def clean_votes(votes, share=None):
             cleaned.append({'mapping': mapping_id, 'choice': choice, 'comment': comment})
     if not cleaned:
         raise SubmissionError('Choose Yes or No, or leave a comment, on at least one proposal.')
-    concepts = {row.pk: row.concept_id for row in votable_rows(seen, share)}
+    concepts = {row.pk: row.concept_id for row in votable_rows(share, seen)}
     if seen - set(concepts):
         raise SubmissionError(
             'Some proposals on this page have changed. Reload the page and vote again.')
@@ -680,7 +683,7 @@ def pending_summary(token, now=None):
     if submission is None:
         return None
     votes = _payload_votes(submission)
-    rows = {row.pk: row for row in votable_rows([vote['mapping'] for vote in votes], submission.share)}
+    rows = {row.pk: row for row in votable_rows(submission.share, [vote['mapping'] for vote in votes])}
     items = []
     for vote in votes:
         row = rows.get(vote['mapping'])
@@ -747,7 +750,7 @@ def _confirm(token, now):
             return None
         votes = sorted(_payload_votes(submission), key=lambda vote: vote['mapping'])
         concepts = {row.pk: row.concept_id for row in votable_rows(
-            [vote['mapping'] for vote in votes], submission.share)}
+            submission.share, [vote['mapping'] for vote in votes])}
         current = [vote for vote in votes if concepts.get(vote['mapping']) == vote['concept']]
         MappingVote.objects.bulk_create(
             [MappingVote(

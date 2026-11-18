@@ -147,6 +147,11 @@ export default function PublicVotePage() {
       <div className="mx-auto max-w-4xl px-4 py-6">
         <h1 className="text-2xl font-semibold text-slate-900">{page.title}</h1>
         {page.note && <p className="mt-2 whitespace-pre-line text-sm text-slate-700">{page.note}</p>}
+        {!!page.source_systems?.length && (
+          <p className="mt-2 text-sm font-medium text-slate-700" data-testid="vote-source-systems">
+            Limited to: {page.source_systems.join(", ")}
+          </p>
+        )}
         <p className="mt-3 text-sm text-slate-600">
           Each proposal below maps a code from a wearable or phone platform to the standard concept its
           values would be stored as. Choose Yes or No on any of them, or leave a comment; you do not have

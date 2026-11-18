@@ -711,3 +711,12 @@ def test_the_reference_lists_the_systems_in_tab_order(reader):
     assert [system['id'] for system in systems] == [
         'Apple', 'HealthConnect', 'Garmin', 'OpenWearables', 'HL7-PHR', 'CDISC-BC']
     assert systems[0] == {'id': 'Apple', 'label': 'HealthKit'}
+
+
+@pytest.mark.django_db
+def test_the_cdisc_bc_system_is_refused_under_the_cdisc_bc_target(reader, three_systems):
+    response = reader.get(URL, {'file_format': 'csv', 'destination': 'cdisc-bc', 'sources': 'CDISC-BC'})
+    assert response.status_code == 400
+    assert 'no codes of its own' in response.json()['detail']
+    # Under the OMOP target it is an ordinary system.
+    assert reader.get(URL, {'file_format': 'csv', 'sources': 'CDISC-BC'}).status_code == 200

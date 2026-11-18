@@ -25,6 +25,8 @@ const fromTheTab: FetchWearableFile = (format, destination, sources) => api.get<
   responseType: "blob",
 });
 
+/** The CDISC Biomedical Concepts' own vocabulary on the Wearables tab. */
+const CDISC_BC = "CDISC-BC";
 const LABEL = "Download all wearable mappings";
 const CHOICES: { format: FileFormat; label: string; name: string; title: string }[] = [
   { format: "csv", label: "CSV", name: `${LABEL} as CSV`, title: "One line per mapping, for a spreadsheet" },
@@ -58,12 +60,16 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
   const [error, setError] = useState<string | null>(null);
   const [destination, setDestination] = useState<Destination>("omop");
   const [source, setSource] = useState("");
+  // The Biomedical Concepts are what that target maps to, so under it the CDISC
+  // BC system has no codes of its own and the file would be empty.
+  const offered = destination === "cdisc-bc" ? systems.filter((system) => system.id !== CDISC_BC) : systems;
+  const chosen = offered.some((system) => system.id === source) ? source : "";
 
   const download = async (format: FileFormat) => {
     setBusy(format);
     setError(null);
     try {
-      const response = await fetchFile(format, destination, source ? [source] : []);
+      const response = await fetchFile(format, destination, chosen ? [chosen] : []);
       const stem = destination === "omop" ? "wearable-mappings" : "wearable-cdisc-bc-mappings";
       saveBlob(response.data, filenameFromDisposition(
         response.headers?.["content-disposition"], `${stem}.${format}`));
@@ -92,7 +98,7 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
           <option value="omop">OMOP concept</option>
           <option value="cdisc-bc">CDISC Biomedical Concept</option>
         </select>
-        <WearableSourceSystemSelect systems={systems} value={source} onChange={setSource} disabled={busy !== null} />
+        <WearableSourceSystemSelect systems={offered} value={chosen} onChange={setSource} disabled={busy !== null} />
         {CHOICES.map(({ format, label, name, title }) => (
           <button
             key={format}

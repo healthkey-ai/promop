@@ -82,6 +82,20 @@ class FormatError(ValueError):
     """The caller asked for a file this export does not write."""
 
 
+class SourceTargetError(FormatError):
+    """The CDISC BC source system asked for under the CDISC BC target.
+
+    The Biomedical Concepts are what that target maps *to*, so the file would
+    hold none of them as a code of its own and be empty. Fixed wording, safe to
+    show a visitor.
+    """
+
+    def __init__(self):
+        super().__init__(
+            'The CDISC BC source system has no codes of its own under the CDISC '
+            'Biomedical Concept target. Choose another source system, or the OMOP concept target.')
+
+
 # The Word document is built in memory inside the request: about 1.4 ms and
 # 35 KB a row, so 20,000 rows is 28 s and 900 MB against gunicorn's 30 s. The
 # tab holds a few hundred. The CSV has no such limit (20,000 rows in 0.1 s).
@@ -291,6 +305,8 @@ def export_file(file_format, day=None, destination=DEST_OMOP, public=False, sour
     if destination not in DESTINATIONS:
         raise FormatError(f"Unknown destination {destination!r}. Use omop or cdisc-bc.")
     sources = clean_sources(sources)
+    if destination == DEST_CDISC_BC and CDISC_BC_VOCABULARY in sources:
+        raise SourceTargetError()
     day = day or localdate()
     rows = export_rows(destination, sources)
     if public:

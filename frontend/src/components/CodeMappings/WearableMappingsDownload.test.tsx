@@ -84,6 +84,22 @@ describe("WearableMappingsDownload", () => {
       });
     });
 
+    it("does not offer the CDISC BC system under the CDISC BC target, and drops a choice of it", async () => {
+      mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
+      const systems = [...SYSTEMS, { id: "CDISC-BC", label: "CDISC BC" }];
+      render(<WearableMappingsDownload systems={systems} />);
+      const options = () => within(select()).getAllByRole("option").map((option) => option.textContent);
+      expect(options()).toContain("CDISC BC");
+      await userEvent.selectOptions(select(), "CDISC-BC");
+      await userEvent.selectOptions(within(group()).getByLabelText("Map codes to"), "cdisc-bc");
+      expect(options()).not.toContain("CDISC BC");
+      expect(select()).toHaveValue("");
+      await userEvent.click(csvButton());
+      expect(mockGet).toHaveBeenLastCalledWith(URL_PATH, {
+        params: { file_format: "csv", destination: "cdisc-bc" }, responseType: "blob",
+      });
+    });
+
     it("hands a custom fetch the chosen systems, as the public page's does not use them", async () => {
       const fetchFile = vi.fn().mockResolvedValue({ data: new Blob(["x"]), headers: {} });
       render(<WearableMappingsDownload systems={SYSTEMS} fetchFile={fetchFile} />);
