@@ -166,6 +166,15 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **PROlog 0.5.0** (from 0.4.8) — survey definitions gain partial dates
+  (`config.precision`: a month and year, or the year alone, stored as
+  `YYYY-MM` or `YYYY`), answers given instead of a date on a date question
+  ("not sure", "still receiving", stored as `{"option": k}`), and `any`
+  groups in `visible_if` (an OR inside its AND). 0.4.9 is included: a section
+  may decline its interstitial and keep its description on its first
+  question. No migrations, no dependency changes, no promop code changes;
+  existing definitions behave as before. See
+  [PROlog surveys](docs/prolog-surveys.md#what-v050-added).
 - **The code-mapping full read takes HealthTree's export shape** —
   `GET /api/v1/code-mappings/?sort=updated_at` pages in `(updated_at, id)`
   order behind an opaque `cursor` that is signed and bound to its query, so

@@ -169,6 +169,24 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.5.0 added
+
+Definition capabilities, no migration (0.4.9's section interstitial opt-out
+comes with it):
+
+- **Partial dates** — `config.precision` on a `date` question lists the
+  precisions it accepts (`day`, `month`, `year`; default `day`). Answers are
+  stored as `YYYY-MM-DD`, `YYYY-MM` or `YYYY`; a partial date is a period,
+  within `min_date`/`max_date` when the period meets them. The runner shows
+  separate day, month and year fields when a part may be left out. Anything
+  reading date answers (exports, a mapping into the record) must expect the
+  shorter forms.
+- **Answers instead of a date** — a `date` question's `options` ("not sure",
+  "still receiving") are answers given in place of a date, stored as
+  `{"option": key}`, and testable with `eq`, `neq` and `in`.
+- **`any` groups** — a `visible_if` list may hold `{"any": [...]}`, true when
+  one of its conditions is, for a follow-up that either of two answers opens.
+
 ### What v0.4.0 added
 
 Two definition capabilities, no migration:
