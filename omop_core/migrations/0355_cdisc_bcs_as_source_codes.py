@@ -10,14 +10,16 @@ the link table.
 One destination per BC, so where 0354 linked a BC to several concepts
 (Heart Rate to general, resting and walking heart rate) the general concept is
 kept. Rows are ``proposed``. A BC row takes the category and metric key of the
-wearable rows already mapped to its concept, so it sits in their group. A row
-whose concept is not loaded on this instance is skipped and logged; re-running
-creates it once the vocabulary is there. An existing row is left as it is.
+wearable rows already mapped to its concept, so it sits in their group. A BC
+is seeded only where a wearable code already maps to its concept: it is there
+to be reached by those codes, and an instance with no wearable mappings (a
+fresh install, a test database) gets none. An existing row is left as it is.
 Reverse is a no-op: the rows may have been curated or voted on.
 """
 import logging
 
 from django.db import migrations
+from django.db.models import Case, When
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +72,13 @@ def seed_bc_source_codes(apps, schema_editor):
         sibling = mappings.filter(
             organization__isnull=True, source_vocabulary_id__in=WEARABLE_VOCABULARIES,
             target_concept_id=concept.pk,
-        ).exclude(status='rejected').exclude(metric_key='').order_by(
-            'source_vocabulary_id', 'source_code').first()
+        ).exclude(status='rejected').order_by(
+            # A row with a metric key first: it names the group the BC joins.
+            Case(When(metric_key='', then=1), default=0), 'source_vocabulary_id', 'source_code',
+        ).first()
+        if sibling is None:
+            skipped.append(bc_id)
+            continue
         _, was_created = mappings.get_or_create(
             organization=None, source_vocabulary_id=VOCABULARY_ID, source_code=bc_id,
             defaults={
@@ -79,14 +86,13 @@ def seed_bc_source_codes(apps, schema_editor):
                 'domain_id': concept.domain_id, 'omop_table': TABLES[concept.domain_id],
                 'target_concept_id': concept.pk, 'destination_vocabulary_id': vocabulary_id,
                 'status': 'proposed', 'origin': 'import', 'origin_system': ORIGIN_SYSTEM,
-                'category': sibling.category if sibling else '',
-                'metric_key': sibling.metric_key if sibling else '',
+                'category': sibling.category, 'metric_key': sibling.metric_key,
             },
         )
         created += was_created
     if skipped:
-        logger.warning('CDISC BC source codes skipped (concept or BC not loaded here): %s',
-                       ', '.join(skipped))
+        logger.info('CDISC BC source codes not seeded (no wearable code on the concept here): %s',
+                    ', '.join(skipped))
     logger.info('Created %d CDISC BC source code mappings.', created)
 
 

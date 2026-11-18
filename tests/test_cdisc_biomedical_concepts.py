@@ -30,6 +30,12 @@ def loinc(code, domain='Measurement'):
         domain=DomainFactory(domain_id=domain))
 
 
+def wearable(code, concept, **kwargs):
+    return Mapping.objects.create(source_code=code, target_concept=concept, **{
+        'source_vocabulary_id': 'OpenWearables', 'status': 'approved', 'omop_table': 'measurement',
+        'domain_id': 'Measurement', **kwargs})
+
+
 def run_seed():
     seed.seed_bc_source_codes(apps, EDITOR)
 
@@ -56,10 +62,8 @@ def test_every_seeded_bc_is_in_the_package_and_has_one_destination():
 def test_a_bc_becomes_a_proposed_source_code_in_its_wearable_group():
     load_catalog()
     heart = loinc('8867-4')
-    Mapping.objects.create(
-        source_vocabulary_id='OpenWearables', source_code='heart_rate', target_concept=heart,
-        status='approved', omop_table='measurement', domain_id='Measurement',
-        category='Heart & Cardiovascular', metric_key='heart_rate')
+    wearable('heart_rate', heart, category='Heart & Cardiovascular', metric_key='heart_rate')
+    loinc('9279-1')  # loaded, but no wearable code maps to it: no BC row
     run_seed()
     row = bc_rows().get()  # only the BC whose concept is loaded here
     assert (row.source_code, row.source_code_description) == ('C49677', 'Heart Rate')
@@ -72,12 +76,12 @@ def test_a_bc_becomes_a_proposed_source_code_in_its_wearable_group():
     assert canonical_source('CDISC-BC') == canonical_source('OpenWearables')
 
 
-def test_rerun_keeps_a_curators_row_and_adds_bcs_whose_concept_arrived():
+def test_rerun_keeps_a_curators_row_and_adds_bcs_whose_wearable_code_arrived():
     load_catalog()
-    loinc('8867-4')
+    wearable('heart_rate', loinc('8867-4'))
     run_seed()
     bc_rows().update(status='approved', notes='checked')
-    loinc('9279-1')
+    wearable('respiratory_rate', loinc('9279-1'))
     run_seed()
     assert bc_rows().count() == 2
     kept = bc_rows().get(source_code='C49677')
@@ -86,7 +90,16 @@ def test_rerun_keeps_a_curators_row_and_adds_bcs_whose_concept_arrived():
 
 def test_a_bc_with_a_concept_outside_measurement_and_observation_is_skipped():
     load_catalog()
-    loinc('8867-4', domain='Procedure')
+    wearable('heart_rate', loinc('8867-4', domain='Procedure'))
+    run_seed()
+    assert not bc_rows().exists()
+
+
+def test_an_instance_with_no_wearable_mappings_gets_no_bc_rows():
+    load_catalog()
+    for _, vocabulary_id, code in seed.BC_DESTINATIONS:
+        ConceptFactory(concept_code=code, vocabulary=VocabularyFactory(vocabulary_id=vocabulary_id),
+                       domain=DomainFactory(domain_id='Measurement'))
     run_seed()
     assert not bc_rows().exists()
 
