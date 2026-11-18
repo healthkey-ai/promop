@@ -493,6 +493,23 @@ describe('edit binding resolution', () => {
   });
 });
 
+describe('an account with no linked record', () => {
+  it('says no record is linked when the read answers 200 with an empty record', async () => {
+    // CB answers 200 with `patient_info: {}` for an account that has no linked
+    // patient (a staff account). That is the same state as a 404, and it used to
+    // surface as the retryable "could not load" failure, which no retry fixes.
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields
+      : { patient_info: {}, user: { id: 1, email: 'staff@example.com' },
+          patient_name: 'Staff', write_enabled: true } }));
+    const store = new PatientFormStore(
+      { get, patch: vi.fn() } as unknown as AxiosInstance, '/api');
+    await store.load();
+    expect(store.getSnapshot().error).toBe('No patient record linked to this account.');
+    expect(store.getSnapshot().writable).toBe(false);
+    expect(store.getSnapshot().loading).toBe(false);
+  });
+});
+
 describe('shared patient-form queue', () => {
   it('loads caller/patient-specific descriptors and fails closed for unsupported writes', async () => {
     const { store, get, patch } = setup();
