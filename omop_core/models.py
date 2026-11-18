@@ -3233,6 +3233,75 @@ class ChronicConditionIndicator(models.Model):
         return f'{self.code} -> {self.indicator}'
 
 
+class BiomedicalConcept(models.Model):
+    """A CDISC Biomedical Concept (BC), as published in the CDISC Library.
+
+    A BC is the standard definition of one measurable thing -- Heart Rate,
+    Body Weight -- with its NCIt identity. It is not an OMOP concept and never
+    a destination for clinical rows; ``ConceptBiomedicalConceptMapping`` links
+    OMOP concepts to it, so a source code reaches a BC through the concept it
+    already maps to. Shipped by migration 0344 from a frozen package.
+    ``bc_id`` is the NCIt C-code, or CDISC's placeholder for the few concepts
+    NCIt does not have yet (``ncit_code`` is then blank).
+    """
+    bc_id = models.CharField(max_length=50, primary_key=True)
+    short_name = models.CharField(max_length=255, db_index=True)
+    ncit_code = models.CharField(max_length=50, blank=True, default='')
+    parent_bc_id = models.CharField(max_length=50, blank=True, default='')
+    categories = models.JSONField(default=list)
+    synonyms = models.JSONField(default=list)
+    result_scales = models.JSONField(default=list)
+    definition = models.TextField(blank=True, default='')
+    hierarchy_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    hierarchy_full = models.TextField(blank=True, default='')
+    package_date = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'biomedical_concept'
+        ordering = ['short_name']
+
+    def __str__(self):
+        return f"{self.short_name} ({self.bc_id})"
+
+
+class ConceptBiomedicalConceptMapping(models.Model):
+    """An OMOP concept and the CDISC Biomedical Concept it measures.
+
+    Concept-level, once, instead of per source code: a wearable code, a lab
+    code or a FHIR code that maps to the concept has the BC transitively.
+    The concept is named by (vocabulary, code) so the row means the same on an
+    instance that loads the concept later or under another id. Only
+    ``approved`` rows are to be relied on; ``proposed`` is the review queue.
+    """
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+    ]
+    target_vocabulary_id = models.CharField(max_length=50)
+    target_concept_code = models.CharField(max_length=50)
+    bc_id = models.CharField(max_length=50, db_index=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
+    origin_system = models.CharField(max_length=100, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_biomedical_concept_mapping'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['target_vocabulary_id', 'target_concept_code', 'bc_id'],
+                name='uq_concept_bc_mapping',
+            ),
+        ]
+        indexes = [models.Index(fields=['target_vocabulary_id', 'target_concept_code'],
+                                name='ix_concept_bc_mapping_concept')]
+
+    def __str__(self):
+        return f"{self.target_vocabulary_id}:{self.target_concept_code} → {self.bc_id} ({self.status})"
+
+
 class CancerStage(VocabularyLookup):
     class Meta:
         db_table = 'vocabulary_cancer_stage'

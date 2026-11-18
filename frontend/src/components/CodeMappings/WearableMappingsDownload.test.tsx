@@ -64,6 +64,8 @@ describe("WearableMappingsDownload", () => {
     mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
     render(<WearableMappingsDownload />);
     await userEvent.tab();
+    expect(within(group()).getByRole("combobox", { name: "Map codes to" })).toHaveFocus();
+    await userEvent.tab();
     expect(csvButton()).toHaveFocus();
     await userEvent.tab();
     expect(wordButton()).toHaveFocus();
@@ -118,5 +120,22 @@ describe("WearableMappingsDownload", () => {
     await userEvent.click(wordButton());
     await waitFor(() => expect(mockSaveBlob).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("asks for the CDISC Biomedical Concept as the target when chosen", async () => {
+    const file = new Blob(["x"]);
+    mockGet.mockResolvedValue({
+      data: file,
+      headers: { "content-disposition": 'attachment; filename="wearable-cdisc-bc-mappings-2026-03-09.docx"' },
+    });
+    render(<WearableMappingsDownload />);
+    const target = within(group()).getByRole("combobox", { name: "Map codes to" });
+    expect(target).toHaveValue("omop");
+    await userEvent.selectOptions(target, "cdisc-bc");
+    await userEvent.click(wordButton());
+    expect(mockGet).toHaveBeenCalledWith(URL_PATH, {
+      params: { file_format: "docx", destination: "cdisc-bc" }, responseType: "blob",
+    });
+    await waitFor(() => expect(mockSaveBlob).toHaveBeenCalledWith(file, "wearable-cdisc-bc-mappings-2026-03-09.docx"));
   });
 });

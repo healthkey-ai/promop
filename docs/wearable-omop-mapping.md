@@ -763,3 +763,23 @@ it was caught.
    to `read_only_fields` by hand.
 8. `frontend/src/types/patient.ts` + `WearableTab.tsx` — expose it.
 9. Tests at every layer, per CLAUDE.md.
+
+---
+
+## CDISC Biomedical Concepts
+
+Wearable codes keep their OMOP concept as the destination. A CDISC Biomedical
+Concept (BC, identified by its NCIt code) is reached **through that concept**:
+`ConceptBiomedicalConceptMapping` links an OMOP concept, named by
+(vocabulary, code), to a BC in `BiomedicalConcept`, so it is curated once per
+concept and every code mapped to it has the BC. Migration `0354` ships the
+1,588 BCs of the CDISC Library package of 2026-11-02 and proposes 27 links for
+the concepts the Wearables tab uses; all are `proposed` until a curator
+approves them. A metric with no BC (steps, sleep, exercise time, RMSSD) has
+none rather than a near miss.
+
+The Wearables download takes `destination=cdisc-bc` (the "Map codes to" menu
+beside it) to write each code against its BC instead of its OMOP concept, as
+CSV or Word: a line per BC a code reaches, and a line marked "No CDISC BC" for
+a code that reaches none. `services/biomedical_concepts.biomedical_concept_links`
+gives the same answer for one code mapping.

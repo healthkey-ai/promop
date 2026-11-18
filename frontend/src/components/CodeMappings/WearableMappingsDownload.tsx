@@ -4,6 +4,10 @@ import api from "@/api/axios";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
 
 type FileFormat = "csv" | "docx";
+// What each code is mapped to in the file. The OMOP concept is the default and
+// is asked for by sending nothing, as before; a CDISC Biomedical Concept is
+// reached through the OMOP concept a code maps to.
+type Destination = "omop" | "cdisc-bc";
 
 const LABEL = "Download all wearable mappings";
 const CHOICES: { format: FileFormat; label: string; name: string; title: string }[] = [
@@ -19,19 +23,24 @@ const CHOICES: { format: FileFormat; label: string; name: string; title: string 
  * tab, whatever section or page it is on, rejected ones aside. The section
  * Download menus beside it write only the rows the page has loaded.
  *
+ * The target menu picks what the codes are mapped to in the file: the OMOP
+ * concept, or the CDISC Biomedical Concept linked to it.
+ *
  * Reading the tab is enough to download it, so a read-only reader sees this
  * too.
  */
 export default function WearableMappingsDownload() {
   const [busy, setBusy] = useState<FileFormat | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [destination, setDestination] = useState<Destination>("omop");
 
   const download = async (format: FileFormat) => {
     setBusy(format);
     setError(null);
     try {
       const response = await api.get<Blob>("/v1/code-mappings/wearables-export/", {
-        params: { file_format: format }, responseType: "blob",
+        params: destination === "omop" ? { file_format: format } : { file_format: format, destination },
+        responseType: "blob",
       });
       saveBlob(response.data, filenameFromDisposition(
         response.headers?.["content-disposition"], `wearable-mappings.${format}`));
@@ -49,6 +58,17 @@ export default function WearableMappingsDownload() {
         <span className="inline-flex items-center gap-1 font-medium text-slate-700">
           <Download size={12} aria-hidden="true" /> {LABEL}
         </span>
+        <select
+          aria-label="Map codes to"
+          title="What each wearable code is mapped to in the file"
+          value={destination}
+          disabled={busy !== null}
+          onChange={(e) => setDestination(e.target.value as Destination)}
+          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800"
+        >
+          <option value="omop">OMOP concept</option>
+          <option value="cdisc-bc">CDISC Biomedical Concept</option>
+        </select>
         {CHOICES.map(({ format, label, name, title }) => (
           <button
             key={format}

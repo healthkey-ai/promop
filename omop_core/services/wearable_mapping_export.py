@@ -13,12 +13,14 @@ import datetime
 import io
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import groupby
 
 from django.utils.timezone import localdate
 
-from omop_core.models import SourceCodeConceptMapping
+from omop_core.models import (
+    BiomedicalConcept, ConceptBiomedicalConceptMapping, SourceCodeConceptMapping,
+)
 from omop_core.services.disease_field_sets import csv_cell
 from omop_core.services.mapping_browse import canonical_source, tab_queryset
 from omop_core.services.mapping_source_units import SourceUnits
@@ -26,6 +28,12 @@ from omop_core.services.source_vocabularies import WEARABLE_METRIC_CATEGORIES
 
 #: The tab every wearable vocabulary is shown on.
 WEARABLES_TAB = canonical_source('OpenWearables')
+
+#: What the file maps each code to: the OMOP concept it is stored as, or the
+#: CDISC Biomedical Concept that concept is linked to.
+DEST_OMOP = 'omop'
+DEST_CDISC_BC = 'cdisc-bc'
+DESTINATIONS = (DEST_OMOP, DEST_CDISC_BC)
 
 FORMAT_CSV = 'csv'
 FORMAT_DOCX = 'docx'
@@ -35,8 +43,10 @@ CONTENT_TYPES = {
 }
 
 TITLE = 'Wearable metric mappings'
+BC_TITLE = 'Wearable metric mappings to CDISC Biomedical Concepts'
 UNCATEGORIZED = 'Uncategorized'
 NOT_MAPPED = 'Not mapped'
+NO_BC = 'No CDISC BC'
 
 # What a reader calls each source, in the order one metric's codes are listed:
 # the two phone platforms, the device vendor, the aggregator, then HL7's own
@@ -55,6 +65,16 @@ CSV_COLUMNS = (
     'Category', 'Measure class', 'Metric key', 'Source', 'Source code', 'Description',
     'Source unit', 'Destination vocabulary', 'Destination code', 'Destination concept',
     'OMOP concept ID', 'Domain', 'Destination unit', 'Status', 'Provenance',
+)
+
+
+#: The CSV for the CDISC BC destination: the code, the OMOP concept it maps to
+#: (how the BC is reached), then the BC and its NCIt identity.
+BC_CSV_COLUMNS = (
+    'Category', 'Measure class', 'Metric key', 'Source', 'Source code', 'Description',
+    'Source unit', 'OMOP vocabulary', 'OMOP code', 'OMOP concept', 'CDISC BC ID',
+    'CDISC BC name', 'NCIt code', 'BC categories', 'BC result scales', 'BC definition',
+    'BC status', 'Code mapping status',
 )
 
 
@@ -96,6 +116,13 @@ class Row:
     destination_unit: str
     status: str
     provenance: str
+    bc_id: str = ''
+    bc_name: str = ''
+    ncit_code: str = ''
+    bc_categories: tuple = ()
+    bc_scales: tuple = ()
+    bc_definition: str = ''
+    bc_status: str = ''
 
     @property
     def source(self):
@@ -121,7 +148,7 @@ def _blank_last(value, order):
     return (not value, order.get(value, len(order)), value)
 
 
-def export_rows():
+def export_rows(destination=DEST_OMOP):
     """Every mapping the Wearables tab can show, rejected ones aside, in file order.
 
     The tab's rows are the browse service's: every wearable vocabulary. A
@@ -131,7 +158,39 @@ def export_rows():
     applied, since it can only remove ICD10CM rows. One query, whatever the
     row count.
     """
-    return rows_from(tab_mappings().filter(organization__isnull=True).exclude(status='rejected'))
+    rows = rows_from(tab_mappings().filter(organization__isnull=True).exclude(status='rejected'))
+    return bc_rows(rows) if destination == DEST_CDISC_BC else rows
+
+
+def bc_rows(rows):
+    """*rows* with the CDISC Biomedical Concepts each one reaches, a line per BC.
+
+    A code has no BC of its own: it reaches one through the OMOP concept it maps
+    to (``ConceptBiomedicalConceptMapping``), so a code with no destination, or
+    whose concept is linked to no BC, keeps one line with no BC; a working group
+    reads those as the gaps. Approved links come before proposed, and rejected
+    ones are left out. Two queries, whatever the row count.
+    """
+    links = {}
+    for link in ConceptBiomedicalConceptMapping.objects.exclude(status='rejected').order_by(
+            'status', 'bc_id'):
+        links.setdefault((link.target_vocabulary_id, link.target_concept_code), []).append(link)
+    catalog = BiomedicalConcept.objects.in_bulk({
+        link.bc_id for held in links.values() for link in held})
+    lines = []
+    for row in rows:
+        held = links.get((row.destination_vocabulary, row.destination_code), []) if row.destination_code else []
+        held = [link for link in held if link.bc_id in catalog]
+        if not held:
+            lines.append(row)
+            continue
+        for link in held:
+            bc = catalog[link.bc_id]
+            lines.append(replace(
+                row, bc_id=bc.bc_id, bc_name=bc.short_name, ncit_code=bc.ncit_code,
+                bc_categories=tuple(bc.categories), bc_scales=tuple(bc.result_scales),
+                bc_definition=bc.definition, bc_status=link.status))
+    return lines
 
 
 def tab_mappings():
@@ -172,23 +231,32 @@ def rows_from(mappings):
     return rows
 
 
-def export_file(file_format, day=None):
-    """``(filename, content type, body)`` of the tab in *file_format*."""
+def export_file(file_format, day=None, destination=DEST_OMOP):
+    """``(filename, content type, body)`` of the tab in *file_format*.
+
+    *destination* is what each code is mapped to in the file: ``omop`` (the
+    concept it is stored as) or ``cdisc-bc`` (the Biomedical Concept that
+    concept is linked to).
+    """
     if file_format not in CONTENT_TYPES:
         raise FormatError(f"Unknown file format {file_format!r}. Use csv or docx.")
+    if destination not in DESTINATIONS:
+        raise FormatError(f"Unknown destination {destination!r}. Use omop or cdisc-bc.")
     day = day or localdate()
-    rows = export_rows()
+    rows = export_rows(destination)
     if file_format != FORMAT_CSV and len(rows) > DOCX_MAX_ROWS:
         raise FormatError(
             f'The Wearables tab holds {len(rows):,} mappings and the Word document is '
             f'limited to {DOCX_MAX_ROWS:,}. Download the CSV instead.')
-    body = csv_text(rows) if file_format == FORMAT_CSV else docx_bytes(rows, day)
-    return f'wearable-mappings-{day.isoformat()}.{file_format}', CONTENT_TYPES[file_format], body
+    bc = destination == DEST_CDISC_BC
+    body = csv_text(rows, bc) if file_format == FORMAT_CSV else docx_bytes(rows, day, bc)
+    stem = 'wearable-cdisc-bc-mappings' if bc else 'wearable-mappings'
+    return f'{stem}-{day.isoformat()}.{file_format}', CONTENT_TYPES[file_format], body
 
 
 # ── CSV ──────────────────────────────────────────────────────────────────
 
-def csv_text(rows):
+def csv_text(rows, bc=False):
     """One line per mapping under a header row; UTF-8, ``\\n`` line ends.
 
     It opens with a byte order mark: descriptions carry "°C" and "μS", and
@@ -199,8 +267,17 @@ def csv_text(rows):
     buffer = io.StringIO()
     buffer.write('\ufeff')
     writer = csv.writer(buffer, lineterminator='\n')
-    writer.writerow(CSV_COLUMNS)
+    writer.writerow(BC_CSV_COLUMNS if bc else CSV_COLUMNS)
     for row in rows:
+        if bc:
+            writer.writerow([csv_cell(value) for value in (
+                row.category, row.measure_class, row.metric_key, row.source, row.source_code,
+                row.description, '; '.join(row.source_units), row.destination_vocabulary,
+                row.destination_code, row.destination_name, row.bc_id, row.bc_name,
+                row.ncit_code, '; '.join(row.bc_categories), '; '.join(row.bc_scales),
+                row.bc_definition, row.bc_status, row.status,
+            )])
+            continue
         writer.writerow([csv_cell(value) for value in (
             row.category, row.measure_class, row.metric_key, row.source, row.source_code,
             row.description, '; '.join(row.source_units), row.destination_vocabulary,
@@ -226,6 +303,23 @@ _SMALL_PT = 8
 DOCX_COLUMNS = (
     ('Metric', 1.7), ('Source', 0.95), ('Source code', 2.55),
     ('Destination', 2.6), ('Unit', 0.8), ('Status', 0.9),
+)
+#: The CDISC BC document's columns, 9.5in in all like the above.
+BC_DOCX_COLUMNS = (
+    ('Metric', 1.6), ('Source', 0.9), ('Source code', 2.3),
+    ('OMOP concept', 1.9), ('CDISC Biomedical Concept', 2.0), ('Status', 0.8),
+)
+BC_LEGEND = (
+    'Each table lists the source codes of one category and the CDISC Biomedical '
+    'Concept (BC) each reaches. A code is mapped to an OMOP concept, and that concept '
+    'is linked to a BC, so the OMOP concept is shown beneath the code as the way the '
+    f'BC is reached. A BC is named with its NCIt code. "{NO_BC}" means the code has no '
+    'destination concept yet, or none of the concepts it maps to is linked to a BC '
+    '(steps and sleep, for example, have no CDISC BC). A code that reaches more '
+    'than one BC has a line for each. Status is that of the concept-to-BC link: '
+    'Approved is in use, Proposed has not been approved yet and may still change. '
+    'Long identifiers wrap at invisible break characters, so copy exact codes from '
+    'the CSV file rather than from this document.'
 )
 LEGEND = (
     'Each table lists the source codes of one category. Metric is the vendor-neutral '
@@ -262,6 +356,20 @@ def sections(rows):
     ]
 
 
+def bc_summary(rows, day):
+    """The BC document's line under the title."""
+    codes = len({row.pk for row in rows})
+    reached = len({row.pk for row in rows if row.bc_id})
+    concepts = len({row.bc_id for row in rows if row.bc_id})
+    approved = sum(row.bc_status == 'approved' for row in rows)
+    linked = sum(bool(row.bc_id) for row in rows)
+    return (
+        f'Generated {day.isoformat()}. {_count(codes, "source code")}: {reached} reach a CDISC '
+        f'Biomedical Concept ({_count(concepts, "distinct BC")}), {codes - reached} have none; '
+        f'{approved} of {_count(linked, "link")} approved, {linked - approved} proposed.'
+    )
+
+
 def summary(rows, day):
     """The line under the title: the date and what the tables add up to."""
     metrics = len({row.metric_key for row in rows if row.metric_key})
@@ -279,7 +387,7 @@ def _count(number, noun):
     return f'{number} {noun}' if number == 1 else f'{number} {noun}s'
 
 
-def docx_bytes(rows, day):
+def docx_bytes(rows, day, bc=False):
     """The tab as a Word document: a table per category, landscape Letter.
 
     The same rows on the same day give the same bytes: the order is the
@@ -301,14 +409,14 @@ def docx_bytes(rows, day):
     page.top_margin = page.bottom_margin = Inches(0.75)
     _page_number_footer(page)
 
-    document.add_heading(TITLE, level=0)
-    _text(document.add_paragraph(), summary(rows, day), size=10, color=_MUTED)
-    _text(document.add_paragraph(), LEGEND, size=10)
+    document.add_heading(BC_TITLE if bc else TITLE, level=0)
+    _text(document.add_paragraph(), (bc_summary if bc else summary)(rows, day), size=10, color=_MUTED)
+    _text(document.add_paragraph(), BC_LEGEND if bc else LEGEND, size=10)
     if not rows:
         _text(document.add_paragraph(), 'There are no wearable mappings.', size=10, italic=True)
     for heading, members in sections(rows):
         document.add_heading(f'{xml_safe(heading)} ({len(members)})', level=1)
-        _category_table(document, members)
+        _category_table(document, members, bc)
 
     buffer = io.BytesIO()
     document.save(buffer)
@@ -398,17 +506,18 @@ def _field(paragraph, instruction):
     field.append(run._r)
 
 
-def _category_table(document, members):
+def _category_table(document, members, bc=False):
     from docx.shared import Inches
 
-    table = document.add_table(rows=1, cols=len(DOCX_COLUMNS))
-    _table_properties(table)
-    for column, (_, width) in zip(table.columns, DOCX_COLUMNS):
+    columns = BC_DOCX_COLUMNS if bc else DOCX_COLUMNS
+    table = document.add_table(rows=1, cols=len(columns))
+    _table_properties(table, columns)
+    for column, (_, width) in zip(table.columns, columns):
         column.width = Inches(width)
 
     header = table.rows[0]
     _row_properties(header, header=True)
-    for cell, (label, width) in zip(header.cells, DOCX_COLUMNS):
+    for cell, (label, width) in zip(header.cells, columns):
         cell.width = Inches(width)
         cell._tc.get_or_add_tcPr().append(_element('shd', val='clear', color='auto', fill=_HEADER_FILL))
         _text(_first_paragraph(cell), label, bold=True)
@@ -431,14 +540,20 @@ def _category_table(document, members):
             _open_edges(cells[0], top=index > 0, bottom=not last)
             _text(_first_paragraph(cells[1]), row.source)
             _text(_first_paragraph(cells[2]), wrappable(row.source_code))
-            _destination_cell(cells[3], row)
-            if row.destination_unit:
-                _text(_first_paragraph(cells[4]), row.destination_unit)
-            elif row.source_units:
-                _text(_first_paragraph(cells[4]), '; '.join(row.source_units), color=_MUTED)
-            approved = row.status == 'approved'
-            _text(_first_paragraph(cells[5]), row.status.capitalize(), italic=not approved,
-                  color=None if approved else _MUTED)
+            if bc:
+                _destination_cell(cells[3], row)
+                _bc_cell(cells[4], row)
+                state = row.bc_status
+            else:
+                _destination_cell(cells[3], row)
+                if row.destination_unit:
+                    _text(_first_paragraph(cells[4]), row.destination_unit)
+                elif row.source_units:
+                    _text(_first_paragraph(cells[4]), '; '.join(row.source_units), color=_MUTED)
+                state = row.status
+            approved = state == 'approved'
+            _text(_first_paragraph(cells[5]), state.capitalize() if state else '–',
+                  italic=not approved, color=None if approved else _MUTED)
             # A page break inside a metric would leave the rows after it under
             # an empty Metric cell, so each row but the last stays with the next.
             if not last:
@@ -472,6 +587,16 @@ def _metric_cell(cell, metric_rows):
         _text(_paragraph(cell), ' / '.join(classes), size=_SMALL_PT, color=_MUTED)
 
 
+def _bc_cell(cell, row):
+    first = _first_paragraph(cell)
+    if not row.bc_id:
+        _text(first, NO_BC, italic=True, color=_MUTED)
+        return
+    _text(first, wrappable(row.bc_name), bold=True)
+    _text(_paragraph(cell), f'NCIt {row.ncit_code}' if row.ncit_code else row.bc_id,
+          size=_SMALL_PT, color=_MUTED)
+
+
 def _destination_cell(cell, row):
     first = _first_paragraph(cell)
     if not row.mapped:
@@ -500,7 +625,7 @@ def _tight(paragraph):
     return paragraph
 
 
-def _table_properties(table):
+def _table_properties(table, columns=DOCX_COLUMNS):
     """Fixed layout at the column widths, thin grey rules, a little padding.
 
     The children go in the order the schema lists them: Word refuses a
@@ -512,7 +637,7 @@ def _table_properties(table):
     for tag in ('tblW', 'tblBorders', 'tblLayout', 'tblCellMar'):
         for stale in properties.findall(qn(f'w:{tag}')):
             properties.remove(stale)
-    width = _element('tblW', w=round(sum(inches for _, inches in DOCX_COLUMNS) * 1440), type='dxa')
+    width = _element('tblW', w=round(sum(inches for _, inches in columns) * 1440), type='dxa')
     borders = _element('tblBorders')
     for edge in ('top', 'left', 'bottom', 'right', 'insideH', 'insideV'):
         borders.append(_element(edge, val='single', sz=4, space=0, color=_RULE))
