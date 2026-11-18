@@ -101,6 +101,8 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
         'omop_core.UmlsConcept', 'omop_core.UmlsRelease', 'omop_core.UmlsSourceCode',
     ), 'load_umls_release'),
     **dict.fromkeys(('omop_core.SourceVocabulary', 'omop_core.SourceVocabularyTerm'), 'load_ncit_source'),
+    # CDISC Biomedical Concepts ship in data migration 0354 to every instance.
+    'omop_core.BiomedicalConcept': 'migration 0354',
     # Routine refreshes come from the release API now (#1624); the loader name
     # stays the marker for 'has its own loader, so is not copied between
     # instances'. LoincRelease records which release the other two came from.

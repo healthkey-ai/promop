@@ -3233,6 +3233,39 @@ class ChronicConditionIndicator(models.Model):
         return f'{self.code} -> {self.indicator}'
 
 
+class BiomedicalConcept(models.Model):
+    """A CDISC Biomedical Concept (BC), as published in the CDISC Library.
+
+    A BC is the standard definition of one measurable thing -- Heart Rate,
+    Body Weight -- with its NCIt identity. It is not an OMOP concept and never
+    a destination for clinical rows. A BC is mapped like any source code: a
+    ``SourceCodeConceptMapping`` row in the ``CDISC-BC`` vocabulary whose code
+    is the ``bc_id`` and whose destination is one OMOP concept, so a wearable
+    code reaches a BC by sharing that destination. This table is the catalog
+    behind those rows. Shipped by migration 0354 from a frozen package.
+    ``bc_id`` is the NCIt C-code, or CDISC's placeholder for the few concepts
+    NCIt does not have yet (``ncit_code`` is then blank).
+    """
+    bc_id = models.CharField(max_length=50, primary_key=True)
+    short_name = models.CharField(max_length=255, db_index=True)
+    ncit_code = models.CharField(max_length=50, blank=True, default='')
+    parent_bc_id = models.CharField(max_length=50, blank=True, default='')
+    categories = models.JSONField(default=list)
+    synonyms = models.JSONField(default=list)
+    result_scales = models.JSONField(default=list)
+    definition = models.TextField(blank=True, default='')
+    hierarchy_level = models.PositiveSmallIntegerField(null=True, blank=True)
+    hierarchy_full = models.TextField(blank=True, default='')
+    package_date = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'biomedical_concept'
+        ordering = ['short_name']
+
+    def __str__(self):
+        return f"{self.short_name} ({self.bc_id})"
+
+
 class CancerStage(VocabularyLookup):
     class Meta:
         db_table = 'vocabulary_cancer_stage'

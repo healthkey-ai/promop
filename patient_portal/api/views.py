@@ -16014,11 +16014,13 @@ def field_mapping_export(request):
 def wearable_mapping_export(request):
     """Every mapping on the Wearables tab as one file, for use outside the app.
 
-    GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx
+    GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx&destination=omop|cdisc-bc
 
     ``csv`` (the default) is one line per mapping; ``docx`` is a Word document
     with a table per category. Both hold the whole tab, whatever section or
-    page a row is on, without the rejected rows. The parameter is not
+    page a row is on, without the rejected rows. ``destination`` picks what each
+    code is mapped to in the file: the OMOP concept (the default) or the CDISC
+    Biomedical Concept that concept is linked to. The parameter is not
     ``format``: DRF reads that one itself and answers 404 for a name it has no
     renderer for. Reference data: no patient value, reviewer or note, and
     whoever may read the mapping pages may download it.
@@ -16029,7 +16031,8 @@ def wearable_mapping_export(request):
     from omop_core.services import wearable_mapping_export as export
     try:
         filename, content_type, body = export.export_file(
-            request.query_params.get('file_format') or export.FORMAT_CSV)
+            request.query_params.get('file_format') or export.FORMAT_CSV,
+            destination=request.query_params.get('destination') or export.DEST_OMOP)
     except export.FormatError as error:
         return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
     response = HttpResponse(body, content_type=content_type)

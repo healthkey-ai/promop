@@ -763,3 +763,30 @@ it was caught.
    to `read_only_fields` by hand.
 8. `frontend/src/types/patient.ts` + `WearableTab.tsx` — expose it.
 9. Tests at every layer, per CLAUDE.md.
+
+---
+
+## CDISC Biomedical Concepts
+
+A CDISC Biomedical Concept (BC, identified by its NCIt code) is mapped the way
+every other code is: as a **source code with one OMOP concept as its
+destination**. BC rows are `SourceCodeConceptMapping` rows in the `CDISC-BC`
+vocabulary (the code is the BC id), shown on the Wearables tab in the group of
+the wearable metric they match, so they are proposed, voted on, approved and
+copied like any other row there. `BiomedicalConcept` is the catalog behind
+them: the 1,588 BCs of the CDISC Library package of 2026-11-02, shipped by
+migration `0354`. Migration `0355` seeds 21 proposed BC rows.
+
+A wearable code has no BC of its own. It **reaches the BC that shares its OMOP
+destination**, so several codes (the HealthKit, Garmin and OpenWearables
+identifiers of one metric) reach one BC, and nothing is stored about the pair.
+A BC is broader than a LOINC concept and has one destination, so it is reached
+only by the codes on that concept: the Heart Rate BC points at general heart
+rate, and resting heart rate does not reach it. A metric with no BC (steps,
+sleep, exercise time, RMSSD) has none rather than a near miss. The OMOP/LOINC
+mapping stays the full one; the BC view is a partial complement.
+
+The Wearables download takes `destination=cdisc-bc` (the "Map codes to" menu
+beside it) for a view-only CSV or Word file of the wearable codes that reach a
+BC, a line per BC. `services/biomedical_concepts.biomedical_concept_mappings`
+gives the same answer for one code mapping.
