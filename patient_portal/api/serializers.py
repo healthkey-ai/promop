@@ -540,6 +540,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         """Accept the historical misspelling on writes during API migration."""
         data = data.copy() if hasattr(data, 'copy') else dict(data)
+        # protein_expressions is a list answer stored as a comma-joined string
+        # (#2574): normalise and validate it here as well, so the native PATCH
+        # enforces the same options as the shared form (a list used to be
+        # stringified by TextField.clean()).
+        if 'protein_expressions' in data:
+            data['protein_expressions'] = _normalise_protein_expressions(
+                data.get('protein_expressions'), self.instance)
         # A direct computed-only assignment is dropped on this native path,
         # as dev did: its callers PATCH whole records and predate the refusal,
         # so a 400 there rolled back their real edits (#2418 regression
@@ -1384,6 +1391,34 @@ class DrugExposureSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
 
 
 _SOURCE_RECORD_KEY = re.compile(r'[!-~]+')
+
+
+def _normalise_protein_expressions(value, instance):
+    """The shared list normaliser for the native PATCH (#2574)."""
+    from omop_core.services.multi_answer import normalise
+    options = set()
+    if 'protein_expressions' in write_descriptor_options():
+        options = set(write_descriptor_options()['protein_expressions'])
+    stored = ''
+    if instance is not None:
+        stored = getattr(instance, 'protein_expressions', '') or ''
+    try:
+        return normalise(value, options=options, stored=stored)
+    except ValueError as exc:
+        raise serializers.ValidationError({
+            'protein_expressions': (
+                f'{str(exc)!r} is not one of the listed answers; '
+                'choose an option or remove it.'),
+        }) from exc
+
+
+def write_descriptor_options():
+    """The curated option values the descriptor serves, by field (#2574)."""
+    from omop_core.services.multi_answer import option_values
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    descriptor = build_writable_field_descriptor()
+    entry = descriptor.get('protein_expressions') or {}
+    return {'protein_expressions': option_values(entry.get('options'))}
 
 
 class SourceRecordKeyConflict(APIException):

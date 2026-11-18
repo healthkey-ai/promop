@@ -216,6 +216,12 @@ _UNMAPPED_GROUP_REASONS = {
 }
 
 
+#: List-valued fields with no OMOP projection: the record keeps a
+#: comma-joined set, and the descriptor must say so or a federated client
+#: renders a scalar (#2574).
+_DIRECT_MULTI_FIELDS = frozenset({'protein_expressions'})
+
+
 def _unmapped_group(field):
     if field.startswith('wearable_'):
         return GROUP_WEARABLE_META
@@ -1238,6 +1244,27 @@ def build_writable_field_descriptor():
                     'rather than entering a summary value.'
                 ),
             }
+            continue
+
+        if field in _DIRECT_MULTI_FIELDS:
+            # Explicit, before the curated rows: a surviving or newly approved
+            # mapping must not restore the single-string Observation projection
+            # this field no longer has (#2574).
+            entry = {
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': 'string',
+                'multiple': True,
+                'reason': (
+                    'Written directly to PatientRecord as a comma-joined set. '
+                    'The marker set has no single OMOP fact, so no projection '
+                    'is attempted.'),
+            }
+            opts = choice_options.get(field, [])
+            if opts:
+                entry['options'] = opts
+            descriptor[field] = entry
             continue
 
         if field in curated:

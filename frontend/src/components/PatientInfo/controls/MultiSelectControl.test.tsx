@@ -38,3 +38,21 @@ describe('the exclusive none answer', () => {
     expect(onChange).toHaveBeenLastCalledWith([]);
   });
 });
+
+
+describe('recorded values the picker does not offer', () => {
+  it('are listed and can be removed without touching the known answers', async () => {
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<MultiSelectControl
+      options={[{ value: 'CD19 +ve', label: 'CD19 +ve' }]}
+      selectedValues={['CD5: equivocal', 'CD19 +ve']}
+      display="CD5: equivocal, CD19 +ve"
+      onChange={onChange} />);
+
+    await user.click(screen.getByRole('button'));
+    await user.click(screen.getByText('CD5: equivocal'));
+
+    expect(onChange).toHaveBeenLastCalledWith(['CD19 +ve']);
+  });
+});

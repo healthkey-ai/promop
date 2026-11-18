@@ -63,6 +63,21 @@ from omop_core.services.chemistry_units import (
 logger = logging.getLogger(__name__)
 
 
+from omop_core.services.multi_answer import FIELDS as _MULTI_ANSWER_FIELDS  # noqa: E402
+
+
+def _multiple_answer_value(name, value, entry, stored):
+    """The stored comma-joined form of a list answer (#2574)."""
+    from omop_core.services.multi_answer import normalise, option_values
+    try:
+        return normalise(
+            value, options=option_values(entry.get('options')), stored=stored)
+    except ValueError as exc:
+        raise WriteRefused(
+            f'{name}: {str(exc)!r} is not one of the listed answers; '
+            'choose an option or remove it.') from exc
+
+
 def _profile_record_value(name, value, entry):
     """Translate a profile display choice to the code PatientRecord stores.
 
@@ -1470,7 +1485,11 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
             if not field.concrete or field.is_relation or field.primary_key:
                 result.rejected[name] = 'Not an editable patient-record column.'
                 continue
-            if (scalar_projection and entry.get('value_kind') != 'number'
+            if entry.get('multiple') and name in _MULTI_ANSWER_FIELDS:
+                value = _multiple_answer_value(
+                    name, value, entry, getattr(record, name, None))
+            if (scalar_projection and name not in _MULTI_ANSWER_FIELDS
+                    and entry.get('value_kind') != 'number'
                     and value is not None and len(str(value)) > 60):
                 # Keep the legacy scalar contract: a rejected edit is better
                 # than a successful, silently truncated clinical assertion.
@@ -1507,6 +1526,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
             # rejected edit is preferable to a successful, silently truncated
             # clinical assertion. Do not change its provenance or projector.
             if ((entry.get('projection') or entry.get('kind') == 'editable')
+                    and name not in _MULTI_ANSWER_FIELDS
                     and entry.get('value_kind') != 'number'
                     and value is not None and len(str(value)) > 60):
                 raise WriteRefused(f'{name}: this scalar write supports at most 60 characters; no value was saved.')

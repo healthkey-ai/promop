@@ -182,6 +182,19 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **`protein_expressions` is a multi-answer record field (#2574)** — the seeded
+  curation row projected the comma-joined marker set into one
+  `Observation.value_as_string` (60 characters), so a realistic selection could
+  not be projected, and the federated editor treated the field as a scalar. The
+  row is removed (migration 0346 deletes it only while it is the untouched
+  system-generated projection, so a curator's row survives, and relabels
+  stored answers from the pre-v32 form — `CD5: positive` → `CD5 +ve`, the
+  kappa/lambda spellings — without freezing the field), the descriptor
+  reports `multiple: true` with the curated options, list and comma-string
+  writes are normalised and validated against those options, and imported
+  markers are mapped to the picker's labels (`CD5: positive` → `CD5 +ve`) for
+  every curated marker. `DERIVATION_VERSION` 32. A value the picker does not
+  know stays visible and removable instead of blocking an edit.
 - **A patient's own record edits are recorded as patient self-report** — a
   `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
   representative projects its OMOP facts with type 32865 (Patient self-report)

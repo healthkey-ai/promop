@@ -553,9 +553,9 @@ describe('a tab that declares its own closed answer set', () => {
     expect(container.querySelector('input')?.getAttribute('type')).toBe('email');
   });
 
-  it('keeps a declared multiselect a single select until #2574 lands', async () => {
-    // Deliberate: multi-answer writes are not supported yet, so a tab that
-    // declares multiselect over a non-multiple descriptor gets one select.
+  it('keeps a declared multiselect a single select when the descriptor is not multiple', async () => {
+    // A tab declaration alone is not a write contract: without `multiple` the
+    // descriptor does not promise a list, so the editor keeps one select.
     const { store } = await setup({
       protein_expressions: { writable: true, target: 'patient_record',
         control: 'text', value_kind: 'string', label: 'Protein Expressions' },
@@ -566,6 +566,21 @@ describe('a tab that declares its own closed answer set', () => {
 
     expect(screen.getByRole('combobox')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /CD5/ })).not.toBeInTheDocument();
+  });
+
+  it('renders the descriptor-declared multiselect and writes the list', async () => {
+    const { store } = await setup({
+      protein_expressions: { writable: true, target: 'patient_record',
+        control: 'text', value_kind: 'string', label: 'Protein Expressions',
+        multiple: true, options: [{ value: 'CD5 +ve' }, { value: 'CD23 -ve' }] },
+    }, { protein_expressions: 'CD5 +ve' });
+    render(<PatientFieldEditor store={store} name="protein_expressions"
+      label="Protein Expressions" controlType="multiselect" />);
+
+    // The descriptor's `multiple` is what selects the list control; a tab
+    // declaration alone (the case above) stays a single select.
+    expect(screen.getByRole('button', { name: /Protein Expressions/ })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
   });
 
   it('never turns a date into a list of strings', async () => {

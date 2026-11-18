@@ -36,6 +36,13 @@ export default function MultiSelectControl({
   // must remove it.
   const noneKey = optionKey('none');
   const hasNone = options.some((o) => optionKey(o.value) === noneKey);
+  // Values the record holds but the picker does not offer (an imported
+  // "CD5: positive" the server could not map, or a retired option) are kept in
+  // the answer but get no toggle of their own; show them as removable rows so
+  // a contradiction can be cleared (#2574).
+  const unmatched = selectedValues.filter(
+    (v) => !options.some((o) => optionKey(o.value) === optionKey(v)),
+  );
 
   const toggle = (v: unknown) => {
     const next = new Set(selectedSet);
@@ -102,6 +109,22 @@ export default function MultiSelectControl({
               );
             })}
           </CommandGroup>
+          {unmatched.length > 0 && (
+            <CommandGroup heading="Recorded">
+              {unmatched.map((v) => (
+                <CommandItem
+                  key={optionKey(v)}
+                  onSelect={() => onChange(
+                    selectedValues.filter((x) => optionKey(x) !== optionKey(v)),
+                  )}
+                  className="flex items-start gap-3"
+                >
+                  <Checkbox checked />
+                  <span className="text-sm text-portal-text-primary">{String(v)}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
         </Command>
       </PopoverContent>
     </Popover>

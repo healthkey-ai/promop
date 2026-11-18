@@ -4532,25 +4532,7 @@
       "reviewed_at": "2026-09-04 11:19:54.244965+00:00",
       "notes": "Auto-proposed from field suggestion."
     },
-    {
-      "field_name": "protein_expressions",
-      "concept_vocabulary_id": "SNOMED",
-      "concept_code_resolved": "371511004",
-      "concept_id": 4155622,
-      "provenance": "system_generated",
-      "vocabulary_id": "SNOMED",
-      "concept_code": "371511004",
-      "unit": "",
-      "omop_table": "Observation",
-      "source_value": "",
-      "value_kind": "",
-      "type_concept_id": null,
-      "value_vocabulary": "",
-      "multiple": false,
-      "status": "approved",
-      "reviewed_at": "2026-09-04 19:53:45.743681+00:00",
-      "notes": "Auto-proposed from field suggestion."
-    },
+
     {
       "field_name": "psa_ng_ml",
       "concept_vocabulary_id": "LOINC",

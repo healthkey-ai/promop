@@ -206,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 31
+DERIVATION_VERSION = 32
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -4729,6 +4729,47 @@ def derive_meets_slim(patient_info: PatientRecord):
     return None
 
 
+#: Imported marker concept names -> the picker's reviewed label (#2574). A
+#: bounded match, not a substring: "CD50" is not CD5, and a name that mentions
+#: two markers (a kappa/lambda ratio) names neither.
+_PROTEIN_MARKERS = (
+    (r'CD-?38', 'CD38'), (r'CD-?49D', 'CD49d'), (r'CD-?19', 'CD19'),
+    (r'CD-?20', 'CD20'), (r'CD-?23', 'CD23'), (r'CD-?5', 'CD5'),
+    (r'ZAP-?70', 'ZAP-70'), (r'KAPPA', 'Kappa light chain'),
+    (r'LAMBDA', 'Lambda light chain'),
+)
+_PROTEIN_MARKER_RES = tuple(
+    (re.compile(rf'(?<![A-Z0-9]){pattern}(?![0-9])'), label)
+    for pattern, label in _PROTEIN_MARKERS
+)
+#: Both the raw answer and the picker's own spelling, so a re-import of an
+#: already-normalised value does not turn "+ve" into "CD5: +ve".
+#: Qualitative answers only. A numeric result ("1") is a concentration, not a
+#: positive expression, and must not manufacture a marker.
+_PROTEIN_POSITIVE = frozenset({
+    'positive', 'pos', '+', '+ve', 've+', 'present', 'true',
+})
+_PROTEIN_NEGATIVE = frozenset({
+    'negative', 'neg', '-', '-ve', 've-', 'absent', 'false',
+})
+#: A name that carries one of these is a panel, a ratio or a quantitative
+#: assay, not the qualitative expression the picker lists.
+_PROTEIN_MARKER_EXCLUDES = ('/', 'RATIO', 'FREE', 'SERUM', 'PLASMA', 'CONCENTRATION')
+
+
+def _protein_marker_label(concept_name):
+    """The picker label for an imported marker concept name, or None.
+
+    Exactly one marker must match: an ambiguous name (kappa/lambda ratio, a
+    panel) is not one of the picker's answers.
+    """
+    upper = (concept_name or '').upper()
+    if any(token in upper for token in _PROTEIN_MARKER_EXCLUDES):
+        return None
+    labels = {label for pattern, label in _PROTEIN_MARKER_RES if pattern.search(upper)}
+    return labels.pop() if len(labels) == 1 else None
+
+
 def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
@@ -5614,9 +5655,22 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     cd_markers = []
     for m in measurements:
         cname = m.measurement_concept.concept_name if m.measurement_concept else ''
-        if any(cd in cname.upper() for cd in ('CD38', 'CD20', 'CD5', 'ZAP70')):
-            if m.value_as_string:
-                cd_markers.append(f'{cname}: {m.value_as_string}')
+        label = _protein_marker_label(cname or '')
+        answer_text = m.value_as_string
+        if not answer_text and m.value_as_concept is not None:
+            answer_text = m.value_as_concept.concept_name
+        if label and answer_text:
+            token = answer_text.strip().casefold()
+            if token in _PROTEIN_POSITIVE:
+                answer = f'{label} +ve'
+            elif token in _PROTEIN_NEGATIVE:
+                answer = f'{label} -ve'
+            else:
+                # An answer the picker cannot express stays visible (and thus
+                # removable) instead of being silently dropped.
+                answer = f'{label}: {m.value_as_string.strip()}'
+            if answer not in cd_markers:
+                cd_markers.append(answer)
     if cd_markers:
         data['protein_expressions'] = ', '.join(cd_markers)
 
