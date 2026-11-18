@@ -1923,11 +1923,11 @@ export default function CodeMappingPage() {
           <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
           {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
           {/* The whole tab, built by the server, where the menus write loaded rows. */}
-          {selectedVocabulary === WEARABLES_TAB && <WearableMappingsDownload />}
+          {selectedVocabulary === WEARABLES_TAB && <WearableMappingsDownload systems={reference.wearable_source_systems} />}
           {/* Sharing the proposals for a public vote sends mail from this
               deployment and gathers voters' addresses: for those who approve
               mappings, staff and org admins (#2678). */}
-          {selectedVocabulary === WEARABLES_TAB && canApprove && <WearableVoteShare />}
+          {selectedVocabulary === WEARABLES_TAB && canApprove && <WearableVoteShare systems={reference.wearable_source_systems} />}
         </div>
 
         {sectionNames.map((section) => {

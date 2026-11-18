@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { Share2 } from "lucide-react";
 import api from "@/api/axios";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
+import type { WearableSourceSystem } from "./codeMappingTypes";
+import WearableSourceSystemSelect from "./WearableSourceSystemSelect";
 
 interface VoteShare {
   id: number;
@@ -14,6 +16,8 @@ interface VoteShare {
   /** Addresses that confirmed at least one vote. */
   voters: number;
   votes: number;
+  /** The source code systems the share is limited to; none is every system. */
+  source_vocabularies?: string[];
   /** The public link; the server sends it only to a mapping administrator. */
   url?: string;
 }
@@ -47,7 +51,7 @@ function status(share: VoteShare): string {
  * A vote is advice. It is recorded only after the voter confirms by email,
  * and it never changes a mapping.
  */
-export default function WearableVoteShare() {
+export default function WearableVoteShare({ systems = [] }: { systems?: WearableSourceSystem[] }) {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -58,16 +62,17 @@ export default function WearableVoteShare() {
       >
         <Share2 size={12} aria-hidden="true" /> Share
       </button>
-      {open && <VoteShareDialog onClose={() => setOpen(false)} />}
+      {open && <VoteShareDialog systems={systems} onClose={() => setOpen(false)} />}
     </>
   );
 }
 
-function VoteShareDialog({ onClose }: { onClose: () => void }) {
+function VoteShareDialog({ onClose, systems }: { onClose: () => void; systems: WearableSourceSystem[] }) {
   const [shares, setShares] = useState<VoteShare[] | null>(null);
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
   const [expires, setExpires] = useState("");
+  const [source, setSource] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<VoteShare | null>(null);
@@ -115,9 +120,10 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
     try {
       const response = await api.post<VoteShare>(SHARES, {
         title: title.trim(), note: note.trim(), ...(expires ? { expires_at: expires } : {}),
+        ...(source ? { source_vocabularies: [source] } : {}),
       });
       setCreated(response.data);
-      setTitle(""); setNote(""); setExpires("");
+      setTitle(""); setNote(""); setExpires(""); setSource("");
       await load();
     } catch (err) {
       setError(detailOf(err) ?? "The share could not be created. Try again.");
@@ -242,6 +248,15 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
                 onChange={(event) => setExpires(event.target.value)}
                 className="mt-1 block rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
             </div>
+            {systems.length > 0 && (
+              <div>
+                <label htmlFor="vote-share-systems" className="text-xs font-medium text-slate-700">Source code system</label>
+                <div className="mt-1">
+                  <WearableSourceSystemSelect id="vote-share-systems" systems={systems} value={source}
+                    onChange={setSource} disabled={busy} />
+                </div>
+              </div>
+            )}
             <button type="submit" disabled={busy}
               className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60">
               {busy ? "Creating…" : "Create link"}
@@ -281,6 +296,9 @@ function VoteShareDialog({ onClose }: { onClose: () => void }) {
                     Created {day(share.created_at)}
                     {share.expires_at ? ` · expires ${day(share.expires_at)}` : " · no expiry"}
                     {" · "}{share.voters} confirmed {share.voters === 1 ? "voter" : "voters"}
+                    {share.source_vocabularies?.length
+                      ? ` · ${share.source_vocabularies.map((id) => systems.find((system) => system.id === id)?.label ?? id).join(", ")} only`
+                      : ""}
                     {" · "}<span className={share.active ? "text-green-700" : "text-slate-600"}>{status(share)}</span>
                   </div>
                 </div>

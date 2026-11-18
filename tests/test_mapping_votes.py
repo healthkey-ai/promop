@@ -326,7 +326,7 @@ def test_reading_or_writing_mappings_is_not_managing_shares(role, anonymous):
     assert listed.status_code == votes.status_code == 200
     assert listed.json()['can_manage'] is False
     assert [set(entry) for entry in listed.json()['results']] == [{
-        'id', 'title', 'note', 'created_at', 'expires_at', 'revoked_at', 'active', 'voters', 'votes'}]
+        'id', 'title', 'note', 'created_at', 'expires_at', 'revoked_at', 'active', 'voters', 'votes', 'source_vocabularies'}]
     assert share.token not in listed.content.decode()
     assert votes.json()['emails_included'] is False
     assert votes.json()['tally'] == {'yes': 1, 'no': 0, 'comments': 1}
@@ -475,7 +475,7 @@ def test_the_public_page_lists_the_proposals_by_category_in_export_order(anonymo
 
     assert response.status_code == 200
     data = response.json()
-    assert set(data) == {'title', 'note', 'expires_at', 'comment_max_length', 'groups'}
+    assert set(data) == {'title', 'note', 'expires_at', 'comment_max_length', 'groups', 'source_systems'}
     assert data['title'] == 'HL7 PHR working group review' and data['note'] == 'Vote by Friday.'
     assert data['comment_max_length'] == 1000
     assert [(group['category'], [entry['source_code'] for entry in group['proposals']])
@@ -1987,3 +1987,101 @@ def test_the_public_download_is_throttled_per_client(anonymous):
     with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {'mapping_vote_export': '2/minute'}):
         codes = [download(anonymous, share).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+# ── A share limited to some source code systems ──────────────────────────
+
+def test_a_share_with_no_systems_puts_every_proposal_to_the_vote(anonymous):
+    proposal('STEP', source_vocabulary_id='Apple')
+    proposal('STEPS', source_vocabulary_id='Garmin')
+    share = make_share()
+    assert share.source_vocabularies == []
+    assert sorted(listed_codes(anonymous, share)) == ['STEP', 'STEPS']
+
+
+def test_a_limited_share_lists_and_exports_only_its_systems(anonymous):
+    proposal('STEP', source_vocabulary_id='Apple')
+    proposal('STEPS', source_vocabulary_id='Garmin')
+    share = make_share(sources=['Garmin'])
+    payload = page(anonymous, share).json()
+    assert listed_codes(anonymous, share) == ['STEPS']
+    assert payload['source_systems'] == ['Garmin']
+    response = anonymous.post(EXPORT, {'token': share.token, 'file_format': 'csv'}, format='json')
+    body = response.content.decode('utf-8-sig')
+    assert 'STEPS' in body and 'STEP,' not in body.replace('STEPS', '')
+
+
+def test_a_voter_cannot_vote_outside_the_shares_systems(anonymous):
+    inside = proposal('STEPS', source_vocabulary_id='Garmin')
+    outside = proposal('STEP', source_vocabulary_id='Apple')
+    share = make_share(sources=['Garmin'])
+    assert submit(anonymous, share, [yes(outside)]).status_code == 400
+    assert submit(anonymous, share, [yes(inside)]).status_code == 202
+
+
+def test_only_an_administrator_names_the_systems_and_an_unknown_one_is_a_400(admin):
+    made = admin.post(SHARES, {'title': 'Garmin only', 'source_vocabularies': ['Garmin', 'Apple']}, format='json')
+    assert made.status_code == 201, made.content
+    assert made.json()['source_vocabularies'] == ['Apple', 'Garmin']
+    listed = admin.get(SHARES).json()['results']
+    assert listed[0]['source_vocabularies'] == ['Apple', 'Garmin']
+    refused = admin.post(SHARES, {'title': 'Bad', 'source_vocabularies': ['Nope']}, format='json')
+    assert refused.status_code == 400
+    assert admin.post(SHARES, {'title': 'Bad', 'source_vocabularies': 'Apple'}, format='json').status_code == 201
+
+
+def test_a_page_names_its_systems_only_when_limited(anonymous):
+    proposal('STEPS', source_vocabulary_id='Garmin')
+    assert page(anonymous, make_share()).json()['source_systems'] == []
+    assert page(anonymous, make_share(sources=['Garmin', 'Apple'])).json()['source_systems'] == ['HealthKit', 'Garmin']
+
+
+def test_an_out_of_scope_pending_vote_is_dropped_at_preview_and_confirmation(anonymous):
+    inside = proposal('STEPS', source_vocabulary_id='Garmin')
+    outside = proposal('STEP', source_vocabulary_id='Apple')
+    share = make_share(sources=['Garmin'])
+    # A submission that names a proposal outside the scope, as one stored before the
+    # share was limited (or made some other way) would.
+    mail.outbox.clear()
+    assert submit(anonymous, share, [yes(inside)]).status_code == 202
+    token = emailed_token()
+    submission = MappingVoteSubmission.objects.get()
+    submission.payload = submission.payload + [{
+        'mapping': outside.pk, 'concept': outside.target_concept_id, 'choice': 'yes', 'comment': ''}]
+    submission.save()
+    items = preview(anonymous, token).json()['votes']
+    assert [item['proposal'] is not None for item in items] == [True, False]
+    result = confirm(anonymous, token).json()
+    assert result['recorded'] == 1 and result['skipped'] == 1
+    assert list(MappingVote.objects.values_list('mapping_id', flat=True)) == [inside.pk]
+
+
+def test_the_public_export_of_a_limited_share_honours_the_cdisc_target_and_its_refusal(anonymous):
+    concept = loinc('55423-8', 'Number of steps')
+    proposal('STEPS', concept, source_vocabulary_id='Garmin')
+    proposal('BC1', concept, source_vocabulary_id='CDISC-BC')
+    share = make_share(sources=['Garmin'])
+    ok = anonymous.post(EXPORT, {'token': share.token, 'destination': 'cdisc-bc'}, format='json')
+    assert ok.status_code == 200
+    assert 'STEPS' in ok.content.decode('utf-8-sig')
+    bc_only = make_share(sources=['CDISC-BC'])
+    refused = anonymous.post(EXPORT, {'token': bc_only.token, 'destination': 'cdisc-bc'}, format='json')
+    assert refused.status_code == 400 and 'no codes of its own' in refused.json()['detail']
+
+
+def test_a_share_whose_stored_systems_have_all_left_the_tab_exports_nothing_rather_than_everything(anonymous):
+    proposal('STEPS', source_vocabulary_id='Garmin')
+    share = make_share()
+    MappingVoteShare.objects.filter(pk=share.pk).update(source_vocabularies=['Gone'])
+    response = anonymous.post(EXPORT, {'token': share.token}, format='json')
+    assert response.status_code == 400
+    assert 'no longer available' in response.json()['detail']
+    # A stale id beside a live one is dropped; the live one still limits the file.
+    MappingVoteShare.objects.filter(pk=share.pk).update(source_vocabularies=['Gone', 'Garmin'])
+    assert anonymous.post(EXPORT, {'token': share.token}, format='json').status_code == 200
+
+
+def test_the_systems_of_a_share_must_be_a_list_of_ids(admin):
+    for bad in ({'a': 1}, [1], [['Apple']], 5):
+        response = admin.post(SHARES, {'title': 'Bad', 'source_vocabularies': bad}, format='json')
+        assert response.status_code == 400, bad

@@ -2,22 +2,31 @@ import { useState } from "react";
 import { Download } from "lucide-react";
 import api from "@/api/axios";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
+import type { WearableSourceSystem } from "./codeMappingTypes";
+import WearableSourceSystemSelect from "./WearableSourceSystemSelect";
 
 // What each code is mapped to in the file. The OMOP concept is the default and
 // is asked for by sending nothing, as before; a CDISC Biomedical Concept is
 // reached through the OMOP concept a code maps to.
 export type Destination = "omop" | "cdisc-bc";
 export type FileFormat = "csv" | "docx";
-/** Fetches the file; the response's `content-disposition` names it. */
-export type FetchWearableFile = (format: FileFormat, destination: Destination) => Promise<{
+/** Fetches the file; the response's `content-disposition` names it. `sources`
+ *  are the source code systems to limit it to; none is every system. */
+export type FetchWearableFile = (format: FileFormat, destination: Destination, sources: string[]) => Promise<{
   data: Blob; headers?: Record<string, unknown>;
 }>;
 
-const fromTheTab: FetchWearableFile = (format, destination) => api.get<Blob>("/v1/code-mappings/wearables-export/", {
-  params: destination === "omop" ? { file_format: format } : { file_format: format, destination },
+const fromTheTab: FetchWearableFile = (format, destination, sources) => api.get<Blob>("/v1/code-mappings/wearables-export/", {
+  params: {
+    file_format: format,
+    ...(destination === "omop" ? {} : { destination }),
+    ...(sources.length ? { sources: sources.join(",") } : {}),
+  },
   responseType: "blob",
 });
 
+/** The CDISC Biomedical Concepts' own vocabulary on the Wearables tab. */
+const CDISC_BC = "CDISC-BC";
 const LABEL = "Download all wearable mappings";
 const CHOICES: { format: FileFormat; label: string; name: string; title: string }[] = [
   { format: "csv", label: "CSV", name: `${LABEL} as CSV`, title: "One line per mapping, for a spreadsheet" },
@@ -35,20 +44,32 @@ const CHOICES: { format: FileFormat; label: string; name: string; title: string 
  * The target menu picks what the codes are mapped to in the file: the OMOP
  * concept, or the CDISC Biomedical Concept linked to it.
  *
+ * The source system menu limits the file to one source code system; the
+ * default is all of them. It is offered when `systems` are given, and not on
+ * the public vote page, where the share already decides which systems it holds.
+ *
  * Reading the tab is enough to download it, so a read-only reader sees this
  * too. `fetchFile` replaces the signed-in request, for the public vote page,
  * which asks its own endpoint with the share's token.
  */
-export default function WearableMappingsDownload({ fetchFile = fromTheTab }: { fetchFile?: FetchWearableFile }) {
+export default function WearableMappingsDownload({ fetchFile = fromTheTab, systems = [] }: {
+  fetchFile?: FetchWearableFile;
+  systems?: WearableSourceSystem[];
+}) {
   const [busy, setBusy] = useState<FileFormat | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [destination, setDestination] = useState<Destination>("omop");
+  const [source, setSource] = useState("");
+  // The Biomedical Concepts are what that target maps to, so under it the CDISC
+  // BC system has no codes of its own and the file would be empty.
+  const offered = destination === "cdisc-bc" ? systems.filter((system) => system.id !== CDISC_BC) : systems;
+  const chosen = offered.some((system) => system.id === source) ? source : "";
 
   const download = async (format: FileFormat) => {
     setBusy(format);
     setError(null);
     try {
-      const response = await fetchFile(format, destination);
+      const response = await fetchFile(format, destination, chosen ? [chosen] : []);
       const stem = destination === "omop" ? "wearable-mappings" : "wearable-cdisc-bc-mappings";
       saveBlob(response.data, filenameFromDisposition(
         response.headers?.["content-disposition"], `${stem}.${format}`));
@@ -77,6 +98,7 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab }: { f
           <option value="omop">OMOP concept</option>
           <option value="cdisc-bc">CDISC Biomedical Concept</option>
         </select>
+        <WearableSourceSystemSelect systems={offered} value={chosen} onChange={setSource} disabled={busy !== null} />
         {CHOICES.map(({ format, label, name, title }) => (
           <button
             key={format}

@@ -22,7 +22,9 @@ from omop_core.models import BiomedicalConcept, SourceCodeConceptMapping
 from omop_core.services.disease_field_sets import csv_cell
 from omop_core.services.mapping_browse import canonical_source, tab_queryset
 from omop_core.services.mapping_source_units import SourceUnits
-from omop_core.services.source_vocabularies import CDISC_BC_VOCABULARY, WEARABLE_METRIC_CATEGORIES
+from omop_core.services.source_vocabularies import (
+    CDISC_BC_VOCABULARY, WEARABLE_METRIC_CATEGORIES, WEARABLE_SOURCE_VOCABULARIES,
+)
 
 #: The tab every wearable vocabulary is shown on.
 WEARABLES_TAB = canonical_source('OpenWearables')
@@ -78,6 +80,20 @@ BC_CSV_COLUMNS = (
 
 class FormatError(ValueError):
     """The caller asked for a file this export does not write."""
+
+
+class SourceTargetError(FormatError):
+    """The CDISC BC source system asked for under the CDISC BC target.
+
+    The Biomedical Concepts are what that target maps *to*, so the file would
+    hold none of them as a code of its own and be empty. Fixed wording, safe to
+    show a visitor.
+    """
+
+    def __init__(self):
+        super().__init__(
+            'The CDISC BC source system has no codes of its own under the CDISC '
+            'Biomedical Concept target. Choose another source system, or the OMOP concept target.')
 
 
 # The Word document is built in memory inside the request: about 1.4 ms and
@@ -146,8 +162,41 @@ def _blank_last(value, order):
     return (not value, order.get(value, len(order)), value)
 
 
-def export_rows(destination=DEST_OMOP):
+def source_systems():
+    """The source code systems a file or a share can be limited to, as
+    ``[{id, label}]`` in the order one metric's codes are listed."""
+    ids = sorted(
+        WEARABLE_SOURCE_VOCABULARIES | set(SOURCE_LABELS),
+        key=lambda vocabulary: (_SOURCE_ORDER.get(vocabulary, len(_SOURCE_ORDER)), vocabulary))
+    return [{'id': vocabulary, 'label': SOURCE_LABELS.get(vocabulary, vocabulary)} for vocabulary in ids]
+
+
+def clean_sources(value):
+    """*value* as a tuple of source system ids in tab order; empty is every system.
+
+    A list, or one comma-separated string. Blank entries and repeats are
+    dropped; an id that is not a system on the tab raises ``FormatError``
+    with fixed wording, so nothing a caller typed is echoed back.
+    """
+    if value in (None, ''):
+        return ()
+    if isinstance(value, str):
+        value = value.split(',')
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        raise FormatError('Source systems must be a list of source code system ids.')
+    wanted = {item.strip() for item in value if item.strip()}
+    known = [system['id'] for system in source_systems()]
+    if wanted - set(known):
+        raise FormatError('Unknown source code system. Use one of: ' + ', '.join(known) + '.')
+    return tuple(system for system in known if system in wanted)
+
+
+def export_rows(destination=DEST_OMOP, sources=()):
     """Every mapping the Wearables tab can show, rejected ones aside, in file order.
+
+    *sources* limits the lines to those source code systems (empty: all). It is
+    applied last, so a CDISC Biomedical Concept is still found for a code
+    whatever the systems chosen.
 
     The tab's rows are the browse service's: every wearable vocabulary. A
     hospital's own override of a code is left out: the file is for use outside
@@ -157,7 +206,10 @@ def export_rows(destination=DEST_OMOP):
     row count.
     """
     rows = rows_from(tab_mappings().filter(organization__isnull=True).exclude(status='rejected'))
-    return bc_rows(rows) if destination == DEST_CDISC_BC else rows
+    rows = bc_rows(rows) if destination == DEST_CDISC_BC else rows
+    if sources:
+        rows = [row for row in rows if row.vocabulary in sources]
+    return rows
 
 
 def bc_rows(rows):
@@ -232,7 +284,7 @@ def rows_from(mappings):
     return rows
 
 
-def export_file(file_format, day=None, destination=DEST_OMOP, public=False):
+def export_file(file_format, day=None, destination=DEST_OMOP, public=False, sources=()):
     """``(filename, content type, body)`` of the tab in *file_format*.
 
     *destination* is what each code is mapped to in the file: ``omop`` (the
@@ -243,13 +295,20 @@ def export_file(file_format, day=None, destination=DEST_OMOP, public=False):
     page's own rule: no provenance, and no source units, which are read from
     patient-data evidence. Both stay as empty columns, so the two files have
     one shape.
+
+    *sources* limits the file to some source code systems (ids, or a
+    comma-separated string; empty is every system) and is named in the file's
+    name and, for Word, under the title.
     """
     if file_format not in CONTENT_TYPES:
         raise FormatError(f"Unknown file format {file_format!r}. Use csv or docx.")
     if destination not in DESTINATIONS:
         raise FormatError(f"Unknown destination {destination!r}. Use omop or cdisc-bc.")
+    sources = clean_sources(sources)
+    if destination == DEST_CDISC_BC and CDISC_BC_VOCABULARY in sources:
+        raise SourceTargetError()
     day = day or localdate()
-    rows = export_rows(destination)
+    rows = export_rows(destination, sources)
     if public:
         rows = [replace(row, source_units=(), provenance='') for row in rows]
     if file_format != FORMAT_CSV and len(rows) > DOCX_MAX_ROWS:
@@ -257,8 +316,10 @@ def export_file(file_format, day=None, destination=DEST_OMOP, public=False):
             f'The Wearables tab holds {len(rows):,} mappings and the Word document is '
             f'limited to {DOCX_MAX_ROWS:,}. Download the CSV instead.')
     bc = destination == DEST_CDISC_BC
-    body = csv_text(rows, bc) if file_format == FORMAT_CSV else docx_bytes(rows, day, bc)
+    body = csv_text(rows, bc) if file_format == FORMAT_CSV else docx_bytes(rows, day, bc, sources)
     stem = 'wearable-cdisc-bc-mappings' if bc else 'wearable-mappings'
+    if sources:
+        stem += '-' + '-'.join(source.lower() for source in sources)
     return f'{stem}-{day.isoformat()}.{file_format}', CONTENT_TYPES[file_format], body
 
 
@@ -392,7 +453,7 @@ def _count(number, noun):
     return f'{number} {noun}' if number == 1 else f'{number} {noun}s'
 
 
-def docx_bytes(rows, day, bc=False):
+def docx_bytes(rows, day, bc=False, sources=()):
     """The tab as a Word document: a table per category, landscape Letter.
 
     The same rows on the same day give the same bytes: the order is the
@@ -416,6 +477,9 @@ def docx_bytes(rows, day, bc=False):
 
     document.add_heading(BC_TITLE if bc else TITLE, level=0)
     _text(document.add_paragraph(), (bc_summary if bc else summary)(rows, day), size=10, color=_MUTED)
+    if sources:
+        labels = ', '.join(SOURCE_LABELS.get(source, source) for source in sources)
+        _text(document.add_paragraph(), f'Source code systems: {labels}.', size=10, color=_MUTED)
     _text(document.add_paragraph(), BC_LEGEND if bc else LEGEND, size=10)
     if not rows:
         _text(document.add_paragraph(), 'No wearable code reaches a CDISC Biomedical Concept.' if bc

@@ -117,6 +117,7 @@ from omop_core.mapping.suggestions import (
 from omop_core.services.suggest_jobs import get_dispatcher as get_suggest_dispatcher
 from omop_core.services.write_descriptor import mapping_table_is_writable
 from omop_core.services import source_vocabularies
+from omop_core.services import wearable_mapping_export as wearable_export
 from omop_core.mapping.therapy import (
     get_or_create_quarantine_drug,
     get_or_create_quarantine_observation,
@@ -15610,6 +15611,7 @@ def _code_mapping_reference_payload():
         'wearable_metric_categories': list(source_vocabularies.WEARABLE_METRIC_CATEGORIES),
         'wearable_measure_classes': list(source_vocabularies.WEARABLE_MEASURE_CLASSES),
         'wearable_source_vocabularies': sorted(source_vocabularies.WEARABLE_SOURCE_VOCABULARIES),
+        'wearable_source_systems': wearable_export.source_systems(),
         'suggest_max_per_run': get_suggest_dispatcher().max_codes,
     }
 
@@ -16014,7 +16016,7 @@ def field_mapping_export(request):
 def wearable_mapping_export(request):
     """Every mapping on the Wearables tab as one file, for use outside the app.
 
-    GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx&destination=omop|cdisc-bc
+    GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx&destination=omop|cdisc-bc&sources=Apple,Garmin
 
     ``csv`` (the default) is one line per mapping; ``docx`` is a Word document
     with a table per category. Both hold the whole tab, whatever section or
@@ -16022,8 +16024,11 @@ def wearable_mapping_export(request):
     code is mapped to in the file: the OMOP concept (the default) or the CDISC
     Biomedical Concept that concept is linked to. The parameter is not
     ``format``: DRF reads that one itself and answers 404 for a name it has no
-    renderer for. Reference data: no patient value, reviewer or note, and
-    whoever may read the mapping pages may download it.
+    renderer for. ``sources`` limits the file to some source code systems, as
+    ids separated by commas or repeated (``Apple,Garmin``); absent is every
+    system, and an id that is not a system on the tab is a 400. Reference data: no
+    patient value, reviewer or note, and whoever may read the mapping pages may
+    download it.
     """
     if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -16032,7 +16037,8 @@ def wearable_mapping_export(request):
     try:
         filename, content_type, body = export.export_file(
             request.query_params.get('file_format') or export.FORMAT_CSV,
-            destination=request.query_params.get('destination') or export.DEST_OMOP)
+            destination=request.query_params.get('destination') or export.DEST_OMOP,
+            sources=','.join(request.query_params.getlist('sources')))
     except export.FormatError as error:
         return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
     response = HttpResponse(body, content_type=content_type)

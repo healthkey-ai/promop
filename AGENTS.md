@@ -2070,6 +2070,21 @@ loaded.
   `DOCX_MAX_ROWS` (5,000): it is built in memory in the request at about
   1.4 ms a row; the CSV has no limit. Characters XML cannot hold are dropped
   from the Word text, since one in any stored code would fail the file.
+- **Source code system.** `sources=Apple,Garmin` (ids, comma-separated or the
+  parameter repeated; default none, which is every system) limits the file to
+  those systems (`export.clean_sources`; an id that is not on the tab is a
+  400 with fixed wording). The choices are `wearable_source_systems` in
+  `code-mappings/reference/` (`export.source_systems()`: id and label in
+  `SOURCE_LABELS` order). The limit is applied last, after a CDISC Biomedical
+  Concept has been linked to each code, so it never changes which BCs a code
+  reaches. A limited file's name ends with the lower-cased ids and the Word
+  document says "Source code systems: ..." under its title. The CDISC BC
+  system is refused with the CDISC Biomedical Concept target (`SourceTargetError`,
+  a 400): the target maps *to* those concepts, so the file would be empty; the
+  select hides that option under that target. The Download menu
+  shows a "Source code system" select beside "Map codes to" (default "All
+  source systems") on both Wearables controls; the public vote page has none,
+  since its share already decides (below).
 - **Order.** Category in `WEARABLE_METRIC_CATEGORIES` order, blank last; then
   metric key, blank last; then source (HealthKit, Health Connect, Garmin,
   OpenWearables, HL7 PHR, then any other vocabulary by id); then source code.
@@ -2156,6 +2171,23 @@ that reason, the read of the page included. A token is checked against
   analyst or a doctor sees that shares exist, the tallies, the choices and
   the comments. A machine credential reaches none of it
   (`is_machine_request`), whatever its scopes.
+- **A share can be limited to some source code systems.** `MappingVoteShare.
+  source_vocabularies` (a list of vocabulary ids, empty is every system; set
+  by `POST code-mappings/vote-shares/` as `source_vocabularies`, an unknown id
+  is a 400) bounds everything the link reaches: the proposals on the page
+  (`votable_mappings(share)`), what a voter may vote on (submit, the
+  confirmation preview and `confirm` all read the share's own list, so an id
+  from another system is the same "not on the page" 400, and a vote already
+  pending for one that left is skipped at confirmation), and the public
+  download, which the visitor cannot widen. The public page names the systems
+  of a limited link (`source_systems`, labels; empty for every system) as
+  "Limited to: ...". A stored system that has since left the tab is dropped
+  from the public download; a share left with none answers 400 rather than
+  becoming every system. `votable_mappings`, `votable_rows` and `clean_votes`
+  take the share as a required argument, so none can default to every system. The Share dialog's "Source code system" select
+  defaults to all systems and a listed share says "HealthKit, Garmin only".
+  The share's own votes CSV is unaffected. Editing a share's systems is not
+  offered: make another link.
 - **What is put to the vote.** Read live, never snapshotted: rows of the
   `WEARABLE_SOURCE_VOCABULARIES` that are `proposed`, global (`organization`
   null), carry a `metric_key`, and have a destination concept loaded here

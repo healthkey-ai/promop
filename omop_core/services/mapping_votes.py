@@ -229,12 +229,21 @@ def parse_expiry(value, now=None):
     return expires
 
 
-def create_share(user, title, note='', expires_at=None):
+def clean_sources(value):
+    """The source code systems a share is limited to, as a list; empty is all."""
+    try:
+        return list(export.clean_sources(value))
+    except export.FormatError as error:
+        raise SubmissionError(str(error)) from None
+
+
+def create_share(user, title, note='', expires_at=None, sources=()):
     return MappingVoteShare.objects.create(
         token=secrets.token_urlsafe(32),
         title=clean_title(title),
         note=clean_note(note),
         expires_at=parse_expiry(expires_at),
+        source_vocabularies=clean_sources(sources),
         created_by=user,
     )
 
@@ -277,6 +286,7 @@ def serialize_share(share, *, with_link, now=None):
         'note': share.note,
         'created_at': share.created_at.isoformat(),
         'expires_at': share.expires_at.isoformat() if share.expires_at else None,
+        'source_vocabularies': list(share.source_vocabularies or []),
         'revoked_at': share.revoked_at.isoformat() if share.revoked_at else None,
         'active': is_active(share, now),
         'voters': getattr(share, 'voters', 0),
@@ -289,7 +299,7 @@ def serialize_share(share, *, with_link, now=None):
 
 # ── The proposals ────────────────────────────────────────────────────────
 
-def votable_mappings():
+def votable_mappings(share):
     """The mappings a share puts to the vote: global wearable proposals that
     name a destination and carry a metric key.
 
@@ -297,19 +307,26 @@ def votable_mappings():
     code under a wearable vocabulary from whatever text a producer sent, and
     Suggest can then give it a destination; without this such a row would be
     published to strangers without a curator ever having looked at it.
+
+    A share limited to some source code systems puts only those to the vote.
+    *share* is required: a default that meant "every system" would be one slip
+    away from putting a limited share's voters outside its scope.
     """
-    return export.tab_mappings().filter(
+    mappings = export.tab_mappings().filter(
         status='proposed', organization__isnull=True, target_concept_id__gt=0,
     ).exclude(metric_key='')
+    if share.source_vocabularies:
+        mappings = mappings.filter(source_vocabulary_id__in=share.source_vocabularies)
+    return mappings
 
 
-def votable_rows(ids=None):
+def votable_rows(share, ids=None):
     """Those mappings as export rows, in the export's order. One query.
 
     A destination whose concept is not loaded here has no code or name to
     show a voter, so it is not put to the vote.
     """
-    mappings = votable_mappings()
+    mappings = votable_mappings(share)
     if ids is not None:
         mappings = mappings.filter(pk__in=ids)
     return [row for row in export.rows_from(mappings) if row.destination_code]
@@ -333,10 +350,13 @@ def _proposal(row):
 
 def public_payload(share):
     """What the public voting page shows for *share*. One query."""
-    rows = votable_rows()
+    rows = votable_rows(share)
     return {
         'title': share.title,
         'note': share.note,
+        # The systems a limited link is limited to, by name; none for every system.
+        'source_systems': [system['label'] for system in export.source_systems()
+                           if system['id'] in (share.source_vocabularies or ())],
         'expires_at': share.expires_at.isoformat() if share.expires_at else None,
         'comment_max_length': COMMENT_MAX_LENGTH,
         'groups': [
@@ -401,7 +421,7 @@ def clean_comment(value):
     return text
 
 
-def clean_votes(votes):
+def clean_votes(votes, share):
     """The submitted list as ``[{mapping, concept, choice, comment}]``.
 
     Raises ``SubmissionError`` for anything that is not a vote on a proposal
@@ -412,7 +432,7 @@ def clean_votes(votes):
     """
     if not isinstance(votes, list) or not votes:
         raise SubmissionError('Choose Yes or No, or leave a comment, on at least one proposal.')
-    limit = votable_mappings().count()
+    limit = votable_mappings(share).count()
     if len(votes) > max(limit, 1):
         raise SubmissionError('There are more votes here than proposals on the page.')
     cleaned, seen = [], set()
@@ -432,7 +452,7 @@ def clean_votes(votes):
             cleaned.append({'mapping': mapping_id, 'choice': choice, 'comment': comment})
     if not cleaned:
         raise SubmissionError('Choose Yes or No, or leave a comment, on at least one proposal.')
-    concepts = {row.pk: row.concept_id for row in votable_rows(seen)}
+    concepts = {row.pk: row.concept_id for row in votable_rows(share, seen)}
     if seen - set(concepts):
         raise SubmissionError(
             'Some proposals on this page have changed. Reload the page and vote again.')
@@ -496,7 +516,7 @@ def submit(share, email, votes, now=None):
     """
     now = now or timezone.now()
     email = normalize_email(email)
-    cleaned = clean_votes(votes)
+    cleaned = clean_votes(votes, share)
     key = _email_key(email)
     with transaction.atomic():
         _lock('mapping_vote_address', key)
@@ -663,7 +683,7 @@ def pending_summary(token, now=None):
     if submission is None:
         return None
     votes = _payload_votes(submission)
-    rows = {row.pk: row for row in votable_rows([vote['mapping'] for vote in votes])}
+    rows = {row.pk: row for row in votable_rows(submission.share, [vote['mapping'] for vote in votes])}
     items = []
     for vote in votes:
         row = rows.get(vote['mapping'])
@@ -729,7 +749,8 @@ def _confirm(token, now):
         if submission is None:
             return None
         votes = sorted(_payload_votes(submission), key=lambda vote: vote['mapping'])
-        concepts = {row.pk: row.concept_id for row in votable_rows([vote['mapping'] for vote in votes])}
+        concepts = {row.pk: row.concept_id for row in votable_rows(
+            submission.share, [vote['mapping'] for vote in votes])}
         current = [vote for vote in votes if concepts.get(vote['mapping']) == vote['concept']]
         MappingVote.objects.bulk_create(
             [MappingVote(

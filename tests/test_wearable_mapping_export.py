@@ -637,3 +637,86 @@ def test_cdisc_bc_files_are_valid_when_no_code_reaches_a_bc(reader):
     _, rows = csv_rows(reader, destination='cdisc-bc')
     assert rows == []
     assert reader.get(URL, {'file_format': 'docx', 'destination': 'cdisc-bc'}).status_code == 200
+
+
+# ── Limiting the file to some source code systems ────────────────────────
+
+@pytest.fixture
+def three_systems():
+    for code, vocabulary in (('steps', 'OpenWearables'), ('HKStep', 'Apple'),
+                             ('StepsRecord', 'HealthConnect'), ('garmin_steps', 'Garmin')):
+        row(code, source_vocabulary_id=vocabulary, category='Activity', metric_key='steps')
+
+
+def codes(client, **params):
+    return [line['Source code'] for line in csv_rows(client, **params)[1]]
+
+
+@pytest.mark.django_db
+def test_no_sources_means_every_system(reader, three_systems):
+    assert sorted(codes(reader)) == ['HKStep', 'StepsRecord', 'garmin_steps', 'steps']
+    assert sorted(codes(reader, sources='')) == sorted(codes(reader))
+
+
+@pytest.mark.django_db
+def test_one_system_limits_the_file_to_its_codes(reader, three_systems):
+    assert codes(reader, sources='Apple') == ['HKStep']
+
+
+@pytest.mark.django_db
+def test_several_systems_by_comma_or_by_repeating_the_parameter(reader, three_systems):
+    assert sorted(codes(reader, sources='Apple,Garmin')) == ['HKStep', 'garmin_steps']
+    assert sorted(codes(reader, sources=['Garmin', 'Apple'])) == ['HKStep', 'garmin_steps']
+    assert sorted(codes(reader, sources=' Apple , ,Apple')) == ['HKStep']
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('bad', ['Nope', 'Apple,Nope', 'apple'])
+def test_an_unknown_system_is_a_400_that_does_not_echo_it(reader, three_systems, bad):
+    response = reader.get(URL, {'file_format': 'csv', 'sources': bad})
+    assert response.status_code == 400
+    assert 'Nope' not in response.json()['detail'] and 'apple' not in response.json()['detail'].split('Use one of')[0]
+    assert 'Apple' in response.json()['detail']
+
+
+@pytest.mark.django_db
+def test_the_file_name_and_word_document_name_the_systems(reader, three_systems):
+    response = reader.get(URL, {'file_format': 'csv', 'sources': 'Garmin,Apple'})
+    assert '-apple-garmin-' in response['Content-Disposition']
+    doc = document(reader)  # every system: no systems line
+    assert not any(paragraph.text.startswith('Source code systems') for paragraph in doc.paragraphs)
+    import docx
+    limited = docx.Document(io.BytesIO(
+        reader.get(URL, {'file_format': 'docx', 'sources': 'Apple,Garmin'}).content))
+    assert any(paragraph.text == 'Source code systems: HealthKit, Garmin.' for paragraph in limited.paragraphs)
+
+
+@pytest.mark.django_db
+def test_the_cdisc_destination_keeps_its_catalog_whatever_the_systems(reader):
+    bc_concept = loinc('8867-4', 'Heart rate')
+    row('hr', source_vocabulary_id='Apple', category='Heart & Cardiovascular',
+        metric_key='heart_rate', target_concept=bc_concept)
+    row('hr_ow', source_vocabulary_id='OpenWearables', category='Heart & Cardiovascular',
+        metric_key='heart_rate', target_concept=bc_concept)
+    row('BC1', source_vocabulary_id='CDISC-BC', category='Heart & Cardiovascular',
+        metric_key='heart_rate', target_concept=bc_concept)
+    only_apple = reader.get(URL, {'file_format': 'csv', 'destination': 'cdisc-bc', 'sources': 'Apple'})
+    lines = list(csv.reader(io.StringIO(only_apple.content.decode('utf-8-sig'))))
+    assert [line[lines[0].index('Source code')] for line in lines[1:]] == ['hr']
+
+
+@pytest.mark.django_db
+def test_the_reference_lists_the_systems_in_tab_order(reader):
+    systems = reader.get('/api/v1/code-mappings/reference/').json()['wearable_source_systems']
+    assert [system['id'] for system in systems] == [
+        'Apple', 'HealthConnect', 'Garmin', 'OpenWearables', 'HL7-PHR', 'CDISC-BC']
+    assert systems[0] == {'id': 'Apple', 'label': 'HealthKit'}
+
+
+@pytest.mark.django_db
+def test_the_cdisc_bc_system_is_refused_under_the_cdisc_bc_target(reader, three_systems):
+    response = reader.get(URL, {'file_format': 'csv', 'destination': 'cdisc-bc', 'sources': 'CDISC-BC'})
+    assert response.status_code == 400
+    assert 'no codes of its own' in response.json()['detail']
+    # Under the OMOP target it is an ordinary system.
+    assert reader.get(URL, {'file_format': 'csv', 'sources': 'CDISC-BC'}).status_code == 200
