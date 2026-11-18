@@ -202,6 +202,51 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     expect(screen.queryByText(/No reviewed PROMOP field binding/)).toBeNull();
   });
 
+  it('mounts a trial-row pair as an embedded dialog editor (#5903, #5904)', async () => {
+    const units = [
+      { value: 'CELLS/UL', label: 'cells/µL' },
+      { value: '10*3/uL', label: '10³/µL' },
+    ];
+    const host = hostClient({
+      patient: { platelet_count: 336 },
+      fields: {
+        platelet_count: {
+          writable: true, target: 'patient_record', control: 'number',
+          value_kind: 'number', unit: 'CELLS/UL', label: 'Platelet count',
+          unit_options: units, bindings: ['plateletCount'],
+        },
+        platelet_count_units: {
+          kind: 'selectable', writable: false, qualifies: 'platelet_count',
+          unit_options: units,
+        },
+        platelet_count_thousand_per_ul: {
+          kind: 'computed', writable: false, normalised_read_model: true,
+          inputs: ['platelet_count'], reason: 'Normalised from platelet_count in the default unit.',
+        },
+      },
+    });
+    render(
+      <PatientFieldEditorSlot
+        apiClient={host.client}
+        apiBasePath=""
+        name="plateletCount"
+        label="Platelet Count Range"
+        readOnly={false}
+      />,
+    );
+
+    // The row keeps the value, and the host cell owns the outline.
+    const row = await screen.findByText('336');
+    expect(row.closest('[data-field]')).toHaveAttribute('data-promop-embedded');
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+
+    // The pair, its unit and the explanation live in the dialog.
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Platelet Count Range' }));
+    expect(await screen.findByRole('spinbutton')).toBeInTheDocument();
+    expect(screen.getByText('Normalised from platelet_count in the default unit.')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Unit for Platelet Count Range' })).toBeInTheDocument();
+  });
+
   it('tells the host which trial rows it can resolve, including bindings', async () => {
     const host = hostClient({ fields: { meets_slim: { bindings: ['meetsSLIM'] } } });
     const { result } = renderHook(() =>

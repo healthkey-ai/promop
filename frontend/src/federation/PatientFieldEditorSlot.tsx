@@ -76,6 +76,11 @@ export default function PatientFieldEditorSlot({
       label={label}
       labelIncludesUnit={labelIncludesUnit}
       compact={compact}
+      /* This slot IS the trial row: the host cell already draws the outline, and
+         a value/unit pair (with its result date) belongs in a dialog rather than
+         in a 200px cell (#5903, #5904). */
+      pairEditor="dialog"
+      embedded
     />
     </PatientFormRenewContext.Provider>
   );

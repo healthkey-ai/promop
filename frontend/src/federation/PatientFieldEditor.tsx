@@ -7,6 +7,7 @@ import ExplicitAnswerActions from '@/components/PatientInfo/ExplicitAnswerAction
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 import { displayUnitLabel, labelNamesUnit } from './unitPresentation';
 import { formatDate } from '@/utils/date';
+import { installEmbeddedStyles } from './embeddedStyles';
 
 interface Props {
   store: PatientFormStore;
@@ -165,6 +166,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const state = usePatientFormSnapshot(store);
   const renew = useContext(PatientFormRenewContext);
   const [open, setOpen] = useState(false);
+  // The embedded row needs one host-agnostic rule at runtime; see the module.
+  useEffect(() => { if (embedded) installEmbeddedStyles(); }, [embedded]);
   const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
   const [valueDraft, setValueDraft] = useState<{ set: boolean; value: unknown }>(
     { set: false, value: undefined });

@@ -1788,6 +1788,13 @@ describe('embedded mount (#5904)', () => {
     expect(row?.className).toContain('[&_input]:border-0');
   });
 
+  it('installs the embedded rule once, for hosts whose CSS would outrank utilities', async () => {
+    const { store } = await setup({}, { height: 170 });
+    render(<PatientFieldEditor store={store} name="height" label="Height" embedded />);
+    await waitFor(() => expect(document.querySelector('style[data-promop-embedded-style]')).not.toBeNull());
+    expect(document.querySelectorAll('style[data-promop-embedded-style]')).toHaveLength(1);
+  });
+
   it('leaves the standalone patient form bordered', async () => {
     const { store } = await setup({}, { height: 170 });
     const { container } = render(<PatientFieldEditor store={store} name="height" label="Height" />);
