@@ -452,3 +452,140 @@ def test_the_earliest_row_is_kept_when_every_candidate_is_a_proposal(api):
     rows = list(_rows(api.person))
     assert [row.measurement_id for row in rows] == [9007]
     assert rows[0].confidence == 30
+
+
+# --- #2483: a keyed row must not hide an unkeyed copy -------------------------
+
+
+def test_a_keyed_row_does_not_hide_an_unkeyed_copy_of_another_hospital(api):
+    """The keyed fallback reads the unkeyed candidate even when attribution
+    narrowing keeps only the keyed row (#2483)."""
+    a, b = (Organization.objects.create(name=n, slug=f'hidden-{n}') for n in 'ab')
+    keyed = api.post([api.row(key='k/one')]).json()['ids'][0]
+    unkeyed = api.post([api.row(key=None)], query='&upsert=false').json()['ids'][0]
+    _attribute(keyed, a)
+    _attribute(unkeyed, b)
+
+    resp = api.post([api.row(key='k/two')])
+
+    body = resp.json()
+    assert resp.status_code == 201, resp.content
+    assert (body['created'], body['updated'], body['ids']) == (0, 1, [unkeyed])
+    assert _rows(api.person).count() == 2
+    keys = dict(Measurement.objects.filter(person=api.person)
+                .values_list('measurement_id', 'source_record_key'))
+    assert keys == {keyed: 'k/one', unkeyed: 'k/two'}
+
+
+# --- #2484: row-level writes and the key -------------------------------------
+
+
+def test_a_row_patch_onto_another_rows_key_is_409(api, client):
+    first, second = api.post([api.row(key='k/a'), api.row(key='k/b')]).json()['ids']
+
+    resp = client.patch(f'/api/v1/measurements/{second}/?skip_refresh=true',
+                        {'source_record_key': 'k/a'}, format='json')
+
+    assert resp.status_code == 409, resp.content
+    assert Measurement.objects.get(pk=second).source_record_key == 'k/b'
+    assert Measurement.objects.get(pk=first).source_record_key == 'k/a'
+
+
+def test_a_row_patch_may_keep_its_own_key(api, client):
+    pk = api.post([api.row(key='k/a')]).json()['ids'][0]
+
+    resp = client.patch(f'/api/v1/measurements/{pk}/?skip_refresh=true',
+                        {'source_record_key': 'k/a', 'value_as_number': '37.9'},
+                        format='json')
+
+    assert resp.status_code == 200, resp.content
+    assert Measurement.objects.get(pk=pk).source_record_key == 'k/a'
+
+
+@pytest.mark.parametrize('bad', [' k/a', 'k/a ', '\tk/a', 'k/a\n'])
+def test_a_padded_key_on_a_row_patch_is_400(api, client, bad):
+    """DRF's default trimming used to turn a padded key into a valid one
+    (#2484); the field must see the supplied identifier."""
+    pk = api.post([api.row(key=None)]).json()['ids'][0]
+
+    resp = client.patch(f'/api/v1/measurements/{pk}/?skip_refresh=true',
+                        {'source_record_key': bad}, format='json')
+
+    assert resp.status_code == 400, resp.content
+    assert Measurement.objects.get(pk=pk).source_record_key is None
+
+
+def test_an_ambiguous_replay_keeps_every_hospitals_row(api):
+    """Counting ambiguity must not collapse a row across attributions (#2483)."""
+    a, b = (Organization.objects.create(name=n, slug=f'keep-{n}') for n in 'ab')
+    first, second = (api.post([api.row(key=None)], query='&upsert=false').json()['ids'][0]
+                     for _ in range(2))
+    _attribute(first, a)
+    _attribute(second, b)
+
+    resp = api.post([api.row()])
+
+    assert resp.json()['key_ambiguous'] == [0]
+    assert _rows(api.person).count() == 2
+    assert not _rows(api.person).filter(source_record_key=KEY).exists()
+    assert ProvenanceRecord.objects.filter(
+        object_id__in=(first, second)).count() == 2
+
+
+def test_a_single_post_with_an_explicit_id_cannot_take_a_key(api, client):
+    """A body carrying its own primary key skips the keyed upsert (#2484)."""
+    api.post([api.row(key='k/a')])
+    data = api.row(key='k/a')
+    data['measurement_id'] = 999001
+
+    resp = client.post('/api/v1/measurements/?skip_refresh=true', data, format='json')
+
+    assert resp.status_code == 409, resp.content
+    assert not Measurement.objects.filter(measurement_id=999001).exists()
+
+
+def test_a_padded_key_in_a_bulk_batch_is_400(api):
+    """The bulk ingest shares the key field, so padding is refused there too
+    (#2484 review)."""
+    resp = api.post([api.row(key='k/a ')])
+
+    assert resp.status_code == 400, resp.content
+    assert not _rows(api.person).exists()
+
+
+def test_a_conflicting_row_patch_answers_409_without_refreshing(api, client, monkeypatch):
+    """The 409 must stop the request: a returned response would still run the
+    PatientRecord derivation, and turn into a false 502 when it fails
+    (#2484 review)."""
+    api.post([api.row(key='k/a'), api.row(key='k/b')])
+    other = Measurement.objects.get(person=api.person, source_record_key='k/a')
+    target = Measurement.objects.get(person=api.person, source_record_key='k/b')
+    called = []
+
+    def fail(*args, **kwargs):
+        called.append((args, kwargs))
+        raise RuntimeError('the derivation must not run for a refused write')
+
+    monkeypatch.setattr(views, 'refresh_patient_record', fail, raising=False)
+
+    resp = client.patch(f'/api/v1/measurements/{target.pk}/',
+                        {'source_record_key': other.source_record_key}, format='json')
+
+    assert resp.status_code == 409, resp.content
+    assert called == []
+
+
+def test_a_bulk_collision_answers_the_generic_409(api, client):
+    """A bulk key collision must not echo PostgreSQL's message, which quotes
+    the other row's key (#2484 review)."""
+    api.post([api.row(key='k/a'), api.row(key='k/b')])
+    url = '/api/v1/measurements/bulk_update/?skip_refresh=true'
+
+    resp = client.patch(url, [
+        {'measurement_id': Measurement.objects.get(source_record_key='k/b').pk,
+         'source_record_key': 'k/a'},
+    ], format='json')
+
+    assert resp.status_code == 409, resp.content
+    assert 'error' not in resp.json()
+    assert 'k/a' not in resp.json()['detail']

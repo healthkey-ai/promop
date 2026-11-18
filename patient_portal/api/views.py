@@ -174,7 +174,7 @@ from .serializers import (
     PatientConsentSerializer,
     PatientMessageSerializer,
     ImmunizationSerializer, AllergySerializer,
-    TherapyLineWriteSerializer,
+    TherapyLineWriteSerializer, SourceRecordKeyConflict,
 )
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
@@ -8021,12 +8021,20 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             if supports_key and row[-3]:
                 keyed_pks.add(row[0])
 
-    # Distinct attributions among the unkeyed rows of a key, before the
-    # filtering below narrows it to one: without a named hospital, more than
-    # one is an ambiguous match for a keyed row.
-    unkeyed_groups = {
-        key: {attribution_by_pk[pk] for pk in pks if pk not in keyed_pks}
+    # The unkeyed rows of each content key, captured before the filtering below
+    # narrows `existing` to one attribution: a keyed row's fallback must still
+    # see them when the narrowing keeps only the keyed row's own attribution
+    # (#2483).
+    unkeyed_by_key = {
+        key: [pk for pk in pks if pk not in keyed_pks]
         for key, pks in existing.items()
+    }
+
+    # Distinct attributions among those unkeyed rows: without a named hospital,
+    # more than one is an ambiguous match for a keyed row.
+    unkeyed_groups = {
+        key: {attribution_by_pk[pk] for pk in pks}
+        for key, pks in unkeyed_by_key.items()
     }
 
     def preferred_keep(pks):
@@ -8045,6 +8053,7 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
         return pks[0]
 
     skipped = {}
+    skipped_unkeyed = {}
     for key in list(existing):
         pks = existing[key]
         if organization is None:
@@ -8053,11 +8062,19 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
         by_class = defaultdict(list)
         for pk in pks:
             by_class[classify(attribution_by_pk[pk], organization.pk)].append(pk)
+        # A keyed replay's candidate must be unkeyed; capture it before the OWN
+        # branch, so a hospital whose own rows all carry keys still answers
+        # with the unattributed copy instead of inserting a duplicate.
+        unkeyed = [pk for pk in by_class[UNATTRIBUTED] if pk not in keyed_pks]
+        if unkeyed:
+            skipped_unkeyed[key] = preferred_keep(unkeyed)
         if by_class[OWN]:
             existing[key] = by_class[OWN]
             continue
         del existing[key]
         if by_class[UNATTRIBUTED]:
+            # A plain unkeyed replay matches the preferred unattributed row
+            # whatever it carries.
             skipped[key] = preferred_keep(by_class[UNATTRIBUTED])
 
     to_insert, row_slots = [], [None] * len(instances)
@@ -8065,11 +8082,18 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     keyed_updates, key_ambiguous = {}, []
     unattributed_matches = 0
 
-    def match_content(i, key):
-        """Today's outcome for a row whose content key is on file."""
-        keep = preferred_keep(existing[key])
+    def match_content(i, key, candidates=None):
+        """Today's outcome for a row whose content key is on file.
+
+        *candidates* overrides the stored set for the ambiguous keyed fallback,
+        which must not mutate ``existing[key]``: the unkeyed pass below reads it
+        and a narrowed entry would redirect that update to another hospital's
+        row (#2483 review).
+        """
+        scope = existing[key] if candidates is None else candidates
+        keep = preferred_keep(scope)
         row_slots[i] = ('old', keep)
-        extras = [pk for pk in existing[key]
+        extras = [pk for pk in scope
                   if pk != keep and pk not in keyed_pks and pk not in collapse_ids]
         collapse_ids.extend(extras)
         new_cid = getattr(instances[i], cid_attr, None)
@@ -8109,17 +8133,22 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             row_slots[i] = ('old', pk)
             continue
         key = keys[i]
-        if key is not None and key in existing and any(
-                pk not in keyed_pks for pk in existing[key]):
+        # Without a hospital the fallback reads the unkeyed rows captured
+        # before the attribution narrowing (#2483); with one, only the rows
+        # classified as its own survived that step.
+        candidates = (existing.get(key, ()) if organization is not None
+                      else unkeyed_by_key.get(key, ()))
+        if key is not None and any(pk not in keyed_pks for pk in candidates):
             fallback[key].append(i)
-        elif key is not None and key in skipped and skipped[key] not in keyed_pks:
-            row_slots[i] = ('old', skipped[key])
+        elif key is not None and key in skipped_unkeyed:
+            row_slots[i] = ('old', skipped_unkeyed[key])
             unattributed_matches += 1
         else:
             insert(i)
     for key, idxs in fallback.items():
         idxs.sort()
-        candidates = [pk for pk in existing[key] if pk not in keyed_pks]
+        source = existing[key] if organization is not None else unkeyed_by_key[key]
+        candidates = [pk for pk in source if pk not in keyed_pks]
         # With a hospital named, only its own rows are candidates: one group.
         groups = len(unkeyed_groups[key]) if organization is None else 1
         if len(idxs) == 1 and groups == 1:
@@ -8131,8 +8160,12 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             row_slots[i] = ('old', keep)
             continue
         key_ambiguous.extend(idxs)
-        existing[key] = candidates
-        match_content(idxs[-1], key)
+        # The pre-narrowing candidates decided the stamp; the content match
+        # keeps the attribution rule above, so an ambiguous replay never
+        # collapses another hospital's row. ``existing[key]`` stays as the
+        # unkeyed pass expects it (#2483 review).
+        match_content(idxs[-1], key,
+                      same_attribution(candidates, attribution_by_pk))
         for i in idxs[:-1]:
             insert(i)
     # Rows sharing a key with its last occurrence resolve to the same row.
@@ -8727,14 +8760,16 @@ class _OmopDeferRefreshMixin:
 
         if _skip_refresh_requested(request):
             with suppress_patient_record_refresh():
-                return self._attributed_update(request, *args, **kwargs)
+                return self._attributed_update_translating_key_conflict(
+                    request, *args, **kwargs)
 
         # Suppress signal-driven refresh and call it explicitly so failures
         # surface as an HTTP error instead of being silently swallowed.
         instance = self.get_object()
         person = instance.person
         with suppress_patient_record_refresh():
-            response = self._attributed_update(request, *args, **kwargs)
+            response = self._attributed_update_translating_key_conflict(
+                request, *args, **kwargs)
         try:
             refresh_patient_record(person)
         except Exception:
@@ -8751,6 +8786,34 @@ class _OmopDeferRefreshMixin:
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return response
+
+    def _attributed_update_translating_key_conflict(
+            self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """A row-level write that hits the key index answers 409, not 500 (#2484).
+
+        Raised, not returned: the request must stop here. Returning a response
+        would let ``update`` continue into ``refresh_patient_record`` on a
+        transaction the failed save already marked for rollback.
+        """
+        write = self._attributed_update
+        return self._translating_key_conflict(write, request, *args, **kwargs)
+
+    @staticmethod
+    def _translating_key_conflict(write, request, *args, **kwargs):
+        """Run *write* and answer 409 when it hits the source-key index (#2484).
+
+        Raised, not returned: the request must stop here. Returning a response
+        would let the caller continue into ``refresh_patient_record`` on a
+        transaction the failed save already marked for rollback. The savepoint
+        keeps the transaction healthy when the exception is translated.
+        """
+        try:
+            with transaction.atomic():
+                return write(request, *args, **kwargs)
+        except IntegrityError as exc:
+            if _is_source_record_key_conflict(exc):
+                raise SourceRecordKeyConflict() from exc
+            raise
 
     def _attributed_update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         provenance = self._provenance(request)
@@ -8839,6 +8902,26 @@ def _source_key_conflict_response(what):
     )
 
 
+#: The (person, source_record_key) unique indexes the row-level write can hit,
+#: derived from the models that support the key so the two cannot drift.
+_KEY_UNIQUE_CONSTRAINTS = tuple(
+    f'uq_{name.lower()}_person_source_record_key' for name in _KEYED_MODELS
+)
+
+
+def _is_source_record_key_conflict(exc):
+    """Whether *exc* is a unique violation of one of the key indexes (#2484).
+
+    Matched on SQLSTATE and the driver's constraint name: the exception text
+    also carries PostgreSQL's DETAIL, which quotes submitted row values, so a
+    key that spells a constraint name must not be mistaken for the index.
+    """
+    cause = getattr(exc, '__cause__', None)
+    diag = getattr(cause, 'diag', None)
+    return (getattr(cause, 'sqlstate', None) == '23505'
+            and getattr(diag, 'constraint_name', None) in _KEY_UNIQUE_CONSTRAINTS)
+
+
 def _record_keyed_provenance(model_cls, person, provenance, keyed_updates):
     """Provenance for rows rewritten by a key match (#2453).
 
@@ -8896,7 +8979,10 @@ class _OmopBulkCreateMixin:
         if not isinstance(request.data, list):
             if self._should_single_upsert(request):
                 return self._single_upsert_create(request)
-            return super().create(request, *args, **kwargs)
+            # A body with its own primary key skips the upsert; it can still
+            # take a key another row holds (#2484).
+            write = super().create
+            return self._translating_key_conflict(write, request, *args, **kwargs)
         return self._bulk_create(request)
 
     def _should_single_upsert(self, request):
@@ -8992,6 +9078,10 @@ class _OmopBulkCreateMixin:
                 status=status.HTTP_409_CONFLICT,
             )
         except IntegrityError as exc:
+            if _is_source_record_key_conflict(exc):
+                # The generic detail: PostgreSQL's own message quotes the
+                # other row's key, which is another hospital's identifier.
+                raise SourceRecordKeyConflict() from exc
             logger.exception(
                 'single %s upsert for person %s failed on a database constraint',
                 model_name, person.person_id)
@@ -9115,6 +9205,10 @@ class _OmopBulkCreateMixin:
         except _SourceKeyConflict:
             return _source_key_conflict_response('batch')
         except IntegrityError as exc:
+            if _is_source_record_key_conflict(exc):
+                # Generic detail on purpose: PostgreSQL's own message quotes
+                # another row's key.
+                raise SourceRecordKeyConflict() from exc
             # A conflict over data, not a server fault. The distinction decides
             # whether the caller retries, and a 500 reads as "service is down".
             logger.exception(
@@ -9296,6 +9390,8 @@ class _OmopBulkUpdateMixin:
                 return self._write_bulk_update(
                     request, model_cls, pk_field, ids, payloads)
         except IntegrityError as exc:
+            if _is_source_record_key_conflict(exc):
+                raise SourceRecordKeyConflict() from exc
             logger.exception(
                 'bulk %s update for %s rows failed on a database constraint',
                 model_name, len(ids))

@@ -282,6 +282,22 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A row-level write cannot take another row's `source_record_key`, and the
+  key field no longer trims (#2484)** — `PATCH /api/v1/measurements/<pk>/` and
+  the observation equivalent skipped DRF's uniqueness validator so the keyed
+  upsert could match by key, but the row-level path answered a 500 when it hit
+  the `(person, source_record_key)` index. The index violation is now
+  translated to 409, so a move onto another row's key answers 409 rather than
+  500, including when a concurrent write takes the key first. The key field is
+  declared with `trim_whitespace=False`, so a padded key is refused instead of
+  being trimmed into a valid one that silently targets an existing row; the
+  bulk ingest shares the field, so a padded key there now fails the batch with
+  400 rather than being trimmed.
+- **A keyed row no longer hides an unkeyed copy of the same reading (#2483)** —
+  attribution narrowing could keep only the keyed row for a content key, so the
+  keyed fallback saw no unkeyed candidate and the replay inserted a duplicate.
+  The fallback now reads the unkeyed candidates captured before the narrowing,
+  and still counts their distinct attributions to decide ambiguity.
 - **A zero unit concept is not a unit on the lab-results summary (#2481)** —
   the summary SQL joined `concept` on `unit_concept_id` unconditionally, so a
   result whose `unit_concept_id` is OMOP's concept 0 ("No matching concept")
