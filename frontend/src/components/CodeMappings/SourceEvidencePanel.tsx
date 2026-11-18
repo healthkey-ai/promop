@@ -1,4 +1,5 @@
 import { useState } from "react";
+import CoOccurringLabs from "./CoOccurringLabs";
 import { sourceSystemManagementUrl } from "./sourceSystemContext";
 
 export interface SourceDistribution {
@@ -138,8 +139,10 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
 
 const FACILITIES_COLLAPSED_LIMIT = 3;
 
-export default function SourceEvidencePanel({ evidence, sourceSystem, loading, error }: {
+export default function SourceEvidencePanel({ evidence, mappingId, sourceSystem, loading, error }: {
   evidence: SourceEvidence | null;
+  /** The mapping the evidence is for; with it the panel reads its co-occurring labs (#2702). */
+  mappingId?: number;
   sourceSystem?: string;
   loading: boolean;
   error?: string;
@@ -295,6 +298,8 @@ export default function SourceEvidencePanel({ evidence, sourceSystem, loading, e
           </dd>}
         </div>}
       </dl>}
+
+      {mappingId != null && <CoOccurringLabs key={mappingId} mappingId={mappingId} />}
     </>}
   </section>;
 }

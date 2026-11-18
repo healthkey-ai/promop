@@ -1420,6 +1420,45 @@ before paging and counts. Both lists have a "with notes" checkbox, off by
 default, and show a yellow sticky note with the text on hover on each such
 row (`has_curator_note` on a mapping row, `curator_note` on a source row).
 
+### Co-occurring labs in Edit Mapping
+
+The dialog's Source Evidence ends with the other results in the same panel or
+order as the opened code (#2702): albumin and the alpha, beta and gamma
+fractions beside "m-spike quantitation" say electrophoresis. `GET
+/api/v1/code-mappings/<id>/co-occurring/` (`omop_core/services/co_occurring_labs.py`)
+returns the coverage (records naming an order, distinct orders, order names
+with counts) and one row per co-occurring source code: description, units,
+System, Method, mapping status and the mapping to open. Every mapping reader
+gets it; a service token does not, as with the mapping's own source evidence.
+
+- **The evidence is the per-patient inventory**, which keeps one sample
+  resource per patient and code. Two codes are seen together only when a
+  patient's samples for both come from the same order, so the table shows
+  co-occurrence and never proves its absence. The OMOP rows hold no order.
+- **An order is a `basedOn` reference**, matched within one patient. A display
+  with no reference names an order and joins nothing. A record that names no
+  order is joined through a DiagnosticReport in the patient's inventory whose
+  `result` lists it.
+- **One Observation is one result.** The opened record's other codings are left
+  out (same resource id; without ids, a code either record lists among its
+  codings). A co-occurring Observation carrying a local code and a LOINC is one
+  row, under the opened code's own code system when it has a coding there, else
+  the local code.
+- **System and Method** are the LOINC axes of the code's current mapping
+  (approved or proposed) when it lands on a LOINC, else those of the LOINC the
+  hospital sent on the record, which the table marks "H"; blank when neither.
+- **It is bounded and read after the dialog opens.** A HealthTree patient's
+  inventory is about 4,000 stored resources, and reading them is the cost: the
+  walk takes the first `MAX_RECORDS` (30) records, those naming an order first,
+  looks for results only under `measurement` and `observation` and for reports
+  only elsewhere, and joins rather than testing per row (about 1s there). Each
+  statement has a 5s limit; a walk that outruns it returns `timed_out`, which
+  the dialog reports instead of an empty answer. The coverage counts are over
+  every record, the orders and the table over the records read.
+- A code in the table links to `/code-mappings?direction=forward&mapping=<id>`,
+  which opens that mapping's Edit Mapping dialog in a new tab
+  (`mappingLinks.ts`); a code with no queue row is plain text.
+
 ### A code's rows follow its mapping to another table
 
 A curator who changes a mapping's Domain re-files it under another clinical

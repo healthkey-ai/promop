@@ -1410,7 +1410,8 @@ export default function EditMappingDialog({
             </fieldset>
 
             {mode === "edit" && selectedRow?.mapping_id && (
-              <SourceEvidencePanel evidence={sourceEvidence} sourceSystem={selectedRow.source_vocabulary_id} loading={loadingDestinations}
+              <SourceEvidencePanel evidence={sourceEvidence} mappingId={selectedRow.mapping_id}
+                sourceSystem={selectedRow.source_vocabulary_id} loading={loadingDestinations}
                 error={sourceEvidenceError} />
             )}
 

@@ -10,6 +10,7 @@ import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { linkedMappingId } from "./mappingLinks";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
@@ -433,8 +434,12 @@ export default function CodeMappingPage() {
   // reverse view, which must not reopen the concept each time.
   const [linkedConceptId, setLinkedConceptId] = useState<number | undefined>(
     Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined);
+  // ?mapping=<id>, from a co-occurring lab in another mapping's Source
+  // Evidence (#2702): open that mapping's Edit Mapping dialog. Held in state
+  // and cleared once handled, like the linked concept.
+  const [linkedMapping, setLinkedMapping] = useState<number | undefined>(() => linkedMappingId(searchParams));
   const [direction, setDirection] = useState<'forward' | 'reverse'>(
-    searchParams.get('direction') === 'forward' ? 'forward' : 'reverse');
+    searchParams.get('direction') === 'forward' || linkedMapping !== undefined ? 'forward' : 'reverse');
   const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
@@ -949,6 +954,27 @@ export default function CodeMappingPage() {
     setDialogMode(null);
     setSelectedRow(null);
   };
+
+  // Open the mapping a link named, once the reader is known to be a writer:
+  // a reader opens no dialog (#2416), and is left on the list.
+  const openLinkedMapping = useRef<(mappingId: number) => Promise<void>>(async () => {});
+  useEffect(() => {
+    openLinkedMapping.current = async (mappingId) => {
+      try {
+        const { data } = await api.get<CodeMappingRow>(`/v1/code-mappings/${mappingId}/`);
+        openEditDialog(data);
+      } catch {
+        setError("Could not load the linked mapping. It may have been deleted.");
+      }
+    };
+  });
+  useEffect(() => {
+    if (linkedMapping === undefined || authLoading) return;
+    (async () => {
+      setLinkedMapping(undefined);
+      if (canWrite) await openLinkedMapping.current(linkedMapping);
+    })();
+  }, [linkedMapping, authLoading, canWrite]);
 
   const applySavedMapping = (saved: CodeMappingRow) => {
     if (!saved?.mapping_id || !saved.status) return;

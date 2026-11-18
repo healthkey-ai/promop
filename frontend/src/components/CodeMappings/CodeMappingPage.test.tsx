@@ -348,6 +348,34 @@ describe("CodeMappingPage", () => {
     }
   });
 
+  describe("a link to one mapping (#2702)", () => {
+    const openLinked = (entry: string) => {
+      const view = renderPage();
+      view.unmount();
+      return render(<MemoryRouter initialEntries={[entry]}><CodeMappingPage /></MemoryRouter>);
+    };
+
+    it("opens that mapping's Edit Mapping dialog on the forward tab", async () => {
+      openLinked(`/code-mappings?mapping=${approvedRow.mapping_id}`);
+
+      const dialog = await screen.findByRole("dialog");
+      expect(await within(dialog).findByDisplayValue(approvedRow.source_code)).toBeInTheDocument();
+      expect(mockGet).toHaveBeenCalledWith(`/v1/code-mappings/${approvedRow.mapping_id}/`);
+      expect(screen.getByRole("button", { name: "Source Code → Concept" })).toHaveAttribute("aria-pressed", "true");
+    });
+
+    it("says so when the mapping is gone, and opens nothing", async () => {
+      renderPage().unmount();
+      const implementation = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string) => (
+        url === "/v1/code-mappings/987654/" ? Promise.reject(new Error("404")) : implementation(url)));
+      render(<MemoryRouter initialEntries={["/code-mappings?mapping=987654"]}><CodeMappingPage /></MemoryRouter>);
+
+      expect(await screen.findByText("Could not load the linked mapping. It may have been deleted.")).toBeInTheDocument();
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  });
+
   describe("duplicate source-code errors", () => {
     const proposed = { ...proposedRow, mapping_id: 101, source_vocabulary_id: "ICD10", source_code: "A02.0" };
     // Same vocabulary as `proposed`: a duplicate is one code twice in one vocabulary.
