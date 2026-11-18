@@ -184,7 +184,7 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
 /**
  * Which tab a row belongs to — keyed by source vocabulary.
  * Blank source_vocabulary_id ("") means uncoded/free text.
- * Apple, Garmin, HL7-PHR and HealthConnect rows are consolidated under the
+ * Apple, Garmin, HL7-PHR, HealthConnect and CDISC-BC rows are consolidated under the
  * Wearables tab.
  * ICD10CM rows are merged into the ICD-10 tab (#1028).
  * FHIR OID URIs are merged into their canonical OMOP vocabulary.
@@ -194,6 +194,7 @@ const VOCABULARY_ALIASES: Record<string, string> = {
   Garmin: "OpenWearables",
   "HL7-PHR": "OpenWearables",
   HealthConnect: "OpenWearables",
+  "CDISC-BC": "OpenWearables",
   // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };

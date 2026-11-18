@@ -18,19 +18,17 @@ from itertools import groupby
 
 from django.utils.timezone import localdate
 
-from omop_core.models import (
-    BiomedicalConcept, ConceptBiomedicalConceptMapping, SourceCodeConceptMapping,
-)
+from omop_core.models import BiomedicalConcept, SourceCodeConceptMapping
 from omop_core.services.disease_field_sets import csv_cell
 from omop_core.services.mapping_browse import canonical_source, tab_queryset
 from omop_core.services.mapping_source_units import SourceUnits
-from omop_core.services.source_vocabularies import WEARABLE_METRIC_CATEGORIES
+from omop_core.services.source_vocabularies import CDISC_BC_VOCABULARY, WEARABLE_METRIC_CATEGORIES
 
 #: The tab every wearable vocabulary is shown on.
 WEARABLES_TAB = canonical_source('OpenWearables')
 
 #: What the file maps each code to: the OMOP concept it is stored as, or the
-#: CDISC Biomedical Concept that concept is linked to.
+#: CDISC Biomedical Concept that is mapped to the same concept.
 DEST_OMOP = 'omop'
 DEST_CDISC_BC = 'cdisc-bc'
 DESTINATIONS = (DEST_OMOP, DEST_CDISC_BC)
@@ -46,7 +44,6 @@ TITLE = 'Wearable metric mappings'
 BC_TITLE = 'Wearable metric mappings to CDISC Biomedical Concepts'
 UNCATEGORIZED = 'Uncategorized'
 NOT_MAPPED = 'Not mapped'
-NO_BC = 'No CDISC BC'
 
 # What a reader calls each source, in the order one metric's codes are listed:
 # the two phone platforms, the device vendor, the aggregator, then HL7's own
@@ -57,6 +54,7 @@ SOURCE_LABELS = {
     'Garmin': 'Garmin',
     'OpenWearables': 'OpenWearables',
     'HL7-PHR': 'HL7 PHR',
+    CDISC_BC_VOCABULARY: 'CDISC BC',
 }
 _SOURCE_ORDER = {vocabulary: index for index, vocabulary in enumerate(SOURCE_LABELS)}
 _CATEGORY_ORDER = {category: index for index, category in enumerate(WEARABLE_METRIC_CATEGORIES)}
@@ -74,7 +72,7 @@ BC_CSV_COLUMNS = (
     'Category', 'Measure class', 'Metric key', 'Source', 'Source code', 'Description',
     'Source unit', 'OMOP vocabulary', 'OMOP code', 'OMOP concept', 'CDISC BC ID',
     'CDISC BC name', 'NCIt code', 'BC categories', 'BC result scales', 'BC definition',
-    'BC status', 'Code mapping status',
+    'BC mapping status', 'Code mapping status',
 )
 
 
@@ -163,33 +161,36 @@ def export_rows(destination=DEST_OMOP):
 
 
 def bc_rows(rows):
-    """*rows* with the CDISC Biomedical Concepts each one reaches, a line per BC.
+    """The wearable codes of *rows* that reach a CDISC Biomedical Concept, a line per BC.
 
-    A code has no BC of its own: it reaches one through the OMOP concept it maps
-    to (``ConceptBiomedicalConceptMapping``), so a code with no destination, or
-    whose concept is linked to no BC, keeps one line with no BC; a working group
-    reads those as the gaps. Approved links come before proposed, and rejected
-    ones are left out. Two queries, whatever the row count.
+    A BC is a row of the tab itself (vocabulary ``CDISC-BC``, mapped to one
+    OMOP concept), and a wearable code reaches the BCs that share its
+    destination. So this is a view of the mappings above, with nothing stored
+    about a code and its BC: the BC rows are not lines of their own, a code
+    that shares a destination with no BC is left out, and the status shown is
+    the BC mapping's. Approved BC mappings come before proposed. One query for
+    the catalog, whatever the row count.
     """
-    links = {}
-    for link in ConceptBiomedicalConceptMapping.objects.exclude(status='rejected').order_by(
-            'status', 'bc_id'):
-        links.setdefault((link.target_vocabulary_id, link.target_concept_code), []).append(link)
-    catalog = BiomedicalConcept.objects.in_bulk({
-        link.bc_id for held in links.values() for link in held})
+    reached = {}
+    for row in rows:
+        if row.vocabulary == CDISC_BC_VOCABULARY and row.concept_id:
+            reached.setdefault(row.concept_id, []).append(row)
+    for held in reached.values():
+        held.sort(key=lambda bc: (bc.status, bc.source_code))
+    catalog = BiomedicalConcept.objects.in_bulk({bc.source_code for held in reached.values() for bc in held})
     lines = []
     for row in rows:
-        held = links.get((row.destination_vocabulary, row.destination_code), []) if row.destination_code else []
-        held = [link for link in held if link.bc_id in catalog]
-        if not held:
-            lines.append(row)
+        if row.vocabulary == CDISC_BC_VOCABULARY:
             continue
-        for link in held:
-            bc = catalog[link.bc_id]
+        for mapped in reached.get(row.concept_id, ()):
+            bc = catalog.get(mapped.source_code)
             lines.append(replace(
-                row, bc_id=bc.bc_id, bc_name=bc.short_name, ncit_code=bc.ncit_code,
-                bc_categories=tuple(bc.categories), bc_scales=tuple(bc.result_scales),
-                bc_definition=bc.definition, bc_status=link.status))
+                row, bc_id=mapped.source_code,
+                bc_name=bc.short_name if bc else mapped.description,
+                ncit_code=bc.ncit_code if bc else '',
+                bc_categories=tuple(bc.categories) if bc else (),
+                bc_scales=tuple(bc.result_scales) if bc else (),
+                bc_definition=bc.definition if bc else '', bc_status=mapped.status))
     return lines
 
 
@@ -235,8 +236,8 @@ def export_file(file_format, day=None, destination=DEST_OMOP):
     """``(filename, content type, body)`` of the tab in *file_format*.
 
     *destination* is what each code is mapped to in the file: ``omop`` (the
-    concept it is stored as) or ``cdisc-bc`` (the Biomedical Concept that
-    concept is linked to).
+    concept it is stored as) or ``cdisc-bc`` (the Biomedical Concept mapped
+    to the same concept).
     """
     if file_format not in CONTENT_TYPES:
         raise FormatError(f"Unknown file format {file_format!r}. Use csv or docx.")
@@ -310,13 +311,12 @@ BC_DOCX_COLUMNS = (
     ('OMOP concept', 1.9), ('CDISC Biomedical Concept', 2.0), ('Status', 0.8),
 )
 BC_LEGEND = (
-    'Each table lists the source codes of one category and the CDISC Biomedical '
-    'Concept (BC) each reaches. A code is mapped to an OMOP concept, and that concept '
-    'is linked to a BC, so the OMOP concept is shown beneath the code as the way the '
-    f'BC is reached. A BC is named with its NCIt code. "{NO_BC}" means the code has no '
-    'destination concept yet, or none of the concepts it maps to is linked to a BC '
-    '(steps and sleep, for example, have no CDISC BC). A code that reaches more '
-    'than one BC has a line for each. Status is that of the concept-to-BC link: '
+    'Each table lists the wearable source codes of one category that reach a CDISC '
+    'Biomedical Concept (BC). Both a wearable code and a BC are mapped to an OMOP '
+    'concept, and a code reaches the BC mapped to the same concept; that concept is '
+    'shown between them. Several codes can reach one BC, and a code whose concept '
+    'no BC is mapped to is not listed (steps and sleep, for example, have no CDISC '
+    'BC). A BC is named with its NCIt code. Status is that of the BC mapping: '
     'Approved is in use, Proposed has not been approved yet and may still change. '
     'Long identifiers wrap at invisible break characters, so copy exact codes from '
     'the CSV file rather than from this document.'
@@ -359,14 +359,12 @@ def sections(rows):
 def bc_summary(rows, day):
     """The BC document's line under the title."""
     codes = len({row.pk for row in rows})
-    reached = len({row.pk for row in rows if row.bc_id})
-    concepts = len({row.bc_id for row in rows if row.bc_id})
-    approved = sum(row.bc_status == 'approved' for row in rows)
-    linked = sum(bool(row.bc_id) for row in rows)
+    concepts = len({row.bc_id for row in rows})
+    approved = len({row.bc_id for row in rows if row.bc_status == 'approved'})
     return (
-        f'Generated {day.isoformat()}. {_count(codes, "source code")}: {reached} reach a CDISC '
-        f'Biomedical Concept ({_count(concepts, "distinct BC")}), {codes - reached} have none; '
-        f'{approved} of {_count(linked, "link")} approved, {linked - approved} proposed.'
+        f'Generated {day.isoformat()}. {_count(codes, "wearable source code")} reaching '
+        f'{_count(concepts, "CDISC Biomedical Concept")}: {approved} approved, '
+        f'{concepts - approved} proposed.'
     )
 
 
@@ -413,7 +411,8 @@ def docx_bytes(rows, day, bc=False):
     _text(document.add_paragraph(), (bc_summary if bc else summary)(rows, day), size=10, color=_MUTED)
     _text(document.add_paragraph(), BC_LEGEND if bc else LEGEND, size=10)
     if not rows:
-        _text(document.add_paragraph(), 'There are no wearable mappings.', size=10, italic=True)
+        _text(document.add_paragraph(), 'No wearable code reaches a CDISC Biomedical Concept.' if bc
+              else 'There are no wearable mappings.', size=10, italic=True)
     for heading, members in sections(rows):
         document.add_heading(f'{xml_safe(heading)} ({len(members)})', level=1)
         _category_table(document, members, bc)
@@ -589,9 +588,6 @@ def _metric_cell(cell, metric_rows):
 
 def _bc_cell(cell, row):
     first = _first_paragraph(cell)
-    if not row.bc_id:
-        _text(first, NO_BC, italic=True, color=_MUTED)
-        return
     _text(first, wrappable(row.bc_name), bold=True)
     _text(_paragraph(cell), f'NCIt {row.ncit_code}' if row.ncit_code else row.bc_id,
           size=_SMALL_PT, color=_MUTED)

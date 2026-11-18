@@ -1,25 +1,23 @@
-"""CDISC Biomedical Concepts reached through the OMOP concept a code maps to.
+"""CDISC Biomedical Concepts a source code reaches through its OMOP concept.
 
-A source code (a wearable metric, a lab code) has no BC of its own: it maps to
-an OMOP concept, and ``ConceptBiomedicalConceptMapping`` links that concept to
-a BC. So the BC follows the code mapping's destination, and a curator changing
-either one changes the answer.
+A BC is itself a source code: a ``SourceCodeConceptMapping`` row in the
+``CDISC-BC`` vocabulary, mapped to one OMOP concept. A wearable code has no BC
+of its own; it reaches the BCs that share its destination. So changing either
+mapping changes the answer, and nothing is stored about the pair.
 """
-from omop_core.models import ConceptBiomedicalConceptMapping, SourceCodeConceptMapping
+from omop_core.models import SourceCodeConceptMapping
+from omop_core.services.source_vocabularies import CDISC_BC_VOCABULARY
 
 
-def biomedical_concept_links(mapping: SourceCodeConceptMapping, statuses=('approved', 'proposed')):
-    """The concept -> BC rows for a code mapping's destination, best status first.
+def biomedical_concept_mappings(mapping: SourceCodeConceptMapping, statuses=('approved', 'proposed')):
+    """The global BC mappings that point at *mapping*'s destination concept.
 
-    Empty when the mapping has no destination concept or no BC is linked to it.
-    A rejected link is never returned unless asked for.
+    Approved before proposed. Empty when the mapping has no destination, or is
+    a BC row itself. A rejected BC mapping is returned only when asked for.
     """
-    concept = mapping.target_concept
-    if concept is None:
+    if not mapping.target_concept_id or mapping.source_vocabulary_id == CDISC_BC_VOCABULARY:
         return []
-    links = ConceptBiomedicalConceptMapping.objects.filter(
-        target_vocabulary_id=concept.vocabulary_id,
-        target_concept_code=concept.concept_code,
-        status__in=statuses,
-    ).order_by('status', 'bc_id')
-    return list(links)
+    return list(SourceCodeConceptMapping.objects.filter(
+        organization__isnull=True, source_vocabulary_id=CDISC_BC_VOCABULARY,
+        target_concept_id=mapping.target_concept_id, status__in=statuses,
+    ).order_by('status', 'source_code'))

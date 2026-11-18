@@ -566,58 +566,59 @@ def test_the_query_count_does_not_grow_with_the_rows(reader, file_format, django
 # ── CDISC Biomedical Concept as the target ───────────────────────────────
 
 def bc_setup():
-    from omop_core.models import BiomedicalConcept, ConceptBiomedicalConceptMapping as Link
+    """Two codes on the heart-rate concept, the BC mapped to it, and two codes that reach no BC."""
+    from omop_core.models import BiomedicalConcept
     BiomedicalConcept.objects.create(
         bc_id='C49677', short_name='Heart Rate', ncit_code='C49677',
         categories=['Vital Signs'], result_scales=['Quantitative'], definition='Beats per minute.')
     heart = loinc('8867-4', 'Heart rate')
     steps = loinc('55423-8', 'Number of steps')
-    Link.objects.create(target_vocabulary_id=heart.vocabulary_id, target_concept_code='8867-4',
-                        bc_id='C49677', status='proposed')
-    row('heart_rate', target_concept=heart, metric_key='heart_rate', category='Cardio')
+    row('C49677', source_vocabulary_id='CDISC-BC', target_concept=heart, metric_key='heart_rate',
+        category='Heart & Cardiovascular', source_code_description='Heart Rate')
+    row('heart_rate', target_concept=heart, metric_key='heart_rate', category='Heart & Cardiovascular')
+    row('HKQuantityTypeIdentifierHeartRate', source_vocabulary_id='Apple', target_concept=heart,
+        metric_key='heart_rate', category='Heart & Cardiovascular', status='approved')
     row('steps', target_concept=steps, metric_key='steps', category='Activity')
     row('daylight', metric_key='daylight', category='Activity')
+    return heart
 
 
-def test_cdisc_bc_csv_lists_the_bc_a_code_reaches_and_keeps_the_gaps(reader):
+def test_cdisc_bc_csv_lists_only_the_codes_that_reach_a_bc(reader):
     bc_setup()
     header, rows = csv_rows(reader, destination='cdisc-bc')
     assert header == list(export.BC_CSV_COLUMNS)
-    by_code = {r['Source code']: r for r in rows}
-    assert by_code['heart_rate']['CDISC BC ID'] == 'C49677'
-    assert by_code['heart_rate']['CDISC BC name'] == 'Heart Rate'
-    assert by_code['heart_rate']['NCIt code'] == 'C49677'
-    assert by_code['heart_rate']['OMOP code'] == '8867-4'
-    assert by_code['heart_rate']['BC status'] == 'proposed'
-    # No link, and no destination: still listed, with no BC.
-    assert by_code['steps']['CDISC BC ID'] == '' and by_code['daylight']['CDISC BC ID'] == ''
-    assert len(rows) == 3
+    # Several codes, one BC; the BC row itself, steps and daylight are not lines.
+    assert sorted(r['Source code'] for r in rows) == ['HKQuantityTypeIdentifierHeartRate', 'heart_rate']
+    for line in rows:
+        assert (line['CDISC BC ID'], line['CDISC BC name'], line['NCIt code']) == (
+            'C49677', 'Heart Rate', 'C49677')
+        assert line['OMOP code'] == '8867-4' and line['BC mapping status'] == 'proposed'
+    assert {r['Source code']: r['Code mapping status'] for r in rows} == {
+        'heart_rate': 'proposed', 'HKQuantityTypeIdentifierHeartRate': 'approved'}
 
 
-def test_a_code_reaching_two_bcs_gets_a_line_each_and_rejected_links_are_left_out(reader):
-    from omop_core.models import BiomedicalConcept, ConceptBiomedicalConceptMapping as Link
-    bc_setup()
-    BiomedicalConcept.objects.create(bc_id='C49676', short_name='Pulse Rate', ncit_code='C49676')
-    BiomedicalConcept.objects.create(bc_id='C1', short_name='Other', ncit_code='C1')
-    vocabulary = Link.objects.get().target_vocabulary_id
-    Link.objects.create(target_vocabulary_id=vocabulary, target_concept_code='8867-4', bc_id='C49676',
-                        status='approved')
-    Link.objects.create(target_vocabulary_id=vocabulary, target_concept_code='8867-4', bc_id='C1',
-                        status='rejected')
+def test_two_bcs_on_one_concept_give_a_line_each_and_a_rejected_bc_gives_none(reader):
+    heart = bc_setup()
+    row('C49676', source_vocabulary_id='CDISC-BC', target_concept=heart, status='approved',
+        source_code_description='Pulse Rate')
+    row('C1', source_vocabulary_id='CDISC-BC', target_concept=heart, status='rejected')
     _, rows = csv_rows(reader, destination='cdisc-bc')
-    heart = [r['CDISC BC ID'] for r in rows if r['Source code'] == 'heart_rate']
-    assert heart == ['C49676', 'C49677']  # approved first; the rejected link is absent
+    reached = [r['CDISC BC ID'] for r in rows if r['Source code'] == 'heart_rate']
+    assert reached == ['C49676', 'C49677']  # approved first; the rejected BC is absent
+    # A BC missing from the catalog is still named, from its mapping's description.
+    assert {r['CDISC BC name'] for r in rows if r['CDISC BC ID'] == 'C49676'} == {'Pulse Rate'}
 
 
-def test_default_destination_is_unchanged_and_an_unknown_one_is_refused(reader):
+def test_the_omop_download_lists_bc_rows_as_a_source_and_refuses_an_unknown_destination(reader):
     bc_setup()
-    header, _ = csv_rows(reader)
+    header, rows = csv_rows(reader)
     assert header == list(export.CSV_COLUMNS)
-    response = reader.get(URL, {'file_format': 'csv', 'destination': 'nope'})
-    assert response.status_code == 400
+    assert {'Source': 'CDISC BC', 'Source code': 'C49677'}.items() <= next(
+        r for r in rows if r['Source code'] == 'C49677').items()
+    assert reader.get(URL, {'file_format': 'csv', 'destination': 'nope'}).status_code == 400
 
 
-def test_cdisc_bc_word_document_names_the_bc_and_the_gap(reader):
+def test_cdisc_bc_word_document_names_the_bc(reader):
     bc_setup()
     response = reader.get(URL, {'file_format': 'docx', 'destination': 'cdisc-bc'})
     assert response.status_code == 200
@@ -626,6 +627,13 @@ def test_cdisc_bc_word_document_names_the_bc_and_the_gap(reader):
     text = plain('\n'.join(
         [p.text for p in doc.paragraphs]
         + [c.text for t in doc.tables for r in t.rows for c in r.cells]))
-    assert 'Biomedical Concepts' in text
+    assert '2 wearable source codes reaching 1 CDISC Biomedical Concept' in text
     assert 'Heart Rate' in text and 'NCIt C49677' in text
-    assert export.NO_BC in text
+    assert 'steps' not in [c.text for t in doc.tables for r in t.rows for c in r.cells]
+
+
+def test_cdisc_bc_files_are_valid_when_no_code_reaches_a_bc(reader):
+    row('steps', metric_key='steps', category='Activity')
+    _, rows = csv_rows(reader, destination='cdisc-bc')
+    assert rows == []
+    assert reader.get(URL, {'file_format': 'docx', 'destination': 'cdisc-bc'}).status_code == 200

@@ -119,6 +119,7 @@ _MEASUREMENT_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
+    ('CDISC-BC', 'CDISC BC — CDISC Biomedical Concepts (NCIt codes)'),
     ('HealthConnect', 'Health Connect — Android Health Connect record types'),
     ('CPT4', 'CPT-4 — billed lab panels'),
     ('UCUM', 'UCUM — units of measure'),
@@ -134,6 +135,7 @@ _OBSERVATION_SYSTEMS = (
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
     ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
+    ('CDISC-BC', 'CDISC BC — CDISC Biomedical Concepts (NCIt codes)'),
     ('HealthConnect', 'Health Connect — Android Health Connect record types'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
     ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
@@ -213,8 +215,12 @@ SOURCE_TAB_LABELS = {
 # tab (OpenWearables) on the Code Mapping page. HL7-PHR holds the HL7 PHR
 # code values, Apple the HealthKit identifiers and HealthConnect the Android
 # Health Connect record types the HL7 PHR table maps those codes from.
+# CDISC-BC holds CDISC Biomedical Concepts as source codes (the code is the
+# BC id, an NCIt C-code): each maps to one OMOP concept like any other code,
+# so a wearable code reaches a BC by sharing its destination.
+CDISC_BC_VOCABULARY = 'CDISC-BC'
 WEARABLE_SOURCE_VOCABULARIES = {
-    'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect',
+    'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect', CDISC_BC_VOCABULARY,
 }
 
 # The metric categories a wearable mapping may carry, in the order the Edit

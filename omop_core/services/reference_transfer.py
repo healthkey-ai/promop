@@ -24,7 +24,6 @@ from omop_core.models import (
     Concept,
     ConceptClass,
     ChronicConditionOverride,
-    ConceptBiomedicalConceptMapping,
     ConceptMappingDone,
     ConceptMappingNote,
     ConceptMappingPriority,
@@ -125,7 +124,6 @@ def copied_tables() -> list[ReferenceTable]:
         ReferenceTable(DiseaseCategoryChoice, ('code',)),
         ReferenceTable(DiseaseCategoryMapping, ('disease_name',)),
         ReferenceTable(ChronicConditionOverride, ('code',)),
-        ReferenceTable(ConceptBiomedicalConceptMapping, ('target_vocabulary_id', 'target_concept_code', 'bc_id')),
     ]
 
 
