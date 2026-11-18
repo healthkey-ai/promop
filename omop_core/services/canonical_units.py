@@ -462,7 +462,14 @@ def _reading_args(measurement):
 
 
 def stored_unit(**reading):
-    """The unit value_as_number and its range are stored in, or None when unknown or absent."""
+    """The unit value_as_number and its range are stored in, or None when unknown or absent.
+
+    ``unit_concept_code`` must already be resolved to "no unit" for a row whose
+    ``unit_concept_id`` is NULL or 0: concept 0 is OMOP's "No matching concept",
+    not a unit. ``measurement_stored_unit`` does that through ``_reading_args``;
+    a raw-SQL reader that hydrates the code itself must map 0 to None, or it
+    prints the placeholder as the result's unit (#2481).
+    """
     verdict, _ = _reading(**reading)
     if verdict == _CONVERTED:
         return reading['unit_concept_code']

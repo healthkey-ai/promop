@@ -11,6 +11,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from omop_core.models import (
+    CanonicalUnitPreference,
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
     Measurement, MeasurementOwnership, Person, PatientRecord, ProvenanceRecord,
     Vocabulary, VisitOccurrence,
@@ -259,6 +260,107 @@ class ResultsSummaryViewTest(TestCase):
     def test_summary_forbidden_for_other_person(self):
         resp = self.client.get('/api/lab-results/summary/', {'person_id': 9999})
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def _creatinine(self, **unit):
+        """A creatinine result whose unit is not a UCUM concept (#2481)."""
+        return Measurement.objects.create(
+            measurement_id=3,
+            person_id=2001,
+            measurement_concept=Concept.objects.get(concept_id=3004249),
+            measurement_date=date(2026, 6, 1),
+            measurement_type_concept=Concept.objects.get(concept_id=32883),
+            value_as_number=Decimal('1.1'),
+            **unit,
+        )
+
+    def _creatinine_value(self):
+        resp = self.client.get('/api/lab-results/summary/', {'person_id': 2001})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        card = next(c for c in resp.data['results'] if c['concept_id'] == 3004249)
+        return card['values'][0]
+
+    def test_a_zero_unit_concept_is_not_a_unit(self):
+        """Concept 0 is "No matching concept", not a unit to print on the card."""
+        self._creatinine(unit_concept_id=0)
+
+        value = self._creatinine_value()
+
+        self.assertEqual(value['measurement_id'], 3)
+        self.assertIsNone(value['unit'])
+        self.assertEqual(value['value'], '1.10000')
+
+    def test_a_zero_unit_concept_keeps_the_reported_unit_text(self):
+        """The reported text survives the placeholder fix.
+
+        It also passed before the fix, on purpose: ``stored_unit`` prefers the
+        row's own text whatever the unit concept says. The test guards against
+        "fixing" #2481 by blanking the unit whenever ``unit_concept_id`` is 0.
+        """
+        self._creatinine(unit_concept_id=0, unit_source_value='mg/dL')
+
+        value = self._creatinine_value()
+
+        self.assertEqual(value['unit'], 'mg/dL')
+
+    def _configure_canonical_unit(self):
+        """A valid instance-wide preference for the creatinine concept."""
+        concept = Concept.objects.get(concept_id=3004249)
+        Concept.objects.filter(concept_id=3004249).update(standard_concept='S')
+        CanonicalUnitPreference.objects.create(
+            concept=concept, unit='mg/dL', property='MCnc')
+
+    def test_a_unitless_row_reads_the_same_through_every_endpoint(self):
+        """Summary, values and detail must agree on the unit of one result.
+
+        With a canonical unit configured, a unitless row cannot convert: all
+        three endpoints must carry the same ``unit`` and the same ``normalized``
+        error instead of the summary inventing a unit from the placeholder.
+        """
+        self._configure_canonical_unit()
+        self._creatinine(unit_concept_id=0)
+
+        value = self._creatinine_value()
+        values_resp = self.client.get('/api/lab-results/values/', {
+            'person_id': 2001,
+            'concept_code': '2160-0',
+        })
+        self.assertEqual(values_resp.status_code, status.HTTP_200_OK)
+        detail_value = values_resp.data['results'][0]
+        detail_resp = self.client.get('/api/lab-results/measurements/3/')
+        self.assertEqual(detail_resp.status_code, status.HTTP_200_OK)
+
+        self.assertEqual(detail_value['measurement_id'], value['measurement_id'])
+        self.assertIsNone(value['unit'])
+        self.assertIsNone(detail_value['unit'])
+        self.assertIsNone(detail_resp.data['unit'])
+        self.assertEqual(value['normalized'], detail_value['normalized'])
+        self.assertEqual(detail_resp.data['normalized'], value['normalized'])
+        self.assertIn('Source unit is missing', value['normalized']['error'])
+        self.assertIsNone(value['normalized']['value'])
+
+    def test_a_reported_unit_is_normalized_the_same_through_every_endpoint(self):
+        """The reported text, not the placeholder, is what the conversion reads.
+
+        Passes before the fix too: ``stored_unit`` prefers the reported text
+        whatever the unit concept is. This pins the canonical-unit conversion
+        and its endpoint parity, not the join.
+        """
+        self._configure_canonical_unit()
+        self._creatinine(unit_concept_id=0, unit_source_value='mg/dL')
+
+        value = self._creatinine_value()
+        detail_value = self.client.get('/api/lab-results/values/', {
+            'person_id': 2001,
+            'concept_code': '2160-0',
+        }).data['results'][0]
+        detail_resp = self.client.get('/api/lab-results/measurements/3/')
+
+        self.assertEqual(value['unit'], 'mg/dL')
+        self.assertEqual(detail_value['unit'], 'mg/dL')
+        self.assertEqual(detail_resp.data['unit'], 'mg/dL')
+        self.assertEqual(value['normalized'], detail_value['normalized'])
+        self.assertEqual(detail_resp.data['normalized'], value['normalized'])
+        self.assertEqual(Decimal(str(value['normalized']['value'])), Decimal('1.1'))
 
 
 class ValuesViewTest(TestCase):
