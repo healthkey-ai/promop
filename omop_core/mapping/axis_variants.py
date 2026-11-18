@@ -761,7 +761,7 @@ def serialize(variant):
     }
 
 
-def set_destination(variant, concept, *, approve, user, reopen=False):
+def set_destination(variant, concept, *, approve, user, reopen=False, machine=False):
     """Point a variant at ``concept``; approving re-points its stored rows.
 
     Only rows in the variant's units move, and only off the concept they would
@@ -773,8 +773,13 @@ def set_destination(variant, concept, *, approve, user, reopen=False):
     because ingest stops routing to it: leaving them would put two concepts on
     one code and one unit. Without ``reopen`` an approved variant refuses
     ``approve=False``, so picking a new destination cannot reopen it silently.
+
+    The two-person rule (#2726): a person who picks a destination proposes it,
+    and may not approve it (``SelfApprovalError``, before anything is saved).
+    ``machine=True`` is Suggest's write, which proposes on nobody's behalf.
     """
     from omop_core.mapping.code_resolution import repoint_clinical_rows
+    from omop_core.services import mapping_approval
 
     previous = variant.target_concept_id if variant.status == 'approved' else None
     mapping = variant.mapping
@@ -785,6 +790,17 @@ def set_destination(variant, concept, *, approve, user, reopen=False):
     # A code with no destination of its own stored these records at concept
     # 0, OMOP's "No matching concept"; that is where they move off and back to.
     fallback = mapping.target_concept_id if mapping.target_concept_id is not None else 0
+    proposer_id = variant.proposed_by_id
+    if (concept.pk if concept is not None else None) != variant.target_concept_id:
+        # Picking a destination proposes it; clearing one proposes nothing.
+        proposer_id = (user.pk if (concept is not None and not machine
+                                   and mapping_approval.is_person(user)) else None)
+    # Approving what is already approved at this destination changes nothing, so
+    # a retry or double click by the proposer is not an approval.
+    already_approved_here = previous is not None and previous == (concept.pk if concept else None)
+    if approve and not already_approved_here:
+        mapping_approval.check_can_approve(user, proposer_id)
+    variant.proposed_by_id = proposer_id
     variant.target_concept = concept
     variant.status = 'approved' if approve else 'proposed'
     if approve:
@@ -881,7 +897,7 @@ def suggest_destinations(mapping, *, ranking_model, user, strategies=None, overr
             if variant.status == 'approved' or variant.target_concept_id is not None:
                 entry['note'] = 'A destination was set while suggesting; it was kept.'
                 continue
-            set_destination(variant, concept, approve=False, user=user)
+            set_destination(variant, concept, approve=False, user=user, machine=True)
         entry['suggested'] = {
             'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
             'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,

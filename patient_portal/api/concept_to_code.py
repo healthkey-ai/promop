@@ -522,6 +522,11 @@ def _preview_score(run, candidate, description):
     return score
 
 
+def _ranker_chose(candidate):
+    """Whether a preview candidate was chosen by a ranker, not merely retrieved."""
+    return bool(candidate and candidate.get('verdict') == 'supported' and not candidate.get('declined'))
+
+
 def _preview_candidate(run_id, concept, *, mapping_id):
     """``(run, candidate)``: the candidate a saved Concept to Code preview listed for this
     concept and source row, or ``(None, None)``.
@@ -592,7 +597,10 @@ def concept_to_code_propose(request, concept_id):
         'status': 'proposed',
         # The preview's ranker scored this source against this concept (#2382).
         'decision_surface': 'concept2code', 'decision_confidence': score,
-    }, request.user)
+        # A candidate a ranker chose is a machine proposal, so the curator who
+        # accepts it may approve it. A retrieved-only ('none' ranker) or declined
+        # candidate was nobody's pick but this curator's (#2726).
+    }, request.user, machine_proposal=_ranker_chose(candidate))
     # The preview's ranker judged this source against this concept; without a
     # ranker, or with a stale preview, the row keeps none.
     if score is not None:
@@ -640,7 +648,11 @@ def concept_to_code_apply(request, concept_id, mapping_id):
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id, 'decision_surface': 'concept2code',
         **({'decision_confidence': score} if score is not None else {}),
-    }, request.user, mapping=row)
+    }, request.user, mapping=row,
+        # A destination the ranker chose in the saved preview is the machine's;
+        # one the curator picked themselves, or a candidate nobody ranked, is
+        # theirs (#2726).
+        machine_proposal=moved and _ranker_chose(candidate))
     if score is not None and moved:
         row.suggestion_confidence = score
         row.save(update_fields=['suggestion_confidence'])

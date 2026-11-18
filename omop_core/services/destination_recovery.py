@@ -14,7 +14,7 @@ REFERENCE_TABLES = (
                                  'vocabulary_version', 'vocabulary_concept_id')),
     ('concept_class_id', ConceptClass, ('concept_class_name', 'concept_class_concept_id')),
 )
-UPDATE_FIELDS = ['target_concept', 'source_concept', 'destination_vocabulary_id', 'domain_id',
+UPDATE_FIELDS = ['proposed_by', 'target_concept', 'source_concept', 'destination_vocabulary_id', 'domain_id',
                  'omop_table', 'status', 'origin', 'origin_system', 'source', 'reviewed_at',
                  'notes', 'source_code_description', 'decision_surface', 'decision_confidence',
                  'updated_at']
@@ -174,6 +174,7 @@ def apply_evidence_batch(items, today, *, dry_run=False):
         row.origin, row.origin_system, row.source = 'import', 'athena-multiple' if multiple else 'athena', 'Athena'
         # Athena decided this destination, not a curator (#2382).
         row.decision_surface, row.decision_confidence = '', None
+        row.proposed_by = None
         row.reviewed_at = None if multiple else now
         row.updated_at = now
         receipt = (f'Athena destination recovery ({item["tier"]}), {today.isoformat()}: '
