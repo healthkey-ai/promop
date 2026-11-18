@@ -358,7 +358,18 @@ export class PatientFormStore {
           patient_name: data.patient_name ?? info.patient_name,
         };
         const personId = Number(values.person_id ?? values.person);
-        if (!personId) throw new Error('No linked patient record.');
+        if (!personId) {
+          // The read succeeded and carried no record: the account exists but has
+          // no linked patient (a staff account, or one that was never linked).
+          // That is the same state as the 404 below, and it must say the same
+          // thing. Throwing here landed in the generic catch, so a staff account
+          // saw a retryable failure that no retry could fix.
+          if (revision === this.readRevision) {
+            this.publish({ values, fields: {}, personId: undefined, loading: false,
+              writable: false, datesStale: false, error: MISSING_RECORD_ERROR });
+          }
+          return;
+        }
         if (this.snapshot.personId && this.snapshot.personId !== personId) {
           if (revision === this.readRevision) {
             this.publish({ loading: false, writable: false, identityChanged: true,
