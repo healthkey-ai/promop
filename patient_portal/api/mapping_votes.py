@@ -307,14 +307,18 @@ class PublicVoteExportView(_PublicVoteView):
             return _not_available()
         file_format = data.get('file_format') or export.FORMAT_CSV
         destination = data.get('destination') or export.DEST_OMOP
-        if not isinstance(file_format, str) or not isinstance(destination, str):
+        # Checked here, with fixed wording: nothing an exception says reaches a stranger.
+        if (not isinstance(file_format, str) or not isinstance(destination, str)
+                or file_format not in export.CONTENT_TYPES or destination not in export.DESTINATIONS):
             return Response({'detail': 'Unknown file format or destination.'},
                             status=status.HTTP_400_BAD_REQUEST)
         try:
             filename, content_type, content = export.export_file(
                 file_format, destination=destination, public=True)
-        except export.FormatError as error:
-            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        except export.FormatError:
+            # What is left is the Word document's row limit.
+            return Response({'detail': 'This file is too large to build. Download the CSV instead.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         response = HttpResponse(content, content_type=content_type)
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
