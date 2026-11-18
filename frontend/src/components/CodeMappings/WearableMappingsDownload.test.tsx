@@ -52,6 +52,47 @@ describe("WearableMappingsDownload", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  describe("source code systems", () => {
+    const SYSTEMS = [{ id: "Apple", label: "HealthKit" }, { id: "Garmin", label: "Garmin" }];
+    const select = () => within(group()).getByLabelText("Source code system");
+
+    it("is not offered without systems", () => {
+      render(<WearableMappingsDownload />);
+      expect(within(group()).queryByLabelText("Source code system")).not.toBeInTheDocument();
+    });
+
+    it("defaults to all systems and sends no filter", async () => {
+      mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
+      render(<WearableMappingsDownload systems={SYSTEMS} />);
+      expect(select()).toHaveValue("");
+      await userEvent.click(csvButton());
+      expect(mockGet).toHaveBeenCalledWith(URL_PATH, { params: { file_format: "csv" }, responseType: "blob" });
+    });
+
+    it("limits the file to the chosen system, for either format and either target", async () => {
+      mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
+      render(<WearableMappingsDownload systems={SYSTEMS} />);
+      await userEvent.selectOptions(select(), "Garmin");
+      await userEvent.click(wordButton());
+      expect(mockGet).toHaveBeenLastCalledWith(URL_PATH, {
+        params: { file_format: "docx", sources: "Garmin" }, responseType: "blob",
+      });
+      await userEvent.selectOptions(within(group()).getByLabelText("Map codes to"), "cdisc-bc");
+      await userEvent.click(csvButton());
+      expect(mockGet).toHaveBeenLastCalledWith(URL_PATH, {
+        params: { file_format: "csv", destination: "cdisc-bc", sources: "Garmin" }, responseType: "blob",
+      });
+    });
+
+    it("hands a custom fetch the chosen systems, as the public page's does not use them", async () => {
+      const fetchFile = vi.fn().mockResolvedValue({ data: new Blob(["x"]), headers: {} });
+      render(<WearableMappingsDownload systems={SYSTEMS} fetchFile={fetchFile} />);
+      await userEvent.selectOptions(select(), "Apple");
+      await userEvent.click(csvButton());
+      expect(fetchFile).toHaveBeenCalledWith("csv", "omop", ["Apple"]);
+    });
+  });
+
   it("names the file itself when the response carries no filename", async () => {
     const file = new Blob(["x"]);
     mockGet.mockResolvedValue({ data: file, headers: {} });

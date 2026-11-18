@@ -159,6 +159,13 @@ export interface Reference {
   wearable_measure_classes?: string[];
   /** The source vocabularies of the Wearables tab, which those and the metric key apply to. */
   wearable_source_vocabularies?: string[];
+  /** The systems a wearable download or share can be limited to, in tab order. */
+  wearable_source_systems?: WearableSourceSystem[];
+}
+
+export interface WearableSourceSystem {
+  id: string;
+  label: string;
 }
 
 /** An approval queued the move of stored clinical rows; a job does it. */

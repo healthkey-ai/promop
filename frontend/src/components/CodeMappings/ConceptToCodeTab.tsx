@@ -11,6 +11,7 @@ import { CuratorNoteMark } from './CuratorNoteMark';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
 import WearableMappingsDownload from './WearableMappingsDownload';
 import WearableVoteShare from './WearableVoteShare';
+import { useWearableSourceSystems } from './wearableSourceSystems';
 import type { AxisVariant, LoincAxesPayload } from './loincAxes';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
@@ -186,6 +187,16 @@ type SourceMode = 'linked' | 'candidates';
 type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
+
+/** Download and Share under the Wearables domain. They ask for the source code
+ *  systems here, so no other domain pays for the request. */
+function WearableControls({ canApprove }: { canApprove: boolean }) {
+  const systems = useWearableSourceSystems();
+  return <>
+    <WearableMappingsDownload systems={systems} />
+    {canApprove && <WearableVoteShare systems={systems} />}
+  </>;
+}
 
 export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange, initialConceptId, onInitialConceptHandled, userId }: {
   canApprove: boolean;
@@ -476,8 +487,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       {/* The whole Wearables tab as a file, and the public vote: the same
           controls as the Source Code to Concept direction's Wearables tab. */}
       {domain === WEARABLES_DOMAIN && <div role="group" aria-label="Wearable mappings" className="flex flex-wrap items-center gap-2">
-        <WearableMappingsDownload />
-        {canApprove && <WearableVoteShare />}
+        <WearableControls canApprove={canApprove} />
       </div>}
     </div>
     <p className="text-xs text-slate-500">{order === 'category'

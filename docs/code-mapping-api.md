@@ -300,6 +300,7 @@ call the lookup above; one token may hold both scopes.
 ```
 GET /api/v1/code-mappings/wearables-export/?file_format=csv
 GET /api/v1/code-mappings/wearables-export/?file_format=docx
+GET /api/v1/code-mappings/wearables-export/?file_format=csv&sources=Apple,Garmin
 ```
 
 Every mapping on the Wearables tab (the Apple HealthKit, Health Connect, Garmin,
@@ -321,6 +322,18 @@ doctor or analyst); anyone else gets 403.
 The parameter is `file_format` because the API framework reserves `format`.
 The response is an attachment named `wearable-mappings-YYYY-MM-DD.csv` or
 `.docx` and is not cached.
+
+`sources` limits the file to some source code systems: the vocabulary ids
+`Apple` (HealthKit), `HealthConnect`, `Garmin`, `OpenWearables`, `HL7-PHR` and
+`CDISC-BC`, separated by commas or by repeating the parameter. Absent, blank
+or empty is every system (the default); an id that is not one of these is a
+400. The systems a file can be limited to are listed in
+`wearable_source_systems` of `GET /api/v1/code-mappings/reference/`
+(`[{id, label}]`, in the order a metric's codes are listed). A limited file's
+name ends with the systems (`wearable-mappings-apple-garmin-YYYY-MM-DD.csv`)
+and a Word document says so under its title. With `destination=cdisc-bc` the
+limit applies to the wearable codes: the Biomedical Concepts are still found
+through every mapping, whatever the systems chosen.
 
 The file holds every row of the tab in every section, proposed and approved,
 mapped and not yet mapped, **without rejected rows**. Rows are ordered by
@@ -367,7 +380,7 @@ reject as before.
 
 ```
 GET    /api/v1/code-mappings/vote-shares/
-POST   /api/v1/code-mappings/vote-shares/                 {"title": "...", "note": "...", "expires_at": "2027-01-31"}
+POST   /api/v1/code-mappings/vote-shares/                 {"title": "...", "note": "...", "expires_at": "2027-01-31", "source_vocabularies": ["Garmin"]}
 POST   /api/v1/code-mappings/vote-shares/<id>/revoke/
 DELETE /api/v1/code-mappings/vote-shares/<id>/
 GET    /api/v1/code-mappings/vote-shares/<id>/votes-export/

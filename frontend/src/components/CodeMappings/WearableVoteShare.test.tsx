@@ -31,8 +31,12 @@ let listed: ReturnType<typeof share>[];
 let flags: { email_configured?: boolean; base_url_configured?: boolean };
 const writeText = vi.fn();
 
-async function openDialog() {
-  render(<WearableVoteShare />);
+const SYSTEMS = [
+  { id: "Apple", label: "HealthKit" }, { id: "Garmin", label: "Garmin" }, { id: "OpenWearables", label: "OpenWearables" },
+];
+
+async function openDialog(systems?: { id: string; label: string }[]) {
+  render(<WearableVoteShare systems={systems} />);
   await userEvent.click(screen.getByRole("button", { name: "Share" }));
   return screen.findByRole("dialog", { name: "Share the wearable proposals for a vote" });
 }
@@ -91,6 +95,41 @@ describe("WearableVoteShare", () => {
     await userEvent.click(within(created).getByRole("button", { name: "Copy the link for HL7 PHR working group review" }));
     expect(writeText).toHaveBeenCalledWith("https://promop.example.test/vote#token-5");
     expect(within(created).getByRole("button")).toHaveTextContent("Copied");
+  });
+
+  it("offers every system by default and sends none; a chosen system limits the share to it", async () => {
+    mockPost.mockImplementation(() => Promise.resolve({ data: share(6, { source_vocabularies: ["Garmin"] }) }));
+    await openDialog(SYSTEMS);
+    const select = screen.getByLabelText("Source code system");
+    expect(select).toHaveValue("");
+    expect(within(select).getAllByRole("option").map((option) => option.textContent))
+      .toEqual(["All source systems", "HealthKit", "Garmin", "OpenWearables"]);
+
+    await userEvent.type(screen.getByLabelText("Title (shown to voters)"), "All of them");
+    await userEvent.click(screen.getByRole("button", { name: "Create link" }));
+    await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(SHARES, { title: "All of them", note: "" }));
+
+    await userEvent.type(screen.getByLabelText("Title (shown to voters)"), "Garmin only");
+    await userEvent.selectOptions(screen.getByLabelText("Source code system"), "Garmin");
+    await userEvent.click(screen.getByRole("button", { name: "Create link" }));
+    await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(SHARES, {
+      title: "Garmin only", note: "", source_vocabularies: ["Garmin"],
+    }));
+    // The choice goes back to every system for the next share.
+    await waitFor(() => expect(screen.getByLabelText("Source code system")).toHaveValue(""));
+  });
+
+  it("offers no system menu when the page has none to offer", async () => {
+    await openDialog();
+    expect(screen.queryByLabelText("Source code system")).not.toBeInTheDocument();
+  });
+
+  it("names the systems a listed share is limited to", async () => {
+    listed = [share(1, { source_vocabularies: ["Apple", "Garmin"] }), share(2)];
+    await openDialog(SYSTEMS);
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    expect(rows()[0]).toHaveTextContent("HealthKit, Garmin only");
+    expect(rows()[1]).not.toHaveTextContent("only");
   });
 
   it("sends no expiry when none was chosen, and needs a title", async () => {
