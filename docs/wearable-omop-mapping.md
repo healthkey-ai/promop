@@ -790,3 +790,8 @@ The Wearables download takes `destination=cdisc-bc` (the "Map codes to" menu
 beside it) for a view-only CSV or Word file of the wearable codes that reach a
 BC, a line per BC. `services/biomedical_concepts.biomedical_concept_mappings`
 gives the same answer for one code mapping.
+
+A vote share's public page offers the same two downloads
+(`POST /api/v1/public/mapping-votes/export/`, the link's token in the body),
+with the provenance and source-unit columns left empty: the public page shows
+neither.

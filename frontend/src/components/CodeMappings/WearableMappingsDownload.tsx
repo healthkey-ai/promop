@@ -3,11 +3,20 @@ import { Download } from "lucide-react";
 import api from "@/api/axios";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
 
-type FileFormat = "csv" | "docx";
 // What each code is mapped to in the file. The OMOP concept is the default and
 // is asked for by sending nothing, as before; a CDISC Biomedical Concept is
 // reached through the OMOP concept a code maps to.
-type Destination = "omop" | "cdisc-bc";
+export type Destination = "omop" | "cdisc-bc";
+export type FileFormat = "csv" | "docx";
+/** Fetches the file; the response's `content-disposition` names it. */
+export type FetchWearableFile = (format: FileFormat, destination: Destination) => Promise<{
+  data: Blob; headers?: Record<string, unknown>;
+}>;
+
+const fromTheTab: FetchWearableFile = (format, destination) => api.get<Blob>("/v1/code-mappings/wearables-export/", {
+  params: destination === "omop" ? { file_format: format } : { file_format: format, destination },
+  responseType: "blob",
+});
 
 const LABEL = "Download all wearable mappings";
 const CHOICES: { format: FileFormat; label: string; name: string; title: string }[] = [
@@ -27,9 +36,10 @@ const CHOICES: { format: FileFormat; label: string; name: string; title: string 
  * concept, or the CDISC Biomedical Concept linked to it.
  *
  * Reading the tab is enough to download it, so a read-only reader sees this
- * too.
+ * too. `fetchFile` replaces the signed-in request, for the public vote page,
+ * which asks its own endpoint with the share's token.
  */
-export default function WearableMappingsDownload() {
+export default function WearableMappingsDownload({ fetchFile = fromTheTab }: { fetchFile?: FetchWearableFile }) {
   const [busy, setBusy] = useState<FileFormat | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [destination, setDestination] = useState<Destination>("omop");
@@ -38,12 +48,10 @@ export default function WearableMappingsDownload() {
     setBusy(format);
     setError(null);
     try {
-      const response = await api.get<Blob>("/v1/code-mappings/wearables-export/", {
-        params: destination === "omop" ? { file_format: format } : { file_format: format, destination },
-        responseType: "blob",
-      });
+      const response = await fetchFile(format, destination);
+      const stem = destination === "omop" ? "wearable-mappings" : "wearable-cdisc-bc-mappings";
       saveBlob(response.data, filenameFromDisposition(
-        response.headers?.["content-disposition"], `wearable-mappings.${format}`));
+        response.headers?.["content-disposition"], `${stem}.${format}`));
     } catch (err) {
       setError((await blobErrorMessage(err)) ?? "Could not download the wearable mappings. Try again.");
     } finally {

@@ -232,12 +232,17 @@ def rows_from(mappings):
     return rows
 
 
-def export_file(file_format, day=None, destination=DEST_OMOP):
+def export_file(file_format, day=None, destination=DEST_OMOP, public=False):
     """``(filename, content type, body)`` of the tab in *file_format*.
 
     *destination* is what each code is mapped to in the file: ``omop`` (the
     concept it is stored as) or ``cdisc-bc`` (the Biomedical Concept mapped
     to the same concept).
+
+    *public* is the file a vote share's visitor may have, on the public
+    page's own rule: no provenance, and no source units, which are read from
+    patient-data evidence. Both stay as empty columns, so the two files have
+    one shape.
     """
     if file_format not in CONTENT_TYPES:
         raise FormatError(f"Unknown file format {file_format!r}. Use csv or docx.")
@@ -245,6 +250,8 @@ def export_file(file_format, day=None, destination=DEST_OMOP):
         raise FormatError(f"Unknown destination {destination!r}. Use omop or cdisc-bc.")
     day = day or localdate()
     rows = export_rows(destination)
+    if public:
+        rows = [replace(row, source_units=(), provenance='') for row in rows]
     if file_format != FORMAT_CSV and len(rows) > DOCX_MAX_ROWS:
         raise FormatError(
             f'The Wearables tab holds {len(rows):,} mappings and the Word document is '

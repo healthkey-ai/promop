@@ -42,7 +42,8 @@ PAGE = '/api/v1/public/mapping-votes/'
 SUBMIT = f'{PAGE}submit/'
 PREVIEW = f'{PAGE}confirm/preview/'
 CONFIRM = f'{PAGE}confirm/'
-PUBLIC_PATHS = {PAGE, SUBMIT, PREVIEW, CONFIRM}
+EXPORT = f'{PAGE}export/'
+PUBLIC_PATHS = {PAGE, SUBMIT, PREVIEW, CONFIRM, EXPORT}
 VOTER = 'voter@example.test'
 LINK = re.compile(r'/vote/confirm#([A-Za-z0-9_-]+)')
 NOT_AVAILABLE = {'detail': 'This link is not available.'}
@@ -1908,3 +1909,81 @@ def test_an_empty_share_exports_a_header_only(admin):
     lines = admin.get(f'{SHARES}{share.pk}/votes-export/').content.decode('utf-8-sig').splitlines()
 
     assert lines == [','.join(mapping_votes.CSV_COLUMNS)]
+
+
+# ── The public download ──────────────────────────────────────────────────
+
+def download(client, share, **body):
+    token = share.token if isinstance(share, MappingVoteShare) else share
+    return client.post(EXPORT, {'token': token, **body}, format='json')
+
+
+def csv_lines(response):
+    import csv
+    import io
+    lines = list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
+    return lines[0], [dict(zip(lines[0], line)) for line in lines[1:]]
+
+
+def test_a_share_holder_downloads_the_mappings_without_provenance_or_source_units(anonymous):
+    share = make_share()
+    org = Organization.objects.create(slug='secret-hospital', name='Secret Hospital')
+    proposal('STEPS', notes='CURATOR-NOTE-TEXT', origin_system='suggest-secret',
+             source_unit_evidence=[{'unit': 'EVIDENCE-UNIT', 'source': 'patient-data'}])
+    proposal('HEART', status='approved')
+    proposal('GONE', status='rejected')
+    proposal('SCOPED', organization=org)
+
+    response = download(anonymous, share)
+
+    assert response.status_code == 200
+    assert response['Content-Type'].startswith('text/csv')
+    assert 'attachment; filename="wearable-mappings-' in response['Content-Disposition']
+    assert response['Cache-Control'] == 'no-store' and response['Referrer-Policy'] == 'no-referrer'
+    assert not response.cookies
+    header, rows = csv_lines(response)
+    # The proposals and the approved mappings: what the group is asked about, and what is settled.
+    assert sorted(row['Source code'] for row in rows) == ['HEART', 'STEPS']
+    assert {row['Provenance'] for row in rows} == {''} and {row['Source unit'] for row in rows} == {''}
+    text = response.content.decode()
+    for secret in ('CURATOR-NOTE-TEXT', 'suggest-secret', 'EVIDENCE-UNIT', 'Secret Hospital', 'SCOPED', 'GONE'):
+        assert secret not in text
+
+
+def test_the_public_download_offers_word_and_the_cdisc_bc_target(anonymous):
+    share = make_share()
+    heart = loinc('8867-4', 'Heart rate')
+    proposal('HEART', concept=heart)
+    proposal('C49677', concept=heart, source_vocabulary_id='CDISC-BC', source_code_description='Heart Rate')
+
+    word = download(anonymous, share, file_format='docx')
+    bc = download(anonymous, share, destination='cdisc-bc')
+
+    assert word.status_code == 200 and word.content[:2] == b'PK'
+    assert 'wordprocessingml' in word['Content-Type']
+    assert 'wearable-cdisc-bc-mappings-' in bc['Content-Disposition']
+    _, rows = csv_lines(bc)
+    assert [(row['Source code'], row['CDISC BC ID']) for row in rows] == [('HEART', 'C49677')]
+
+
+@pytest.mark.parametrize('body', [
+    {'file_format': 'pdf'}, {'destination': 'nope'}, {'file_format': ['csv']}, {'destination': 7}])
+def test_the_public_download_refuses_what_it_does_not_write(anonymous, body):
+    response = download(anonymous, make_share(), **body)
+    assert response.status_code == 400 and response['Content-Type'] == 'application/json'
+
+
+def test_the_public_download_needs_a_live_link(anonymous):
+    revoked = make_share()
+    mapping_votes.revoke_share(revoked)
+    for token in (revoked, WELL_FORMED, ''):
+        response = download(anonymous, token)
+        assert (response.status_code, response.json()) == (404, NOT_AVAILABLE)
+    assert anonymous.get(EXPORT).status_code == 405
+
+
+def test_the_public_download_is_throttled_per_client(anonymous):
+    share = make_share()
+    with mock.patch.dict(ScopedRateThrottle.THROTTLE_RATES, {'mapping_vote_export': '2/minute'}):
+        codes = [download(anonymous, share).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]

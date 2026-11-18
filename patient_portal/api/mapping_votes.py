@@ -28,6 +28,7 @@ from rest_framework.views import APIView
 
 from omop_core.models import MappingVoteShare, SourceCodeConceptMapping
 from omop_core.services import mapping_votes as votes
+from omop_core.services import wearable_mapping_export as export
 
 from .permissions import is_machine_request
 
@@ -283,6 +284,40 @@ class PublicVotePageView(_PublicVoteView):
             return _not_available()
         votes.purge_expired()
         return Response(votes.public_payload(share))
+
+
+class PublicVoteExportView(_PublicVoteView):
+    """POST /api/v1/public/mapping-votes/export/
+
+    ``{"token": "...", "file_format": "csv"|"docx", "destination": "omop"|"cdisc-bc"}``
+    -- the wearable mappings as a file, for whoever holds the link. The same
+    file the Wearables tab downloads (every global mapping that is not
+    rejected, with an OMOP concept or a CDISC Biomedical Concept as the
+    target), without its provenance and source units, which the public page
+    does not show either. A POST for the reason the page is: the token must
+    not be in a URL. The answer is the file, not JSON; a refusal is JSON.
+    """
+    throttle_scope = 'mapping_vote_export'
+
+    def post(self, request):
+        data, refusal = self.body(request)
+        if refusal is not None:
+            return refusal
+        if votes.active_share(data.get('token')) is None:
+            return _not_available()
+        file_format = data.get('file_format') or export.FORMAT_CSV
+        destination = data.get('destination') or export.DEST_OMOP
+        if not isinstance(file_format, str) or not isinstance(destination, str):
+            return Response({'detail': 'Unknown file format or destination.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            filename, content_type, content = export.export_file(
+                file_format, destination=destination, public=True)
+        except export.FormatError as error:
+            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+        response = HttpResponse(content, content_type=content_type)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
 
 
 class PublicVoteSubmitView(_PublicVoteView):
