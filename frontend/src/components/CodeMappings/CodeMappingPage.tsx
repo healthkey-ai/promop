@@ -540,8 +540,8 @@ export default function CodeMappingPage() {
       const sort = sorts[section];
       params[`order_${index}`] = sort ? `${sort.descending ? "-" : ""}${sort.column}` : "-occurrence_count";
     });
-    // Only the browse request controls table loading. Ancillary metadata and
-    // counters must not hold the page open or turn usable rows into an error.
+    // Only the browse request controls table loading. Reference metadata must
+    // not hold the page open or turn usable rows into an error.
     const mappingsRequest = api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params });
     if (!referenceCache.current && !referenceRequest.current) {
       referenceRequest.current = api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {

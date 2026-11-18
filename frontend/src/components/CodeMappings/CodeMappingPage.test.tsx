@@ -3616,7 +3616,7 @@ describe("server mapping pages", () => {
 });
 
 describe("Source Code to Concept carries no accuracy tracking", () => {
-  beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); });
+  beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); mockPost.mockReset(); });
 
   it("shows no accuracy strip and reads no accuracy: Concept to Source Code is where accuracy is tracked", async () => {
     mockGet.mockImplementation((url: string) => Promise.resolve({
@@ -3633,6 +3633,13 @@ describe("Source Code to Concept carries no accuracy tracking", () => {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
     expect(screen.queryByRole("link", { name: "History" })).not.toBeInTheDocument();
+
+    // Replace still asks first, and says nothing about a model's accuracy.
+    fireEvent.click(within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" }));
+    fireEvent.click(within(controls).getByRole("button", { name: "Suggest" }));
+    expect(await screen.findByText("This will replace all current suggestions.")).toBeInTheDocument();
+    expect(screen.queryByText(/accuracy/i)).not.toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
     expect(mockGet.mock.calls.filter(([url]) => String(url).includes("accuracy"))).toHaveLength(0);
   });
 

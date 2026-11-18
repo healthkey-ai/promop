@@ -1334,11 +1334,14 @@ describe the last curator save, the outcome the first disposition, the status
 the row now; a reverse-Suggest re-point since the save shows as Proposed. A
 decision no ranker scored counts in the Overall row only; a row with a blank surface is not a
 curator decision and is not counted. One grouped query
-(`code_mapping_accuracy_analytics`). It is the one place a curator tracks mapping accuracy: the Code to
-Concept tab carries no accuracy strip (#2730). Most mapping is done from
-Concept to Code, and that tab's strip read as low recall only because nearly
-every reviewed row counted as "Other destination". The History page
-(`/code-mappings/accuracy`) it linked to still answers at its address.
+(`code_mapping_accuracy_analytics`).
+
+The analytics page is the one place a curator tracks mapping accuracy: the
+Code to Concept tab carries no accuracy strip (#2730). Most mapping is done
+from Concept to Code, and the strip on Code to Concept read as low recall only
+because nearly every reviewed row counted as "Other destination". The History
+page (`/code-mappings/accuracy`) that strip linked to still answers at its
+address, with no link to it in the UI.
 
 Suggest never writes either column: reverse Suggest's auto-propose goes
 through the same writer with `record_decision=False`. A machine write that
