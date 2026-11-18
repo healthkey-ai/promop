@@ -1,6 +1,7 @@
 from typing import Any
 
 from rest_framework import serializers
+from rest_framework.exceptions import APIException
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     UNPLACED_TAB,
@@ -1385,6 +1386,33 @@ class DrugExposureSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
 _SOURCE_RECORD_KEY = re.compile(r'[!-~]+')
 
 
+class SourceRecordKeyConflict(APIException):
+    """A row-level write would move a key onto another row of the same person.
+
+    The bulk keyed upsert turns a known key into an update and answers 409 for
+    a collision (#2453); the row-level PATCH has the same uniqueness rule and
+    must answer the same way instead of reaching the index and returning 500
+    (#2484).
+    """
+
+    status_code = 409
+    default_detail = 'The source_record_key is already used by another row of this patient.'
+    default_code = 'source_record_key_conflict'
+
+
+def _source_record_key_field():
+    """The key field with trimming off, so a padded key is refused (#2484).
+
+    ``CharField`` trims whitespace by default *before* field validators run, so
+    " key " arrived as "key" and silently targeted an existing row. The stored
+    value and ``_validate_source_record_key`` must see the supplied identifier.
+    """
+    return serializers.CharField(
+        required=False, allow_null=True, allow_blank=True,
+        trim_whitespace=False, max_length=512,
+    )
+
+
 def _validate_source_record_key(value):
     """The producer's stable id for a source record (#2453): printable ASCII,
     no whitespace. Null means no key; an empty string is refused rather than
@@ -1397,10 +1425,18 @@ def _validate_source_record_key(value):
     return value
 
 
+# The uniqueness check lives in the database index, not in a serializer query:
+# a row-level move can name another patient, and answering before
+# ``perform_update`` authorizes that patient would disclose whether a key is
+# taken there. ``_OmopDeferRefreshMixin`` translates the index violation instead
+# (#2484).
+
+
 class MeasurementSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
     concept_field = 'measurement_concept'
     concept_name = serializers.SerializerMethodField()
     normalized = serializers.SerializerMethodField()
+    source_record_key = _source_record_key_field()
 
     def get_normalized(self, obj):
         from omop_core.services.canonical_units import policies, measurement_normalized
@@ -1473,6 +1509,7 @@ class MeasurementSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
 class ObservationSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
     concept_field = 'observation_concept'
     concept_name = serializers.SerializerMethodField()
+    source_record_key = _source_record_key_field()
 
     class Meta:
         model = Observation
