@@ -6193,6 +6193,11 @@ class MappingVoteShare(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
+    source_vocabularies = models.JSONField(
+        default=list, blank=True,
+        help_text='The source code systems this link puts to the vote and lets a '
+                  'visitor download; empty is every wearable system.',
+    )
 
     class Meta:
         db_table = 'mapping_vote_share'
