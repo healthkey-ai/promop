@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import CoOccurringLabs, { type CoOccurringCode, type CoOccurringLabsPayload } from "./CoOccurringLabs";
 import SourceEvidencePanel from "./SourceEvidencePanel";
@@ -8,14 +8,15 @@ const { get } = vi.hoisted(() => ({ get: vi.fn() }));
 vi.mock("@/api/axios", () => ({ default: { get } }));
 
 const code = (overrides: Partial<CoOccurringCode> = {}): CoOccurringCode => ({
-  source_code: "ALBE", source_vocabulary_id: "EPIC", omop_table: "measurement",
+  source_code: "ALBE", source_vocabulary_id: "EPIC",
   description: "Albumin, electrophoresis", units: ["g/dL"], system: "Ser/Plas", method: "Electrophoresis",
   axes_basis: "mapping", axes_loinc: "2862-1", mapping_id: 11, mapping_status: "approved", orders: 12,
   ...overrides,
 });
 
 const payload = (overrides: Partial<CoOccurringLabsPayload> = {}): CoOccurringLabsPayload => ({
-  timed_out: false, records: 160, records_read: 30, records_with_order: 148, orders: 31,
+  applies: true, timed_out: false, records: 160, records_read: 30, records_with_order: 148, records_in_report: 0,
+  orders: 31,
   order_names: [{ name: "PROTEIN ELECTROPHORESIS SERUM", count: 20 }, { name: "SPEP", count: 4 }],
   order_names_total: 2,
   codes: [
@@ -44,12 +45,12 @@ describe("CoOccurringLabs", () => {
     expect(within(table).getAllByRole("columnheader").map((header) => header.textContent)).toEqual(
       ["Source code", "Description", "Units", "System", "Method", "Mapping status"]);
     const [albumin, beta, interpretation] = within(table).getAllByRole("row").slice(1);
-    expect(albumin).toHaveTextContent("ALBEAlbumin, electrophoresisg/dLSer/PlasElectrophoresisApproved");
+    expect(albumin).toHaveTextContent("ALBE, in 12 of 31 ordersAlbumin, electrophoresisg/dLSer/PlasElectrophoresisApproved");
     // System and Method from the hospital's own LOINC are marked.
-    expect(within(albumin).queryByTitle("From the LOINC the hospital sent")).toBeNull();
-    expect(within(beta).getAllByTitle("From the LOINC the hospital sent")).toHaveLength(2);
+    expect(within(albumin).queryByTitle(/From the LOINC the hospital sent/)).toBeNull();
+    expect(within(beta).getAllByTitle("From the LOINC the hospital sent (2871-2)")).toHaveLength(2);
     expect(beta).toHaveTextContent("Unmapped");
-    expect(interpretation).toHaveTextContent("SPEPI————Unmapped");
+    expect(interpretation).toHaveTextContent("SPEPI, in 2 of 31 orders————Unmapped");
   });
 
   it("links a code to its own Edit Mapping, and leaves a code with no mapping row as text", async () => {
@@ -64,6 +65,14 @@ describe("CoOccurringLabs", () => {
     expect(screen.getByText("SPEPI")).toHaveAttribute("title", "Not in the mapping queue yet. In 2 of 31 orders.");
   });
 
+  it("is read whether or not the mapping's own evidence arrived", async () => {
+    serve({});
+    render(<SourceEvidencePanel evidence={null} mappingId={7} loading={false} error="Could not load source evidence." />);
+
+    expect(await screen.findByRole("table", { name: "Co-occurring labs" })).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith("/v1/code-mappings/7/co-occurring/");
+  });
+
   it("states the coverage: records with an order, distinct orders and order names", async () => {
     serve({ order_names_total: 5 });
     render(<CoOccurringLabs mappingId={7} />);
@@ -74,12 +83,39 @@ describe("CoOccurringLabs", () => {
       "PROTEIN ELECTROPHORESIS SERUM (20) · SPEP (4) · and 3 more");
   });
 
+  it("counts records a DiagnosticReport joins apart from those naming an order", async () => {
+    serve({ records: 400, records_read: 30, records_with_order: 0, records_in_report: 30 });
+    render(<CoOccurringLabs mappingId={7} />);
+
+    const coverage = (await screen.findByText("Records with an order reference")).parentElement!;
+    expect(coverage).toHaveTextContent("0 of 400");
+    expect(coverage).toHaveTextContent("30 of the 30 read name no order and are listed in a DiagnosticReport");
+    expect(screen.getByRole("table", { name: "Co-occurring labs" })).toBeInTheDocument();
+    expect(screen.queryByText("No order links in the source records.")).toBeNull();
+  });
+
   it("says so when the source records carry no order links", async () => {
     serve({ records_with_order: 0, orders: 0, order_names: [], order_names_total: 0, codes: [], codes_total: 0 });
     render(<CoOccurringLabs mappingId={7} />);
 
     expect(await screen.findByText("No order links in the source records.")).toBeInTheDocument();
     expect(screen.queryByRole("table")).toBeNull();
+  });
+
+  it("tells a code no patient holds from one whose records name no order", async () => {
+    serve({ records: 0, records_read: 0, records_with_order: 0, orders: 0, order_names: [], order_names_total: 0,
+      codes: [], codes_total: 0 });
+    render(<CoOccurringLabs mappingId={7} />);
+
+    expect(await screen.findByText("No patient's source records hold this code.")).toBeInTheDocument();
+    expect(screen.queryByText("No order links in the source records.")).toBeNull();
+  });
+
+  it("shows nothing for a code that is not a result", async () => {
+    serve({ applies: false, records: 0, records_with_order: 0, codes: [], codes_total: 0 });
+    const view = render(<CoOccurringLabs mappingId={7} />);
+
+    await waitFor(() => expect(view.container).toBeEmptyDOMElement());
   });
 
   it("tells orders with no other result from no orders at all", async () => {
@@ -105,17 +141,23 @@ describe("CoOccurringLabs", () => {
     expect(within(table).getAllByRole("row")).toHaveLength(11);
   });
 
-  it("reports a read that failed or ran out of time instead of an empty answer", async () => {
+  it("reports a read that failed or ran out of time instead of an empty answer, and reads again on Retry", async () => {
     get.mockRejectedValueOnce(new Error("500"));
-    const failed = render(<CoOccurringLabs mappingId={7} />);
+    render(<CoOccurringLabs mappingId={7} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not load co-occurring labs");
     expect(screen.queryByText("No order links in the source records.")).toBeNull();
-    failed.unmount();
 
     serve({ timed_out: true, records: 0, records_with_order: 0, codes: [], codes_total: 0 });
-    render(<CoOccurringLabs mappingId={7} />);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Looking for order links");
     expect(await screen.findByRole("alert")).toHaveTextContent("took too long");
     expect(screen.queryByText("No order links in the source records.")).toBeNull();
+
+    serve({});
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("table", { name: "Co-occurring labs" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(get).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -137,9 +179,11 @@ describe("SourceEvidencePanel co-occurring labs", () => {
     expect(screen.getByRole("region", { name: "Source evidence" })).toContainElement(table);
   });
 
-  it("reads again for another mapping and never without one", async () => {
+  it("reads again for another mapping, never without one, and only once the mapping's own read has settled", async () => {
     serve({});
     const view = render(<SourceEvidencePanel evidence={evidence} loading={false} />);
+    expect(get).not.toHaveBeenCalled();
+    view.rerender(<SourceEvidencePanel evidence={null} mappingId={7} loading />);
     expect(get).not.toHaveBeenCalled();
 
     view.rerender(<SourceEvidencePanel evidence={evidence} mappingId={7} loading={false} />);

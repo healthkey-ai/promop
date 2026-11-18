@@ -298,8 +298,10 @@ export default function SourceEvidencePanel({ evidence, mappingId, sourceSystem,
           </dd>}
         </div>}
       </dl>}
-
-      {mappingId != null && <CoOccurringLabs key={mappingId} mappingId={mappingId} />}
     </>}
+    {/* Outside the evidence above: it does not depend on that read having
+        succeeded. After it has settled, though: this one walks patients'
+        records, and the dialog's own reads should not queue behind it. */}
+    {mappingId != null && (evidence || error) && <CoOccurringLabs key={mappingId} mappingId={mappingId} />}
   </section>;
 }

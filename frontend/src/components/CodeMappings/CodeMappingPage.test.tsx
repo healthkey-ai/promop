@@ -1,5 +1,5 @@
 import { cleanup, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
 import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
@@ -364,15 +364,49 @@ describe("CodeMappingPage", () => {
       expect(screen.getByRole("button", { name: "Source Code → Concept" })).toHaveAttribute("aria-pressed", "true");
     });
 
-    it("says so when the mapping is gone, and opens nothing", async () => {
+    it("says so when the mapping cannot be read, and opens nothing", async () => {
       renderPage().unmount();
       const implementation = mockGet.getMockImplementation()!;
       mockGet.mockImplementation((url: string) => (
         url === "/v1/code-mappings/987654/" ? Promise.reject(new Error("404")) : implementation(url)));
       render(<MemoryRouter initialEntries={["/code-mappings?mapping=987654"]}><CodeMappingPage /></MemoryRouter>);
 
-      expect(await screen.findByText("Could not load the linked mapping. It may have been deleted.")).toBeInTheDocument();
+      expect(await screen.findByText("Could not open the linked mapping.")).toBeInTheDocument();
       expect(screen.queryByRole("dialog")).toBeNull();
+    });
+
+    it("spends the link: the mapping is dropped from the address once handled", async () => {
+      renderPage().unmount();
+      const Location = () => <output aria-label="search">{useLocation().search}</output>;
+      render(<MemoryRouter initialEntries={[`/code-mappings?mapping=${approvedRow.mapping_id}&direction=forward`]}>
+        <CodeMappingPage /><Location />
+      </MemoryRouter>);
+
+      await screen.findByRole("dialog");
+      expect(screen.getByLabelText("search")).toHaveTextContent(/^\?direction=forward$/);
+    });
+
+    it("waits for the session, and tells a reader the link needs write access", async () => {
+      renderPage().unmount();
+      const detailReads = () => mockGet.mock.calls.filter(([url]) => url === `/v1/code-mappings/${approvedRow.mapping_id}/`);
+      mockGet.mockClear();
+      const entry = `/code-mappings?mapping=${approvedRow.mapping_id}`;
+      try {
+        mockUseAuth.mockReturnValue({ currentUser: null, loading: true });
+        const view = render(<MemoryRouter initialEntries={[entry]}><CodeMappingPage /></MemoryRouter>);
+        expect(detailReads()).toHaveLength(0);
+
+        // A doctor reads the page and opens no dialog (#2416).
+        const doctor = { id: 8, org_accesses: [{ org_slug: "acme", org_name: "Acme", role: "doctor", expires_at: null }] };
+        mockUseAuth.mockReturnValue({ currentUser: doctor, loading: false });
+        view.rerender(<MemoryRouter initialEntries={[entry]}><CodeMappingPage /></MemoryRouter>);
+
+        expect(await screen.findByText("Opening a mapping from a link needs mapping write access.")).toBeInTheDocument();
+        expect(screen.queryByRole("dialog")).toBeNull();
+        expect(detailReads()).toHaveLength(0);
+      } finally {
+        mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER });
+      }
     });
   });
 

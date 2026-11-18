@@ -18,28 +18,40 @@ Rules, all per patient (a reference means nothing across patients):
 * A record that names no order is joined through a DiagnosticReport in the
   patient's inventory whose ``result`` lists it: the report's other results
   are in the same panel. A record that names its order is not looked up in
-  reports, because that lookup reads every report the patient has.
+  reports, because that lookup reads every report the patient has. The
+  report is found by the relative reference the ETL stores
+  (``Observation/<id>``); one that lists its results by absolute URL is not.
 * One Observation is one result however many codings it carries. The codings
   of the record the dialog is open on are left out, and a co-occurring
   Observation is listed once, under the coding in the opened code's own code
   system when it has one.
 """
 import json
+import logging
 from collections import Counter, defaultdict
+from time import monotonic
 
 from django.db import OperationalError, connection, transaction
+from psycopg.errors import QueryCanceled
 
 from omop_core.mapping import loinc_axes
-from omop_core.services.source_vocabularies import canonical_source_vocabulary
+from omop_core.services.source_vocabularies import (
+    VOCABULARY_OID_ALIASES, canonical_source_vocabulary, fhir_source_vocabulary,
+)
 
-# Inventory records of the opened code that are read. Every one costs a walk
+# Inventory records of the opened code that are walked. Every one costs a walk
 # of that patient's inventory -- about 4,000 rows of stored resources each on
-# HealthTree, near 20 ms a patient -- so this bounds the request.
-MAX_RECORDS = 30
+# HealthTree, near 20 ms a patient -- so this bounds the walks. Counting the
+# records still reads one row per patient holding the code.
+MAX_RECORDS = 25
 MAX_CODES = 50
 MAX_ORDER_NAMES = 8
-# Per statement; a walk that outruns it is reported, not waited for.
-STATEMENT_TIMEOUT_MS = 5000
+# For the whole walk, not each statement: a walk that outruns it is reported,
+# not waited for, and never holds a web worker near its own timeout. About a
+# second when the patients' rows are cached; the first read of a code after
+# they have left the cache can take several, and what it read stays cached
+# for the retry the dialog offers.
+BUDGET_MS = 8000
 # Where a result is filed. Reports, orders and medications are half of an
 # inventory and sit under other tables: results are looked for in these two
 # tables only, and reports only outside them, so neither walk reads it all.
@@ -48,10 +60,13 @@ RESULT_TABLES = ('measurement', 'observation')
 _RESOURCE = '''CROSS JOIN LATERAL (SELECT CASE
         WHEN jsonb_typeof(sc.source_metadata->'fhir') = 'object'
         THEN sc.source_metadata->'fhir' ELSE sc.source_metadata END AS res) r'''
-# jsonpath's lax mode unwraps an array and yields nothing for anything else,
-# so a malformed basedOn is "no order" rather than an error.
-_HAS_ORDER = '''jsonb_path_exists(r.res,
-        '$.basedOn[*].reference ? (@.type() == "string" && @ != "")')'''
+# What `_Record.orders` accepts, so the count over every record and the
+# records read agree: a list holding a reference that is a non-blank string.
+# The array test is explicit because jsonpath's lax mode would wrap an object.
+_HAS_ORDER = '''(jsonb_typeof(r.res->'basedOn') = 'array' AND jsonb_path_exists(r.res,
+        '$.basedOn[*].reference ? (@.type() == "string" && @ like_regex "[^[:space:]]")'))'''
+logger = logging.getLogger(__name__)
+
 _COLUMNS = '''sc.id, sc.person_id, sc.source_value, sc.source_vocabulary_id, sc.omop_table,
         COALESCE(sc.source_unit_override, sc.source_unit),
         r.res->>'id', r.res->>'resourceType', r.res->'code', r.res->'basedOn', r.res->'result' '''
@@ -73,8 +88,16 @@ class _Record:
         code = _json(code)
         code = code if isinstance(code, dict) else {}
         self.text = code['text'].strip() if isinstance(code.get('text'), str) else ''
-        self.codings = [c for c in code.get('coding') or [] if isinstance(c, dict)] \
-            if isinstance(code.get('coding'), list) else []
+        # (system, code, display) of every coding that has a code, in the
+        # resource's order. A system or display that is not text is blank.
+        self.codings = []
+        for coding in code['coding'] if isinstance(code.get('coding'), list) else []:
+            if isinstance(coding, dict) and isinstance(coding.get('code'), (str, int)) \
+                    and str(coding['code']).strip():
+                self.codings.append(tuple(
+                    str(coding['code']).strip() if key == 'code'
+                    else coding[key].strip() if isinstance(coding.get(key), str) else ''
+                    for key in ('system', 'code', 'display')))
         # {reference: display}, in the resource's order.
         self.orders = {}
         for reference in _list(based_on):
@@ -91,27 +114,23 @@ class _Record:
 
     @property
     def coding_codes(self):
-        return {str(c['code']).strip() for c in self.codings if c.get('code')}
+        return {code for _, code, _ in self.codings}
 
-    def description(self):
-        """What the source calls this code: the Observation's text, which names
-        the test where a shared display does not (#1778), else the display of
-        the coding that is this code."""
-        if self.text:
-            return self.text
-        for coding in self.codings:
-            if str(coding.get('code') or '').strip() == self.code and isinstance(coding.get('display'), str):
-                return coding['display'].strip()
-        return ''
+    def system_of(self, wanted):
+        """The system the resource gives *wanted*, when it lists that code."""
+        return next((system for system, code, _ in self.codings if code == wanted), '')
 
-    def hospital_loinc(self):
-        """The LOINC the hospital sent on this record, when it sent one."""
-        if loinc_axes.is_loinc(self.vocabulary):
-            return self.code
-        for coding in self.codings:
-            if loinc_axes.is_loinc(coding.get('system')) and coding.get('code'):
-                return str(coding['code']).strip()
-        return ''
+    def described(self, wanted):
+        """What the source calls *wanted*: the resource's text, which names the
+        test where a shared display does not (#1778), else that coding's display."""
+        return self.text or next(
+            (display for _, code, display in self.codings if code == wanted and display), '')
+
+    def loincs(self):
+        """The LOINC codes the hospital sent on this record, its own first."""
+        own = [self.code] if loinc_axes.is_loinc(self.vocabulary) else []
+        return own + [code for system, code, _ in self.codings
+                      if loinc_axes.is_loinc(system) and code not in own]
 
 
 def _json(value):
@@ -131,39 +150,76 @@ def _reference_id(reference):
     return reference.strip().rstrip('/').rsplit('/', 1)[-1]
 
 
-def _same_result(record, target):
-    """Whether *record* is another coding of the record the dialog is open on.
+def _is_opened_result(records, target):
+    """Whether the Observation these rows sampled is the opened record's own.
 
-    Resource ids decide when both records carry one. Without them, a code the
-    opened record lists among its own codings is that record's alternate
-    coding, and so is a record that lists the opened code among its own.
+    Resource ids decide when both sides carry one. Without them, an
+    Observation that lists the opened code is the same test; one that carries
+    no coding at all is, when the opened record lists its row's code.
     """
-    if record.vocabulary == target.vocabulary and record.code == target.code:
-        return True
+    record = records[0]
     if record.resource_id and target.resource_id:
         return record.resource_id == target.resource_id
-    return record.code in target.coding_codes or target.code in record.coding_codes
+    if record.codings:
+        return target.code in record.coding_codes
+    return any(r.code in target.coding_codes for r in records)
 
 
 def _result_key(record):
+    """What makes two inventory rows samples of one Observation."""
     if record.resource_id:
         return ('id', record.resource_id)
-    codes = frozenset(
-        (str(c.get('system') or ''), str(c.get('code') or '')) for c in record.codings if c.get('code'))
-    return ('codings', codes) if codes else ('row', record.pk)
+    return ('codings', frozenset((system, code) for system, code, _ in record.codings)) \
+        if record.codings else ('row', record.pk)
 
 
-def _primary(records, vocabulary):
-    """The one record that stands for an Observation carrying several codings:
-    the opened code's own code system first, then a local code before the
-    LOINC beside it (which the table shows as the hospital's), then the order
-    the resource lists them in."""
-    def rank(record):
-        listed = [str(c.get('code') or '').strip() for c in record.codings]
-        position = listed.index(record.code) if record.code in listed else len(listed)
-        return (record.vocabulary != vocabulary, loinc_axes.is_loinc(record.vocabulary),
-                position, record.vocabulary, record.code)
-    return min(records, key=rank)
+def _listed_coding(record, system):
+    """The coding an Observation is listed under: the one in the opened code's
+    own code system, else a local code before the LOINC beside it (which the
+    table shows as the hospital's), else the first. None when the resource
+    carries no coding."""
+    codings = record.codings
+    return next((c for c in codings if system and c[0] == system), None) \
+        or next((c for c in codings if not loinc_axes.is_loinc(c[0])), None) \
+        or (codings[0] if codings else None)
+
+
+def _vocabulary_of(coding, target, system, held):
+    """``(vocabulary, unit)`` of *coding* in this patient's inventory.
+
+    *held* are the patient's inventory rows for that code, as ``(vocabulary,
+    unit)``. The inventory says how the ETL named the code system; the
+    resource's own system only picks between rows, or stands in for a code
+    the inventory does not hold.
+    """
+    wanted = target.vocabulary if system and coding[0] == system else canonical_source_vocabulary(
+        fhir_source_vocabulary(coding[0]) or coding[0])
+    if not held:
+        return wanted, ''
+    return min(held, key=lambda row: (row[0] != wanted, loinc_axes.is_loinc(row[0]) != loinc_axes.is_loinc(coding[0]),
+                                      row[0]))
+
+
+class _Budget:
+    """A cursor whose statements share one time budget.
+
+    Before each statement the limit is set to what is left, so the walk as a
+    whole is bounded; a statement that outruns it is cancelled by the server.
+    """
+
+    def __init__(self, cursor, budget_ms):
+        self._cursor = cursor
+        self._deadline = monotonic() + budget_ms / 1000
+
+    def execute(self, sql, params=None):
+        remaining = int((self._deadline - monotonic()) * 1000)
+        if remaining <= 0:
+            raise TimeoutError('The co-occurring walk exceeded its time budget.')
+        self._cursor.execute("SELECT set_config('statement_timeout', %s, true)", [str(remaining)])
+        return self._cursor.execute(sql, params)
+
+    def fetchall(self):
+        return self._cursor.fetchall()
 
 
 def _walk(cursor, tables, where, wanted):
@@ -189,14 +245,10 @@ def _walk(cursor, tables, where, wanted):
 def _targets(cursor, mapping):
     """``(records, total, with_order)`` for the opened code: the records read,
     how many the inventory holds, and how many of those name an order."""
-    cursor.execute(
-        'SELECT DISTINCT source_vocabulary_id FROM patient_source_code WHERE source_value = %s',
-        [mapping.source_code])
-    wanted = canonical_source_vocabulary(mapping.source_vocabulary_id)
     # The ETL posts the system it received; the mapping stores the canonical id.
-    vocabularies = [v for (v,) in cursor.fetchall() if canonical_source_vocabulary(v) == wanted]
-    if not vocabularies:
-        return [], 0, 0
+    wanted = canonical_source_vocabulary(mapping.source_vocabulary_id)
+    vocabularies = sorted({mapping.source_vocabulary_id, wanted, *(
+        alias for alias, canonical in VOCABULARY_OID_ALIASES.items() if canonical == wanted)})
     where = ['sc.source_value = %s', 'sc.source_vocabulary_id = ANY(%s)', 'sc.omop_table = ANY(%s)']
     params = [mapping.source_code, vocabularies, sorted({mapping.omop_table or '', ''})]
     if mapping.organization_id:
@@ -237,8 +289,9 @@ def _collect(cursor, mapping, empty):
             reports[target.person_id][target.pk] = target
     unlinked = defaultdict(set)
     for target in targets:
-        if not target.orders and target.resource_id and target.resource_type != 'DiagnosticReport':
-            unlinked[target.person_id].add(f'{target.resource_type or "Observation"}/{target.resource_id}')
+        # Only an Observation is a report's result.
+        if not target.orders and target.resource_id and target.resource_type in ('Observation', ''):
+            unlinked[target.person_id].add(f'Observation/{target.resource_id}')
     if unlinked:
         for report in _walk(cursor, 'sc.omop_table <> ALL(%s)',
                             "r.res->>'resourceType' = 'DiagnosticReport' AND r.res->'result' @> ANY(o.refs)",
@@ -267,17 +320,12 @@ def _collect(cursor, mapping, empty):
     for other in others.values():
         others_by_person[other.person_id].append(other)
 
-    orders = set()            # (person, order key)
-    names = Counter()         # order name -> records of the opened code
-    found = defaultdict(lambda: {
-        'orders': set(), 'units': Counter(), 'descriptions': Counter(),
-        'loincs': Counter(), 'tables': Counter(),
-    })
-    linked_without_reference = 0
+    order_names = {}          # (person, order key) -> the names it goes by
+    in_report = 0             # records read that name no order and a report joins
+    grouped = []              # (person, target, rows that sampled one Observation, order keys shared)
     for person_id, person_targets in by_person.items():
         candidates = others_by_person.get(person_id, [])
         for target in person_targets:
-            # order key -> the names it goes by
             target_orders = {('order', reference): {display} - {''}
                              for reference, display in target.orders.items()}
             report_results = defaultdict(set)    # order key -> resource ids in it
@@ -286,46 +334,87 @@ def _collect(cursor, mapping, empty):
                     continue
                 shared = [reference for reference in report.orders if reference in target.orders]
                 key = ('order', shared[0]) if shared else ('report', report.resource_id or report.pk)
+                # The report names an order its reference does not.
+                named = report.described(report.code)
+                if named and not target_orders.get(key):
+                    target_orders[key] = {named}
                 target_orders.setdefault(key, set())
-                if report.description():
-                    target_orders[key].add(report.description())
                 report_results[key] |= report.results
             if not target_orders:
                 continue
             if not target.orders:
-                linked_without_reference += 1
+                in_report += 1
             for key, labels in target_orders.items():
-                orders.add((person_id, key))
-                for label in labels:
-                    names[label] += 1
+                order_names.setdefault((person_id, key), set()).update(labels)
 
-            results = defaultdict(list)
+            results = defaultdict(lambda: ([], set()))
             for candidate in candidates:
-                if candidate.resource_type == 'DiagnosticReport' or _same_result(candidate, target):
+                if candidate.resource_type == 'DiagnosticReport':
                     continue
                 shared = {key for key in target_orders
                           if (key[0] == 'order' and key[1] in candidate.orders)
                           or (candidate.resource_id and candidate.resource_id in report_results.get(key, ()))}
                 if shared:
-                    results[_result_key(candidate)].append((candidate, shared))
-            for group in results.values():
-                record = _primary([candidate for candidate, _ in group], target.vocabulary)
-                entry = found[(record.vocabulary, record.code)]
-                for _, shared in group:
-                    entry['orders'] |= {(person_id, key) for key in shared}
-                entry['tables'][record.omop_table] += 1
-                if record.unit:
-                    entry['units'][record.unit] += 1
-                if record.description():
-                    entry['descriptions'][record.description()] += 1
-                # Another coding of the same Observation may be the LOINC.
-                loinc = record.hospital_loinc() or next(
-                    (c.hospital_loinc() for c, _ in group if c.hospital_loinc()), '')
-                if loinc:
-                    entry['loincs'][loinc] += 1
+                    rows, keys = results[_result_key(candidate)]
+                    rows.append(candidate)
+                    keys |= shared
+            grouped += [(person_id, target, rows, keys) for rows, keys in results.values()
+                        if not _is_opened_result(rows, target)]
 
-    summary['records_with_order'] = with_order + linked_without_reference
-    summary['orders'] = len(orders)
+    # Each Observation is listed under one of its own codings, which need not
+    # be the code of the row that happened to sample it: a LOINC shared by
+    # several local codes samples only one of them. The patient's inventory
+    # row for the listed code says which code system the ETL filed it under.
+    listed = [(_listed_coding(rows[0], target.system_of(target.code)), person_id, target, rows, keys)
+              for person_id, target, rows, keys in grouped]
+    unknown = sorted({(person_id, coding[1]) for coding, person_id, _, rows, _ in listed
+                      if coding and not any(row.code == coding[1] for row in rows)})
+    held = defaultdict(list)
+    for coding, person_id, _, rows, _ in listed:
+        for row in rows:
+            held[(person_id, row.code)].append((row.vocabulary, row.unit))
+    if unknown:
+        cursor.execute('''
+            SELECT sc.person_id, sc.source_value, sc.source_vocabulary_id,
+                   COALESCE(sc.source_unit_override, sc.source_unit)
+            FROM unnest(%s::int[], %s::text[]) AS o(person_id, code)
+            JOIN patient_source_code sc ON sc.person_id = o.person_id AND sc.source_value = o.code''',
+                       [[p for p, _ in unknown], [c for _, c in unknown]])
+        for person_id, code, vocabulary, unit in cursor.fetchall():
+            held[(person_id, code)].append((canonical_source_vocabulary(vocabulary), (unit or '').strip()))
+
+    found = defaultdict(lambda: {
+        'orders': set(), 'units': Counter(), 'descriptions': Counter(), 'loincs': Counter(),
+    })
+    for coding, person_id, target, rows, keys in listed:
+        record = rows[0]
+        if coding is None:
+            # A resource with no coding: all there is to list is the row's own code.
+            row = min(rows, key=lambda r: (r.vocabulary != target.vocabulary, r.vocabulary, r.code))
+            code, vocabulary, unit = row.code, row.vocabulary, row.unit
+        else:
+            code = coding[1]
+            vocabulary, unit = _vocabulary_of(coding, target, target.system_of(target.code),
+                                              held.get((person_id, code)))
+        if (vocabulary, code) == (target.vocabulary, target.code):
+            continue    # the opened test again, resulted twice in the order
+        entry = found[(vocabulary, code)]
+        entry['orders'] |= {(person_id, key) for key in keys}
+        if unit:
+            entry['units'][unit] += 1
+        if record.described(code):
+            entry['descriptions'][record.described(code)] += 1
+        # A LOINC the opened record carries too says nothing about this one:
+        # Epic files every vital sign under 8716-3 as well.
+        shared_loincs = set(target.loincs())
+        loinc = code if loinc_axes.is_loinc(vocabulary) else next(
+            (c for row in rows for c in row.loincs() if c not in shared_loincs), '')
+        if loinc:
+            entry['loincs'][loinc] += 1
+
+    names = Counter(label for labels in order_names.values() for label in labels)
+    summary['records_in_report'] = in_report
+    summary['orders'] = len(order_names)
     summary['order_names_total'] = len(names)
     summary['order_names'] = [
         {'name': name, 'count': count}
@@ -335,9 +424,10 @@ def _collect(cursor, mapping, empty):
 
 
 def _mappings(mapping, found):
-    """The current mapping of each co-occurring code: this hospital's when the
-    opened mapping is a hospital's, else the global one, in the table the
-    records sit in when the code is filed under several."""
+    """The current mapping of each co-occurring code. A hospital's opened
+    mapping sees that hospital's row before the global one and never another
+    hospital's. A global one sees the global row first, else a hospital's:
+    its walk read every hospital's patients, and the code is in the queue."""
     from omop_core.models import SourceCodeConceptMapping
 
     chosen = {}
@@ -346,10 +436,11 @@ def _mappings(mapping, found):
     ).select_related('target_concept').order_by('id')
     for row in rows:
         key = (canonical_source_vocabulary(row.source_vocabulary_id), row.source_code)
-        if key not in found or row.organization_id not in (None, mapping.organization_id):
+        if key not in found:
             continue
-        table = found[key]['tables'].most_common(1)[0][0]
-        rank = (row.organization_id is None, row.omop_table != table, row.pk)
+        if mapping.organization_id and row.organization_id not in (None, mapping.organization_id):
+            continue
+        rank = (row.organization_id != mapping.organization_id, row.organization_id is not None, row.pk)
         if key not in chosen or rank < chosen[key][0]:
             chosen[key] = (rank, row)
     return {key: row for key, (_, row) in chosen.items()}
@@ -365,6 +456,7 @@ def _status(row):
 
 
 def _serialize(mapping, found):
+    """One row per code, in the order *found* is in."""
     mappings = _mappings(mapping, found)
     destinations = {}
     for key, row in mappings.items():
@@ -391,7 +483,6 @@ def _serialize(mapping, found):
         codes.append({
             'source_code': code,
             'source_vocabulary_id': vocabulary,
-            'omop_table': row.omop_table if row else entry['tables'].most_common(1)[0][0],
             'description': described,
             'units': [unit for unit, _ in entry['units'].most_common(3)],
             'system': axes[loinc]['system'] if loinc else '',
@@ -402,30 +493,40 @@ def _serialize(mapping, found):
             'mapping_status': _status(row),
             'orders': len(entry['orders']),
         })
-    codes.sort(key=lambda c: (-c['orders'], c['source_code'], c['source_vocabulary_id']))
     return codes
 
 
 def co_occurring(mapping):
     """The coverage and co-occurring codes for *mapping*'s source code.
 
-    ``timed_out`` is true when the inventory walk hit its time limit; the
-    counts are then unknown, not zero.
+    ``applies`` is false for a code filed under a table that holds no results
+    (conditions, drugs, procedures). ``timed_out`` is true when the inventory walk hit its time
+    limit; the counts are then unknown, not zero.
     """
-    empty = {'records': 0, 'records_read': 0, 'records_with_order': 0, 'orders': 0,
+    empty = {'applies': True, 'timed_out': False, 'records': 0, 'records_read': 0,
+             'records_with_order': 0, 'records_in_report': 0, 'orders': 0,
              'order_names': [], 'order_names_total': 0, 'codes': [], 'codes_total': 0}
+    # A condition, a drug or a procedure is not resulted in a panel: nothing
+    # is read for one, and the dialog shows no section.
+    if (mapping.omop_table or '') not in (*RESULT_TABLES, ''):
+        return {**empty, 'applies': False}
     try:
         with transaction.atomic(), connection.cursor() as cursor:
             cursor.execute('SHOW statement_timeout')
             previous = cursor.fetchone()[0]
-            cursor.execute("SELECT set_config('statement_timeout', %s, true)", [str(STATEMENT_TIMEOUT_MS)])
-            summary, found = _collect(cursor, mapping, empty)
+            summary, found = _collect(_Budget(cursor, BUDGET_MS), mapping, empty)
             # Restore the caller's setting when this is nested in a request's
             # transaction. On failure the savepoint rollback restores it.
             cursor.execute("SELECT set_config('statement_timeout', %s, true)", [previous])
-    except OperationalError:
+    except (OperationalError, TimeoutError) as exc:
+        # Only the time limit is an answer. A dropped connection or any other
+        # database fault is an error, and is not reported as a slow walk.
+        if isinstance(exc, OperationalError) and not isinstance(exc.__cause__, QueryCanceled):
+            raise
+        # The mapping id only: no code text or order name belongs in a log.
+        logger.warning('Co-occurring walk for mapping %s exceeded %s ms', mapping.pk, BUDGET_MS)
         return {**empty, 'timed_out': True}
     # Most orders first; only the codes returned are looked up.
     kept = dict(sorted(found.items(), key=lambda item: (-len(item[1]['orders']), item[0][1], item[0][0]))[:MAX_CODES])
-    summary.update(timed_out=False, codes=_serialize(mapping, kept), codes_total=len(found))
+    summary.update(codes=_serialize(mapping, kept), codes_total=len(found))
     return summary

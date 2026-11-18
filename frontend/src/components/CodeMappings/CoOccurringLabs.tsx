@@ -11,7 +11,6 @@ import { editMappingUrl } from "./mappingLinks";
 export interface CoOccurringCode {
   source_code: string;
   source_vocabulary_id: string;
-  omop_table: string;
   description: string;
   units: string[];
   system: string;
@@ -26,11 +25,16 @@ export interface CoOccurringCode {
 }
 
 export interface CoOccurringLabsPayload {
+  /** False for a code that is not filed as a result (a condition, a drug): nothing is read or shown. */
+  applies: boolean;
   /** The walk hit its time limit: the counts are unknown, not zero. */
   timed_out: boolean;
   records: number;
   records_read: number;
+  /** Of every record, those that name an order (a basedOn reference). */
   records_with_order: number;
+  /** Of the records read, those that name no order and a DiagnosticReport joins. */
+  records_in_report: number;
   orders: number;
   order_names: Array<{ name: string; count: number }>;
   order_names_total: number;
@@ -42,7 +46,8 @@ const CODES_COLLAPSED_LIMIT = 10;
 
 /** No records at all: what a response is read over, so a field it omits is empty rather than undefined. */
 const NOTHING: CoOccurringLabsPayload = {
-  timed_out: false, records: 0, records_read: 0, records_with_order: 0, orders: 0,
+  applies: true, timed_out: false, records: 0, records_read: 0, records_with_order: 0, records_in_report: 0,
+  orders: 0,
   order_names: [], order_names_total: 0, codes: [], codes_total: 0,
 };
 
@@ -57,11 +62,13 @@ function count(value: number) {
   return new Intl.NumberFormat().format(value);
 }
 
-function Axis({ value, hospital }: { value: string; hospital: boolean }) {
+/** A System or Method, marked when it comes from the LOINC the hospital sent rather than a mapping. */
+function Axis({ value, hospitalLoinc }: { value: string; hospitalLoinc: string }) {
   if (!value) return <>—</>;
   return <>
     {value}
-    {hospital && <abbr title="From the LOINC the hospital sent" className="ml-1 font-semibold text-indigo-700 no-underline">H</abbr>}
+    {hospitalLoinc && <abbr title={`From the LOINC the hospital sent (${hospitalLoinc})`}
+      className="ml-1 font-semibold text-indigo-700 no-underline">H</abbr>}
   </>;
 }
 
@@ -70,6 +77,9 @@ export default function CoOccurringLabs({ mappingId }: { mappingId: number }) {
   // null until the read settles; `data` null when it failed.
   const [current, setCurrent] = useState<{ data: CoOccurringLabsPayload | null } | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const retry = <button type="button" onClick={() => { setCurrent(null); setAttempt((n) => n + 1); }}
+    className="ml-2 font-medium text-sky-700 underline hover:text-sky-900">Retry</button>;
 
   useEffect(() => {
     let active = true;
@@ -82,15 +92,17 @@ export default function CoOccurringLabs({ mappingId }: { mappingId: number }) {
       }
     })();
     return () => { active = false; };
-  }, [mappingId]);
+  }, [mappingId, attempt]);
 
   const data = current?.data ?? null;
+  const linked = data ? data.records_with_order + data.records_in_report : 0;
   const codes = data?.codes ?? [];
   const visible = expanded ? codes : codes.slice(0, CODES_COLLAPSED_LIMIT);
   const hidden = codes.length - CODES_COLLAPSED_LIMIT;
   const unlisted = data ? data.codes_total - codes.length : 0;
   const unnamed = data ? data.order_names_total - data.order_names.length : 0;
 
+  if (data && !data.applies) return null;
   return <div className="mt-4 border-t border-slate-200 pt-4">
     <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-600">
       Other results in the same panel/order (co-occurring labs)
@@ -101,19 +113,28 @@ export default function CoOccurringLabs({ mappingId }: { mappingId: number }) {
     </p>
     {!current && <p role="status" className="mt-2 text-sm text-slate-600">Looking for order links…</p>}
     {current && !data && <p role="alert" className="mt-2 text-sm text-red-700">
-      Could not load co-occurring labs. Close and reopen this mapping to retry.
+      Could not load co-occurring labs.{retry}
     </p>}
     {data?.timed_out && <p role="alert" className="mt-2 text-sm text-amber-800">
-      Reading the source records took too long. Close and reopen this mapping to retry.
+      Reading the source records took too long. A second read is usually quicker.{retry}
     </p>}
-    {data && !data.timed_out && data.records_with_order === 0 && (
-      <p className="mt-2 text-sm text-slate-600">No order links in the source records.</p>
+    {data && !data.timed_out && linked === 0 && (
+      <p className="mt-2 text-sm text-slate-600">
+        {data.records === 0 ? "No patient's source records hold this code." : "No order links in the source records."}
+      </p>
     )}
-    {data && !data.timed_out && data.records_with_order > 0 && <>
+    {data && !data.timed_out && linked > 0 && <>
       <dl className="mt-2 grid gap-2 text-xs sm:grid-cols-3">
         <div>
           <dt className="font-semibold text-slate-600">Records with an order reference</dt>
-          <dd className="text-slate-800">{count(data.records_with_order)} of {count(data.records)}</dd>
+          <dd className="text-slate-800">
+            {count(data.records_with_order)} of {count(data.records)}
+            <span className="text-slate-500"> (one record per patient)</span>
+          </dd>
+          {data.records_in_report > 0 && <dd className="text-slate-500">
+            {count(data.records_in_report)} of the {count(data.records_read)} read name no order and are listed in a
+            DiagnosticReport
+          </dd>}
         </div>
         <div>
           <dt className="font-semibold text-slate-600">Distinct orders</dt>
@@ -150,7 +171,7 @@ export default function CoOccurringLabs({ mappingId }: { mappingId: number }) {
               {visible.map((code) => {
                 const status = STATUS[code.mapping_status] ?? { label: code.mapping_status, tone: STATUS.unmapped.tone };
                 const seen = `In ${count(code.orders)} of ${count(data.orders)} orders`;
-                const hospital = code.axes_basis === "hospital";
+                const hospitalLoinc = code.axes_basis === "hospital" ? code.axes_loinc : "";
                 return <tr key={`${code.source_vocabulary_id}|${code.source_code}`}>
                   <td className="py-2 pr-3 font-mono text-slate-900">
                     {code.mapping_id != null
@@ -158,11 +179,13 @@ export default function CoOccurringLabs({ mappingId }: { mappingId: number }) {
                         target="_blank" rel="noopener noreferrer"
                         title={`Open Edit Mapping for ${code.source_code}. ${seen}.`}>{code.source_code}</a>
                       : <span title={`Not in the mapping queue yet. ${seen}.`}>{code.source_code}</span>}
+                    {/* The title is not read out or reachable by keyboard. */}
+                    <span className="sr-only">, {seen.toLowerCase()}</span>
                   </td>
                   <td className="py-2 pr-3 text-slate-800">{code.description || "—"}</td>
                   <td className="py-2 pr-3 text-slate-700">{code.units.length ? code.units.join(", ") : "—"}</td>
-                  <td className="py-2 pr-3 text-slate-700"><Axis value={code.system} hospital={hospital} /></td>
-                  <td className="py-2 pr-3 text-slate-700"><Axis value={code.method} hospital={hospital} /></td>
+                  <td className="py-2 pr-3 text-slate-700"><Axis value={code.system} hospitalLoinc={hospitalLoinc} /></td>
+                  <td className="py-2 pr-3 text-slate-700"><Axis value={code.method} hospitalLoinc={hospitalLoinc} /></td>
                   <td className="py-2">
                     <span className={`rounded px-1.5 py-0.5 font-medium ${status.tone}`}>{status.label}</span>
                   </td>
