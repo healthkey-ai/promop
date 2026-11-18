@@ -10,6 +10,7 @@ import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { linkedMappingId } from "./mappingLinks";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
@@ -427,14 +428,18 @@ export default function CodeMappingPage() {
   const canWrite = canWriteMappings(currentUser);
   // ?direction=reverse&concept=<id>, from the field mapper's {codes} button:
   // open Concept → Source Code on that concept's source codes.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const linkedConcept = Number(searchParams.get('concept'));
   // Held in state and cleared once opened: switching direction remounts the
   // reverse view, which must not reopen the concept each time.
   const [linkedConceptId, setLinkedConceptId] = useState<number | undefined>(
     Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined);
+  // ?mapping=<id>, from a co-occurring lab in another mapping's Source
+  // Evidence (#2702): open that mapping's Edit Mapping dialog. Held in state
+  // and cleared once handled, like the linked concept.
+  const [linkedMapping, setLinkedMapping] = useState<number | undefined>(() => linkedMappingId(searchParams));
   const [direction, setDirection] = useState<'forward' | 'reverse'>(
-    searchParams.get('direction') === 'forward' ? 'forward' : 'reverse');
+    searchParams.get('direction') === 'forward' || linkedMapping !== undefined ? 'forward' : 'reverse');
   const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
@@ -949,6 +954,40 @@ export default function CodeMappingPage() {
     setDialogMode(null);
     setSelectedRow(null);
   };
+
+  // Open the mapping a link named, once the reader is known to be a writer:
+  // a reader opens no dialog (#2416), and is left on the list. Once only (the
+  // latch holds through StrictMode's second run), and never over a dialog the
+  // curator opened while the mapping was being read.
+  const linkedMappingHandled = useRef(false);
+  const openLinkedMapping = useRef<(mappingId: number) => Promise<void>>(async () => {});
+  useEffect(() => {
+    openLinkedMapping.current = async (mappingId) => {
+      const sequence = duplicateLoadSequence.current;
+      try {
+        const { data } = await api.get<CodeMappingRow>(`/v1/code-mappings/${mappingId}/`);
+        // openEditDialog and openNewDialog advance the sequence.
+        if (sequence === duplicateLoadSequence.current) openEditDialog(data);
+      } catch {
+        if (sequence === duplicateLoadSequence.current) setError("Could not open the linked mapping.");
+      }
+    };
+  });
+  useEffect(() => {
+    if (linkedMapping === undefined || authLoading || linkedMappingHandled.current) return;
+    linkedMappingHandled.current = true;
+    (async () => {
+      setLinkedMapping(undefined);
+      // The link is spent: a reload or Back must not open the dialog again.
+      setSearchParams((previous) => {
+        const next = new URLSearchParams(previous);
+        next.delete("mapping");
+        return next;
+      }, { replace: true });
+      if (canWrite) await openLinkedMapping.current(linkedMapping);
+      else setError("Opening a mapping from a link needs mapping write access.");
+    })();
+  }, [linkedMapping, authLoading, canWrite, setSearchParams]);
 
   const applySavedMapping = (saved: CodeMappingRow) => {
     if (!saved?.mapping_id || !saved.status) return;

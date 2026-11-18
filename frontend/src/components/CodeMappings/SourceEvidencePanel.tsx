@@ -1,4 +1,5 @@
 import { useState } from "react";
+import CoOccurringLabs from "./CoOccurringLabs";
 import { sourceSystemManagementUrl } from "./sourceSystemContext";
 
 export interface SourceDistribution {
@@ -138,8 +139,10 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
 
 const FACILITIES_COLLAPSED_LIMIT = 3;
 
-export default function SourceEvidencePanel({ evidence, sourceSystem, loading, error }: {
+export default function SourceEvidencePanel({ evidence, mappingId, sourceSystem, loading, error }: {
   evidence: SourceEvidence | null;
+  /** The mapping the evidence is for; with it the panel reads its co-occurring labs (#2702). */
+  mappingId?: number;
   sourceSystem?: string;
   loading: boolean;
   error?: string;
@@ -296,5 +299,9 @@ export default function SourceEvidencePanel({ evidence, sourceSystem, loading, e
         </div>}
       </dl>}
     </>}
+    {/* Outside the evidence above: it does not depend on that read having
+        succeeded. After it has settled, though: this one walks patients'
+        records, and the dialog's own reads should not queue behind it. */}
+    {mappingId != null && (evidence || error) && <CoOccurringLabs key={mappingId} mappingId={mappingId} />}
   </section>;
 }

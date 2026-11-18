@@ -1420,6 +1420,62 @@ before paging and counts. Both lists have a "with notes" checkbox, off by
 default, and show a yellow sticky note with the text on hover on each such
 row (`has_curator_note` on a mapping row, `curator_note` on a source row).
 
+### Co-occurring labs in Edit Mapping
+
+The dialog's Source Evidence ends with the other results in the same panel or
+order as the opened code (#2702): albumin and the alpha, beta and gamma
+fractions beside "m-spike quantitation" say electrophoresis. `GET
+/api/v1/code-mappings/<id>/co-occurring/` (`omop_core/services/co_occurring_labs.py`)
+returns the coverage (records naming an order, distinct orders, order names
+with counts) and one row per co-occurring source code: description, units,
+System, Method, mapping status and the mapping to open. It has the audience of
+the mapping's own source evidence: every mapping reader, whatever their
+organization, and no service token. It returns codes, order names and counts,
+never a patient, a date or a result value.
+
+- **The evidence is the per-patient inventory**, which keeps one sample
+  resource per patient and code. Two codes are seen together only when a
+  patient's samples for both come from the same order, so the table shows
+  co-occurrence and never proves its absence. The OMOP rows hold no order.
+- **An order is a `basedOn` reference**, matched within one patient. A display
+  with no reference names an order and joins nothing. A record that names no
+  order is joined through a DiagnosticReport in the patient's inventory whose
+  `result` lists it (`Observation/<id>`, as the ETL stores it), and counted
+  apart (`records_in_report`, over the records read). A hospital's mapping
+  reads only that hospital's patients.
+- **One Observation is one result, listed under one of its own codings**: the
+  one in the opened code's code system, else a local code before the LOINC
+  beside it. Not under the code of the inventory row that sampled it: a LOINC
+  shared by several local codes samples only one of them, and Epic files every
+  vital sign under 8716-3 as well. The patient's inventory row for the listed
+  code says which code system the ETL filed it under. The opened record's own
+  Observation (same resource id; without ids, one listing the opened code) is
+  left out.
+- **System and Method** are the LOINC axes of the code's current mapping
+  (approved or proposed) when it lands on a LOINC, else those of a LOINC the
+  hospital sent on the record that the opened record does not also carry,
+  which the table marks "H"; blank when neither.
+- **The mapping shown** is the opened mapping's hospital's row, then the
+  global one; a global opened mapping falls back to a hospital's row, so a
+  queued code is never shown as outside the queue.
+- **It is bounded and read after the dialog's own load.** A HealthTree
+  patient's inventory is about 4,000 stored resources, and reading them is the
+  cost: the walk takes the first `MAX_RECORDS` (25) records, those naming an
+  order first, looks for results only under `measurement` and `observation`
+  and for reports only elsewhere, and joins rather than testing per row (about
+  1s there with the rows cached). The walk as a whole has an 8s budget
+  (`BUDGET_MS`), spent across its statements; one that outruns it, usually the
+  first read after the rows have left the cache, returns `timed_out` and logs
+  the mapping id, and the dialog offers Retry instead of an empty answer. The
+  count of records naming an order is over every record; the orders and the
+  table are over the records read. A code filed as a condition, drug or
+  procedure is not walked (`applies: false`) and the dialog shows no section.
+- A code in the table links to `/code-mappings?direction=forward&mapping=<id>`,
+  which opens that mapping's Edit Mapping dialog in a new tab and then drops
+  `mapping` from the address (`mappingLinks.ts`); a code with no queue row is
+  plain text, and a reader without mapping write access is told why nothing
+  opened.
+
 ### A code's rows follow its mapping to another table
 
 A curator who changes a mapping's Domain re-files it under another clinical
