@@ -1494,6 +1494,26 @@ Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
 before enabling it there.** Off, nothing is queried, queued or written. See
 [the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
 
+### What the provisional pass reads (#2534)
+
+`patient_record_provisional` is built by `omop_core/services/provisional_record.py`
+from provisional rows only, with one rule for every reader: a value is kept only
+where `patient_record` has no answer for the field and nobody typed one, and its
+confidence is the lowest among the rows that decide it. The phase 1 readers (labs,
+blood counts, assertions, vitals, curated field mappings) read provisional
+measurements and observations. Two composite readers read the other tables:
+the disease fields (`disease`, `disease_slug`, `diagnosis_date`,
+`diagnosis_date_precision`, `condition_clinical_status`) from the cancer among the
+provisional conditions -- run only when one is a cancer, and only for a record with no
+disease yet or the same one, so another cancer's dates never fill a disease the record
+names -- and `concomitant_medications` from the provisional drug exposures through the
+real reader's own `recent_medications`. Not run, and why: therapy lines (persisted
+Episodes, which a proposal must not create), staging/cytogenetics/SCT/cancer details
+(curator-written observation keys, not proposal-fed concepts), and every JSON field
+(`active_malignancies`, `disease_slugs`, `genetic_mutations`, `prior_procedures`, the
+`genomics_*` markers), which has no confidence column. A patient whose approved record
+already answers these fields shows nothing new: real beats provisional.
+
 ### One patient's full provisional view: `fill_provisional_record`
 
 `manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much

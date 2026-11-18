@@ -558,6 +558,31 @@ rule for a composite field is the **minimum** confidence of the provisional
 rows that joined its answer. JSON-typed fields are in this group, so the
 confidence table has no column for them until then.
 
+### Composite readers as built (#2534)
+
+Two composite readers join the pass, over provisional conditions and drug
+exposures only, with the phase 1 rule (a value only where the real record is
+empty and nobody typed one; the lowest confidence among the rows that decide it):
+
+| Reader | Fields | Deciding rows |
+|---|---|---|
+| disease (`_get_disease_data` over provisional conditions) | `disease`, `disease_slug`, `diagnosis_date`, `diagnosis_date_precision`, `condition_clinical_status` | the cancer `_primary_cancer_condition` picks; its confidence is every field's |
+| medications (`recent_medications`, shared with the real reader) | `concomitant_medications` | the provisional exposures in the list (the five newest named of the last ten) |
+
+The disease reader runs only when a provisional condition is a cancer, because
+without one its fallbacks take a diagnosis date from any condition and a status
+from the newest one. The group is offered only when the record has no disease or
+names the same one (same slug): a second cancer's dates must not fill the first
+one's gaps. Left out: therapy lines (they read persisted Episodes, which a
+proposal must not create), staging, cytogenetics, SCT and cancer details (they
+read curator-written observation source keys that a proposed concept never
+carries), the fields of `active_malignancies`, `disease_slugs`,
+`genetic_mutations`, `prior_procedures` and the `genomics_*` markers (JSON: no
+confidence column until the JSON phase), and `active_infection_status` (a
+"none found" over a provisional-only view says nothing). A patient whose
+approved record already holds these fields, such as one with many approved
+rows, shows nothing new from them: real beats provisional.
+
 ### Computed fields
 
 `recompute_patient_record_fields` computes BMI, scores and aliases from stored
@@ -839,7 +864,7 @@ without a click:
 | A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
 | The patient's "Confirm my record" attestation is still offered while proposals are shown | (no issue yet) | open |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
-| Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | open |
+| Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields and `concomitant_medications`; therapy lines, staging, genomics, JSON fields open |
 
 The rule for all of them: with the switch off, no provisional data is computed,
 stored or shown to anyone.

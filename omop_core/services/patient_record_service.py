@@ -1940,6 +1940,24 @@ def _disease_name_to_slug(name: str) -> str:
     return slug[:100]
 
 
+def recent_medications(drug_exposures) -> tuple[list, list]:
+    """(names, rows) of the medications ``concomitant_medications`` lists.
+
+    *drug_exposures* is ordered oldest first. The list is the names of the five
+    newest rows that have one, newest first (a nameless row is skipped, not
+    replaced by an older one). Shared with the
+    provisional pass, which runs it over provisional rows only and needs the
+    rows to say which proposals decided the field.
+    """
+    names, rows = [], []
+    for drug in list(reversed(drug_exposures[-10:]))[:5]:
+        name = _usable_concept_name(drug.drug_concept) or drug.drug_source_value
+        if name:
+            names.append(name)
+            rows.append(drug)
+    return names, rows
+
+
 def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
@@ -1955,13 +1973,7 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data['medication_contexts'] = {str(pk): values for pk, values in
         medication_contexts(person.pk, [row.pk for row in drug_exposures]).items()}
 
-    recent_drugs = list(reversed(drug_exposures[-10:]))
-
-    current_meds = []
-    for drug in recent_drugs[:5]:
-        name = _usable_concept_name(drug.drug_concept) or drug.drug_source_value
-        if name:
-            current_meds.append(name)
+    current_meds, _ = recent_medications(drug_exposures)
     if current_meds:
         data['concomitant_medications'] = ', '.join(current_meds)
 
