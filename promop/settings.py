@@ -655,6 +655,8 @@ REST_FRAMEWORK = {
         # group voting from one meeting room is one address. What bounds
         # outgoing mail is counted in the database: MAPPING_VOTE_MAX_* below.
         'mapping_vote_read': os.environ.get('MAPPING_VOTE_READ_THROTTLE_RATE', '60/minute'),
+        # Builds a file (the Word document is ~0.5s of CPU), so tighter than the page read.
+        'mapping_vote_export': os.environ.get('MAPPING_VOTE_EXPORT_THROTTLE_RATE', '20/minute'),
         'mapping_vote_submit': os.environ.get('MAPPING_VOTE_SUBMIT_THROTTLE_RATE', '30/hour'),
         'mapping_vote_confirm': os.environ.get('MAPPING_VOTE_CONFIRM_THROTTLE_RATE', '60/hour'),
     },

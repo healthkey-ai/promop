@@ -11,7 +11,10 @@ reject as before.
 
 Everything a voter can reach here is reference data: the proposals are the
 global wearable mappings with status ``proposed``, a metric key and a loaded
-destination concept, read live. No patient data is reachable from a share.
+destination concept, read live. A share also downloads the tab's mappings as a
+file (``wearable_mapping_export.export_file(public=True)``): the global rows
+that are not rejected, without provenance or source units. No patient data is
+reachable from a share.
 
 Both tokens are credentials. They travel in a URL fragment and a request
 body, never in a path or a query string, so no access log, audit row or error

@@ -242,6 +242,8 @@ urlpatterns = [
          name='v1-code-mapping-votes'),
     path('public/mapping-votes/', mapping_votes.PublicVotePageView.as_view(),
          name='v1-public-mapping-vote-page'),
+    path('public/mapping-votes/export/', mapping_votes.PublicVoteExportView.as_view(),
+         name='v1-public-mapping-vote-export'),
     path('public/mapping-votes/submit/', mapping_votes.PublicVoteSubmitView.as_view(),
          name='v1-public-mapping-vote-submit'),
     path('public/mapping-votes/confirm/preview/', mapping_votes.PublicVotePreviewView.as_view(),

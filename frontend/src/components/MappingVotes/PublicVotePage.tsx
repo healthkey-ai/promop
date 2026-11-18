@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import { publicApi } from "@/api/publicAxios";
+import WearableMappingsDownload, { type FetchWearableFile } from "@/components/CodeMappings/WearableMappingsDownload";
 import { ProposalDestination, ProposalSource } from "./ProposalSummary";
 import {
   counted, errorDetail, errorStatus, tokenFromHash,
@@ -52,6 +53,13 @@ export default function PublicVotePage() {
     })();
     return () => { cancelled = true; };
   }, [token]);
+
+  // The same files the Wearables tab downloads, asked for with the link's
+  // token in the body: the proposals below and the mappings already approved,
+  // against their OMOP concept or the CDISC Biomedical Concept it shares.
+  const fetchFile = useMemo<FetchWearableFile>(() => (format, destination) => publicApi.post<Blob>(
+    "/v1/public/mapping-votes/export/", { token, file_format: format, destination }, { responseType: "blob" },
+  ), [token]);
 
   const acted = useMemo(
     () => Object.entries(drafts)
@@ -146,6 +154,13 @@ export default function PublicVotePage() {
           are not recorded until you confirm, and a vote does not change a mapping: the curators who
           maintain them read the votes and decide.
         </p>
+        <div className="mt-4 rounded-md border border-slate-200 bg-white p-3">
+          <p className="mb-2 text-xs text-slate-600">
+            The full set of wearable mappings, proposed and approved, as a file. Choose CDISC Biomedical
+            Concept to see which wearable codes reach a BC through the concept they map to.
+          </p>
+          <WearableMappingsDownload fetchFile={fetchFile} />
+        </div>
         {total === 0 && (
           <p role="status" className="mt-6 rounded-md border border-slate-200 bg-white p-4 text-sm text-slate-600">
             There are no proposals open for voting right now.

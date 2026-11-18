@@ -14,15 +14,28 @@ const mockPage = vi.fn();
 const mockSubmit = vi.fn();
 const PAGE_URL = "/v1/public/mapping-votes/";
 const SUBMIT_URL = "/v1/public/mapping-votes/submit/";
+const EXPORT_URL = "/v1/public/mapping-votes/export/";
+const mockExport = vi.fn();
+const mockSaveBlob = vi.fn();
 vi.mock("@/api/publicAxios", () => ({
   publicApi: {
     get: (...args: unknown[]) => mockGet(...args),
-    post: (url: string, ...rest: unknown[]) => (url === SUBMIT_URL ? mockSubmit(url, ...rest) : mockPage(url, ...rest)),
+    post: (url: string, ...rest: unknown[]) => (
+      url === SUBMIT_URL ? mockSubmit(url, ...rest) : url === EXPORT_URL ? mockExport(url, ...rest) : mockPage(url, ...rest)),
   },
+}));
+vi.mock("@/utils/download", async (original) => ({
+  ...(await original<typeof import("@/utils/download")>()),
+  saveBlob: (...args: unknown[]) => mockSaveBlob(...args),
 }));
 // The signed-in client must never be touched from a public page.
 const mockPrivate = vi.fn();
-vi.mock("@/api/axios", () => ({ default: { get: mockPrivate, post: mockPrivate, patch: mockPrivate, delete: mockPrivate } }));
+// Called lazily: the download control imports the signed-in client's module, so
+// this factory runs before `mockPrivate` is initialised.
+vi.mock("@/api/axios", () => {
+  const viaPrivate = (...args: unknown[]) => mockPrivate(...args);
+  return { default: { get: viaPrivate, post: viaPrivate, patch: viaPrivate, delete: viaPrivate } };
+});
 
 const proposal = (id: number, code: string, extra: Partial<VotePage["groups"][0]["proposals"][0]> = {}) => ({
   id, metric_key: "steps", measure_class: "Aggregate over interval", source: "HealthKit", source_code: code,
@@ -50,7 +63,7 @@ const button = (name: string) => screen.getByRole("button", { name });
 const counts = () => screen.getByTestId("vote-counts").textContent;
 
 beforeEach(() => {
-  [mockGet, mockPage, mockSubmit, mockPrivate].forEach((mock) => mock.mockReset());
+  [mockGet, mockPage, mockSubmit, mockPrivate, mockExport, mockSaveBlob].forEach((mock) => mock.mockReset());
   mockPage.mockResolvedValue({ data: PAGE });
   mockSubmit.mockResolvedValue({ data: { detail: SENT } });
 });
@@ -254,5 +267,21 @@ describe("PublicVotePage", () => {
     expect(await screen.findByText("<img src=x onerror=alert(1)>")).toBeInTheDocument();
     expect(screen.getByText("<i>code</i>")).toBeInTheDocument();
     expect(container.querySelector("img, script, i, b, a")).toBeNull();
+  });
+
+  it("downloads the mappings with the link's token in the body, never the signed-in client", async () => {
+    const file = new Blob(["x"]);
+    mockExport.mockResolvedValue({
+      data: file, headers: { "content-disposition": 'attachment; filename="wearable-cdisc-bc-mappings-2026-11-18.csv"' },
+    });
+    renderPage();
+    const group = await screen.findByRole("group", { name: "Download all wearable mappings" });
+    await userEvent.selectOptions(within(group).getByRole("combobox", { name: "Map codes to" }), "cdisc-bc");
+    await userEvent.click(within(group).getByRole("button", { name: "Download all wearable mappings as CSV" }));
+    expect(mockExport).toHaveBeenCalledWith(
+      EXPORT_URL, { token: "share-token", file_format: "csv", destination: "cdisc-bc" }, { responseType: "blob" });
+    await waitFor(() => expect(mockSaveBlob).toHaveBeenCalledWith(file, "wearable-cdisc-bc-mappings-2026-11-18.csv"));
+    expect(mockPrivate).not.toHaveBeenCalled();
+    expect(mockGet).not.toHaveBeenCalled();
   });
 });
