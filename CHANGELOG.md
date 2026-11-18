@@ -298,6 +298,23 @@ All notable changes to PRomop are documented here.
   keyed fallback saw no unkeyed candidate and the replay inserted a duplicate.
   The fallback now reads the unkeyed candidates captured before the narrowing,
   and still counts their distinct attributions to decide ambiguity.
+- **The eligibility benchmark reads lab pairs with the derivation's range gate
+  (#2475)** — `benchmark_trial_eligibility` converted a paired lab value but
+  never applied the canonical column's range, so a negative or
+  out-of-column value came back as a number while the derivation treats it as
+  no evidence. The five paired fields (hemoglobin, creatinine, albumin, serum
+  calcium, total bilirubin) now apply the same `*_canonical_in_range` predicate
+  after conversion, and their measurement query names a row the way
+  `_measurement_code` names the coded representation: a LOINC-shaped concept
+  code wins over the source value, so a molar 59260-0 row carrying a 718-7
+  source value is no longer read as g/dL hemoglobin. The paired fields and the
+  ANC/platelet counts take their accepted codes from
+  `resolve_lab_code_fields()`, the curation tables the derivation itself reads,
+  so a curator-approved alias is not dropped for a hardcoded list; WBC keeps
+  its single code because its derivation path converts only `6690-2`. The
+  display-name and legacy-name read paths, the number/text builders and the
+  person-scoped resolution remain approximations and are tracked in #2708.
+  Read-only command: `PatientRecord` and `DERIVATION_VERSION` are unchanged.
 - **A zero unit concept is not a unit on the lab-results summary (#2481)** —
   the summary SQL joined `concept` on `unit_concept_id` unconditionally, so a
   result whose `unit_concept_id` is OMOP's concept 0 ("No matching concept")

@@ -14,6 +14,7 @@ from django.core.management.base import CommandError
 
 from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
 from omop_core.models import Organization, PatientRecord
+from omop_core.services.patient_record_service import _get_laboratory_data
 from tests.factories import (
     ConditionOccurrenceFactory,
     ConceptFactory,
@@ -256,6 +257,88 @@ def _ucum(code):
     return ConceptFactory(vocabulary_id='UCUM', concept_code=code)
 
 
+@pytest.mark.parametrize('code,value,field', [
+    ('718-7', '-1', 'hemoglobin_g_dl'),
+    ('718-7', '10000', 'hemoglobin_g_dl'),
+    ('2160-0', '1000', 'serum_creatinine_mg_dl'),
+    ('1751-7', '-1', 'albumin_g_dl'),
+])
+def test_an_out_of_range_pair_is_no_evidence(code, value, field):
+    """The canonical columns have limits; the derivation rejects a value the
+    column cannot hold, and the benchmark must not report it either (#2475)."""
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, code, Decimal(value), None)
+
+    assert _fetch_omop_trial_row(person.person_id)[field] is None
+
+
+def test_a_raw_value_above_the_column_limit_survives_its_conversion():
+    """The range gate applies to the canonical, not to the raw row: 1000 umol/L
+    is a valid 11.31 mg/dL creatinine even though the raw number exceeds the
+    mg/dL column's limit."""
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, '38483-4', 1000, 'umol/L')
+
+    row = _fetch_omop_trial_row(person.person_id)
+
+    assert row['serum_creatinine_mg_dl'] == Decimal('11.31')
+    assert _get_laboratory_data(person)['serum_creatinine_mg_dl'] == Decimal('11.31')
+
+
+def test_the_benchmark_reads_the_five_pairs_exactly_as_the_derivation_does():
+    """One stored row per pair, read by both surfaces: the benchmark's own
+    conversion must not drift from the derivation's (#2475)."""
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, '718-7', 135, 'g/L')
+    _measurement(person, '2160-0', 221, 'umol/L')
+    _measurement(person, '17861-6', 2.9, 'mmol/L')
+    _measurement(person, '1975-2', 20, 'umol/L')
+    _measurement(person, '1751-7', 40, 'g/L')
+
+    row = _fetch_omop_trial_row(person.person_id)
+    lab = _get_laboratory_data(person)
+
+    for field in ('hemoglobin_g_dl', 'serum_creatinine_mg_dl',
+                  'serum_calcium_mg_dl', 'bilirubin_total_mg_dl',
+                  'albumin_g_dl'):
+        assert row[field] == lab[field], field
+
+
+def test_the_benchmark_and_the_derivation_reject_the_same_out_of_range_value():
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, '1751-7', -1, 'g/L')
+
+    assert _fetch_omop_trial_row(person.person_id)['albumin_g_dl'] is None
+    assert _get_laboratory_data(person)['albumin_g_dl'] is None
+
+
+def test_a_loinc_concept_wins_over_a_loinc_shaped_source_value():
+    """The derivation names a row by its LOINC-shaped concept code and only
+    defers to the source value otherwise; a molar 59260-0 row with a 718-7
+    source value is not g/dL hemoglobin (#2475)."""
+    person = PersonFactory(year_of_birth=1960)
+    molar = ConceptFactory(
+        concept_code='59260-0', concept_name='Hemoglobin [Moles/volume]',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'))
+    MeasurementFactory(
+        person=person, measurement_concept=molar,
+        measurement_source_value='718-7', value_as_number=Decimal('8'))
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] is None
+    assert _get_laboratory_data(person).get('hemoglobin_g_dl') is None
+
+
+def test_a_source_only_row_still_names_its_measurement():
+    """The positive control for the precedence rule: a non-LOINC concept defers
+    to a LOINC-shaped source value, as before."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='718-7',
+        value_as_number=Decimal('12.4'))
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] == Decimal('12.4')
+
+
 def test_a_row_converted_on_write_is_read_from_the_number_as_sent():
     """The stored value is in UCUM's unit; the sent number proves the source."""
     person = PersonFactory(year_of_birth=1960)
@@ -336,3 +419,52 @@ def test_an_unproven_converted_count_is_no_evidence():
     )
 
     assert _fetch_omop_trial_row(person.person_id)['wbc_count_thousand_per_ul'] is None
+
+
+def test_a_curated_alias_code_is_read_through_its_own_concept(lab_field_mappings):
+    """The benchmark takes each field's codes from the curation tables, so an
+    approved alias is read through its concept even when the row's source value
+    is blank (#2475 review)."""
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+
+    person = PersonFactory(year_of_birth=1960)
+    mapping = FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl')
+    alias = ConceptFactory(
+        concept_code='30313-1', concept_name='Hemoglobin [Mass/volume] in Arterial blood')
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code=alias.concept_code,
+        target_concept_id=mapping.concept_id, status='approved',
+        omop_table='measurement', origin='curator')
+    MeasurementFactory(
+        person=person, measurement_concept=alias,
+        measurement_source_value=None, value_as_number=Decimal('12.2'))
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] == Decimal('12.2')
+    assert _get_laboratory_data(person)['hemoglobin_g_dl'] == Decimal('12.2')
+
+
+def test_a_newer_approved_count_alias_is_the_one_that_counts(lab_field_mappings):
+    """Platelets and ANC select the newest row across every routed code, as the
+    derivation's blood-count projection does (#2475)."""
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+
+    person = PersonFactory(year_of_birth=1960)
+    mapping = FieldConceptMapping.objects.get(field_name='anc_thousand_per_ul')
+    alias = ConceptFactory(concept_code='26499-4', concept_name='Neutrophils in Blood')
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code=alias.concept_code,
+        target_concept_id=mapping.concept_id, status='approved',
+        omop_table='measurement', origin='curator')
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='751-8'),
+        measurement_source_value='751-8', measurement_date='2024-01-01',
+        value_as_number=Decimal('2.1'))
+    MeasurementFactory(
+        person=person, measurement_concept=alias,
+        measurement_source_value='26499-4', measurement_date='2024-02-01',
+        value_as_number=Decimal('1500'), unit_source_value='cells/uL')
+
+    row = _fetch_omop_trial_row(person.person_id)
+
+    assert row['anc_thousand_per_ul'] == Decimal('1.5')
+    assert _get_laboratory_data(person)['anc_thousand_per_ul'] == Decimal('1.5')
