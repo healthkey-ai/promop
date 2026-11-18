@@ -147,7 +147,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     # not need and that would exceed the full-refresh query budget.
     mappings = FieldConceptMapping.objects.filter(
         status='approved', field_name__in=readable_fields,
-    ).exclude(wrong_breast_field_mappings()).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
+    ).exclude(wrong_breast_field_mappings()).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').exclude(field_name='protein_expressions').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
     )
     sct_mapping = None

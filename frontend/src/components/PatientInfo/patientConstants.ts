@@ -162,8 +162,10 @@ export const PROTEIN_EXPRESSION_OPTIONS = [
   'CD49d +ve', 'CD49d -ve', 'CD19 +ve', 'CD19 -ve',
   'CD5 +ve', 'CD5 -ve', 'CD20 +ve', 'CD20 -ve',
   'CD23 +ve', 'CD23 -ve',
-  'Kappa (κ) light chain +ve', 'Kappa (κ) light chain -ve',
-  'Lambda (λ) light chain +ve', 'Lambda (λ) light chain -ve',
+  // The curated FieldChoice values (#2574): the tab and the federated picker
+  // must submit the same strings or a selection cannot be toggled.
+  'Kappa light chain +ve', 'Kappa light chain -ve',
+  'Lambda light chain +ve', 'Lambda light chain -ve',
 ];
 
 export const RICHTER_TRANSFORMATION_OPTIONS = [
