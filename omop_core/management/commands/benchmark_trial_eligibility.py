@@ -36,12 +36,13 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.functions import Coalesce, JSONObject
+from django.db.models.functions import Coalesce, JSONObject, NullIf
 
 from omop_core.models import ConditionOccurrence, Measurement, Observation, PatientRecord, Person
 from omop_core.services.chemistry_units import (
     PAIRS as CHEMISTRY_PAIRS,
     canonical_from_pair as chemistry_canonical_from_pair,
+    canonical_in_range as chemistry_canonical_in_range,
     normalize_unit as normalize_chemistry_unit,
 )
 from omop_core.services.canonical_units import value_in_source_unit
@@ -49,14 +50,20 @@ from omop_core.services.clinical_units import blood_count_to_canonical, count_un
 from omop_core.services.creatinine_units import (
     DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
     canonical_from_pair as creatinine_canonical_from_pair,
+    canonical_in_range as creatinine_canonical_in_range,
     normalize_unit as normalize_creatinine_unit,
 )
 from omop_core.services.hemoglobin_units import (
     DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
     canonical_from_pair as hemoglobin_canonical_from_pair,
+    canonical_in_range as hemoglobin_canonical_in_range,
     normalize_unit as normalize_hemoglobin_unit,
 )
-from omop_core.services.patient_record_service import _resolve_reported_unit
+from omop_core.services.patient_record_service import (
+    _LOINC_CODE_RE,
+    _resolve_reported_unit,
+    resolve_lab_code_fields,
+)
 
 
 TRIAL_ELIGIBILITY_FIELDS = [
@@ -160,9 +167,37 @@ def _latest_measurement_number_subquery(concept_codes, output_field):
     return Subquery(qs, output_field=output_field)
 
 
-def _latest_blood_count_subquery(code):
-    """Keep the source unit alongside the newest count, including unknowns."""
-    return _latest_measurement_pair_subquery([code])
+def _latest_blood_count_subquery(concept_codes):
+    """Keep the source unit alongside the newest count, including unknowns.
+
+    The selection follows the derivation's blood-count projection, which takes
+    the newest row across every code routed to the field and converts its unit.
+    WBC keeps its single code: its derivation path converts ``6690-2`` only.
+    """
+    return _latest_measurement_pair_subquery(concept_codes)
+
+
+#: A code that names the row's measurement, as ``_measurement_code`` decides it:
+#: a LOINC-shaped concept code wins over the source value, so a row that carries
+#: a different LOINC concept is not read through a LOINC-shaped source value.
+#: The derivation's own pattern, so the two dialects cannot drift.
+_LOINC_CODE_PATTERN = _LOINC_CODE_RE.pattern
+
+
+def _codes_for(code_fields, field):
+    """The LOINC codes the derivation routes to *field*.
+
+    The curation tables are the authority (#1796): reading the benchmark's own
+    hardcoded list would miss an alias a curator approved, and a row whose
+    concept is that alias would silently drop out of the benchmark while the
+    derivation still reads it (#2475).
+
+    Resolved once per run without measurements, so the derivation's
+    "no LOINC lab on this person means no curation" fallback is approximated
+    here; #2708 tracks it.
+    """
+    return tuple(sorted(
+        code for code, (target, _cast) in code_fields.items() if target == field))
 
 
 def _latest_measurement_pair_subquery(concept_codes):
@@ -171,12 +206,34 @@ def _latest_measurement_pair_subquery(concept_codes):
     The derivation reads a value in its canonical unit, so a benchmark that
     compared the raw ``value_as_number`` would report 221 umol/L creatinine as
     221 mg/dL (#2438 class). The payload carries the unit to convert with.
+
+    The row is selected by its effective code, the same precedence
+    ``_measurement_code`` uses: a LOINC-shaped concept code names the
+    measurement, and only a concept that is not LOINC-shaped defers to the
+    source value. Matching either column, as this query did before #2475, read a
+    row whose concept is 59260-0 (moles/volume) through a 718-7 source value as
+    g/dL hemoglobin.
+
+    Only the paired-lab and blood-count subqueries use this builder. The
+    number/text builders still match either column; that pre-existing
+    divergence from the derivation is #2708.
     """
     return Subquery(
-        Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False).filter(
-            Q(measurement_concept__concept_code__in=concept_codes)
-            | Q(measurement_source_value__in=concept_codes)
-        ).exclude(value_as_number__isnull=True)
+        Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False)
+        .annotate(
+            effective_code=Case(
+                When(measurement_concept__concept_code__regex=_LOINC_CODE_PATTERN,
+                     then=F('measurement_concept__concept_code')),
+                # The last arm of ``_measurement_code``: the source value when
+                # it is non-empty, else the concept code.
+                default=Coalesce(
+                    NullIf(F('measurement_source_value'), Value('')),
+                    F('measurement_concept__concept_code')),
+                output_field=CharField(),
+            ),
+        )
+        .filter(effective_code__in=concept_codes)
+        .exclude(value_as_number__isnull=True)
         .order_by('-measurement_date', '-measurement_id').annotate(
             measurement_payload=JSONObject(
                 value='value_as_number',
@@ -206,13 +263,15 @@ def _reading(payload):
     )
 
 
-def _canonical_pair(payload, normalize, default_unit, from_pair):
+def _canonical_pair(payload, normalize, default_unit, from_pair, in_range):
     """A measurement payload in its canonical unit, or None (no evidence).
 
     Read exactly as the derivation does: first put the number back in
     ``unit_source_value``'s unit (a row converted on write holds it in
-    ``unit_concept``'s, #2249), then resolve the reported unit and convert. A
-    unit that cannot be proven is no evidence, not a number to guess.
+    ``unit_concept``'s, #2249), then resolve the reported unit and convert.
+    A unit that cannot be proven is no evidence, not a number to guess, and so
+    is a canonical the destination column cannot hold (``in_range``, the same
+    predicate the derivation applies after conversion, #2475).
     """
     if not payload:
         return None
@@ -224,7 +283,9 @@ def _canonical_pair(payload, normalize, default_unit, from_pair):
     if code is None:
         return None
     recognised, canonical = from_pair(sent, code)
-    return canonical if recognised else None
+    if not recognised or not in_range(canonical):
+        return None
+    return canonical
 
 
 def _canonical_blood_count(payload):
@@ -348,7 +409,8 @@ def _fetch_patient_record_trial_row(person_id):
     )
 
 
-def _fetch_omop_trial_row(person_id):
+def _fetch_omop_trial_row(person_id, code_fields=None):
+    code_fields = code_fields or resolve_lab_code_fields()
     today = date.today()
     qs = (
         Person.objects
@@ -365,17 +427,24 @@ def _fetch_omop_trial_row(person_id):
             karnofsky_performance_score=_latest_observation_number_name_subquery(['karnofsky'], IntegerField()),
             # Not 59260-0: it is moles/volume, the canonical field does not read
             # it, and a unitless one in the g/dL default is a false anemia.
-            hemoglobin_g_dl=_latest_measurement_pair_subquery(['718-7']),
-            platelet_count_thousand_per_ul=_latest_blood_count_subquery('777-3'),
-            anc_thousand_per_ul=_latest_blood_count_subquery('751-8'),
-            wbc_count_thousand_per_ul=_latest_blood_count_subquery('6690-2'),
-            serum_creatinine_mg_dl=_latest_measurement_pair_subquery(['2160-0', '38483-4']),
+            hemoglobin_g_dl=_latest_measurement_pair_subquery(
+                _codes_for(code_fields, 'hemoglobin_g_dl')),
+            platelet_count_thousand_per_ul=_latest_blood_count_subquery(
+                _codes_for(code_fields, 'platelet_count_thousand_per_ul')),
+            anc_thousand_per_ul=_latest_blood_count_subquery(
+                _codes_for(code_fields, 'anc_thousand_per_ul')),
+            wbc_count_thousand_per_ul=_latest_blood_count_subquery(['6690-2']),
+            serum_creatinine_mg_dl=_latest_measurement_pair_subquery(
+                _codes_for(code_fields, 'serum_creatinine_mg_dl')),
             creatinine_clearance_ml_min=_latest_measurement_number_subquery(['2164-2'], DecimalField(max_digits=6, decimal_places=1)),
-            serum_calcium_mg_dl=_latest_measurement_pair_subquery(['17861-6', '49765-1']),
-            bilirubin_total_mg_dl=_latest_measurement_pair_subquery(['1975-2']),
+            serum_calcium_mg_dl=_latest_measurement_pair_subquery(
+                _codes_for(code_fields, 'serum_calcium_mg_dl')),
+            bilirubin_total_mg_dl=_latest_measurement_pair_subquery(
+                _codes_for(code_fields, 'bilirubin_total_mg_dl')),
             ast_u_l=_latest_measurement_number_subquery(['1920-8'], IntegerField()),
             alt_u_l=_latest_measurement_number_subquery(['1742-6'], IntegerField()),
-            albumin_g_dl=_latest_measurement_pair_subquery(['1751-7']),
+            albumin_g_dl=_latest_measurement_pair_subquery(
+                _codes_for(code_fields, 'albumin_g_dl')),
             her2_raw=_latest_measurement_text_subquery(['48676-1']),
             estrogen_receptor_raw=_latest_measurement_text_subquery(['16112-5']),
             progesterone_receptor_raw=_latest_measurement_text_subquery(['16113-3']),
@@ -414,34 +483,39 @@ def _fetch_omop_trial_row(person_id):
         'karnofsky_performance_score': row['karnofsky_performance_score'],
         'hemoglobin_g_dl': _canonical_pair(
             row['hemoglobin_g_dl'], normalize_hemoglobin_unit,
-            HEMOGLOBIN_DEFAULT_UNIT, hemoglobin_canonical_from_pair),
+            HEMOGLOBIN_DEFAULT_UNIT, hemoglobin_canonical_from_pair,
+            hemoglobin_canonical_in_range),
         'platelet_count_thousand_per_ul': _canonical_blood_count(row['platelet_count_thousand_per_ul']),
         'anc_thousand_per_ul': _canonical_blood_count(row['anc_thousand_per_ul']),
         'wbc_count_thousand_per_ul': _canonical_blood_count(row['wbc_count_thousand_per_ul']),
         'serum_creatinine_mg_dl': _canonical_pair(
             row['serum_creatinine_mg_dl'], normalize_creatinine_unit,
-            CREATININE_DEFAULT_UNIT, creatinine_canonical_from_pair),
+            CREATININE_DEFAULT_UNIT, creatinine_canonical_from_pair,
+            creatinine_canonical_in_range),
         'creatinine_clearance_ml_min': row['creatinine_clearance_ml_min'],
         'serum_calcium_mg_dl': _canonical_pair(
             row['serum_calcium_mg_dl'],
             lambda unit: normalize_chemistry_unit('serum_calcium_mg_dl', unit),
-            CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
+            CHEMISTRY_PAIRS['serum_calcium_mg_dl']['canonical_unit'],
             lambda value, unit: chemistry_canonical_from_pair(
-                'serum_calcium_mg_dl', value, unit)),
+                'serum_calcium_mg_dl', value, unit),
+            lambda value: chemistry_canonical_in_range('serum_calcium_mg_dl', value)),
         'bilirubin_total_mg_dl': _canonical_pair(
             row['bilirubin_total_mg_dl'],
             lambda unit: normalize_chemistry_unit('bilirubin_total_mg_dl', unit),
-            CHEMISTRY_PAIRS['bilirubin_total_mg_dl']['default_unit'],
+            CHEMISTRY_PAIRS['bilirubin_total_mg_dl']['canonical_unit'],
             lambda value, unit: chemistry_canonical_from_pair(
-                'bilirubin_total_mg_dl', value, unit)),
+                'bilirubin_total_mg_dl', value, unit),
+            lambda value: chemistry_canonical_in_range('bilirubin_total_mg_dl', value)),
         'ast_u_l': row['ast_u_l'],
         'alt_u_l': row['alt_u_l'],
         'albumin_g_dl': _canonical_pair(
             row['albumin_g_dl'],
             lambda unit: normalize_chemistry_unit('albumin_g_dl', unit),
-            CHEMISTRY_PAIRS['albumin_g_dl']['default_unit'],
+            CHEMISTRY_PAIRS['albumin_g_dl']['canonical_unit'],
             lambda value, unit: chemistry_canonical_from_pair(
-                'albumin_g_dl', value, unit)),
+                'albumin_g_dl', value, unit),
+            lambda value: chemistry_canonical_in_range('albumin_g_dl', value)),
         'her2_status': _normalize_receptor_status(row['her2_raw']),
         'estrogen_receptor_status': _normalize_receptor_status(row['estrogen_receptor_raw']),
         'progesterone_receptor_status': _normalize_receptor_status(row['progesterone_receptor_raw']),
@@ -493,13 +567,14 @@ class Command(BaseCommand):
 
         # Warm-up: touch both paths once per patient so the timed runs do not
         # inherit a one-sided cold-cache penalty.
+        code_fields = resolve_lab_code_fields()
         for pid in person_ids:
             try:
                 _fetch_patient_record_trial_row(pid)
             except PatientRecord.DoesNotExist:
                 pass
             try:
-                _fetch_omop_trial_row(pid)
+                _fetch_omop_trial_row(pid, code_fields)
             except Person.DoesNotExist:
                 pass
 
@@ -522,7 +597,7 @@ class Command(BaseCommand):
             for pid in person_ids:
                 try:
                     t0 = time.perf_counter()
-                    row = _fetch_omop_trial_row(pid)
+                    row = _fetch_omop_trial_row(pid, code_fields)
                     omop_times.append(time.perf_counter() - t0)
                     omop_populated.append(_count_populated_fields(row))
                 except Person.DoesNotExist:
