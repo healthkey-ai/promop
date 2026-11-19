@@ -72,7 +72,7 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
             except Exception as exc:
                 total_errors += 1
                 error_details.append({'person_id': pid, 'error': str(exc)})
-                logger.exception('Error resolving person %s in run %s', pid, run_id)
+                logger.exception('Error resolving a person in run %s', run_id)
 
             run.done = i + 1
             run.resolved = total_resolved

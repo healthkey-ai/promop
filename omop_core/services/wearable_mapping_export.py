@@ -103,11 +103,11 @@ DOCX_MAX_ROWS = 5000
 
 # What XML 1.0 cannot hold, and python-docx therefore refuses to write: one
 # such character in any stored code would fail the document for every reader.
-_XML_ILLEGAL = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')
+_XML_ILLEGAL = dict.fromkeys([*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0xFFFE, 0xFFFF])
 
 
 def xml_safe(text):
-    return _XML_ILLEGAL.sub('', text or '')
+    return (text or '').translate(_XML_ILLEGAL)
 
 
 @dataclass(frozen=True)

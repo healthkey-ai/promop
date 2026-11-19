@@ -142,6 +142,7 @@ import os
 import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
+from urllib.parse import urlparse
 from patient_portal.api.bulk_upload import (
     BULK_UPLOAD_AUTHENTICATION, BulkUploadPermission, ordered_bundle_entries,
     upload_organization, upload_actor_id,
@@ -3762,7 +3763,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         for _coding in _obs_fhir_code.get('coding', []):
                             _sys = _coding.get('system', '')
                             _code = _coding.get('code', '')
-                            if 'loinc.org' in _sys and _code in _ASSESSMENT_LOINC:
+                            if urlparse(_sys).hostname == 'loinc.org' and _code in _ASSESSMENT_LOINC:
                                 _obs_concept = _cc_by_loinc(_code)
                                 _obs_src = _code
                                 break
@@ -5675,7 +5676,6 @@ def auth_test(request):
     """Test auth endpoint — DEBUG only."""
     if not settings.DEBUG:
         return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
-    import traceback as tb
     try:
         step = 'start'
         username = request.data.get('username', 'test')
@@ -5685,8 +5685,9 @@ def auth_test(request):
         user = do_auth(request, username=username, password='badpassword_test_only')
         step = 'authenticate done'
         return Response({'status': 'ok', 'step': step, 'user': str(user)})
-    except Exception as e:
-        return Response({'status': 'error', 'step': step, 'error': str(e), 'traceback': tb.format_exc()}, status=500)
+    except Exception:
+        logger.exception('auth_test failed at step %s', step)
+        return Response({'status': 'error', 'step': step}, status=500)
 
 # =============================================================================
 # Person ViewSet — identity resolution and demographic patch
