@@ -8,6 +8,29 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Questionnaire answers can write the patient's own record** — a deployment
+  supplies record mappings (`PROLOG_RECORD_MAPPING_DIRS`, JSON, one per survey
+  and its reviewed versions) naming which answers fill which `PatientRecord`
+  fields and which describe lines of therapy. When a response to a mapped
+  version is submitted, promop applies it as the patient: record fields through
+  the save path of `PATCH /api/v1/patient-records/me/` (now
+  `apply_patient_record_patch`), lines through `author_therapy_line`, every row
+  typed patient self-report (32865), the lines asserted by `questionnaire`. A
+  mapping writes only what an answer gives and never clears a field; applying
+  again writes the same values. `manage.py apply_record_mappings --check`
+  checks the mappings against their survey versions, and `--survey`/`--response`
+  apply them to responses submitted earlier. It runs once, when a response
+  becomes submitted, on a worker when Celery has a broker; a line the writer
+  refuses is left out without losing the rest; a line from the EHR or a
+  clinician is never overwritten; a response through an invitation link writes
+  nothing; and a broken mapping file fails the system check
+  `patient_portal.E007`. Off by default: with no mapping
+  directories, answers stay in the survey tables. See
+  [Survey record mapping](docs/survey-record-mapping_architecture.md).
+- **A therapy line can be written as patient self-report** —
+  `author_therapy_line(..., type_concept_id=32865)` types the line's Episode,
+  drug exposures and observations with it; the default stays EHR (32817).
+
 - **Sign-up records country, year of birth and the sign-up declarations** —
   `POST /api/v1/patient-invitations/accept/` takes the form's `country`
   (ISO alpha-2 from the deployment's pilot list), `year_of_birth` (written

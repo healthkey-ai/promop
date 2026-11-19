@@ -211,6 +211,183 @@ def _write_genetic_mutations(person, mutations, type_concept_id):
     replace_variants(person, mutations, type_concept_id=type_concept_id)
 
 
+def apply_patient_record_patch(person, patient_info, data, *, actor):
+    """Apply a partial update to a person's PatientRecord, as ``actor`` writes it.
+
+    The save path of ``PATCH /api/v1/patient-records/<id>/`` and ``/me/``,
+    after their access checks, and of anything else that writes the record on
+    a person's behalf (their questionnaire answers: ``survey_record_mapping``).
+    Validation errors raise; returns the saved record and the previous value
+    of each field the patch touched. ``actor`` decides authorship: the
+    patient's own edit is typed patient self-report and carries PATIENT_SELF
+    provenance (``_patient_authorship``).
+    """
+    # patient_name targets Person, not PatientRecord, so it is handled by hand
+    # here exactly as /patient-info/me/ handles it — through the same pair of
+    # helpers, so the two routes cannot drift apart again. This is the route
+    # the provider UI PATCHes, and leaving the key in the body would 405 the
+    # request below as a non-projection-owned field.
+    patient_name, patch_data = _pop_patient_name(data)
+    from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
+    patch_data = canonicalize_fields(patch_data)
+    priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
+    priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
+
+    # Sensitive profile fields are staff-only; patients attest via /me/confirm/.
+    # Silent drop (not 400) because auto-save sends the full GET representation.
+    if not getattr(actor, 'is_staff', False):
+        for f in PatientRecordViewSet._STAFF_ONLY_FIELDS:
+            patch_data.pop(f, None)
+    # language_skills are PersonLanguageSkill rows, not PatientRecord columns.
+    # Pop them before the serializer sees an unknown key.
+    language_skills = patch_data.pop('language_skills', None) if 'language_skills' in patch_data else None
+    # Demographics (gender/race/ethnicity) are popped because the serializer's
+    # GenderField is read-only and would silently drop the value.  They are
+    # projected to Person separately, writing the raw display text as the
+    # source value and resolving the concept.
+    demographics = {
+        f: patch_data.pop(f)
+        for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
+    }
+    mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
+    # The editor PATCHes the complete GET representation.  A projected
+    # mutation list carried back unchanged is therefore an autosave echo,
+    # not an instruction to replace its OMOP rows (and it may be empty
+    # before the vocabulary has been loaded).
+    if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
+        mutations = None
+    if mutations is not None and priority_edits:
+        raise ValidationError({'genetic_mutations': 'Edit either the full list or named priority fields in one request.'})
+
+    with transaction.atomic():
+        # Match derivation's lock order and serialize the read/modify/write
+        # of user_edited_fields as well as same-day OMOP projection.
+        patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
+        serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        # Validate location fields early, before serializer.save() writes
+        # to PatientRecord — the model has a check constraint requiring
+        # both lat/lng or neither, so a partial clear would fail at the DB.
+        location_in_patch = {
+            f: serializer.validated_data[f]
+            for f in serializer.validated_data if f in _PROFILE_LOCATION_FIELDS
+        }
+        _validate_location_fields(location_in_patch, person, patient_info)
+        previous_values = {
+            field: getattr(patient_info, field)
+            for field in serializer.validated_data
+            if hasattr(patient_info, field)
+        }
+        direct_fields = {
+            field for field in serializer.validated_data
+            if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+            and (serializer.validated_data[field] != previous_values.get(field)
+                 or (field in {'relapse_count', 'treatment_refractory_status'}
+                     and field not in (patient_info.therapy_overrides or {})
+                     and serializer.validated_data[field] is not None))
+        }
+        _apply_patient_name(person, patient_name)
+        if priority_edits:
+            from omop_core.services.genomics import replace_priority_fields
+            type_id = _genomics_type_concept(actor, person)
+            replace_priority_fields(person, priority_edits, type_id)
+            patient_info.refresh_from_db()
+        if mutations is not None:
+            _write_genetic_mutations(person, mutations, _genomics_type_concept(actor, person))
+            patient_info.refresh_from_db()
+        # The UI's height/weight inputs use canonical units. Set them before
+        # Model.save computes BMI, without requiring an OMOP read-back.
+        for field, unit in (('weight', 'kg'), ('height', 'cm')):
+            if field in direct_fields:
+                setattr(patient_info, f'{field}_units', unit)
+        serializer.save()
+
+        # These edits already passed the dedicated source writer and fresh
+        # readback. Never mark them pending or send them to same-day upsert.
+        direct_fields.difference_update(getattr(serializer, '_clinical_input_fields', ()))
+
+        # Demographics were popped before the serializer (GenderField is
+        # read-only and translates 'Female' → 'F'). Write the DB code to
+        # PatientRecord and the raw display text to Person.
+        if demographics:
+            from patient_portal.api.serializers import GenderField
+            gender_field = GenderField()
+            demo_update_fields = []
+            for demo_field, demo_value in demographics.items():
+                old = getattr(patient_info, demo_field)
+                # For gender, translate the display text to the DB code.
+                db_value = (gender_field.to_internal_value(demo_value)
+                            if demo_field == 'gender' and demo_value else demo_value)
+                if old != db_value:
+                    setattr(patient_info, demo_field, db_value)
+                    previous_values[demo_field] = old
+                    direct_fields.add(demo_field)
+                    demo_update_fields.append(demo_field)
+            if demo_update_fields:
+                patient_info.save(update_fields=demo_update_fields)
+
+        # Profile fields are backed by Person/Location, not OMOP clinical
+        # tables — exclude them from user_edited_fields.
+        # Pass the raw demographic values (not the serializer-translated ones)
+        # so Person.gender_source_value gets the display text.
+        profile_patch_data = dict(serializer.validated_data)
+        profile_patch_data.update(demographics)
+        profile_projected = _project_profile_fields(
+            person, direct_fields, profile_patch_data,
+        )
+        if 'date_of_birth' in profile_projected:
+            # PatientRecord.save calculates age from its related Person when
+            # DOB is cleared. Keep that relation on the just-updated Person
+            # instance rather than the stale object cached by serializer.save().
+            patient_info.person = person
+        clinical_fields = direct_fields - profile_projected
+
+        if clinical_fields:
+            edited = set(patient_info.user_edited_fields or []) | clinical_fields
+            patient_info.user_edited_fields = sorted(edited)
+            patient_info.save(update_fields=['user_edited_fields'])
+        _write_record_revisions(patient_info, previous_values, actor)
+
+        # Handle language skills (PersonLanguageSkill rows).
+        touched_languages = False
+        if language_skills is not None:
+            try:
+                created, removed = set_language_skills(person, language_skills)
+                touched_languages = bool(created or removed)
+            except LanguageSkillError as exc:
+                raise ValidationError({'detail': str(exc)})
+
+        if clinical_fields:
+            from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+            projection_data = dict(serializer.validated_data)
+            if 'medication_contexts' in clinical_fields:
+                from omop_core.services.medication_context import context_delta
+                projection_data['medication_contexts'] = context_delta(
+                    previous_values.get('medication_contexts') or {},
+                    projection_data['medication_contexts'])
+            projected = PatientRecordViewSet._project_mapped_fields(
+                person, clinical_fields, projection_data, actor=actor,
+            )
+            patient_info.user_edited_fields = sorted(
+                set(patient_info.user_edited_fields or []) - projected
+            )
+            recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
+            patient_info.refresh_from_db()
+        elif profile_projected or touched_languages:
+            from omop_core.services.patient_record_service import recompute_patient_record_fields
+            recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
+            patient_info.refresh_from_db()
+
+        # A direct edit is approved: the provisional picture takes it too,
+        # and drops any proposal's confidence on the edited fields.
+        if direct_fields:
+            from omop_core.services.provisional_record import mirror_user_edit
+            mirror_user_edit(patient_info, direct_fields)
+
+    return patient_info, previous_values
+
+
 class PatientRecordPagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = 'page_size'
@@ -845,7 +1022,7 @@ def _changed_fields(patient_record, previous_values, prev_val):
     }
 
 
-def _write_record_revisions(patient_record, previous_values, request):
+def _write_record_revisions(patient_record, previous_values, user):
     """Persist field-level revision-history rows for a PatientRecord update.
 
     PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
@@ -861,7 +1038,6 @@ def _write_record_revisions(patient_record, previous_values, request):
         # Normalize to a stable string form for storage + comparison.
         return None if v is None else str(v)
 
-    user = getattr(request, 'user', None)
     changed_by = (
         str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
         else 'system'
@@ -1326,177 +1502,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _patch_record(self, request, person, patient_info):
         """Shared save path after the provider or self-service access check."""
-        # patient_name targets Person, not PatientRecord, so it is handled by hand
-        # here exactly as /patient-info/me/ handles it — through the same pair of
-        # helpers, so the two routes cannot drift apart again. This is the route
-        # the provider UI PATCHes, and leaving the key in the body would 405 the
-        # request below as a non-projection-owned field.
-        patient_name, patch_data = _pop_patient_name(request.data)
-        from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
-        patch_data = canonicalize_fields(patch_data)
-        priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
-        priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
-
-        # Sensitive profile fields are staff-only; patients attest via /me/confirm/.
-        # Silent drop (not 400) because auto-save sends the full GET representation.
-        if not getattr(request.user, 'is_staff', False):
-            for f in self._STAFF_ONLY_FIELDS:
-                patch_data.pop(f, None)
-        # language_skills are PersonLanguageSkill rows, not PatientRecord columns.
-        # Pop them before the serializer sees an unknown key.
-        language_skills = patch_data.pop('language_skills', None) if 'language_skills' in patch_data else None
-        # Demographics (gender/race/ethnicity) are popped because the serializer's
-        # GenderField is read-only and would silently drop the value.  They are
-        # projected to Person separately, writing the raw display text as the
-        # source value and resolving the concept.
-        demographics = {
-            f: patch_data.pop(f)
-            for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
-        }
-        mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
-        # The editor PATCHes the complete GET representation.  A projected
-        # mutation list carried back unchanged is therefore an autosave echo,
-        # not an instruction to replace its OMOP rows (and it may be empty
-        # before the vocabulary has been loaded).
-        if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
-            mutations = None
-        if mutations is not None and priority_edits:
-            raise ValidationError({'genetic_mutations': 'Edit either the full list or named priority fields in one request.'})
-
-        # Validate language_skills early, before the transaction.
+        language_skills = request.data.get('language_skills') if 'language_skills' in request.data else None
         if language_skills is not None and not isinstance(language_skills, dict):
             return Response(
                 {'detail': "'language_skills' must be an object mapping a "
                            "language to its capabilities."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        with transaction.atomic():
-            # Match derivation's lock order and serialize the read/modify/write
-            # of user_edited_fields as well as same-day OMOP projection.
-            patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
-            serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            # Validate location fields early, before serializer.save() writes
-            # to PatientRecord — the model has a check constraint requiring
-            # both lat/lng or neither, so a partial clear would fail at the DB.
-            location_in_patch = {
-                f: serializer.validated_data[f]
-                for f in serializer.validated_data if f in _PROFILE_LOCATION_FIELDS
-            }
-            _validate_location_fields(location_in_patch, person, patient_info)
-            previous_values = {
-                field: getattr(patient_info, field)
-                for field in serializer.validated_data
-                if hasattr(patient_info, field)
-            }
-            direct_fields = {
-                field for field in serializer.validated_data
-                if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
-                and (serializer.validated_data[field] != previous_values.get(field)
-                     or (field in {'relapse_count', 'treatment_refractory_status'}
-                         and field not in (patient_info.therapy_overrides or {})
-                         and serializer.validated_data[field] is not None))
-            }
-            _apply_patient_name(person, patient_name)
-            if priority_edits:
-                from omop_core.services.genomics import replace_priority_fields
-                type_id = _genomics_type_concept(request.user, person)
-                replace_priority_fields(person, priority_edits, type_id)
-                patient_info.refresh_from_db()
-            if mutations is not None:
-                _write_genetic_mutations(person, mutations, _genomics_type_concept(request.user, person))
-                patient_info.refresh_from_db()
-            # The UI's height/weight inputs use canonical units. Set them before
-            # Model.save computes BMI, without requiring an OMOP read-back.
-            for field, unit in (('weight', 'kg'), ('height', 'cm')):
-                if field in direct_fields:
-                    setattr(patient_info, f'{field}_units', unit)
-            serializer.save()
-
-            # These edits already passed the dedicated source writer and fresh
-            # readback. Never mark them pending or send them to same-day upsert.
-            direct_fields.difference_update(getattr(serializer, '_clinical_input_fields', ()))
-
-            # Demographics were popped before the serializer (GenderField is
-            # read-only and translates 'Female' → 'F'). Write the DB code to
-            # PatientRecord and the raw display text to Person.
-            if demographics:
-                from patient_portal.api.serializers import GenderField
-                gender_field = GenderField()
-                demo_update_fields = []
-                for demo_field, demo_value in demographics.items():
-                    old = getattr(patient_info, demo_field)
-                    # For gender, translate the display text to the DB code.
-                    db_value = (gender_field.to_internal_value(demo_value)
-                                if demo_field == 'gender' and demo_value else demo_value)
-                    if old != db_value:
-                        setattr(patient_info, demo_field, db_value)
-                        previous_values[demo_field] = old
-                        direct_fields.add(demo_field)
-                        demo_update_fields.append(demo_field)
-                if demo_update_fields:
-                    patient_info.save(update_fields=demo_update_fields)
-
-            # Profile fields are backed by Person/Location, not OMOP clinical
-            # tables — exclude them from user_edited_fields.
-            # Pass the raw demographic values (not the serializer-translated ones)
-            # so Person.gender_source_value gets the display text.
-            profile_patch_data = dict(serializer.validated_data)
-            profile_patch_data.update(demographics)
-            profile_projected = _project_profile_fields(
-                person, direct_fields, profile_patch_data,
-            )
-            if 'date_of_birth' in profile_projected:
-                # PatientRecord.save calculates age from its related Person when
-                # DOB is cleared. Keep that relation on the just-updated Person
-                # instance rather than the stale object cached by serializer.save().
-                patient_info.person = person
-            clinical_fields = direct_fields - profile_projected
-
-            if clinical_fields:
-                edited = set(patient_info.user_edited_fields or []) | clinical_fields
-                patient_info.user_edited_fields = sorted(edited)
-                patient_info.save(update_fields=['user_edited_fields'])
-            _write_record_revisions(patient_info, previous_values, request)
-
-            # Handle language skills (PersonLanguageSkill rows).
-            touched_languages = False
-            if language_skills is not None:
-                try:
-                    created, removed = set_language_skills(person, language_skills)
-                    touched_languages = bool(created or removed)
-                except LanguageSkillError as exc:
-                    raise ValidationError({'detail': str(exc)})
-
-            if clinical_fields:
-                from omop_core.services.patient_record_service import recompute_patient_record_fields
-
-                projection_data = dict(serializer.validated_data)
-                if 'medication_contexts' in clinical_fields:
-                    from omop_core.services.medication_context import context_delta
-                    projection_data['medication_contexts'] = context_delta(
-                        previous_values.get('medication_contexts') or {},
-                        projection_data['medication_contexts'])
-                projected = self._project_mapped_fields(
-                    person, clinical_fields, projection_data, actor=request.user,
-                )
-                patient_info.user_edited_fields = sorted(
-                    set(patient_info.user_edited_fields or []) - projected
-                )
-                recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
-                patient_info.refresh_from_db()
-            elif profile_projected or touched_languages:
-                from omop_core.services.patient_record_service import recompute_patient_record_fields
-                recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
-                patient_info.refresh_from_db()
-
-            # A direct edit is approved: the provisional picture takes it too,
-            # and drops any proposal's confidence on the edited fields.
-            if direct_fields:
-                from omop_core.services.provisional_record import mirror_user_edit
-                mirror_user_edit(patient_info, direct_fields)
-
+        patient_info, previous_values = apply_patient_record_patch(
+            person, patient_info, request.data, actor=request.user,
+        )
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod

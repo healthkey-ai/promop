@@ -100,6 +100,7 @@ def upsert_therapy_line_episode(
     overwrite_source_concept=False,
     assert_line=True,
     asserted_by='authoring',
+    type_concept_id=None,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -150,7 +151,9 @@ def upsert_therapy_line_episode(
             line_number,
         )
         return TherapyLineEpisodeResult(None, False, [])
-    ehr_type_concept = _concept(CONCEPT_EHR_TYPE) or tx_regimen_concept
+    # The type of every row the line writes: EHR, unless the caller says who
+    # stated it (patient self-report, 32865, for a patient's own answers).
+    ehr_type_concept = _concept(type_concept_id or CONCEPT_EHR_TYPE) or tx_regimen_concept
     no_match_concept = _concept(0)
     # episode_object_concept is a required (non-null) FK. Prefer the resolved
     # regimen, then the standard "no matching concept" (0), then EHR type — the
@@ -564,6 +567,7 @@ def _author_therapy_line_once(
     disease=None,
     episode=None,
     asserted_by='authoring',
+    type_concept_id=None,
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -613,6 +617,8 @@ def _author_therapy_line_once(
             by number (which another cancer's line may share).
         asserted_by: source recorded on the TherapyLineAssertion
             ('authoring' for the editor, 'import' for an ETL feed).
+        type_concept_id: type of every row the line writes; None is EHR (32817).
+            A patient's own answers pass patient self-report (32865).
 
     Returns a TherapyLineEpisodeResult with two extra attributes attached:
     ``drug_exposure_ids`` and ``drugs_created``.
@@ -637,6 +643,7 @@ def _author_therapy_line_once(
             disease=disease,
             episode=episode,
             asserted_by=asserted_by,
+            type_concept_id=type_concept_id,
         )
         if result.episode is None:
             transaction.set_rollback(True)
@@ -660,13 +667,14 @@ def _author_therapy_line_inner(
     disease=None,
     episode=None,
     asserted_by='authoring',
+    type_concept_id=None,
 ):
     from omop_core.models import DrugExposure
     from omop_oncology.models import TherapyLineExposure
 
     if _concept(CONCEPT_TREATMENT_REGIMEN) is None:
         return TherapyLineEpisodeResult(None, False, [])
-    ehr_type = _concept(CONCEPT_EHR_TYPE)
+    ehr_type = _concept(type_concept_id or CONCEPT_EHR_TYPE)
     if ehr_type is None or _concept(CONCEPT_DRUG_EXPOSURE_FIELD) is None:
         raise TherapyLineValidationError('vocabulary_missing')
     if not isinstance(line_number, int) or line_number < 1:
@@ -752,6 +760,7 @@ def _author_therapy_line_inner(
         replace_events=replace and composition_supplied,
         replace_metadata=replace,
         asserted_by=asserted_by,
+        type_concept_id=type_concept_id,
     )
     if result.episode is None:
         raise TherapyLineValidationError('vocabulary_lost')
@@ -861,7 +870,7 @@ def _author_therapy_line_inner(
     links = upsert_therapy_line_episode(
         person, line_number=line_number, episode=line, source_value=line.episode_source_value,
         drug_exposure_ids=exposure_ids, replace_events=replace,
-        asserted_by=asserted_by,
+        asserted_by=asserted_by, type_concept_id=type_concept_id,
     )
     if replace:
         for owned in TherapyLineExposure.objects.filter(episode=line).exclude(
