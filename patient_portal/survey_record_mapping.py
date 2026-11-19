@@ -40,6 +40,8 @@ A mapping file (JSON, ``mapping_version`` 1)::
       ],
       "therapy_lines": [
         {"line": 1, "disease": "Example disease",
+         "details": [{"field": "clinical_trial", "answer": "q_trial",
+                      "values": {"yes": "yes", "no": "no"}}],
          "regimen": {"answer": "q_treatment", "labels": {"chemo": "Chemotherapy"}},
          "names": "q_treatment_names",
          "start_date": "q_started", "end_date": "q_ended",
@@ -55,10 +57,18 @@ a date answer is written as its first day, with its precision in
 (the submission's date). ``when`` is a list of PROlog conditions, evaluated
 with PROlog's own engine, so it means what ``visible_if`` means.
 
-A line is written when its ``regimen`` answer is a listed option: the label
-becomes the line's source value (with the ``names`` answer, when given, after
-it), and the line's composition stays unknown. Dates are written as their
-first day; therapy lines have no date precision yet.
+A line's ``line`` is its number, ``"next"`` (a new line after the person's
+last one: a treatment reported later) or ``"latest"`` (their last line: a
+treatment reported as finished, or a return after it). A numbered or next line
+is written when its ``regimen`` answer is a listed option: the label becomes
+the line's source value (with the ``names`` answer, when given, after it), and
+its composition stays unknown; a latest line needs no regimen and is written
+only when the person has a line. Line dates are written as their first day,
+with each date's precision in the line's detail (TherapyLineDetail), beside
+what its ``details`` rules give (the same rules as ``record``, naming detail
+fields: still receiving, clinical trial, maintenance, expected end). The
+detail also names the responses that wrote the line, so applying a response
+again updates its own lines and never adds one.
 """
 from __future__ import annotations
 
@@ -79,6 +89,7 @@ MAPPING_VERSION = 1
 QUESTIONNAIRE = 'questionnaire'
 _RECORD_SOURCES = ('answer', 'value', 'submitted_on')
 _LINE_DATES = ('start_date', 'end_date', 'progression_date')
+_TARGETS = ('next', 'latest')
 
 
 class MappingError(ValueError):
@@ -141,18 +152,32 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
             fail(f'{where}: precision_field must be a PatientRecord field')
         _check_when(rule, where, fail)
     numbers = set()
+    detail_fields = _detail_fields()
     for i, line in enumerate(mapping.get('therapy_lines', [])):
         where = f'therapy_lines[{i}]'
-        if not isinstance(line, dict) or not isinstance(line.get('line'), int) or line['line'] < 1:
-            fail(f'{where}: line must be a line number')
-        if line['line'] in numbers:
-            fail(f'{where}: line {line["line"]} is mapped twice')
-        numbers.add(line['line'])
+        target = line.get('line') if isinstance(line, dict) else None
+        if not (target in _TARGETS or (isinstance(target, int) and not isinstance(target, bool) and target >= 1)):
+            fail(f'{where}: line must be a line number, "next" or "latest"')
+        if target in numbers and target != 'latest':
+            fail(f'{where}: line {target} is mapped twice')
+        numbers.add(target)
         regimen = line.get('regimen')
-        if not isinstance(regimen, dict) or not isinstance(regimen.get('labels'), dict) or 'answer' not in regimen:
+        if regimen is None and target != 'latest':
+            fail(f'{where}: a line that may be new needs a regimen')
+        if regimen is not None and (not isinstance(regimen, dict) or not isinstance(regimen.get('labels'), dict)
+                                    or 'answer' not in regimen):
             fail(f'{where}: regimen needs an answer and labels')
-        if too_long := [k for k, label in regimen['labels'].items() if len(str(label)) > _source_value_length()]:
+        if regimen and (too_long := [k for k, label in regimen['labels'].items()
+                                     if len(str(label)) > _source_value_length()]):
             fail(f'{where}: labels longer than a line source value ({_source_value_length()}): {too_long}')
+        for j, rule in enumerate(line.get('details', [])):
+            if not isinstance(rule, dict) or rule.get('field') not in detail_fields:
+                fail(f'{where}.details[{j}]: field must be a line detail ({", ".join(sorted(detail_fields))})')
+            if sum(1 for k in _RECORD_SOURCES if k in rule) != 1:
+                fail(f'{where}.details[{j}]: give exactly one of answer, value, submitted_on')
+            if rule.get('precision_field') is not None and rule['precision_field'] not in detail_fields:
+                fail(f'{where}.details[{j}]: precision_field must be a line detail')
+            _check_when(rule, f'{where}.details[{j}]', fail)
         outcome = line.get('outcome')
         if outcome is not None and (not isinstance(outcome, dict) or 'answer' not in outcome
                                     or not isinstance(outcome.get('values'), dict)):
@@ -192,17 +217,22 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
             for key in condition_questions(cond):
                 question(key, f'{where}.when')
 
-    for i, rule in enumerate(mapping.get('record', [])):
-        where = f'record[{i}]'
+    def value_rule(rule: dict, where: str):
         if 'answer' in rule:
             if 'values' in rule:
                 options(rule['answer'], rule['values'], where)
             else:
                 question(rule['answer'], where)
         conditions(rule, where)
+
+    for i, rule in enumerate(mapping.get('record', [])):
+        value_rule(rule, f'record[{i}]')
     for i, line in enumerate(mapping.get('therapy_lines', [])):
         where = f'therapy_lines[{i}]'
-        options(line['regimen']['answer'], line['regimen']['labels'], f'{where}.regimen')
+        if line.get('regimen'):
+            options(line['regimen']['answer'], line['regimen']['labels'], f'{where}.regimen')
+        for j, rule in enumerate(line.get('details', [])):
+            value_rule(rule, f'{where}.details[{j}]')
         if line.get('outcome'):
             options(line['outcome']['answer'], line['outcome']['values'], f'{where}.outcome')
         for key in ('names', *_LINE_DATES):
@@ -210,6 +240,14 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
                 question(line[key], f'{where}.{key}')
         conditions(line, where)
     return problems
+
+
+def _detail_fields() -> set[str]:
+    """The line details a mapping may write: TherapyLineDetail's answer columns."""
+    from omop_oncology.models import TherapyLineDetail
+
+    own = {'id', 'episode', 'source_references', 'updated_at'}
+    return {f.name for f in TherapyLineDetail._meta.get_fields() if getattr(f, 'concrete', False)} - own
 
 
 def _source_value_length() -> int:
@@ -248,8 +286,13 @@ def _option(answers: dict[str, dict], key: str) -> str | None:
 
 def record_patch(mapping: dict[str, Any], answers: dict[str, dict], submitted_on: dt.date) -> dict[str, Any]:
     """The PatientRecord fields a response gives, as a PATCH body."""
+    return _values(mapping.get('record', []), answers, submitted_on)
+
+
+def _values(rules: list[dict], answers: dict[str, dict], submitted_on: dt.date) -> dict[str, Any]:
+    """The field values a list of value rules gives (record fields, or a line's details)."""
     patch: dict[str, Any] = {}
-    for rule in mapping.get('record', []):
+    for rule in rules:
         if not _holds(rule, answers):
             continue
         field_name = rule['field']
@@ -275,33 +318,89 @@ def record_patch(mapping: dict[str, Any], answers: dict[str, dict], submitted_on
     return patch
 
 
-def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict]) -> list[dict[str, Any]]:
-    """``author_therapy_line`` keyword arguments for each line a response gives."""
+def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
+                  submitted_on: dt.date | None = None) -> list[dict[str, Any]]:
+    """Each line a response gives: its ``target`` (a number, "next" or "latest"),
+    the ``author_therapy_line`` keyword arguments, and its ``detail`` fields
+    (each date's precision among them)."""
+    submitted_on = submitted_on or dt.date.today()
     lines = []
-    for line in mapping.get('therapy_lines', []):
+    for index, line in enumerate(mapping.get('therapy_lines', [])):
         if not _holds(line, answers):
             continue
-        regimen = line['regimen']
-        label = regimen['labels'].get(_option(answers, regimen['answer']))
-        if not label:
-            continue
-        names = (answers.get(line.get('names') or '') or {}).get('text')
-        named = f'{label} ({names})' if names else label
-        kwargs: dict[str, Any] = {
-            'line_number': line['line'],
-            # The names only when they fit beside the label; they stay in the answers either way.
-            'source_value': named if len(named) <= _source_value_length() else label,
-        }
-        if line.get('disease'):
-            kwargs['disease'] = line['disease']
+        kwargs: dict[str, Any] = {}
+        regimen = line.get('regimen')
+        if regimen:
+            label = regimen['labels'].get(_option(answers, regimen['answer']))
+            if label:
+                names = (answers.get(line.get('names') or '') or {}).get('text')
+                named = f'{label} ({names})' if names else label
+                # The names only when they fit beside the label; they stay in the answers either way.
+                kwargs['source_value'] = named if len(named) <= _source_value_length() else label
+        if line['line'] != 'latest' and 'source_value' not in kwargs:
+            continue  # a line that may be new is written only with its treatment
+        detail = _values(line.get('details', []), answers, submitted_on)
         for key in _LINE_DATES:
             if line.get(key) and (dated := answer_date(answers.get(line[key]))) is not None:
-                kwargs[key] = dated[0]
+                kwargs[key], detail[f'{key}_precision'] = dated
         outcome = line.get('outcome')
         if outcome and (value := outcome['values'].get(_option(answers, outcome['answer']))):
             kwargs['outcome'] = value
-        lines.append(kwargs)
+        if not kwargs and not detail:
+            continue
+        if line.get('disease'):
+            kwargs['disease'] = line['disease']
+        lines.append({'index': index, 'target': line['line'], 'kwargs': kwargs, 'detail': detail})
     return lines
+
+
+def _existing_lines(person, disease: str | None) -> dict[int, Any]:
+    """The person's asserted lines for a cancer (the primary one without ``disease``), by number."""
+    from omop_core.services.disease_episodes import primary_lines, regimen_episodes
+    from omop_core.services.episode_service import _line_parent
+
+    parent, primary = _line_parent(person, disease, None)
+    episodes = primary_lines(person) if primary else regimen_episodes(person).filter(
+        episode_parent_id=parent.episode_id)
+    episodes = episodes.exclude(assertion__state='retracted').select_related('detail')
+    return {e.episode_number: e for e in episodes.order_by('episode_number', 'episode_id')}
+
+
+def _line_numbers(person, writes: list[dict[str, Any]], response_id: str) -> list[dict[str, Any]]:
+    """The writes with their line numbers; a "latest" with no line yet is dropped.
+
+    A number is itself. A line this response already wrote (its ``reference``
+    is kept on the line's detail) is that line again, so applying a response
+    twice never adds a line. Otherwise "next" follows the person's last line
+    for that cancer, and "latest" is their last line other than the one this
+    response's "next" wrote.
+    """
+    known: dict[str | None, dict[int, Any]] = {}
+    resolved = []
+    for write in writes:
+        target = write['target']
+        write['reference'] = f'{response_id}:{f"line-{target}" if isinstance(target, int) else target}'
+        if isinstance(target, int):
+            resolved.append({**write, 'line_number': target})
+            continue
+        disease = write['kwargs'].get('disease')
+        if disease not in known:
+            known[disease] = _existing_lines(person, disease)
+        lines = known[disease]
+
+        def written_by(reference: str):
+            return next((n for n, e in lines.items()
+                         if reference in (getattr(getattr(e, 'detail', None), 'source_references', None) or [])), None)
+
+        number = written_by(write['reference'])
+        if number is None and target == 'next':
+            number = max(lines, default=0) + 1
+        elif number is None:  # latest
+            own_next = written_by(f'{response_id}:next')
+            number = max((n for n in lines if n != own_next), default=None)
+        if number is not None:
+            resolved.append({**write, 'line_number': number})
+    return resolved
 
 
 # --- applying -----------------------------------------------------------------
@@ -320,7 +419,9 @@ def apply_response(response) -> Applied | None:
     holds the participant's account (no patient to write as)."""
     from omop_core.api.serializers import outcome_aliases
     from omop_core.models import PatientRecord, Person
+    from omop_core.services.disease_episodes import primary_disease_slug
     from omop_core.services.episode_service import author_therapy_line
+    from omop_core.services.therapy_errors import TherapyLineValidationError
     from omop_core.services.omop_projection import patient_self_report_type
     from omop_core.services.patient_record_service import refresh_patient_record
     from omop_core.signals import suppress_patient_record_refresh
@@ -340,8 +441,8 @@ def apply_response(response) -> Applied | None:
     answers = {a.question_key: a.value for a in response.answers.all()}
     submitted_on = response.submitted_at.date()
     patch = record_patch(mapping, answers, submitted_on)
-    lines = therapy_lines(mapping, answers)
-    applied = Applied(str(response.pk), sorted(patch), [line['line_number'] for line in lines])
+    lines = therapy_lines(mapping, answers, submitted_on)
+    applied = Applied(str(response.pk), sorted(patch))
     with transaction.atomic():
         record, _ = PatientRecord.objects.get_or_create(person=person)
         if patch:
@@ -352,21 +453,53 @@ def apply_response(response) -> Applied | None:
             # disease catalogue stores it, as the therapy-lines API accepts it; one
             # the catalogue lacks is left out rather than written.
             aliases = outcome_aliases(record.disease)
-            with suppress_patient_record_refresh():
+            if not primary_disease_slug(person):
+                # A record that names no cancer yet: a line filed under none is the
+                # primary cancer's, whichever the record names later.
                 for line in lines:
-                    if 'outcome' in line:
-                        outcome = aliases.get(line.pop('outcome'))
+                    line['kwargs'].pop('disease', None)
+            with suppress_patient_record_refresh():
+                for write in _line_numbers(person, lines, str(response.pk)):
+                    kwargs = dict(write['kwargs'])
+                    if 'outcome' in kwargs:
+                        outcome = aliases.get(kwargs.pop('outcome'))
                         if outcome is not None:
-                            line['outcome'] = outcome
-                    author_therapy_line(
-                        person, asserted_by=QUESTIONNAIRE, type_concept_id=patient_self_report_type(), **line,
-                    )
+                            kwargs['outcome'] = outcome
+                    try:
+                        with transaction.atomic():
+                            result = author_therapy_line(
+                                person, line_number=write['line_number'], asserted_by=QUESTIONNAIRE,
+                                type_concept_id=patient_self_report_type(), **kwargs,
+                            )
+                            if result.episode is not None:
+                                _write_detail(result.episode, write['detail'], write['reference'])
+                    except TherapyLineValidationError as exc:
+                        # One line the writer refuses (dates out of order, a cancer the
+                        # record does not have) is left out; the rest of the response stands.
+                        logger.warning('survey_record_mapping: response %s line %s refused: %s',
+                                       response.pk, write['line_number'], exc)
+                        continue
+                    if result.episode is not None:
+                        applied.lines.append(write['line_number'])
             refresh_patient_record(person)
     logger.info(
         'survey_record_mapping: response %s wrote fields %s and lines %s',
         applied.response_id, applied.fields, applied.lines,
     )
     return applied
+
+
+def _write_detail(episode, detail: dict[str, Any], reference: str) -> None:
+    """The line's detail: what this response says (a field it does not give
+    keeps its value), and that this response wrote the line."""
+    from omop_oncology.models import TherapyLineDetail
+
+    row, _ = TherapyLineDetail.objects.select_for_update().get_or_create(episode=episode)
+    for name, value in detail.items():
+        setattr(row, name, value)
+    if reference not in row.source_references:
+        row.source_references = [*row.source_references, reference]
+    row.save()
 
 
 def on_response_saved(sender, instance, created, update_fields=None, **kwargs):

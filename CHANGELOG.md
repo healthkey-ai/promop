@@ -22,6 +22,15 @@ All notable changes to PRomop are documented here.
   apply them to responses submitted earlier. Off by default: with no mapping
   directories, answers stay in the survey tables. See
   [Survey record mapping](docs/survey-record-mapping_architecture.md).
+- **Record mappings name a line as "next" or "latest", and keep what the patient
+  said about it** — a later questionnaire can add the next line after the
+  person's last, or update their latest (an end date, a return). The new
+  `TherapyLineDetail` (one per line, migration `omop_oncology` 0011) keeps each
+  line date's precision and the answers with no OMOP row yet (still receiving,
+  clinical trial, maintenance, expected end), and the responses that wrote the
+  line, so applying a response again never adds a line.
+  `GET /api/v1/phr/therapy/` returns them with each line (`precision`,
+  `came_back`, `ongoing`, `clinical_trial`, `maintenance`, `expected_end`).
 - **A therapy line can be written as patient self-report** —
   `author_therapy_line(..., type_concept_id=32865)` types the line's Episode,
   drug exposures and observations with it; the default stays EHR (32817).

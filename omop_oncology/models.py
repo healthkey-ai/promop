@@ -99,6 +99,49 @@ class TherapyLineAssertion(models.Model):
         return f'Episode {self.episode_id} therapy line {self.state}'
 
 
+class TherapyLineDetail(models.Model):
+    """What the patient said about a line of therapy that its Episode cannot hold.
+
+    The Episode and its observations keep whole dates; a patient often gives a
+    month and year, or a year alone, so each date's precision is kept here.
+    The rest are answers with no OMOP row yet: whether the line is still being
+    received, whether it was part of a clinical trial, its maintenance (whether,
+    which medicine, its dates), and when it is expected to end. Written by the
+    survey record mapping (patient_portal.survey_record_mapping); a line no
+    answer described has none.
+
+    ``source_references`` names every questionnaire response that wrote the
+    line, so applying a response again updates the lines it wrote rather than
+    adding new ones.
+    """
+    PRECISIONS = [('day', 'Day'), ('month', 'Month'), ('year', 'Year')]
+    ANSWERS = [('yes', 'Yes'), ('no', 'No'), ('not_sure', 'Not sure')]
+
+    episode = models.OneToOneField(Episode, on_delete=models.CASCADE, related_name='detail')
+    start_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
+    end_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
+    progression_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
+    ongoing = models.BooleanField(blank=True, null=True, help_text='Still being received (no end date yet).')
+    clinical_trial = models.CharField(max_length=8, choices=ANSWERS, blank=True, null=True)
+    maintenance = models.CharField(max_length=8, choices=ANSWERS, blank=True, null=True)
+    maintenance_medicine = models.CharField(max_length=100, blank=True, null=True)
+    maintenance_start_date = models.DateField(blank=True, null=True)
+    maintenance_start_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
+    maintenance_end_date = models.DateField(blank=True, null=True)
+    maintenance_end_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
+    maintenance_ongoing = models.BooleanField(blank=True, null=True)
+    expected_end_date = models.DateField(blank=True, null=True)
+    expected_end_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
+    source_references = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'therapy_line_detail'
+
+    def __str__(self):
+        return f'Episode {self.episode_id} line detail'
+
+
 class CancerModifier(models.Model):
     """OMOP Oncology Extension Cancer Modifier table - cancer-specific modifiers."""
     cancer_modifier_id = models.BigIntegerField(primary_key=True)

@@ -1,6 +1,7 @@
 """Questionnaire answers into the patient's own record (patient_portal.survey_record_mapping)."""
 import datetime as dt
 import json
+from pathlib import Path
 
 import pytest
 from django.utils import timezone
@@ -12,6 +13,7 @@ from patient_portal.models import Identity, PatientUser
 from prolog_surveys.definitions.loader import load_definition
 from prolog_surveys.models import ResponseStatus, SurveyResponse
 from tests.factories import ConceptFactory, PatientRecordFactory, VocabularyFactory
+from omop_core.services.episode_service import CONCEPT_TREATMENT_REGIMEN
 from tests.test_episode_service import _seed_episode_writer_concepts
 
 pytestmark = pytest.mark.django_db
@@ -42,6 +44,8 @@ DEFINITION = {
          'config': {'precision': ['month', 'year']}, 'options': [_option('ongoing')]},
         {'key': 'response', 'type': 'single', 'text': {'en': 'Response?'}, 'required': False,
          'options': [_option('complete'), _option('unsure')]},
+        {'key': 'trial', 'type': 'single', 'text': {'en': 'In a trial?'}, 'required': False,
+         'options': [_option('yes'), _option('no')]},
     ]}],
 }
 
@@ -57,7 +61,11 @@ MAPPING = {
     'therapy_lines': [
         {'line': 1, 'regimen': {'answer': 'treatment', 'labels': {'chemo': 'Chemotherapy', 'not_sure': 'Not sure'}},
          'names': 'treatment_names', 'start_date': 'started', 'end_date': 'ended',
-         'outcome': {'answer': 'response', 'values': {'complete': 'CR'}}},
+         'outcome': {'answer': 'response', 'values': {'complete': 'CR'}},
+         'details': [
+             {'field': 'clinical_trial', 'answer': 'trial', 'values': {'yes': 'yes', 'no': 'no'}},
+             {'field': 'ongoing', 'answer': 'ended', 'values': {'ongoing': True}},
+         ]},
     ],
 }
 
@@ -105,6 +113,7 @@ ANSWERS = {
     'started': {'date': '2019-06'},
     'ended': {'date': '2019-11'},
     'response': {'option': 'complete'},
+    'trial': {'option': 'no'},
 }
 
 
@@ -152,6 +161,9 @@ def test_the_patient_sees_the_line_as_theirs(mapped, patient, django_capture_on_
     lines = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
 
     assert [(line['regimen'], line['source']['kind']) for line in lines] == [('Chemotherapy (R-CHOP)', 'patient')]
+    # What the patient said about it beyond the Episode's dates.
+    assert lines[0]['precision'] == {'start': 'month', 'end': 'month'}
+    assert lines[0]['clinical_trial'] == 'no'
 
 
 def test_only_what_an_answer_gives_is_written(mapped, patient, django_capture_on_commit_callbacks):
@@ -218,7 +230,7 @@ def test_a_line_label_must_fit_the_line_and_long_names_are_left_out():
 
     lines = srm.therapy_lines(MAPPING, {**ANSWERS, 'treatment_names': {'text': 'y' * 45}})
 
-    assert lines[0]['source_value'] == 'Chemotherapy'
+    assert lines[0]['kwargs']['source_value'] == 'Chemotherapy'
 
 
 def test_a_mapping_is_checked_against_its_survey_version():
@@ -263,3 +275,117 @@ def test_the_command_checks_mappings_and_backfills_earlier_responses(mapped, pat
 
     assert 'OK: 1 mapped survey version(s)' in capsys.readouterr().out
     assert PatientRecord.objects.get(pk=record.pk).stage == 'III'
+
+
+def test_a_line_keeps_each_date_precision_and_its_details(mapped, patient, django_capture_on_commit_callbacks):
+    from omop_oncology.models import TherapyLineDetail
+
+    record, _ = patient
+    response = submit(mapped, record, {**ANSWERS, 'started': {'date': '2019'}}, django_capture_on_commit_callbacks)
+
+    detail = TherapyLineDetail.objects.get(episode__person=record.person, episode__episode_number=1)
+    assert (detail.start_date_precision, detail.end_date_precision) == ('year', 'month')
+    assert detail.clinical_trial == 'no'
+    assert detail.ongoing is None  # an end date was given, not "still receiving"
+    assert detail.source_references == [f'{response.pk}:line-1']
+
+
+CHECKIN = {
+    'schema_version': 1, 'slug': 'checkin-example', 'version': '1.0', 'status': 'draft',
+    'default_language': 'en', 'languages': ['en'], 'title': {'en': 'Check-in'},
+    'sections': [{'key': 's1', 'title': {'en': 'Check-in'}, 'questions': [
+        {'key': 'new_treatment', 'type': 'single', 'text': {'en': 'New treatment?'}, 'required': False,
+         'options': [_option('chemo'), _option('other')]},
+        {'key': 'new_started', 'type': 'date', 'text': {'en': 'Started?'}, 'required': False,
+         'config': {'precision': ['month', 'year']}},
+        {'key': 'finished_on', 'type': 'date', 'text': {'en': 'Finished?'}, 'required': False,
+         'config': {'precision': ['month', 'year']}},
+    ]}],
+}
+CHECKIN_MAPPING = {
+    'mapping_version': 1, 'survey': 'checkin-example', 'versions': ['1.0'],
+    'therapy_lines': [
+        {'line': 'latest', 'end_date': 'finished_on',
+         'details': [{'field': 'ongoing', 'value': False, 'when': [{'question': 'finished_on', 'op': 'answered'}]}]},
+        {'line': 'next', 'regimen': {'answer': 'new_treatment', 'labels': {'chemo': 'Chemotherapy', 'other': 'Other'}},
+         'start_date': 'new_started'},
+    ],
+}
+
+
+@pytest.fixture
+def checkin(mapped, settings, tmp_path):
+    (tmp_path / 'checkin.json').write_text(json.dumps(CHECKIN_MAPPING))
+    srm.reset_cache()
+    return load_definition(json.loads(json.dumps(CHECKIN)), activate=True).version
+
+
+def test_a_later_answer_adds_the_next_line_and_finishes_the_latest(
+        mapped, checkin, patient, django_capture_on_commit_callbacks):
+    from omop_oncology.models import TherapyLineDetail
+
+    record, _ = patient
+    submit(mapped, record, {**ANSWERS, 'ended': {'option': 'ongoing'}}, django_capture_on_commit_callbacks)
+    assert TherapyLineDetail.objects.get(episode__episode_number=1).ongoing is True
+
+    later = submit(checkin, record, {
+        'new_treatment': {'option': 'other'}, 'new_started': {'date': '2024-02'}, 'finished_on': {'date': '2023-12'},
+    }, django_capture_on_commit_callbacks)
+    # Again: the same response writes the same two lines, and adds none.
+    srm.apply_response(later)
+
+    lines = {e.episode_number: e for e in Episode.objects.filter(
+        person=record.person, episode_concept_id=CONCEPT_TREATMENT_REGIMEN)}
+    first, second = lines[1], lines[2]
+    assert sorted(lines) == [1, 2]
+    assert first.episode_end_date == dt.date(2023, 12, 1)
+    assert TherapyLineDetail.objects.get(episode=first).ongoing is False
+    assert second.episode_source_value == 'Other'
+    assert second.episode_start_date == dt.date(2024, 2, 1)
+    assert TherapyLineDetail.objects.get(episode=second).source_references == [f'{later.pk}:next']
+
+
+def test_latest_needs_a_line_to_update(mapped, checkin, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+
+    submit(checkin, record, {'finished_on': {'date': '2023-12'}}, django_capture_on_commit_callbacks)
+
+    assert not Episode.objects.filter(person=record.person).exists()
+
+
+def test_a_line_target_is_a_number_next_or_latest():
+    bad = {**CHECKIN_MAPPING, 'therapy_lines': [{'line': 'first', 'regimen': CHECKIN_MAPPING['therapy_lines'][1]['regimen']}]}
+    with pytest.raises(srm.MappingError, match='"next" or "latest"'):
+        srm.check_mapping(bad)
+    with pytest.raises(srm.MappingError, match='needs a regimen'):
+        srm.check_mapping({**CHECKIN_MAPPING, 'therapy_lines': [{'line': 'next', 'start_date': 'new_started'}]})
+    with pytest.raises(srm.MappingError, match='line detail'):
+        srm.check_mapping({**CHECKIN_MAPPING, 'therapy_lines': [
+            {'line': 'latest', 'details': [{'field': 'episode', 'value': 1}]}]})
+
+
+def test_a_line_for_a_record_that_names_no_cancer_yet_is_the_primary_cancers(
+        mapped, checkin, settings, django_capture_on_commit_callbacks):
+    _seed_episode_writer_concepts()
+    record = PatientRecordFactory(disease='', stage='')
+    PatientUser.objects.create(identity=Identity.objects.create_user(email='new@example.test'), person=record.person)
+    # The mapping names the cancer, which this record does not have yet.
+    mapping = json.loads(json.dumps(CHECKIN_MAPPING))
+    mapping['therapy_lines'][1]['disease'] = 'Follicular Lymphoma'
+    (Path(settings.PROLOG_RECORD_MAPPING_DIRS[0]) / 'checkin.json').write_text(json.dumps(mapping))
+    srm.reset_cache()
+    submit(checkin, record, {'new_treatment': {'option': 'chemo'}, 'new_started': {'date': '2024-02'}},
+           django_capture_on_commit_callbacks)
+
+    assert Episode.objects.get(person=record.person, episode_number=1).episode_parent_id is None
+
+
+def test_a_refused_line_leaves_the_rest_of_the_response(mapped, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+
+    # An end before the start: the writer refuses the line, the record fields stand.
+    submit(mapped, record, {**ANSWERS, 'started': {'date': '2020-01'}, 'ended': {'date': '2019-01'}},
+           django_capture_on_commit_callbacks)
+
+    assert PatientRecord.objects.get(pk=record.pk).stage == 'III'
+    assert not Episode.objects.filter(person=record.person, episode_number=1).exists()
