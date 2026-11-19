@@ -111,6 +111,9 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # The last curator decision's surface and ranker confidence (#2382).
     'decision_surface': '',
     'decision_confidence': None,
+    # Whether the stored suggestion is a ranker-unavailable fallback (#2743):
+    # it travels with the suggestion and outcome it describes.
+    'suggestion_fallback': False,
     # Travels with the note it describes (#2423): the copy replaces the text,
     # so a payload without the key leaves no mark over the source's note.
     'curator_note_at': None,

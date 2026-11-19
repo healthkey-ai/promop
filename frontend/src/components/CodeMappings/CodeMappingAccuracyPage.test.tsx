@@ -46,6 +46,22 @@ describe("CodeMappingAccuracyPage", () => {
     expect(screen.queryByText(/All models/)).not.toBeInTheDocument();
   });
 
+  it("says how many fallbacks are in no row, and nothing when there are none (#2743)", async () => {
+    get.mockResolvedValue({ data: {
+      models: [model("v0.4", { suggestions: 76, reviewed: 76, approved: 66, overridden: 9, rejected: 1 })],
+      overall: model("", { suggestions: 76 }), fallbacks: { suggestions: 2761, reviewed: 1551 },
+    } });
+    const view = render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    expect(await screen.findByText(/Not counted here: 2,761 fallback destinations/)).toHaveTextContent(
+      "written while the ranking model was unavailable (1,551 reviewed). The model never proposed them.");
+    view.unmount();
+
+    get.mockResolvedValue({ data: { models: [model("v0.4")], overall: null, fallbacks: { suggestions: 0, reviewed: 0 } } });
+    render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    await screen.findByText(/Suggest v0\.4/);
+    expect(screen.queryByText(/Not counted here/)).not.toBeInTheDocument();
+  });
+
   it("says so when the history cannot be loaded", async () => {
     get.mockRejectedValue(new Error("500"));
     render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);

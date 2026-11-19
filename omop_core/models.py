@@ -2241,6 +2241,14 @@ class SourceCodeConceptMapping(models.Model):
         max_length=12, choices=SUGGESTION_OUTCOME_CHOICES, blank=True, default='', db_index=True,
         help_text='Immutable first curator disposition of a machine suggestion.',
     )
+    suggestion_fallback = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            'The stored suggestion is the first retrieval candidate, written '
+            'because no ranking model could be reached. It is not the model\'s '
+            'answer, so its outcome is recorded and never scored (#2743).'
+        ),
+    )
     SUGGESTED_ACTION_CHOICES = [('reject', 'Reject')]
     suggested_action = models.CharField(
         max_length=12, choices=SUGGESTED_ACTION_CHOICES, blank=True,
@@ -2611,6 +2619,8 @@ class MappingSuggestionReview(models.Model):
     suggestion_outcome = models.CharField(
         max_length=12, choices=SourceCodeConceptMapping.SUGGESTION_OUTCOME_CHOICES,
     )
+    # As on the mapping: a review of a fallback is kept and never scored.
+    suggestion_fallback = models.BooleanField(default=False, db_default=False)
     archived_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

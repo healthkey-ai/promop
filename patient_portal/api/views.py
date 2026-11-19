@@ -110,6 +110,7 @@ from omop_core.mapping.suggestions import (
     STRATEGY_VECTORS,
     SUGGESTION_MODEL_VERSION,
     VOCAB_TO_UMLS_ROOT,
+    archive_suggestion_review,
     suggest_one_mapping,
     suggestable_mappings,
 )
@@ -13735,17 +13736,43 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     # target that was on the proposed row and version it atomically here.
     # A row the model proposed keeps that history even after a curator's edit
     # re-stamps its provenance (below): suggested_target_concept is the record.
-    is_suggestion = mapping is not None and (
+    #
+    # A destination a ranker chose in the other direction (reverse Suggest's
+    # auto-propose, a candidate accepted from a Concept to Code preview) is the
+    # suggestion on the row from here on. Leaving the older forward suggestion
+    # in place scored a curator who approved exactly what the ranker proposed
+    # as having overridden it (#2743). A review the row already carries is
+    # archived first, as a forward run does, so it is neither lost nor counted
+    # for the new suggestion; a fallback this pick replaces loses its mark.
+    restamp = machine_proposal and concept is not None and (
+        mapping is None
+        or (was_proposed and (
+            mapping.suggested_target_concept_id != concept.concept_id
+            or mapping.suggestion_fallback
+        ))
+    )
+    reviewed = bool(mapping is not None and mapping.suggestion_outcome)
+    if restamp:
+        if reviewed:
+            archive_suggestion_review(mapping)
+            values['suggestion_outcome'] = ''
+            reviewed = False
+        values['suggested_target_concept_id'] = concept.concept_id
+        values['suggestion_model_version'] = SUGGESTION_MODEL_VERSION
+        values['suggestion_fallback'] = False
+    is_suggestion = restamp or (mapping is not None and (
         mapping.origin_system.lower().startswith('suggest')
         or mapping.suggested_target_concept_id is not None
-    )
-    if was_proposed and is_suggestion and not mapping.suggestion_outcome:
-        original_target_id = mapping.suggested_target_concept_id or mapping.target_concept_id
-        if not mapping.suggestion_model_version:
+    ))
+    if was_proposed and is_suggestion and not reviewed:
+        original_target_id = concept.concept_id if restamp else (
+            mapping.suggested_target_concept_id or mapping.target_concept_id
+        )
+        if not mapping.suggestion_model_version and not restamp:
             values['suggestion_model_version'] = 'v0.1'
         if mapping.origin_system.lower() == 'suggest':
             values['origin_system'] = 'suggest v0.1'
-        if original_target_id and not mapping.suggested_target_concept_id:
+        if original_target_id and not mapping.suggested_target_concept_id and not restamp:
             values['suggested_target_concept_id'] = original_target_id
         if status_value == 'approved':
             values['suggestion_outcome'] = (
@@ -15384,10 +15411,19 @@ def _suggestion_accuracy_from_counts(counts):
     }
 
 
-def _suggestion_accuracy_groups():
-    """Current suggestions and archived reviews, in one bounded grouped query."""
+def _suggestion_accuracy_groups(fallback=False):
+    """Current suggestions and archived reviews, in one bounded grouped query.
+
+    Scores are over the ranking models' own answers. A fallback, the first
+    retrieval candidate written because no ranker could be reached, is not
+    one: counting it gave HealthTree 4% precision for a single unanswered
+    "albumin" ranking written to 1,531 hospital codes (#2743). *fallback*
+    returns those rows instead, so a page can say how many it set aside.
+    """
     def groups(model):
-        return model.objects.filter(suggestion_model_version__gt='').order_by().values(
+        return model.objects.filter(
+            suggestion_model_version__gt='', suggestion_fallback=fallback,
+        ).order_by().values(
             'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
         ).annotate(total=Count('id'))
 
@@ -15468,12 +15504,21 @@ def code_mapping_accuracy_dashboard(request):
         counts[group['suggestion_model_version']][outcome] += total
         totals[outcome] += total
     versions = sorted(counts, key=_suggestion_version_key, reverse=True)
+    fallbacks = Counter()
+    for group in _suggestion_accuracy_groups(fallback=True):
+        fallbacks[group['suggestion_outcome']] += group['total']
     return Response({
         'models': [
             {'model_version': version, **_suggestion_accuracy_from_counts(counts[version])}
             for version in versions
         ],
         'overall': _suggestion_accuracy_from_counts(totals) if versions else None,
+        # Written while no ranking model could be reached, and in no score
+        # above: how many there are, and how many a curator has reviewed.
+        'fallbacks': {
+            'suggestions': sum(fallbacks.values()),
+            'reviewed': sum(total for outcome, total in fallbacks.items() if outcome),
+        },
     })
 
 
@@ -15547,27 +15592,38 @@ def code_mapping_accuracy_analytics(request):
     groups = (
         SourceCodeConceptMapping.objects.exclude(decision_surface='').order_by()
         .annotate(band=_decision_band_case())
-        .values('decision_surface', 'band', 'status', 'suggestion_outcome')
+        .values('decision_surface', 'band', 'status', 'suggestion_outcome', 'suggestion_fallback')
         .annotate(total=Count('id'))
     )
+    unscored_fallbacks = 0
     for group in groups:
+        # The decision counts whatever it was made on. The ranker is scored on
+        # its own answers only: a fallback written while no ranking model could
+        # be reached is not one (#2743).
+        scored = group['suggestion_outcome'] and not group['suggestion_fallback']
+        if group['suggestion_outcome'] and group['suggestion_fallback']:
+            unscored_fallbacks += group['total']
         for section in (sections['overall'], sections.get(group['decision_surface'])):
             if section is None:
                 continue
             rows = [section['overall']] + ([section[group['band']]] if group['band'] else [])
             for row in rows:
                 row['statuses'][group['status']] += group['total']
-                if group['suggestion_outcome']:
+                if scored:
                     row['outcomes'][group['suggestion_outcome']] += group['total']
     labels = dict(DECISION_CONFIDENCE_BANDS)
-    return Response({'sections': [
-        {
-            'key': surface, 'label': label,
-            'rows': [_decision_accuracy_row(key, labels.get(key, 'Overall'), rows['statuses'], rows['outcomes'])
-                     for key, rows in sections[surface].items()],
-        }
-        for surface, label in DECISION_SURFACE_SECTIONS
-    ]})
+    return Response({
+        'sections': [
+            {
+                'key': surface, 'label': label,
+                'rows': [_decision_accuracy_row(key, labels.get(key, 'Overall'), rows['statuses'], rows['outcomes'])
+                         for key, rows in sections[surface].items()],
+            }
+            for surface, label in DECISION_SURFACE_SECTIONS
+        ],
+        # Reviewed decisions left out of every Scored count and score above.
+        'unscored_fallbacks': unscored_fallbacks,
+    })
 
 
 # HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The

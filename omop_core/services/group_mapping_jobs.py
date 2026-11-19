@@ -89,12 +89,17 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                     )
                 ):
                     continue
-                from omop_core.mapping.suggestions import SUGGESTION_MODEL_VERSION, SUGGESTION_PROVENANCE
+                from omop_core.mapping.suggestions import (
+                    SUGGESTION_MODEL_VERSION, SUGGESTION_PROVENANCE, is_fallback_note,
+                )
                 mapping.target_concept = concept
                 mapping.suggested_target_concept = concept
                 mapping.destination_vocabulary_id = concept.vocabulary_id
                 mapping.origin_system = SUGGESTION_PROVENANCE
                 mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+                # One unanswered ranking would otherwise be scored against the
+                # model once per member of the group (#2743).
+                mapping.suggestion_fallback = is_fallback_note(proposal['note'])
                 # None for an exact match: no ranker was asked.
                 mapping.suggestion_confidence = proposal.get('confidence')
                 mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-group'
@@ -105,7 +110,8 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                 mapping.save(update_fields=[
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
-                    'suggestion_model_version', 'suggestion_confidence', 'last_suggest_attempt',
+                    'suggestion_model_version', 'suggestion_fallback',
+                    'suggestion_confidence', 'last_suggest_attempt',
                     'suggest_strategy', 'suggested_action', 'notes', 'proposed_by', 'updated_at',
                 ])
                 destinations += 1
