@@ -6,7 +6,7 @@
  * writable and the rest are refused for three different reasons, so this is the
  * tab where "render what the server says" has to mean more than one thing.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -154,6 +154,26 @@ describe('GeneralTab', () => {
     for (const name of ['disease_management', 'disease_status', 'care_setting']) {
       expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
     }
+  });
+
+  it('offers the patient-facing choices for how the cancer is managed, and reports the one picked', async () => {
+    const onChange = vi.fn();
+    renderTab({}, onChange);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const box = screen.getByText('Disease Management').closest('div')!.parentElement!;
+    const trigger = within(box).getByRole('combobox');
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole('listbox');
+    const offered = within(listbox).getAllByRole('option').map((o) => o.textContent?.trim()).filter((t) => t && !t.startsWith('—'));
+    expect(offered).toEqual([
+      'Watch and wait, never treated', 'Receiving first treatment', 'Monitored after first treatment',
+      'Receiving treatment after relapse', 'Monitored after relapse', 'Maintenance treatment',
+      'No regular follow-up or treatment', 'Other', 'Not sure',
+    ]);
+    fireEvent.click(within(listbox).getByRole('option', { name: 'Maintenance treatment' }));
+    expect(onChange).toHaveBeenCalledWith('disease_management', 'Maintenance treatment');
   });
 
   it('renders date of birth as an editable calendar control', async () => {

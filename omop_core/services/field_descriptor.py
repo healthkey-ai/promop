@@ -220,6 +220,7 @@ _TAB_GENERAL = frozenset({
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
     'disease', 'stage', 'histologic_type',
     'ecog_performance_status', 'ecog_assessment_date', 'karnofsky_performance_score',
+    'disease_management', 'disease_status', 'care_setting',
     'preexisting_conditions', 'peripheral_neuropathy_grade',
     'no_other_active_malignancies', 'no_active_infection_status',
     'hiv_status', 'hepatitis_b_status',

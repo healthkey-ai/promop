@@ -100,6 +100,18 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Karnofsky Performance Score",
           "karnofsky_performance_score"
+        ],
+        [
+          "Disease Management",
+          "disease_management"
+        ],
+        [
+          "Disease Status Today",
+          "disease_status"
+        ],
+        [
+          "Main Care Setting",
+          "care_setting"
         ]
       ]
     },

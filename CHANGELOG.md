@@ -28,7 +28,7 @@ All notable changes to PRomop are documented here.
   directories, answers stay in the survey tables. See
   [Survey record mapping](docs/survey-record-mapping_architecture.md).
 - **How the cancer is managed, how it is today, and where care happens** —
-  three `PatientRecord` fields (migration `omop_core` 0358, with the provisional
+  three `PatientRecord` fields (migration `omop_core` 0359, with the provisional
   table): `disease_management` (watch and wait, receiving treatment, monitored,
   maintenance, …), `disease_status` (in remission, stable, relapsed or
   progressed, …) and `care_setting`. Written directly to the record until
