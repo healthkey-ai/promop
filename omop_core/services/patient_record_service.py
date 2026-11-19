@@ -129,6 +129,9 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'no_concomitant_medication_status', 'substance_use_details',
     'geographic_exposure_risk_details', 'no_active_infection_status',
     'concomitant_medication_date', 'planned_therapies', 'spleen_size',
+    # How the cancer is managed now, how it is today, and the main care setting:
+    # patient-described, written to PatientRecord until concepts are curated.
+    'disease_management', 'disease_status', 'care_setting',
 })
 
 

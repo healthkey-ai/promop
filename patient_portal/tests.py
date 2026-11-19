@@ -34402,3 +34402,46 @@ class ProvisionalConfidenceColumnTest(TestCase):
     def test_a_malformed_floor_does_not_stop_settings_loading(self):
         from django.conf import settings as s
         self.assertTrue(0 <= s.PROVISIONAL_CONFIDENCE_FLOOR <= 100)
+
+
+
+class PatientDiseaseManagementFieldsTest(TestCase):
+    """disease_management, disease_status, care_setting: how the patient's cancer is
+    managed now, how it is today, and where they mainly receive care."""
+
+    def setUp(self):
+        from patient_portal.models import PatientUser as PU
+
+        self.identity = Identity.objects.create_user(email='disease_management@test.com', password='pass')
+        self.person = Person.objects.create(
+            person_id=89711, year_of_birth=1970, gender_source_value='female',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        self.record = PatientRecord.objects.create(person=self.person)
+        PU.objects.create(identity=self.identity, person=self.person)
+        self.client = APIClient()
+        self.client.force_authenticate(self.identity)
+
+    def test_the_patient_records_them_and_reads_them_back(self):
+        values = {
+            'disease_management': 'Maintenance treatment',
+            'disease_status': 'In remission',
+            'care_setting': 'Specialist cancer centre or university hospital',
+        }
+
+        response = self.client.patch('/api/v1/patient-records/me/', values, format='json')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.record.refresh_from_db()
+        for field, value in values.items():
+            self.assertEqual(getattr(self.record, field), value)
+        info = self.client.get('/api/v1/patient-records/me/').data['patient_info']
+        self.assertEqual({k: info[k] for k in values}, values)
+
+    def test_they_are_written_directly_until_a_concept_is_curated(self):
+        from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+        descriptor = build_writable_field_descriptor()
+        for field in ('disease_management', 'disease_status', 'care_setting'):
+            self.assertEqual(descriptor[field]['kind'], 'direct', field)
+            self.assertTrue(descriptor[field]['writable'], field)

@@ -75,6 +75,10 @@ const DESCRIPTORS: Record<string, unknown> = {
     kind: 'unmapped', writable: false, group: 'needs-concept-set',
     reason: 'No concept set assigned yet.',
   },
+  // Written directly to PatientRecord until a concept is curated.
+  disease_management: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  disease_status: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  care_setting: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
 };
 
 beforeEach(() => {
@@ -137,6 +141,19 @@ describe('GeneralTab', () => {
 
     expect(screen.getByText('Female')).toBeInTheDocument();
     expect(screen.queryByTestId('reason-gender')).not.toBeInTheDocument();
+  });
+
+  it('shows how the cancer is managed, how it is today and where care happens, as editable choices', async () => {
+    renderTab({ disease_management: 'Maintenance treatment', disease_status: 'In remission', care_setting: 'Local clinic' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText('Disease Management')).toBeInTheDocument();
+    expect(screen.getByText('Maintenance treatment')).toBeInTheDocument();
+    expect(screen.getByText('In remission')).toBeInTheDocument();
+    expect(screen.getByText('Local clinic')).toBeInTheDocument();
+    for (const name of ['disease_management', 'disease_status', 'care_setting']) {
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
+    }
   });
 
   it('renders date of birth as an editable calendar control', async () => {
