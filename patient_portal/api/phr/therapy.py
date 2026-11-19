@@ -20,10 +20,10 @@ from django.utils import timezone
 from omop_core.models import DrugExposure, ProcedureOccurrence
 from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
 from omop_core.services.provisional import real_or_provisional
-from omop_oncology.models import EpisodeEvent
+from omop_oncology.models import Episode, EpisodeEvent
 
 from .names import drug_name, procedure_name
-from .sources import row_sources, source
+from .sources import PATIENT, PATIENT_SELF_REPORT_TYPE_CONCEPT_ID, row_sources, source
 
 # Response categories, explained without disease-specific thresholds: the
 # numbers behind them differ between cancers (IMWG for myeloma, RECIST for
@@ -79,13 +79,22 @@ def _line_rows(person, episode_id: int | None) -> list[DrugExposure]:
     )
 
 
-def _line_source(ctx: '_Context', rows: list[DrugExposure], start: date) -> dict[str, Any]:
-    """Where the line was given: its first medicine's care site, else the record's facility."""
+def _line_source(ctx: '_Context', rows: list[DrugExposure], start: date,
+                 episode_id: int | None = None) -> dict[str, Any]:
+    """Where the line was given: its first medicine's care site, else the record's facility.
+
+    A line the patient reported (its medicine, or the line itself when no
+    medicine is recorded, typed patient self-report) is the patient's.
+    """
     if rows:
         first = row_sources(DrugExposure, rows[:1], type_attr='drug_type_concept',
                             date_attr='drug_exposure_start_date')[rows[0].pk]
-        if first.get('facility'):
+        if first.get('facility') or first['kind'] == PATIENT:
             return {**first, 'date': start.isoformat()}
+    elif episode_id is not None and Episode.objects.filter(
+        pk=episode_id, episode_type_concept_id=PATIENT_SELF_REPORT_TYPE_CONCEPT_ID,
+    ).exists():
+        return source(PATIENT, None, start)
     return source('record', ctx.facility, start)
 
 
@@ -191,7 +200,7 @@ def _shape(ctx: _Context, entry: dict) -> dict[str, Any] | None:
         'outcome': _outcome(entry.get('outcome')),
         'intent': (entry.get('intent') or '').strip() or None,
         'stopped_because': STOP_REASONS.get(reason.lower().replace(' ', '_'), reason) or None,
-        'source': _line_source(ctx, _line_rows(ctx.person, entry.get('episode_id')), start),
+        'source': _line_source(ctx, _line_rows(ctx.person, entry.get('episode_id')), start, entry.get('episode_id')),
     }
     told = ctx.reasons.get(line['id'])
     if told is not None:

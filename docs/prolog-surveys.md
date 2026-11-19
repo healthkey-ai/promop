@@ -97,6 +97,15 @@ the survey-to-OMOP work is issue #903. One existing constraint applies when it i
 built: patient-originated rows are typed 32865 "Patient self-report", never 32883
 "Survey" — that mislabelling caused #441.
 
+A deployment can now write some answers into the patient's own record through a
+**record mapping**: data it supplies (`PROLOG_RECORD_MAPPING_DIRS`), reviewed
+like a definition, naming which answers of which survey versions fill which
+`PatientRecord` fields and lines of therapy. promop applies it when a response is
+submitted, as the patient, through the same save path as their own edit, so the
+rows are 32865 with PATIENT_SELF provenance. PROlog itself still writes nothing
+clinical, and with no mapping nothing changes. See
+[survey-record-mapping_architecture.md](survey-record-mapping_architecture.md).
+
 ## Serving surveys
 
 No survey is offered until a deployment mounts one. Both directories are empty by

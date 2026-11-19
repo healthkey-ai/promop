@@ -922,6 +922,11 @@ PROLOG_THEME_DIRS = [d for d in os.environ.get('PROLOG_THEME_DIRS', '').split(os
 # environment variable gets nothing — which is how it went unnoticed until a
 # real notice was mounted.
 PROLOG_LEGAL_DIRS = [d for d in os.environ.get('PROLOG_LEGAL_DIRS', '').split(os.pathsep) if d]
+# Record mappings: which answers of which survey versions a deployment writes
+# into the patient's own record when a response is submitted
+# (patient_portal/survey_record_mapping.py). Data, reviewed like a definition.
+# Empty by default: answers stay in the survey tables (PROlog DEP-7).
+PROLOG_RECORD_MAPPING_DIRS = [d for d in os.environ.get('PROLOG_RECORD_MAPPING_DIRS', '').split(os.pathsep) if d]
 
 # The built runner front end, when a deployment mounts one. It is a separate SPA
 # from PRomop's own, so its assets are served under their own prefix
