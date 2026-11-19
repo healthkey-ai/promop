@@ -143,6 +143,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
 from urllib.parse import urlparse
+from patient_portal.api.public_errors import public_errors
 from patient_portal.api.bulk_upload import (
     BULK_UPLOAD_AUTHENTICATION, BulkUploadPermission, ordered_bundle_entries,
     upload_organization, upload_actor_id,
@@ -5802,10 +5803,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         descriptor = disease_profiles.annotate(build_writable_field_descriptor())
         named = [value for value in request.query_params.getlist('disease') if value.strip()]
         if named:
-            try:
+            with public_errors(disease_profiles.ScopeError, field='detail'):
                 codes = disease_profiles.profile_codes(named)
-            except disease_profiles.ScopeError as error:
-                return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
             descriptor = disease_profiles.profile(descriptor, codes)
 
         raw_person = request.query_params.get('person_id')
@@ -13333,14 +13332,12 @@ def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, co
     from omop_core.mapping import confidence_token
     token = data.get('suggestion_confidence_token')
     if token not in (None, ''):
-        try:
+        with public_errors(ValueError, field='suggestion_confidence_token'):
             return True, confidence_token.verify(
                 token, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
                 omop_table=omop_table, destination_concept_id=concept.concept_id if concept else None,
                 source_description=source_description,
             )
-        except ValueError as exc:
-            raise serializers.ValidationError({'suggestion_confidence_token': str(exc)})
     if 'suggestion_confidence' in data and data.get('suggestion_confidence') in (None, ''):
         return True, None
     return False, None
@@ -16012,12 +16009,10 @@ def field_mapping_list(request):
         named = [value for value in request.query_params.getlist('disease') if value.strip()]
         if named:
             from omop_core.services import disease_field_sets
-            try:
+            with public_errors(disease_field_sets.SetError, field='detail'):
                 descriptors = disease_field_sets.disease_set(
                     descriptors, named,
                     request.query_params.get('set') or disease_field_sets.SET_PROFILE)
-            except disease_field_sets.SetError as error:
-                return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(descriptors)
 
     # POST — create a mapping.  Non-admin users cannot create as approved.
@@ -16051,12 +16046,10 @@ def field_mapping_export(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     from django.http import HttpResponse
     from omop_core.services import disease_field_sets
-    try:
+    with public_errors(disease_field_sets.SetError, field='detail'):
         filename, text = disease_field_sets.csv_export(
             request.query_params.getlist('disease'),
             request.query_params.get('set') or disease_field_sets.SET_PROFILE)
-    except disease_field_sets.SetError as error:
-        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
     response = HttpResponse(text, content_type='text/csv; charset=utf-8')
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     response['Cache-Control'] = 'no-store'
@@ -16086,13 +16079,11 @@ def wearable_mapping_export(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     from django.http import HttpResponse
     from omop_core.services import wearable_mapping_export as export
-    try:
+    with public_errors(export.FormatError, field='detail'):
         filename, content_type, body = export.export_file(
             request.query_params.get('file_format') or export.FORMAT_CSV,
             destination=request.query_params.get('destination') or export.DEST_OMOP,
             sources=','.join(request.query_params.getlist('sources')))
-    except export.FormatError as error:
-        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
     response = HttpResponse(body, content_type=content_type)
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     response['Cache-Control'] = 'no-store'
@@ -16129,10 +16120,8 @@ def field_scope(request, field_name):
         if not isinstance(diseases, list) or not all(isinstance(code, str) for code in diseases):
             return Response({'diseases': 'Send a list of Disease Category codes; an empty list is the base record.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        try:
+        with public_errors(disease_profiles.ScopeError, field='diseases'):
             disease_profiles.set_field_diseases(field_name, diseases, user=request.user)
-        except disease_profiles.ScopeError as error:
-            return Response({'diseases': str(error)}, status=status.HTTP_400_BAD_REQUEST)
     diseases = sorted(held.values_list('disease', flat=True))
     return Response({'field_name': field_name, 'scope': disease_profiles.scope_of(diseases),
                      'diseases': diseases})

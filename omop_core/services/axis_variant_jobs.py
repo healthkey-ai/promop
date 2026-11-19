@@ -220,7 +220,11 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
             rebuild_evidence=request.rebuild_evidence, summary=summary)
         keys = offset + len(remaining)
     except Exception as exc:
-        attempt.update(outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
+        # The reason is shown to curators, so it names the kind of failure; the
+        # message and traceback go to the worker log.
+        logger.exception('Axis variant refresh %s failed.', request_id)
+        attempt.update(outcome='failed', failure_reason=f'{type(exc).__name__}: see the worker log.',
+                       completed_at=timezone.now())
         raise
     attempt.update(outcome='done', completed_at=timezone.now())
     logger.info('Axis variant refresh %s walked %s codes and refreshed %s mappings%s.',

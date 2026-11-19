@@ -149,7 +149,7 @@ def test_a_failure_is_recorded_and_raised():
         with pytest.raises(RuntimeError):
             axis_variant_jobs.run_refresh(request.pk)
     request.refresh_from_db()
-    assert (request.outcome, request.failure_reason) == ('failed', 'boom')
+    assert (request.outcome, request.failure_reason) == ('failed', 'RuntimeError: see the worker log.')
     assert request.completed_at is not None
 
 

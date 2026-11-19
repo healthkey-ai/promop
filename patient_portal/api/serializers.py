@@ -1,6 +1,8 @@
 from typing import Any
 
 from rest_framework import serializers
+
+from .public_errors import public_errors
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
     UNPLACED_TAB,
@@ -1603,10 +1605,8 @@ class InterchangeAgreementSerializer(serializers.ModelSerializer):
 def _clean_field_diseases(value):
     """The Disease Category codes a field's scope may name (#2331)."""
     from omop_core.services import disease_profiles
-    try:
+    with public_errors(disease_profiles.ScopeError):
         return disease_profiles.clean_codes(value)
-    except disease_profiles.ScopeError as error:
-        raise serializers.ValidationError(str(error))
 
 
 class FieldConceptMappingSerializer(serializers.ModelSerializer):

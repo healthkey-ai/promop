@@ -57,3 +57,27 @@ def test_export_file_is_owner_only(tmp_path, db):
     call_command('export_fhir_bundle', '--person-id', str(person.person_id), '--output', str(out))
     assert out.exists()
     assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+
+
+def test_public_errors_turn_only_named_types_into_a_400():
+    import pytest
+    from rest_framework.exceptions import ValidationError
+    from patient_portal.api.public_errors import PublicError, public_errors
+
+    with pytest.raises(PublicError) as raised:
+        with public_errors(ValueError, field='loinc_axes'):
+            raise ValueError('Unknown axis.')
+    assert raised.value.detail == {'loinc_axes': 'Unknown axis.'}
+    assert isinstance(raised.value, ValidationError)
+
+    with pytest.raises(PublicError) as bare:
+        with public_errors(ValueError):
+            raise ValueError('Nope.')
+    assert [str(m) for m in bare.value.detail] == ['Nope.']
+
+    # Anything else is not ours to show: it stays what it was.
+    with pytest.raises(RuntimeError):
+        with public_errors(ValueError, field='detail'):
+            raise RuntimeError('database password is hunter2')
+    with public_errors(ValueError):
+        pass

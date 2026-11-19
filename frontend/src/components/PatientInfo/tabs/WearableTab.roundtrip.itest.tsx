@@ -9,6 +9,7 @@
  */
 import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeAll, vi } from 'vitest';
+import { signInForItest } from '@/test/itestSession';
 import WearableTab from './WearableTab';
 import { fetchWritableFields, __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import api from '@/api/axios';
@@ -16,8 +17,7 @@ import api from '@/api/axios';
 const PERSON = 262;
 
 beforeAll(() => {
-  document.cookie = 'sessionid=svlpo0jc6pm4ey52ih43ruykpv2cio51';
-  document.cookie = 'csrftoken=aTaONYK8cVsQ9ZR0dOt8QlfacFA4iomG';
+  signInForItest();
   __resetWritableFieldsCache();
 });
 
