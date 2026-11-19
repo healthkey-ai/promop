@@ -1451,15 +1451,31 @@ row holds and whether its outcome is scored at all (#2743).
   suggestion stayed in place, and approving exactly what the ranker proposed
   was scored as overriding it.
 - **Provenance follows who chose.** Reverse Suggest's own auto-propose stamps
-  `origin_system` `suggest vN`, so Replace may re-answer a row no curator
-  touched. A curator who accepts a ranker-chosen candidate from a preview keeps
+  `origin_system` `suggest vN` on a new row, or on one whose provenance was
+  blank or already `suggest*`, so Replace may re-answer a row no curator
+  touched. A row a curator, an importer or a pending Athena choice had
+  claimed keeps the writer's `curator` stamp. A curator who accepts a ranker-chosen candidate from a preview keeps
   curator provenance (Replace leaves it alone) and the row is still scored
   against the ranker's pick: scoring reads `suggested_target_concept`, never
   `origin_system`.
 
-Not addressed: a group decision is one outcome per member row, so one answer
-for a label shared by 700 hospital codes counts 700 times; and outcomes
-recorded before #2743 for reverse proposals cannot be reconstructed.
+- **Ingest lookups mark too.** `_record_proposal(is_suggestion=True)` (the ETL
+  `code-mappings/lookup/` path) sets `suggestion_fallback` from the note it
+  stores, for the same reason.
+
+Not addressed:
+
+- A group decision is one outcome per member row, so one answer for a label
+  shared by 700 hospital codes counts 700 times.
+- Outcomes recorded before #2743 for reverse proposals cannot be
+  reconstructed.
+- A reverse pick is stamped with the forward model's version, and only the
+  picks a person later saves become outcomes (auto-propose is gated by its
+  confidence threshold), so the reverse ranker is scored on its selected
+  picks and v0.4's precision reads somewhat high for it. A distinct version
+  or direction would separate them.
+- A forward suggestion nobody has reviewed yet, replaced by a reverse pick,
+  is replaced silently and is not an archived review.
 
 ### Which notes are a curator's
 

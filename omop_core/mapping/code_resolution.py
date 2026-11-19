@@ -291,6 +291,11 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     ).filter(organization=organization).first()
 
     if mapping is None:
+        # A suggestion the lookup took from an unreachable ranker is the first
+        # retrieval hit, not the model's answer (#2743): marked as Suggest's own
+        # writers mark one, or its outcome would be scored once approved.
+        from omop_core.mapping.suggestions import is_fallback_note
+        fallback = bool(is_suggestion and is_fallback_note(notes))
         try:
             # Savepointed: two ETL workers importing the same new code both miss
             # the filter above and both insert. Without this the loser's
@@ -309,6 +314,7 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     domain_id=_DOMAIN_FOR_TABLE.get(omop_table, ''),
                     target_concept=concept,
                     suggested_target_concept=concept if is_suggestion else None,
+                    suggestion_fallback=fallback,
                     destination_vocabulary_id=(concept.vocabulary_id or '') if concept else '',
                     omop_table=omop_table,
                     source=SOURCE_HEALTHKEY,

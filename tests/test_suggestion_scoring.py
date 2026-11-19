@@ -193,6 +193,68 @@ def test_a_dashboard_with_only_fallbacks_scores_nothing_and_says_how_many(client
     assert data['fallbacks'] == {'suggestions': 1, 'reviewed': 0}
 
 
+def test_the_note_a_ranker_that_cannot_run_leaves_is_what_marks_a_fallback(settings, albumin_goal):
+    """Not a hand-copied string: if rank_candidates' wording changed, nothing
+    would be marked and every other test here would still pass."""
+    settings.ANTHROPIC_API_KEY = ''
+
+    chosen, note, _ = suggestions.rank_candidates('ALB', [candidate(albumin_goal)], 'albumin')
+
+    assert chosen['concept_id'] == albumin_goal.concept_id, 'the first retrieval hit stands in'
+    assert suggestions.is_fallback_note(note)
+    assert suggestions.is_fallback_note(FALLBACK_NOTE)
+    assert note.startswith('Best-match fallback'), 'migration 0360 matches the start of the note'
+    chosen, note, _ = suggestions.rank_candidates('ALB', [candidate(albumin_goal)], 'albumin',
+                                                  require_model_selection=True)
+    assert chosen is None and not suggestions.is_fallback_note(chosen) and suggestions.is_fallback_note(note)
+
+
+@pytest.mark.parametrize(('note', 'fallback'), [(FALLBACK_NOTE, True), ('Selected with high confidence.', False)])
+def test_an_ingest_lookup_marks_a_fallback_and_its_approval_is_not_scored(client, albumin_goal, note, fallback):
+    from omop_core.mapping.code_resolution import _record_proposal
+
+    created = _record_proposal(
+        source_vocabulary_id='VendorLab', source_code='ING', source_text='albumin', concept=albumin_goal,
+        omop_table='measurement', source_system='fhir-upload', notes=note, is_suggestion=True)
+
+    assert created.suggestion_fallback is fallback
+    assert client.patch(detail(created), {'status': 'approved'}, format='json').status_code == 200
+    created.refresh_from_db()
+    assert created.suggestion_outcome == 'accepted', 'what happened is still on the row'
+    scored = scores(client)
+    assert scored['accepted'] == (0 if fallback else 1)
+    assert client.get(DASHBOARD).data['fallbacks']['reviewed'] == (1 if fallback else 0)
+
+
+def test_a_reverse_pick_never_hands_a_curators_row_back_to_replace(curator, albumin_goal, albumin):
+    """A curator moved the destination, so Suggest's Replace must not re-answer it."""
+    mine = row('ALB', albumin_goal, origin_system='curator', updated_by=curator)
+    pending = row('ATH', albumin_goal, origin_system='athena-multiple')
+    imported = row('IMP', origin_system='healthtree-unmapped-v2')
+    for mapping in (mine, pending, imported):
+        reverse_suggest_jobs._repoint_proposed_row(ranked(mapping), albumin, curator)
+        mapping.refresh_from_db()
+        assert mapping.target_concept_id == albumin.pk
+        assert mapping.origin_system == suggestions.CURATOR_PROVENANCE, mapping.source_code
+        assert mapping.suggested_target_concept_id == albumin.pk
+    assert not {m.pk for m in (mine, pending, imported)} & {m.pk for m in suggestions.suggestable_mappings(
+        'measurement', resuggest=True, min_occurrences=1)}
+
+
+def test_a_reverse_pick_that_is_already_the_stored_suggestion_keeps_its_history(curator, albumin_goal, albumin):
+    """The curator parked the destination elsewhere; the ranker's pick is the suggestion already stored."""
+    parked = row('ALB', albumin, suggestion_model_version='v0.3', origin_system='suggest v0.3')
+    parked.target_concept = albumin_goal
+    parked.save(update_fields=['target_concept'])
+
+    reverse_suggest_jobs._repoint_proposed_row(ranked(parked), albumin, curator)
+
+    parked.refresh_from_db()
+    assert parked.target_concept_id == albumin.pk
+    assert parked.suggestion_model_version == 'v0.3', 'not restamped as a new suggestion'
+    assert not MappingSuggestionReview.objects.exists()
+
+
 def test_a_replaced_fallbacks_review_is_archived_as_one(monkeypatch, client, albumin_goal, albumin):
     reviewed = row('ALB', albumin_goal, suggestion_fallback=True, suggestion_outcome='rejected')
 

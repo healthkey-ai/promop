@@ -71,7 +71,7 @@ def _propose_new_row(candidate, concept, user):
             'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
             'status': 'proposed',
         }, user, machine_proposal=_ranker_chose(candidate))
-        _store_machine_proposal(row, candidate)
+        _store_machine_proposal(row, candidate, previous_origin=None)
     return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
 
 
@@ -92,12 +92,13 @@ def _repoint_proposed_row(candidate, concept, user):
         if (row.target_concept_id is not None and row.suggestion_confidence is not None
                 and (confidence is None or confidence < row.suggestion_confidence)):
             return candidate
+        previous_origin = row.origin_system
         # A ranker's pick becomes the suggestion the row is scored on (#2743).
         row, _ = _upsert_source_code_mapping(concept, {
             'status': 'proposed', 'domain_id': concept.domain_id, 'omop_table': table,
             'destination_vocabulary_id': concept.vocabulary_id,
         }, user, mapping=row, record_decision=False, machine_proposal=_ranker_chose(candidate))
-        _store_machine_proposal(row, candidate)
+        _store_machine_proposal(row, candidate, previous_origin=previous_origin)
     return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
 
 
@@ -106,19 +107,29 @@ def _ranker_chose(candidate):
     return bool(candidate.get('verdict') == 'supported' and not candidate.get('declined'))
 
 
-def _store_machine_proposal(row, candidate):
+def _store_machine_proposal(row, candidate, *, previous_origin):
     """What only this job knows about the row it just wrote: the ranker's
     score, and that no person chose the destination. The writer stamps a moved
     proposal as a curator's pick, which is right for a person's save and wrong
-    here: it kept Suggest's Replace from ever re-answering a row no curator
-    had touched (#2743)."""
+    for a row only Suggest has touched: it kept Suggest's Replace from ever
+    re-answering one (#2743).
+
+    *previous_origin* is the provenance the row had before this write (``None``
+    for a new row). Only a blank or ``suggest`` provenance goes back to
+    ``suggest``: a row a curator or an importer (or an Athena choice still
+    pending) had claimed keeps the writer's stamp, as before, so Replace never
+    re-answers it.
+    """
     from omop_core.mapping.suggestions import SUGGESTION_PROVENANCE
 
     fields = []
     if candidate.get('confidence') is not None:
         row.suggestion_confidence = candidate['confidence']
         fields.append('suggestion_confidence')
-    if _ranker_chose(candidate):
+    if _ranker_chose(candidate) and (
+        previous_origin is None or previous_origin == ''
+        or previous_origin.lower().startswith('suggest')
+    ):
         row.origin_system = SUGGESTION_PROVENANCE
         fields.append('origin_system')
     if fields:
