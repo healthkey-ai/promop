@@ -2172,6 +2172,12 @@ grants the row level path honours: self, verified representative, professional
 through `GroupAccess`.
 
 Writes are grouped by patched column set, one `bulk_update` per distinct shape.
+Before the groups run, one `UPDATE ... SET source_record_key = NULL` releases the
+keys the batch itself changes (a payload whose `source_record_key` differs from
+the stored one), inside the same transaction and after the rows are locked and
+validated. A key transfer between two rows of one batch is therefore allowed and
+does not depend on group order; if any group fails, the rollback restores every
+key.
 A single call takes one column list for every instance, so an ungrouped batch
 would write a column back onto rows whose payload never carried it, clobbering
 a concurrent change.

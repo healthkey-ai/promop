@@ -130,36 +130,73 @@ def _cohort_person_ids(org_slugs, person_ids_arg, limit):
     return list(qs[:limit]) if limit else list(qs)
 
 
-def _latest_measurement_text_subquery(concept_codes):
-    qs = (
-        Measurement.objects
-        .filter(person=OuterRef('pk'))
-        .filter(
-            Q(measurement_concept__concept_code__in=concept_codes)
-            | Q(measurement_source_value__in=concept_codes)
-        )
-        .annotate(
-            raw_text=Coalesce(
-                'value_as_string',
-                'value_source_value',
-                'value_as_concept__concept_name',
-                output_field=CharField(),
-            )
-        )
-        .order_by('-measurement_date', '-measurement_id')
-        .values('raw_text')[:1]
+def _effective_code():
+    """The row's named code, with `_measurement_code`'s precedence.
+
+    A LOINC-shaped concept code wins; otherwise the source value, else the
+    concept code. Matching either column read a row whose concept names a
+    different analyte through its source value (#2475/#2708).
+    """
+    return Case(
+        When(measurement_concept__concept_code__regex=_LOINC_CODE_PATTERN,
+             then=F('measurement_concept__concept_code')),
+        default=Coalesce(
+            NullIf(F('measurement_source_value'), Value('')),
+            F('measurement_concept__concept_code')),
+        output_field=CharField(),
     )
+
+
+def _latest_measurement_text_subquery(concept_codes, source_fallback=False):
+    """The newest text answer, matched by the effective code.
+
+    ``source_fallback`` keeps the staging extractor's rule for the stage field:
+    `_get_staging_data` reads a row by concept *or* source value, so the
+    benchmark must not give the concept precedence there (#2708 review).
+    """
+    qs = Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False)
+    if source_fallback:
+        # `_get_staging_data` reads every concept-coded row before any
+        # source-only row, so the ordering carries that precedence; a plain
+        # newest-across-both query would let an older concept row lose to a
+        # newer source row the record does not read (#2708 review).
+        qs = (
+            qs.annotate(
+                _concept_match=Case(
+                    When(measurement_concept__concept_code__in=concept_codes,
+                         then=Value(0)),
+                    default=Value(1),
+                ),
+            )
+            .filter(
+                Q(measurement_concept__concept_code__in=concept_codes)
+                | Q(measurement_source_value__in=concept_codes),
+            )
+            .order_by('_concept_match', '-measurement_date', '-measurement_id')
+        )
+    else:
+        qs = qs.annotate(effective_code=_effective_code()).filter(
+            effective_code__in=concept_codes)
+    qs = qs.annotate(
+        raw_text=Coalesce(
+            'value_as_string',
+            'value_source_value',
+            'value_as_concept__concept_name',
+            output_field=CharField(),
+        )
+    )
+    if not source_fallback:
+        qs = qs.order_by('-measurement_date', '-measurement_id')
+    qs = qs.values('raw_text')[:1]
     return Subquery(qs, output_field=CharField())
 
 
 def _latest_measurement_number_subquery(concept_codes, output_field):
     qs = (
         Measurement.objects
-        .filter(person=OuterRef('pk'))
-        .filter(
-            Q(measurement_concept__concept_code__in=concept_codes)
-            | Q(measurement_source_value__in=concept_codes)
-        )
+        .filter(person=OuterRef('pk'), is_erroneous=False)
+        .annotate(effective_code=_effective_code())
+        .filter(effective_code__in=concept_codes)
         .exclude(value_as_number__isnull=True)
         .order_by('-measurement_date', '-measurement_id')
         .values('value_as_number')[:1]
@@ -214,24 +251,13 @@ def _latest_measurement_pair_subquery(concept_codes):
     row whose concept is 59260-0 (moles/volume) through a 718-7 source value as
     g/dL hemoglobin.
 
-    Only the paired-lab and blood-count subqueries use this builder. The
-    number/text builders still match either column; that pre-existing
-    divergence from the derivation is #2708.
+    The number and text builders use the same effective code (except the stage
+    text field, which follows the staging extractor's concept-or-source rule).
+    The remaining benchmark/derivation divergence is row selection (#2708).
     """
     return Subquery(
         Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False)
-        .annotate(
-            effective_code=Case(
-                When(measurement_concept__concept_code__regex=_LOINC_CODE_PATTERN,
-                     then=F('measurement_concept__concept_code')),
-                # The last arm of ``_measurement_code``: the source value when
-                # it is non-empty, else the concept code.
-                default=Coalesce(
-                    NullIf(F('measurement_source_value'), Value('')),
-                    F('measurement_concept__concept_code')),
-                output_field=CharField(),
-            ),
-        )
+        .annotate(effective_code=_effective_code())
         .filter(effective_code__in=concept_codes)
         .exclude(value_as_number__isnull=True)
         .order_by('-measurement_date', '-measurement_id').annotate(
@@ -420,7 +446,11 @@ def _fetch_omop_trial_row(person_id, code_fields=None):
             gender_raw=Coalesce('gender_concept__concept_name', 'gender_source_value'),
             disease=_latest_cancer_condition_subquery(),
             stage=Coalesce(
-                _latest_measurement_text_subquery(['21908-9']),
+                # `_get_staging_data` prefers R-ISS and reads concept or source
+                # value, so this field keeps both rules while the other text
+                # fields use the effective code (#2708 review).
+                _latest_measurement_text_subquery(['21908-9-riss'], source_fallback=True),
+                _latest_measurement_text_subquery(['21908-9'], source_fallback=True),
                 _latest_observation_text_subquery(['21908-9']),
             ),
             ecog_performance_status=_latest_observation_number_name_subquery(['ecog'], IntegerField()),
@@ -436,13 +466,17 @@ def _fetch_omop_trial_row(person_id, code_fields=None):
             wbc_count_thousand_per_ul=_latest_blood_count_subquery(['6690-2']),
             serum_creatinine_mg_dl=_latest_measurement_pair_subquery(
                 _codes_for(code_fields, 'serum_creatinine_mg_dl')),
-            creatinine_clearance_ml_min=_latest_measurement_number_subquery(['2164-2'], DecimalField(max_digits=6, decimal_places=1)),
+            creatinine_clearance_ml_min=_latest_measurement_number_subquery(
+                _codes_for(code_fields, 'creatinine_clearance_ml_min'),
+                DecimalField(max_digits=6, decimal_places=1)),
             serum_calcium_mg_dl=_latest_measurement_pair_subquery(
                 _codes_for(code_fields, 'serum_calcium_mg_dl')),
             bilirubin_total_mg_dl=_latest_measurement_pair_subquery(
                 _codes_for(code_fields, 'bilirubin_total_mg_dl')),
-            ast_u_l=_latest_measurement_number_subquery(['1920-8'], IntegerField()),
-            alt_u_l=_latest_measurement_number_subquery(['1742-6'], IntegerField()),
+            ast_u_l=_latest_measurement_number_subquery(
+                _codes_for(code_fields, 'ast_u_l'), IntegerField()),
+            alt_u_l=_latest_measurement_number_subquery(
+                _codes_for(code_fields, 'alt_u_l'), IntegerField()),
             albumin_g_dl=_latest_measurement_pair_subquery(
                 _codes_for(code_fields, 'albumin_g_dl')),
             her2_raw=_latest_measurement_text_subquery(['48676-1']),

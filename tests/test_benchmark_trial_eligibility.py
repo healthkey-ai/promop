@@ -14,7 +14,9 @@ from django.core.management.base import CommandError
 
 from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
 from omop_core.models import Organization, PatientRecord
-from omop_core.services.patient_record_service import _get_laboratory_data
+from omop_core.services.patient_record_service import (
+    _get_laboratory_data, _get_staging_data,
+)
 from tests.factories import (
     ConditionOccurrenceFactory,
     ConceptFactory,
@@ -468,3 +470,96 @@ def test_a_newer_approved_count_alias_is_the_one_that_counts(lab_field_mappings)
 
     assert row['anc_thousand_per_ul'] == Decimal('1.5')
     assert _get_laboratory_data(person)['anc_thousand_per_ul'] == Decimal('1.5')
+
+
+def test_a_number_field_reads_its_own_concept_not_another_code_source():
+    """The number subquery names a row like `_measurement_code` (#2708): a
+    creatinine concept with an AST source value is not AST."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='2160-0'),
+        measurement_source_value='1920-8', value_as_number=Decimal('1.1'))
+
+    assert _fetch_omop_trial_row(person.person_id)['ast_u_l'] is None
+    assert _get_laboratory_data(person).get('ast_u_l') is None
+
+
+def test_the_stage_field_keeps_the_staging_extractors_source_fallback():
+    """`_get_staging_data` reads concept or source value, so the benchmark must
+    agree for stage while the other text fields use the effective code."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='21905-5'),
+        measurement_source_value='21908-9', value_as_string='Stage II')
+
+    row = _fetch_omop_trial_row(person.person_id)
+
+    assert row['stage'] == 'Stage II'
+    assert _get_staging_data(person)['stage'] == 'Stage II'
+
+
+def test_a_number_field_reads_a_curated_code_and_an_approved_alias(lab_field_mappings):
+    """The number builders take the field's curated codes, so a positive result
+    and an approved alias both survive (#2708 review)."""
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='1920-8'),
+        measurement_source_value='1920-8', measurement_date='2024-01-01',
+        value_as_number=Decimal('41'))
+    mapping = FieldConceptMapping.objects.get(field_name='ast_u_l')
+    alias = ConceptFactory(concept_code='30239-9', concept_name='Aspartate aminotransferase')
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code=alias.concept_code,
+        target_concept_id=mapping.concept_id, status='approved',
+        omop_table='measurement', origin='curator')
+    MeasurementFactory(
+        person=person, measurement_concept=alias, measurement_source_value='30239-9',
+        measurement_date='2024-02-01', value_as_number=Decimal('55'))
+
+    assert _fetch_omop_trial_row(person.person_id)['ast_u_l'] == 55
+
+
+def test_stage_reads_a_concept_row_before_a_newer_source_row():
+    """`_get_staging_data` visits concept-coded rows first, so the benchmark
+    must not let a newer source-only row win (#2708 review)."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='21908-9'),
+        measurement_source_value='21908-9', measurement_date='2020-01-01',
+        value_as_string='Stage I')
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='21905-5'),
+        measurement_source_value='21908-9', measurement_date='2026-01-01',
+        value_as_string='Stage IV')
+
+    assert _fetch_omop_trial_row(person.person_id)['stage'] == 'Stage I'
+    assert _get_staging_data(person)['stage'] == 'Stage I'
+
+
+def test_an_entered_in_error_row_is_not_a_benchmark_fact():
+    """The derivation skips entered-in-error rows, so every measurement builder
+    must too (the pair builder already did)."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='1920-8'),
+        measurement_source_value='1920-8', value_as_number=Decimal('88'),
+        is_erroneous=True)
+
+    assert _fetch_omop_trial_row(person.person_id)['ast_u_l'] is None
+    assert _get_laboratory_data(person).get('ast_u_l') is None
+
+
+def test_stage_reads_the_r_iss_code_the_derivation_prefers():
+    """R-ISS is the MM stage the record derives; only the source value carries
+    it, so the benchmark must read that code too."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='21905-5'),
+        measurement_source_value='21908-9-riss', value_as_string='Stage III')
+
+    assert _fetch_omop_trial_row(person.person_id)['stage'] == 'Stage III'
+    assert _get_staging_data(person)['stage'] == 'Stage III'

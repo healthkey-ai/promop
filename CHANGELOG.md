@@ -295,6 +295,23 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A `bulk_update` batch releases the keys it changes before writing any
+  group (#2709)** — the endpoint applies one `UPDATE` per patched column set,
+  so a key transfer between two rows (clear on one, set on another) failed with
+  409 whenever the destination group happened to run first. The rows are
+  locked and validated as before; the keys the batch changes are then cleared
+  in the same transaction before the groups are written, so the transfer no
+  longer depends on row or group order.
+- **The eligibility benchmark's number and text subqueries name a row the way
+  the derivation does (#2708)** — they still matched `concept_code OR
+  source_value`, so a row whose LOINC concept names a different analyte was
+  read through its source value (a creatinine concept with an AST source value
+  reported AST). They now use the same effective-code precedence as the paired
+  labs, except `stage`, which keeps the staging extractor's concept-before-
+  source ordering, and the creatinine clearance, AST and ALT fields take their
+  accepted codes from `resolve_lab_code_fields()`. The remaining row-selection
+  differences (NULL newest rows, provisional measurements, clears) stay in
+  #2708.
 - **A row-level write cannot take another row's `source_record_key`, and the
   key field no longer trims (#2484)** — `PATCH /api/v1/measurements/<pk>/` and
   the observation equivalent skipped DRF's uniqueness validator so the keyed

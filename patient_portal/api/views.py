@@ -9455,6 +9455,10 @@ class _OmopBulkUpdateMixin:
 
         instances: list[models.Model] = []
         by_shape: dict[frozenset[str], list[models.Model]] = defaultdict(list)
+        # Rows whose stored source_record_key the batch changes: their key is
+        # released before any group is written, so a transfer between two rows
+        # does not depend on the order PostgreSQL applies the groups (#2709).
+        releasing_keys: list[int] = []
         errors: list[dict[str, Any]] = []
         for row_id, payload in present:
             row_serializer = self.get_serializer(
@@ -9468,6 +9472,9 @@ class _OmopBulkUpdateMixin:
             if not attrs:
                 continue
             instance = by_id[row_id]
+            if ('source_record_key' in attrs
+                    and attrs['source_record_key'] != instance.source_record_key):
+                releasing_keys.append(row_id)
             for name, value in attrs.items():
                 setattr(instance, name, value)
             by_shape[frozenset(attrs)].append(instance)
@@ -9489,6 +9496,13 @@ class _OmopBulkUpdateMixin:
                 provenance.organization)
 
         with suppress_patient_record_refresh():
+            if releasing_keys:
+                # Same transaction, after the rows are locked and validated:
+                # clear every key this batch is changing so the destination's
+                # new key cannot collide with a release in another group (#2709).
+                model_cls.objects.filter(
+                    **{f'{pk_field}__in': releasing_keys}).update(
+                    source_record_key=None)
             # Grouped by patched column set, so a row never writes back a column
             # its own payload did not carry.
             for shape, group in by_shape.items():

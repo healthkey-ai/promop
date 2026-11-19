@@ -589,3 +589,24 @@ def test_a_bulk_collision_answers_the_generic_409(api, client):
     assert resp.status_code == 409, resp.content
     assert 'error' not in resp.json()
     assert 'k/a' not in resp.json()['detail']
+
+
+@pytest.mark.parametrize('destination_first', [True, False])
+def test_a_bulk_update_may_transfer_a_key_in_either_order(api, client, destination_first):
+    """The batch releases the keys it changes before writing any group, so a
+    destination group that sorts first cannot collide with the release (#2709)."""
+    first, second = api.post([api.row(key='k/a'), api.row(key='k/b')]).json()['ids']
+    rows = [
+        {'measurement_id': second, 'source_record_key': 'k/a', 'value_as_number': '37.7'},
+        {'measurement_id': first, 'source_record_key': None},
+    ]
+    if not destination_first:
+        rows.reverse()
+
+    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true',
+                        rows, format='json')
+
+    assert resp.status_code == 200, resp.content
+    keys = dict(Measurement.objects.filter(person=api.person)
+                .values_list('measurement_id', 'source_record_key'))
+    assert keys == {first: None, second: 'k/a'}
