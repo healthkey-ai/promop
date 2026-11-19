@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from omop_core.models import Concept, SourceCodeConceptMapping, SuggestRun
+from omop_core.services import mapping_approval
 from omop_core.services.source_labels import normalise
 
 
@@ -99,12 +100,13 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                 mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-group'
                 mapping.suggest_strategy = proposal['strategy']
                 mapping.suggested_action = ''
+                mapping.proposed_by = None   # the machine's destination now (#2726)
                 mapping.notes = mapping.notes or proposal['note']
                 mapping.save(update_fields=[
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
                     'suggestion_model_version', 'suggestion_confidence', 'last_suggest_attempt',
-                    'suggest_strategy', 'suggested_action', 'notes', 'updated_at',
+                    'suggest_strategy', 'suggested_action', 'notes', 'proposed_by', 'updated_at',
                 ])
                 destinations += 1
             done += 1
@@ -117,6 +119,7 @@ def _apply_group_action(mapping_ids, action, destination_id, *, run, actor, sele
 
     concept = Concept.objects.filter(concept_id=destination_id).first() if destination_id else None
     done = 0
+    skipped = 0
     refreshed_at = timezone.now()
     refresh_interval = timedelta(seconds=max(15, settings.MAPPING_LOCK_TIMEOUT_MINUTES * 30))
     for position, mapping_id in enumerate(mapping_ids):
@@ -139,16 +142,34 @@ def _apply_group_action(mapping_ids, action, destination_id, *, run, actor, sele
                 raise RuntimeError(
                     'A group member destination changed while the decision was running.'
                 )
-            _upsert_source_code_mapping(
-                concept if action == 'approve' else mapping.target_concept,
-                {'status': 'approved' if action == 'approve' else 'rejected',
-                 'decision_surface': 'code2concept'},
-                actor, mapping=mapping,
-            )
+            # The two-person rule (#2726): a code the actor proposed is left
+            # for another approver. It stays proposed, uncounted, so the run's
+            # `done` is the codes actually decided.
+            if action == 'approve' and mapping_approval.blocked_for(actor, mapping.proposed_by_id):
+                skipped += 1
+                continue
+            try:
+                with transaction.atomic():
+                    _upsert_source_code_mapping(
+                        concept if action == 'approve' else mapping.target_concept,
+                        {'status': 'approved' if action == 'approve' else 'rejected',
+                         'decision_surface': 'code2concept'},
+                        actor, mapping=mapping,
+                    )
+            except mapping_approval.SelfApprovalError:
+                # The group's destination is not this member's own, so the
+                # approval would also be the actor's proposal of it.
+                skipped += 1
+                continue
             done += 1
             SuggestRun.objects.filter(pk=run.pk).update(
                 done=done, destinations=done if action == 'approve' else 0,
             )
+    if skipped:
+        # The page says how many were left for another approver (#2726).
+        SuggestRun.objects.filter(pk=run.pk).update(
+            activity=[{'action': 'skipped', 'reason': 'self_approval', 'count': skipped}],
+        )
     return done
 
 

@@ -70,6 +70,8 @@ type Props = {
   generation?: number;
   onSaved?: () => void;
   canApprove?: boolean;
+  /** The proposer may not approve their own pick (#2726): the inline picker's Save & approve is hidden. */
+  separateApprover?: boolean;
   vocabularies?: { vocabulary_id: string; vocabulary_name: string }[];
   domains?: { domain_id: string; label: string }[];
 };
@@ -150,7 +152,7 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
   return applyAxisOrder([...byId.values()], ranked);
 }
 
-export default function SuggestCandidates({ activity, finished, generation, onSaved, canApprove = false, vocabularies = [], domains = [] }: Props) {
+export default function SuggestCandidates({ activity, finished, generation, onSaved, canApprove = false, separateApprover = false, vocabularies = [], domains = [] }: Props) {
   const [editing, setEditing] = useState<number | null>(null);
   const [minting, setMinting] = useState<number | null>(null);
   const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
@@ -421,7 +423,7 @@ export default function SuggestCandidates({ activity, finished, generation, onSa
           {canSearch && <div className="mt-3 flex items-center gap-2">
             {editing === mappingId ? <InlineDestinationPicker key={mappingId} mappingId={mappingId}
               sourceLabel={`${source.source_vocabulary_id || "Uncoded"}:${source.source_code}${description ? ` — ${description}` : ""}`}
-              canApprove={canApprove} vocabularies={vocabularies}
+              canApprove={canApprove} separateApprover={separateApprover} vocabularies={vocabularies}
               onCancel={() => setEditing(null)} onSaved={(saved, concept) => {
                 remember(mappingId, concept, saved.status === "approved");
                 setEditing(null);

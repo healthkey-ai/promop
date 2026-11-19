@@ -31,6 +31,8 @@ import {
   SUGGEST_POLL_INTERVAL_MS,
   SUGGEST_POLL_MAX_FAILURES,
   SUGGEST_POLL_TIMEOUT_MS,
+  OWN_PROPOSAL_NOTE,
+  isOwnProposal,
 } from "./codeMappingTypes";
 
 /**
@@ -417,6 +419,13 @@ function sortsWithoutWearableColumns(previous: Partial<Record<MappingSection, Se
 // value, so filtering to blank needs a sentinel the server translates back.
 const BLANK_PROVENANCE = "__blank__";
 const GLOBAL_ORGANIZATION = "__none__";
+
+/** Codes a group approval left for another approver because the actor proposed them (#2726). */
+function skippedNote(activity: unknown): string {
+  const event = (Array.isArray(activity) ? activity : []).find(
+    (entry) => (entry as { action?: string }).action === "skipped") as { count?: number } | undefined;
+  return event?.count ? ` ${event.count.toLocaleString()} you proposed ${event.count === 1 ? "was" : "were"} left for another approver.` : "";
+}
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
@@ -911,7 +920,7 @@ export default function CodeMappingPage() {
             : finished.destinations
               ? `Suggested once and applied the destination to ${finished.destinations} eligible code(s).`
               : "Group Suggest found no safe destination; no mapping was changed."
-          : `${action === "approve" ? "Approved" : "Rejected"} ${finished.done} eligible code(s).`,
+          : `${action === "approve" ? "Approved" : "Rejected"} ${finished.done} eligible code(s).${skippedNote(finished.activity)}`,
       );
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -1345,7 +1354,8 @@ export default function CodeMappingPage() {
             <td className="px-4 py-3">
               {canWrite && <>
               <button type="button" onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
-                disabled={!row.destination_concept_id}
+                disabled={!row.destination_concept_id || (row.status !== "approved" && isOwnProposal(row, currentUser?.id))}
+                title={row.status !== "approved" && isOwnProposal(row, currentUser?.id) ? OWN_PROPOSAL_NOTE : undefined}
                 aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
                 className="mr-1 rounded border border-slate-300 px-2 py-1 text-xs">
                 {row.status === "approved" ? "Unapprove" : "Approve"}
@@ -1364,7 +1374,8 @@ export default function CodeMappingPage() {
                 sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
                 vocabularies={reference.destination_vocabularies}
                 initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
-                canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
+                canApprove={canApprove} separateApprover={reference.separate_approver === true}
+                onCancel={() => setInlineMappingId(null)}
                 onSaved={(saved, concept) => {
                   applySavedMapping(saved as CodeMappingRow);
                   setInlineMappingId(null);
@@ -1810,7 +1821,7 @@ export default function CodeMappingPage() {
           activity={[...accumulatedActivity, ...(suggestRun?.activity ?? [])]}
           finished={!suggestRun || suggestRun.state === "success" || suggestRun.state === "failure"}
           generation={suggestGeneration}
-          canApprove={canApprove} vocabularies={reference.destination_vocabularies}
+          canApprove={canApprove} separateApprover={reference.separate_approver === true} vocabularies={reference.destination_vocabularies}
           domains={reference.domains}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
@@ -1970,6 +1981,7 @@ export default function CodeMappingPage() {
         row={selectedRow}
         reference={reference}
         canApprove={canApprove}
+        currentUserId={currentUser?.id}
         canWrite={canWrite}
         sourceExamples
         strategies={strategies}

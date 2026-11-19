@@ -724,7 +724,9 @@ still applies to it (`get_admin_access_paths`). A self-signup at a public demo o
 trusted-domain self-signup (#1454), are granted `doctor` rather than the former
 `analyst`, because that signup exists to browse patients; grants made before
 #2416 are left as they are. Approval stays with
-staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
+staff and org_admin (`_can_approve_mappings`) for every role, and never for the
+curator who proposed that destination (see
+[the approver cannot be the proposer](#code-mapping--the-approver-cannot-be-the-proposer)). Gate a new
 mapping endpoint's reads with `_can_view_mappings` and its writes with
 `_can_manage_mappings` (`concept_to_code._authorize(user, write=True)` on
 that module); a mixed-verb view checks both. `AnalystRoleScopeTest` and
@@ -1039,7 +1041,7 @@ lookups or therapy reference rows, because patient data can point at them.
 
 Code mappings steer ingest (`resolve_source_code`), so copying an approved row
 changes what a later import resolves to. `occurrence_count`, `first_seen` and
-`last_seen` stay local. `reviewer` / `created_by` / `updated_by` are cleared:
+`last_seen` stay local. `reviewer` / `created_by` / `updated_by` / `proposed_by` are cleared:
 the same Identity id is a different person on another instance.
 
 The field-mapping tables go through `field_curation_transfer`, whose payload is
@@ -2333,6 +2335,31 @@ Tests: `tests/test_mapping_votes.py`; `PublicVotePage.test.tsx`,
 `ConfirmVotesPage.test.tsx`, `WearableVoteShare.test.tsx`,
 `MappingVotesSection.test.tsx`, `CodeMappingPage.votes.test.tsx`,
 `EditMappingDialog.votes.test.tsx`.
+
+## Code Mapping — The Approver Cannot Be the Proposer
+
+`proposed_by` (on `SourceCodeConceptMapping` and `SourceCodeAxisVariant`) names
+the curator behind the destination now on a row, and a curator may not approve
+what they proposed (#2726). Rule and wording: `omop_core/services/mapping_approval.py`;
+the writer is `_upsert_source_code_mapping`. Full description:
+[concept_to_code_architecture.md](docs/concept_to_code_architecture.md#approval-needs-a-second-person-2726).
+
+- **Stamped** by a person's save that creates a row, moves its destination or
+  re-opens it from rejected; **kept** by note fixes and un-approvals; **null**
+  for machine proposals (Suggest and its group, Replace and reverse runs, a
+  Concept to Code propose/apply of a candidate a ranker chose, importers, service tokens) and
+  for rows that predate it. A writer that moves a destination for a machine
+  clears it (`machine_proposal=True` on `_upsert_source_code_mapping`, or
+  `proposed_by = None` in the bulk writers).
+- **Refused** with a 403 `{"detail", "code": "self_approval"}` (a DRF `PermissionDenied`), before any
+  save, including propose-and-approve in one request. Group approve skips the
+  actor's own proposals; a file upload that approves its uploader's proposal is a
+  400 with one error per row; axis variants follow the same rule.
+- **Switch**: `MAPPING_SEPARATE_APPROVER`, on where `DEBUG` is off, off under
+  `DEBUG` unless the variable is set. A one-administrator deployment sets it to
+  `false`. A test of the rule sets `settings.MAPPING_SEPARATE_APPROVER = True`.
+- Field mappings and custom fields are not covered. Row payloads carry
+  `proposed_by_id` (null when off); the pages disable Approve for the proposer.
 
 ## Code Mapping Lookup — Unit Conversion
 

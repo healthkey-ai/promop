@@ -2358,10 +2358,12 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             # provisional write put on that concept follow the proposal back to
             # unresolved (#2530); the next Generate OMOP run writes new ones.
             moved_off = None
+            destination_moved = False
 
             if concept is not None and not athena_duplicate:
                 if concept.pk != mapping.target_concept_id:
                     moved_off = mapping.target_concept_id
+                    destination_moved = True
                 if mapping.suggestion_outcome:
                     from omop_core.models import MappingSuggestionReview
                     MappingSuggestionReview.objects.create(
@@ -2397,10 +2399,15 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 mapping.origin_system = SUGGESTION_PROVENANCE
                 mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
                 mapping.suggestion_confidence = chosen_confidence(chosen, job.get('alternatives'))
+                # A destination the machine moved is its own, not whoever proposed
+                # the one it replaced; one it re-confirms stays its proposer's
+                # (#2726).
+                if destination_moved:
+                    mapping.proposed_by = None
                 fields += [
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
-                    'suggestion_model_version', 'suggestion_confidence',
+                    'suggestion_model_version', 'suggestion_confidence', 'proposed_by',
                 ]
             # Notes is a free-text field a curator writes in, and the row we are
             # writing to may not be one a Suggest run created -- the candidate set is

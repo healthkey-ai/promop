@@ -69,6 +69,9 @@ import {
   SUGGEST_POLL_TIMEOUT_MS,
   STRATEGY_LABELS,
   TIP,
+  NEW_DESTINATION_NOTE,
+  OWN_PROPOSAL_NOTE,
+  isOwnProposal,
 } from "./codeMappingTypes";
 
 // Re-export types that callers may need.
@@ -85,6 +88,8 @@ export interface EditMappingDialogProps {
   row: CodeMappingRow | null;
   reference: Reference;
   canApprove: boolean;
+  /** The signed-in account: Approved is offered only for a mapping it did not propose (#2726). */
+  currentUserId?: number | string | null;
   /**
    * Whether the user can write mappings. Without it the wearable Category,
    * Measure Class and Metric Key read as text. Defaults to true: the pages
@@ -183,6 +188,7 @@ export default function EditMappingDialog({
   row: selectedRow,
   reference,
   canApprove,
+  currentUserId,
   canWrite = true,
   strategies,
   rankingModel,
@@ -205,6 +211,14 @@ export default function EditMappingDialog({
 
   // ── state ───────────────────────────────────────────────────────
   const [form, setForm] = useState<MappingForm>(emptyForm);
+  // The server refuses an approval by whoever proposed the destination (#2726);
+  // say so up front rather than after the save.
+  const ownProposal = mode === "edit" && isOwnProposal(selectedRow, currentUserId);
+  // With the rule on, a save that creates the row or moves its destination makes
+  // the saver its proposer, so Approved would be refused in the same request.
+  const proposesDestination = reference.separate_approver === true && (
+    mode === "new"
+    || String(form.destination_concept_id ?? "") !== String(selectedRow?.destination_concept_id ?? ""));
   const [searchVocabulary, setSearchVocabulary] = useState("");
   const [searchScope, setSearchScope] = useState<SearchScope>(DEFAULT_SEARCH_SCOPE);
   const [conceptSearchQuery, setConceptSearchQuery] = useState("");
@@ -1077,7 +1091,8 @@ export default function EditMappingDialog({
     const message =
       detail && typeof detail === "object" && !Array.isArray(detail)
         ? Object.entries(detail as Record<string, unknown>)
-          .filter(([field]) => field !== "existing_mapping")
+          // `code` is the machine-readable twin of `detail` (e.g. self_approval).
+          .filter(([field]) => field !== "existing_mapping" && !(field === "code" && "detail" in detail))
           .map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : String(value)}`)
           .join(" ")
         : "";
@@ -1849,8 +1864,12 @@ export default function EditMappingDialog({
                   className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
                 >
                   <option value="proposed">Proposed</option>
-                  <option value="approved" disabled={!canApprove || !form.destination_concept_id}>
-                    {!form.destination_concept_id ? "Approved (set destination first)" : canApprove ? "Approved" : "Approved (admin only)"}
+                  <option value="approved" disabled={!canApprove || !form.destination_concept_id || ownProposal || proposesDestination}
+                    title={ownProposal ? OWN_PROPOSAL_NOTE : proposesDestination ? NEW_DESTINATION_NOTE : undefined}>
+                    {!form.destination_concept_id ? "Approved (set destination first)"
+                      : !canApprove ? "Approved (admin only)"
+                        : ownProposal ? "Approved (you proposed this)"
+                          : proposesDestination ? "Approved (save as proposed first)" : "Approved"}
                   </option>
                   <option value="rejected">Rejected</option>
                 </select>

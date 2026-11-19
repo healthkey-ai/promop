@@ -492,9 +492,10 @@ def _promote_if_loaded(
         mapping.source = 'Athena'
         mapping.status = 'approved'
         mapping.origin_system = 'athena-direct'
+        mapping.proposed_by = None
         mapping.save(update_fields=[
             'source_concept', 'target_concept', 'destination_vocabulary_id',
-            'domain_id', 'source', 'status', 'origin_system', 'updated_at',
+            'domain_id', 'source', 'status', 'origin_system', 'proposed_by', 'updated_at',
         ])
     return mapping
 
