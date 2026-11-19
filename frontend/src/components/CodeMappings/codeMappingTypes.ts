@@ -59,6 +59,8 @@ export interface CodeMappingRow {
   created_by: string;
   reviewer?: string;
   reviewed_at?: string | null;
+  /** Who proposed the destination, while the two-person rule is on (#2726); null otherwise. */
+  proposed_by_id?: number | null;
   occurrence_count: number;
   destination_count: number;
   has_mapping: boolean;
@@ -161,6 +163,8 @@ export interface Reference {
   wearable_source_vocabularies?: string[];
   /** The systems a wearable download or share can be limited to, in tab order. */
   wearable_source_systems?: WearableSourceSystem[];
+  /** Whether the proposer may not approve their own proposal (#2726). */
+  separate_approver?: boolean;
 }
 
 export interface WearableSourceSystem {
@@ -521,3 +525,14 @@ export function signedScore(activity: CandidateActivity[], conceptId: string): C
   }
   return null;
 }
+
+/** Whether the signed-in curator proposed this mapping's destination, and so may not approve it (#2726). */
+export function isOwnProposal(
+  row: { proposed_by_id?: number | null } | null | undefined,
+  userId: number | string | null | undefined,
+): boolean {
+  return row?.proposed_by_id != null && userId != null && String(row.proposed_by_id) === String(userId);
+}
+
+export const OWN_PROPOSAL_NOTE = "You proposed this mapping, so another approver must approve it.";
+export const NEW_DESTINATION_NOTE = "Choosing a destination proposes it, so another approver must approve it.";

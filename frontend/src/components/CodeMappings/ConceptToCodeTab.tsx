@@ -536,7 +536,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
           </div>
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
-        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={!canWrite || lockedByOther(selected)}
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} currentUserId={userId} readOnly={!canWrite || lockedByOther(selected)}
           seenOnlyByDefault={domain !== WEARABLES_DOMAIN}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
           onEditingChange={setEditing} suggestCache={suggestCache} />
@@ -878,8 +878,10 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
   return { data, setData, page, setPage, loading, failed, reset };
 }
 
-function SourceCoverage({ concept, canApprove, readOnly = false, seenOnlyByDefault = true, onSaved, onWriting, onEditingChange, suggestCache }: {
+function SourceCoverage({ concept, canApprove, currentUserId, readOnly = false, seenOnlyByDefault = true, onSaved, onWriting, onEditingChange, suggestCache }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
+  /** The signed-in account, for the dialog's two-person rule (#2726). */
+  currentUserId?: number | string | null;
   /** Whether Suggested Codes starts on Seen > 0. Off under the Wearables
    * domain: a platform's own codes have no sightings on an instance that
    * holds no wearable data, and they are the codes to map (#2686). */
@@ -1441,7 +1443,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, seenOnlyByDefau
     {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {withNotes ? 'Uncheck with notes to include codes without a curator note. ' : ''}{seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
       Run Suggest source codes to search.</p>}
     <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
-      reference={reference ?? emptyReference} canApprove={canApprove} canWrite={!readOnly}
+      reference={reference ?? emptyReference} canApprove={canApprove} currentUserId={currentUserId} canWrite={!readOnly}
       strategies={dialogStrategies} rankingModel={dialogRanking}
       onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
       onSaved={editorSaved} onDeleted={editorDeleted}

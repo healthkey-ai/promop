@@ -2,7 +2,6 @@ import { cleanup, render, screen, fireEvent, waitFor, within } from "@testing-li
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
-import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
 import type { SourceSystemContext } from "./SourceEvidencePanel";
 
 const mockGet = vi.fn();
@@ -2518,7 +2517,7 @@ describe("server mapping pages", () => {
     expect(screen.getByText("Loading mappings…")).toBeInTheDocument();
   });
 
-  it("finishes an empty mapping load without waiting for reference or accuracy", async () => {
+  it("finishes an empty mapping load without waiting for reference", async () => {
     mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/"
       ? Promise.resolve({ data: [] }) : new Promise(() => {}));
     render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
@@ -3616,103 +3615,48 @@ describe("server mapping pages", () => {
   });
 });
 
-describe("Overall review counters and refresh", () => {
-  const metrics = { approved: 0, accepted: 0, rejected: 0, overridden: 0, reviewed: 0, precision: null, recall: null, f1: null, model_version: "v0.2" };
-  beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); });
+describe("Source Code to Concept carries no accuracy tracking", () => {
+  beforeEach(() => { mockGet.mockReset(); mockPatch.mockReset(); mockPost.mockReset(); });
 
-  it("shows overall reviews across models regardless of the selected vocabulary", async () => {
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } },
-      by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } } },
-    } : url.includes("reference") ? reference : [proposedRow] }));
+  it("shows no accuracy strip and reads no accuracy: Concept to Source Code is where accuracy is tracked", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: url.includes("reference") ? reference : [proposedRow],
+    }));
     render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
-    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
-    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("6");
-    expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("2");
-    expect(within(section).getByText("Other destination").parentElement).toHaveTextContent("3");
-    expect(within(section).queryByText(/^Metrics:/)).not.toBeInTheDocument();
-    expect(screen.queryByText("Review counts: all models")).not.toBeInTheDocument();
-    const controls = screen.getByRole("group", { name: "Suggest controls" });
+
+    const controls = await screen.findByRole("group", { name: "Suggest controls" });
     expect(within(controls).getByRole("checkbox", { name: "Vectors" })).toBeInTheDocument();
     expect(within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" })).toBeInTheDocument();
-    // Approved leads the strip now that no box names a model version.
-    expect(section.firstElementChild).toHaveTextContent("Approved");
+    expect(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Suggestion accuracy" })).not.toBeInTheDocument();
+    for (const label of ["Other destination", "Precision", "Recall", "F1"]) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole("link", { name: "History" })).not.toBeInTheDocument();
+
+    // Replace still asks first, and says nothing about a model's accuracy.
+    fireEvent.click(within(controls).getByRole("checkbox", { name: "Replace Current Suggestions" }));
+    fireEvent.click(within(controls).getByRole("button", { name: "Suggest" }));
+    expect(await screen.findByText("This will replace all current suggestions.")).toBeInTheDocument();
+    expect(screen.queryByText(/accuracy/i)).not.toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockGet.mock.calls.filter(([url]) => String(url).includes("accuracy"))).toHaveLength(0);
   });
 
-  it("scores precision, recall and F1 over every model rather than the newest reviewed one", async () => {
-    // v0.3 alone would read 100%; all models together are 2 of 4 accepted.
-    const latestReviewed = { ...metrics, model_version: "v0.3", reviewed: 1, approved: 1, precision: 1, recall: 1, f1: 1 };
-    const allModels = { ...metrics, model_versions: 2, suggestions: 4, reviewed: 4, approved: 2, rejected: 1, overridden: 1, precision: 0.5, recall: 2 / 3, f1: 4 / 7 };
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: url.includes("dashboard") ? allModels : { ...metrics, all_models: allModels },
-      models: [latestReviewed, { ...metrics, model_version: "v0.2" }],
-      by_source_vocabulary: { "": { ...latestReviewed, all_models: { ...latestReviewed, model_versions: 1 } } },
-    } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
-    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
-    expect(await within(section).findByText("Precision")).toBeInTheDocument();
-    expect(within(section).getByText("Precision").parentElement).toHaveTextContent("50.0%");
-    expect(within(section).getByText("Recall").parentElement).toHaveTextContent("66.7%");
-    expect(within(section).getByText("F1").parentElement).toHaveTextContent("57.1%");
-    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("2");
-    expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("1");
-    expect(within(section).getByText("Other destination").parentElement).toHaveTextContent("1");
-    expect(within(section).queryByText(/model reviews/)).not.toBeInTheDocument();
-    const labels = ["Approved", "Rejected", "Other destination", "Precision", "Recall", "F1"];
-    const displayed = labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent);
-    fireEvent.click(screen.getByRole("tab", { name: /Overall/ }));
-    expect(labels.map(label => within(section).getByText(label).parentElement?.lastElementChild?.textContent)).toEqual(displayed);
-    render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
-    const historyRow = (await screen.findByText("All models (2)")).closest("tr")!;
-    expect(within(historyRow).getAllByRole("cell").slice(2).map(cell => cell.textContent)).toEqual(displayed);
-  });
-
-  it("shows dashes rather than one model's score when the API predates all_models", async () => {
-    // A web instance mid-roll answers without the key. Counts still span
-    // versions, so a single version's score beside them would be #1154 again
-    // with nothing left on the strip to explain it.
-    const latestReviewed = { ...metrics, model_version: "v0.2", reviewed: 2, approved: 2, precision: 1, recall: 1, f1: 1 };
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: { ...metrics, latest_reviewed: latestReviewed, review_totals: { approved: 5, rejected: 1, overridden: 0 } },
-      by_source_vocabulary: {},
-    } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
-    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
-    expect(await within(section).findByText("Precision")).toBeInTheDocument();
-    expect(within(section).queryByText("100.0%")).not.toBeInTheDocument();
-    expect(within(section).getAllByText("—")).toHaveLength(3);
-    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("5");
-  });
-
-  it("updates confirmed reviews and counters without waiting for the table reload", async () => {
+  it("updates a confirmed review without waiting for the table reload", async () => {
     let loads = 0;
     mockGet.mockImplementation((url: string) => {
       if (url === "/v1/code-mappings/") {
         loads += 1;
         return loads === 1 ? Promise.resolve({ data: [proposedRow] }) : new Promise(() => {});
       }
-      if (url.includes("reference")) return Promise.resolve({ data: reference });
-      return Promise.resolve({ data: { overall: { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } }, by_source_vocabulary: {} } });
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
     mockPatch.mockResolvedValue({ data: { ...proposedRow, status: "approved" } });
     render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Approve M-PROTEIN, SERUM" })).not.toBeInTheDocument());
-    const section = screen.getByRole("region", { name: "Suggestion accuracy" });
-    await waitFor(() => expect(within(section).getByText("Approved").parentElement).toHaveTextContent("1"));
     expect(mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/reference/")).toHaveLength(1);
-  });
-
-  it("shows overall reviews even when the selected vocabulary has no suggestions", async () => {
-    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes("accuracy") ? {
-      overall: { ...metrics, approved: 99, review_totals: { approved: 99, rejected: 0, overridden: 0 } },
-      by_source_vocabulary: {},
-    } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
-    const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
-    expect(within(section).getByText("Approved").parentElement).toHaveTextContent("99");
-    // Older API responses still cannot supply cross-version scores.
-    expect(within(section).getAllByText("—")).toHaveLength(3);
   });
 });
 

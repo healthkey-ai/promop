@@ -70,7 +70,7 @@ def _propose_new_row(candidate, concept, user):
                if len(fresh['source_code_description']) > 255 else {}),
             'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
             'status': 'proposed',
-        }, user)
+        }, user, machine_proposal=bool(candidate.get('verdict') == 'supported' and not candidate.get('declined')))
         _store_confidence(row, candidate)
     return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
 

@@ -126,3 +126,75 @@ A category that is not listed is folded, so a new account, a new domain and a
 category never seen start folded. A stored part of the wrong shape is ignored
 without discarding the rest, and an older `collapsed` list, which recorded what
 was shut, is not read.
+
+## Approval needs a second person (#2726)
+
+Approval is the one mapping transition that rewrites stored patient data, so
+the curator who **proposed** a destination may not **approve** it. Someone with
+approver access (`_can_approve_mappings`: staff and org admins) who did not
+propose it signs it off.
+
+**Who is the proposer.** `SourceCodeConceptMapping.proposed_by` and
+`SourceCodeAxisVariant.proposed_by` name the person behind the destination now
+on the row. A curator's save stamps it when it
+
+- creates the row (the dialog, a file upload, Concept to Code propose),
+- moves the destination (the new destination is theirs), or
+- re-opens a rejected row as proposed.
+
+A note fix by anyone, an un-approval and an approval leave it as it is, so the
+person who tidies a typo does not take the proposal over and the person who
+proposed is not freed by someone else's edit. A **machine** proposal records no proposer: Suggest (single, group and
+Replace), reverse Suggest's auto-propose, a Concept to Code proposal or apply
+whose candidate a ranker **chose** (verdict `supported`, not declined; a candidate that was only retrieved, e.g. with the `none` ranker, is the curator's own pick) (`machine_proposal=True` on the writer), an
+importer, Athena, and a service credential (an `urn:service` identity is not a
+person). A machine that moves a destination takes the name off (Suggest only when the destination actually changes, so a re-run that re-confirms a curator's own pick leaves them as proposer), except that a
+re-point started by the person who proposed the row keeps their name, so a
+re-point cannot launder it. Any approver may sign off a machine proposal,
+including the one who ran the Suggest; a curator who replaces its destination
+by hand becomes the proposer of the replacement. A CSV row with no destination
+proposes nothing. Rows proposed before this change have no proposer (no
+backfill: `created_by` and `updated_by` say who last touched a row, not whose
+destination it is), so the rule starts with the next proposal.
+
+**What is refused.** An approval whose proposer is the approver, on the writer
+every human save goes through (`_upsert_source_code_mapping`), before anything
+is saved: a mapping dialog or list save, the Concept to Code apply, a patient
+page save. Proposing and approving in one request is the same person on both
+sides and is refused too: creating a mapping already approved, or changing the
+destination and approving in one save. The way through is two steps by two
+people, or a save as proposed followed by another approver's. The answer is a
+403 `{"detail": "You proposed this mapping, so another approver must approve
+it. …", "code": "self_approval"}`. Elsewhere:
+
+| Path | Behaviour |
+|---|---|
+| group Approve (`group_mapping_jobs`) | the actor's own proposals, and members the group's destination would move (which would make the actor their proposer), are skipped and stay proposed; the run's `done` counts only the codes decided and its activity carries `{action: 'skipped', count}`, which the banner reports |
+| axis variants (`axis_variants.set_destination`) | the same rule per variant; Suggest passes `machine=True` and records no proposer |
+| code mapping file upload | a file that approves a row the uploader proposes (a new row, or a moved destination) is refused whole, one error per row; approving someone else's proposal with its destination unchanged is allowed |
+
+**What the page does.** Row payloads carry `proposed_by_id`, null when the rule
+is off or for a machine reader (a service token), and `code-mappings/reference/`
+carries `separate_approver`. The list's Approve button and the Edit Mapping
+dialog's Approved option are disabled for the proposer, with the reason
+(`isOwnProposal`); with the rule on the dialog also disables Approved when the
+save would create the row or move its destination ("save as proposed first"),
+and the inline picker's "Save & approve" is hidden, since each would be refused
+in the same request. Concept to Code's batch Approve is not predicted: a source
+taken from a ranker preview approves, a hand-picked one shows the server's
+message.
+
+**The switch.** `MAPPING_SEPARATE_APPROVER` (`promop/settings.py`). Unset, it is
+on wherever `DEBUG` is off and off under `DEBUG`, which a one-person local
+instance and the test runs use. Set it to `true` or `false` to override either
+way. **With it on, one administrator cannot approve anything they proposed**,
+including creating a mapping as approved: an instance run by a single
+administrator sets `MAPPING_SEPARATE_APPROVER=false`.
+
+**Not covered.** Field mappings and custom fields (`FieldConceptMapping`,
+`POST /api/v1/custom-patient-fields/`): adding a field creates an approved
+mapping by design (#721) and would need its own decision. `proposed_by` is a
+user id, so `copy_reference_data` does not carry it, as with `reviewer`.
+
+Tests: `tests/test_mapping_separate_approver.py`,
+`EditMappingDialog.ownProposal.test.tsx`.

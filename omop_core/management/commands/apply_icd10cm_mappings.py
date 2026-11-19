@@ -107,6 +107,7 @@ class Command(BaseCommand):
             row.status = 'approved'
             row.reviewed_at = now
             row.reviewer = reviewer
+            row.proposed_by = None   # a machine's destination now (#2726)
             new_origin = (
                 f'{row.origin_system}; auto-approved from ICD10CM'
                 if row.origin_system
@@ -118,7 +119,7 @@ class Command(BaseCommand):
 
         update_fields = [
             'target_concept', 'destination_vocabulary_id',
-            'status', 'reviewed_at', 'reviewer', 'origin_system', 'updated_at',
+            'status', 'reviewed_at', 'reviewer', 'proposed_by', 'origin_system', 'updated_at',
         ]
         with transaction.atomic():
             SourceCodeConceptMapping.objects.bulk_update(

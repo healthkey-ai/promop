@@ -2466,6 +2466,16 @@ class SourceCodeConceptMapping(models.Model):
             'moves on every save.'
         ),
     )
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+        help_text=(
+            'The curator who proposed the destination now on this mapping: '
+            'whoever created the row, moved its destination, or re-opened it '
+            'from rejected. A machine proposal (Suggest, an importer) leaves '
+            'it null. The proposer may not approve it (MAPPING_SEPARATE_APPROVER).'
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -2716,6 +2726,12 @@ class SourceCodeAxisVariant(models.Model):
         null=True, blank=True, related_name='+',
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+        help_text='The curator who set the destination now proposed; see '
+                  'SourceCodeConceptMapping.proposed_by.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
