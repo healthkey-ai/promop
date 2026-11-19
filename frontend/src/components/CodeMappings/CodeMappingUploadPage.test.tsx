@@ -9,7 +9,7 @@ vi.mock("@/hooks/useAuth", () => ({
 const mockGet = vi.fn((url: string) => Promise.resolve({ data: url.includes("reference") ? {
   domains: [], source_code_systems_by_domain: {}, destination_vocabularies: [],
   omop_tables: {}, source_vocabulary_tabs: [],
-} : url.includes("accuracy") ? { overall: {}, by_source_vocabulary: {} } : [] }));
+} : [] }));
 vi.mock("@/api/axios", () => ({
   default: {
     get: (url: string) => mockGet(url),
@@ -20,8 +20,9 @@ vi.mock("@/api/axios", () => ({
 describe("CodeMappingPage upload action", () => {
   it("opens the upload dialog with signed-in email provenance", async () => {
     render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
-    await waitFor(() => expect(mockGet.mock.calls.length).toBeGreaterThanOrEqual(5));
-    fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
+    // Upload is offered once the page's reference data has arrived.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Upload" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
     expect(await screen.findByRole("dialog", { name: "Upload source codes" })).toBeInTheDocument();
     expect(screen.getByLabelText("Provenance")).toHaveValue("signed-in@example.com");
   });

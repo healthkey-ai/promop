@@ -125,29 +125,7 @@ function DownloadMenu({ rows, section }: { rows: CodeMappingRow[]; section: stri
 }
 
 
-interface SuggestionAccuracy {
-  latest_reviewed?: SuggestionAccuracy | null;
-  all_models?: SuggestionAccuracy & { model_versions: number };
-  review_totals?: { approved: number; rejected: number; overridden: number };
-  model_version?: string | null;
-  accepted: number;
-  approved: number;
-  overridden: number;
-  rejected: number;
-  reviewed: number;
-  precision: number | null;
-  recall: number | null;
-  f1: number | null;
-}
-
-interface AccuracyResponse {
-  overall: SuggestionAccuracy;
-  by_source_vocabulary: Record<string, SuggestionAccuracy>;
-  suggest_model_version?: string;
-}
-
 const OVERALL_TAB = "__overall__";
-const metric = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
 
 
 /** How far along a run is, counting the phase it is actually in.
@@ -466,7 +444,6 @@ export default function CodeMappingPage() {
   const [asyncDuplicates, setAsyncDuplicates] = useState<{ source: string; rows: DuplicateSummary[] } | null>(null);
   const [checkingDuplicates, setCheckingDuplicates] = useState(false);
   const [duplicateError, setDuplicateError] = useState("");
-  const [accuracy, setAccuracy] = useState<AccuracyResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [error, setError] = useState("");
@@ -572,8 +549,8 @@ export default function CodeMappingPage() {
       const sort = sorts[section];
       params[`order_${index}`] = sort ? `${sort.descending ? "-" : ""}${sort.column}` : "-occurrence_count";
     });
-    // Only the browse request controls table loading. Ancillary metadata and
-    // counters must not hold the page open or turn usable rows into an error.
+    // Only the browse request controls table loading. Reference metadata must
+    // not hold the page open or turn usable rows into an error.
     const mappingsRequest = api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params });
     if (!referenceCache.current && !referenceRequest.current) {
       referenceRequest.current = api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
@@ -586,11 +563,6 @@ export default function CodeMappingPage() {
         setReferenceError("Could not load mapping options. Refresh to retry.");
       }).finally(() => { referenceRequest.current = null; });
     }
-    void api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
-      if (sequence === loadSequence.current) setAccuracy(data);
-    }).catch(() => {
-      if (sequence === loadSequence.current) setAccuracy(null);
-    });
     try {
       const { data } = await mappingsRequest;
       if (sequence !== loadSequence.current) return;
@@ -719,19 +691,6 @@ export default function CodeMappingPage() {
   }, [selectedVocabulary, showSuggestCandidates]);
 
   const overallTab = selectedVocabulary === OVERALL_TAB;
-  // Keep the latest reviewed model visible while a newer model awaits reviews.
-  const scopedAccuracy = overallTab
-    ? accuracy?.overall
-    : accuracy?.by_source_vocabulary?.[selectedVocabulary];
-  const modelAccuracy = scopedAccuracy ?? accuracy?.overall;
-  const selectedAccuracy = modelAccuracy?.latest_reviewed ?? modelAccuracy;
-  // Match History's All models row across every vocabulary and model version.
-  // Older API responses can supply global counts, but not global scores.
-  const allModels = accuracy?.overall?.all_models;
-  const reviewTotals = allModels ?? accuracy?.overall?.review_totals ?? accuracy?.overall;
-
-  const suggestModelVersion = accuracy?.suggest_model_version ?? "";
-
   // Audit the entire tab, not just expanded/search-visible rows. A hidden
   // rejected mapping still owns its source code and can block re-creation.
   const duplicateCodes = useMemo(() => {
@@ -1787,31 +1746,6 @@ export default function CodeMappingPage() {
               <option value="both">Both</option>
             </select>
           </label>
-          <section
-            aria-label="Suggestion accuracy"
-            title="Overall reviews across all vocabularies and model versions, matching the History page's All models row."
-            className="ml-auto flex max-w-full shrink-0 flex-wrap divide-x rounded-md border border-slate-200 bg-slate-50 text-right text-xs"
-          >
-            {([
-              ['Approved', reviewTotals?.approved],
-              ['Rejected', reviewTotals?.rejected],
-              ['Other destination', reviewTotals?.overridden],
-            ] as const).map(([label, value]) => (
-              <div key={label} className="px-3 py-2">
-                <div className="font-medium text-slate-500">{label}</div>
-                <div className="text-sm font-semibold text-slate-900">{value ?? 0}</div>
-              </div>
-            ))}
-            {([['Precision', allModels?.precision], ['Recall', allModels?.recall], ['F1', allModels?.f1]] as const).map(([label, value]) => (
-              <div key={label} className="px-3 py-2">
-                <div className="font-medium text-slate-500">{label}</div>
-                <div className="text-sm font-semibold text-slate-900">{metric(value ?? null)}</div>
-              </div>
-            ))}
-            <a href="/code-mappings/accuracy" className="px-3 py-2 text-left font-medium text-slate-700 underline hover:text-slate-950">
-              History
-            </a>
-          </section>
         </div>
 
         </>}
@@ -1872,15 +1806,7 @@ export default function CodeMappingPage() {
 
         {confirmReplace && (
           <div className="mb-4 flex items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            <span>
-              {(() => {
-                const mappingVersion = selectedAccuracy?.model_version;
-                const isVersionBump = !!mappingVersion && mappingVersion !== suggestModelVersion;
-                return isVersionBump
-                  ? "This will replace all current suggestions and effectively freezes accuracy results for current model."
-                  : "This will replace all current suggestions.";
-              })()}
-            </span>
+            <span>This will replace all current suggestions.</span>
             <button
               type="button"
               onClick={() => void runSuggest()}
