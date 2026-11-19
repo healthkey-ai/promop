@@ -11,6 +11,7 @@ from django.utils import timezone
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID, revert_provisional_rows
 from omop_core.mapping.table_relocation import relocatable
 from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
+from omop_core.services import mapping_approval
 from omop_core.services.concept_lock import check_concept_locks
 from omop_core.services.relocation_jobs import queue_relocation
 from omop_core.services.repoint_jobs import queue_repoints
@@ -285,6 +286,34 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
         check_concept_locks(
             [row.destination_concept_id for row in rows if row.destination_concept_id is not None], actor,
         )
+        # The two-person rule (#2726): a file that approves a row the uploader
+        # proposes in the same file (a new row, or a moved destination) is a
+        # self-approval, refused like a dialog save. Approving a row somebody
+        # else proposed, with its destination unchanged, is the normal path.
+        proposer_id = actor.pk if mapping_approval.is_person(actor) else None
+        self_approved = []
+        for row in rows:
+            concept = concepts.get(row.destination_concept_id)
+            if concept is None or row.state != 'approved':
+                continue
+            mapping = existing.get(row.source_code)
+            if mapping is None or mapping.target_concept_id != concept.pk:
+                proposed_by_id = proposer_id
+            elif mapping.status == 'approved':
+                continue
+            else:
+                proposed_by_id = mapping.proposed_by_id
+            if mapping_approval.blocked_for(actor, proposed_by_id):
+                self_approved.append(row)
+        if self_approved:
+            raise CodeMappingUploadError(
+                f'CSV validation failed on {len(self_approved)} row(s).',
+                errors=[{
+                    'row': row.line,
+                    'field': STATE_HEADER,
+                    'detail': mapping_approval.SELF_APPROVAL_MESSAGE,
+                } for row in self_approved[:100]],
+            )
         now = timezone.now()
         inserts = []
         updates = []
@@ -318,6 +347,9 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     reviewed_at=now if approved else None,
                     created_by=actor,
                     updated_by=actor,
+                    # Only a destination can be proposed: a row with none is a
+                    # queue entry Suggest will answer (#2726).
+                    proposed_by_id=proposer_id if concept else None,
                 ))
                 if approved:
                     approval_repoints.append((row.source_code, False, set(), concept.pk))
@@ -377,6 +409,10 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                         mapping.suggestion_confidence = None
                         mapping.decision_surface = ''
                         mapping.decision_confidence = None
+                        mapping.proposed_by_id = proposer_id
+                    elif mapping.status == 'rejected' and row.state == 'proposed':
+                        # Re-opening a rejected row is a proposal, as in the dialog.
+                        mapping.proposed_by_id = proposer_id
                     mapping.target_concept = concept
                     mapping.destination_vocabulary_id = concept.vocabulary_id or ''
                     mapping.domain_id = concept.domain_id
@@ -420,7 +456,7 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                  'reviewer', 'reviewed_at', 'pending_repoint_concept_ids',
                  'deferred_repoint_concept_ids',
                  'suggestion_confidence', 'decision_surface', 'decision_confidence',
-                 'updated_by', 'updated_at'],
+                 'proposed_by', 'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
         # In the table the rows are in now, before a queued relocation moves them.

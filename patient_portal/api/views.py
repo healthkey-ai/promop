@@ -116,7 +116,7 @@ from omop_core.mapping.suggestions import (
 )
 from omop_core.services.suggest_jobs import get_dispatcher as get_suggest_dispatcher
 from omop_core.services.write_descriptor import mapping_table_is_writable
-from omop_core.services import source_vocabularies
+from omop_core.services import mapping_approval, source_vocabularies
 from omop_core.services import wearable_mapping_export as wearable_export
 from omop_core.mapping.therapy import (
     get_or_create_quarantine_drug,
@@ -12792,6 +12792,8 @@ def _without_source_samples(mappings):
     """
     for mapping in mappings:
         mapping._source_samples = {'quantities': [], 'based_on': [], 'units': []}
+        # A machine reads the table, not who proposed what (#2726).
+        mapping._hide_proposer = True
     return mappings
 
 
@@ -12840,6 +12842,17 @@ def _mapping_author(mapping):
     above every human's.
     """
     return _user_display(getattr(mapping, 'created_by', None) if mapping else None)
+
+
+def _proposer_id(mapping):
+    """The curator the two-person rule keeps from approving ``mapping``, or None.
+
+    None when the rule is off, so a client compares it with the signed-in
+    account and never needs to know the setting (#2726).
+    """
+    if mapping is None or not mapping_approval.enabled() or getattr(mapping, '_hide_proposer', False):
+        return None
+    return mapping.proposed_by_id
 
 
 def _user_display(user):
@@ -12988,6 +13001,9 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             # created_by/updated_by, which say only who last touched the row.
             'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
             'reviewed_at': mapping.reviewed_at if mapping else None,
+            # Who proposed the destination, only while the two-person rule is on:
+            # the page disables Approve for that curator (#2726).
+            'proposed_by_id': _proposer_id(mapping),
             'occurrence_count': mapping.occurrence_count if mapping else 0,
             'destination_count': destination_count if destination_count is not None else 0,
             'first_seen': mapping.first_seen if mapping else None,
@@ -13078,6 +13094,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         # created_by/updated_by, which say only who last touched the row.
         'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
         'reviewed_at': mapping.reviewed_at if mapping else None,
+        'proposed_by_id': _proposer_id(mapping),
         'occurrence_count': mapping.occurrence_count if mapping else 0,
         'destination_count': destination_count if destination_count is not None else 0,
         'first_seen': mapping.first_seen if mapping else None,
@@ -13391,7 +13408,8 @@ def _existing_mapping_conflict(existing, requested_table):
 
 
 def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None,
-                                record_decision=True, curator_note=False):
+                                record_decision=True, curator_note=False,
+                                machine_proposal=False):
     """Create or update one mapping. Returns (mapping, repoint_result).
 
     ``curator_note`` is True when ``data['notes']`` is what a person typed
@@ -13403,6 +13421,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     ``decision_surface`` and ``decision_confidence`` (#2382). A machine write
     through this function (reverse Suggest's auto-propose) passes False so a
     curator's last decision is not overwritten with a blank.
+
+    ``machine_proposal`` is True when the destination being saved came from a
+    ranker rather than the person's own pick (reverse Suggest's auto-propose,
+    a Concept to Code proposal made from a saved ranker preview): it names no
+    proposer, so the person who accepted it may approve it (#2726).
 
     ``repoint_result`` is ``{'queued': True, 'from_concept_ids': [...]}`` when
     the approval left stored rows to move **and** no ``person_id`` was
@@ -13755,6 +13778,32 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     elif was_approved and status_value != 'approved':
         values['reviewer'] = None
         values['reviewed_at'] = None
+    # The two-person rule (#2726): whoever proposed the destination now on this
+    # row may not approve it. A curator's save that creates the row, moves its
+    # destination or re-opens it from rejected is a proposal and names them; a
+    # note fix or an un-approval keeps the proposer already on the row; a
+    # machine write that moves the destination takes the name off, since the
+    # destination is no longer anyone's pick. Checked before anything is saved.
+    proposer_id = mapping.proposed_by_id if mapping is not None else None
+    human_save = record_decision and mapping_approval.is_person(user) and not machine_proposal
+    destination_changed = concept is not None and concept.pk != previous_concept_id
+    if human_save and (
+        mapping is None or destination_changed
+        or (status_value == 'proposed' and mapping.status == 'rejected')
+    ):
+        proposer_id = user.pk
+    elif destination_changed and not human_save:
+        # A machine moved the destination. A new row has no proposer; on an
+        # existing one the person who started the run keeps what they had
+        # proposed (a re-point must not launder their own proposal), and
+        # anyone else's proposal is no longer the destination in force.
+        proposer_id = (
+            proposer_id if (mapping is not None and mapping_approval.is_person(user)
+                            and proposer_id == user.pk) else None
+        )
+    values['proposed_by_id'] = proposer_id
+    if status_value == 'approved' and (not was_approved or destination_moved):
+        mapping_approval.check_can_approve(user, proposer_id)
     if 'notes' in data:
         values['notes'] = str(data.get('notes') or '').strip()
         # The dialog sends the note back on every save, so only a changed
@@ -15627,6 +15676,8 @@ def _code_mapping_reference_payload():
         'wearable_measure_classes': list(source_vocabularies.WEARABLE_MEASURE_CLASSES),
         'wearable_source_vocabularies': sorted(source_vocabularies.WEARABLE_SOURCE_VOCABULARIES),
         'wearable_source_systems': wearable_export.source_systems(),
+        # Whether the proposer may not approve (#2726): the pages disable the controls that would be refused.
+        'separate_approver': mapping_approval.enabled(),
         'suggest_max_per_run': get_suggest_dispatcher().max_codes,
     }
 

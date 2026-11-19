@@ -724,7 +724,9 @@ still applies to it (`get_admin_access_paths`). A self-signup at a public demo o
 trusted-domain self-signup (#1454), are granted `doctor` rather than the former
 `analyst`, because that signup exists to browse patients; grants made before
 #2416 are left as they are. Approval stays with
-staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
+staff and org_admin (`_can_approve_mappings`) for every role, and never for the
+curator who proposed that destination (see
+[the approver cannot be the proposer](#code-mapping--the-approver-cannot-be-the-proposer)). Gate a new
 mapping endpoint's reads with `_can_view_mappings` and its writes with
 `_can_manage_mappings` (`concept_to_code._authorize(user, write=True)` on
 that module); a mixed-verb view checks both. `AnalystRoleScopeTest` and
@@ -1039,7 +1041,7 @@ lookups or therapy reference rows, because patient data can point at them.
 
 Code mappings steer ingest (`resolve_source_code`), so copying an approved row
 changes what a later import resolves to. `occurrence_count`, `first_seen` and
-`last_seen` stay local. `reviewer` / `created_by` / `updated_by` are cleared:
+`last_seen` stay local. `reviewer` / `created_by` / `updated_by` / `proposed_by` are cleared:
 the same Identity id is a different person on another instance.
 
 The field-mapping tables go through `field_curation_transfer`, whose payload is
@@ -1336,6 +1338,13 @@ decision no ranker scored counts in the Overall row only; a row with a blank sur
 curator decision and is not counted. One grouped query
 (`code_mapping_accuracy_analytics`).
 
+The analytics page is the one place a curator tracks mapping accuracy: the
+Code to Concept tab carries no accuracy strip (#2730). Most mapping is done
+from Concept to Code, and the strip on Code to Concept read as low recall only
+because nearly every reviewed row counted as "Other destination". The History
+page (`/code-mappings/accuracy`) that strip linked to still answers at its
+address, with no link to it in the UI.
+
 Suggest never writes either column: reverse Suggest's auto-propose goes
 through the same writer with `record_decision=False`. A machine write that
 moves a destination outside the writer (a code-mapping upload, Athena
@@ -1549,6 +1558,30 @@ organization-scoped ones (set when the caller passes an organization for Epic or
 Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
 before enabling it there.** Off, nothing is queried, queued or written. See
 [the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
+
+### What the provisional pass reads (#2534)
+
+`patient_record_provisional` is built by `omop_core/services/provisional_record.py`
+from provisional rows only, with one rule for every reader: a value is kept only
+where `patient_record` has no answer for the field and nobody typed one, and its
+confidence is the lowest among the rows that decide it. The phase 1 readers (labs,
+blood counts, assertions, vitals, curated field mappings) read provisional
+measurements and observations. Two composite readers read the other tables:
+the disease fields (`disease`, `disease_slug`, `diagnosis_date`,
+`diagnosis_date_precision`, `condition_clinical_status`) from the cancer among the
+provisional conditions -- run only when one is a cancer, and only for a record with no
+disease yet or the same one, so another cancer's dates never fill a disease the record
+names -- and `concomitant_medications` from the provisional drug exposures through the
+real reader's own `recent_medications`. Not run, and why: therapy lines (persisted
+Episodes, which a proposal must not create), staging/cytogenetics/SCT/cancer details
+(curator-written observation keys, not proposal-fed concepts), and every JSON field
+(`active_malignancies`, `disease_slugs`, `genetic_mutations`, `prior_procedures`, the
+`genomics_*` markers), which has no confidence column. A patient whose approved record
+already answers these fields shows nothing new: real beats provisional. The chosen
+cancer is the real ranking's, whatever the confidence (a 55% row that wins on recency
+gives every disease field 55); a typed disease or slug blocks the whole group, and the
+PATCH mirror takes the group back together; a curated phase 1 value for the same field
+wins; each reader runs in its own savepoint.
 
 ### One patient's full provisional view: `fill_provisional_record`
 
@@ -2333,6 +2366,31 @@ Tests: `tests/test_mapping_votes.py`; `PublicVotePage.test.tsx`,
 `ConfirmVotesPage.test.tsx`, `WearableVoteShare.test.tsx`,
 `MappingVotesSection.test.tsx`, `CodeMappingPage.votes.test.tsx`,
 `EditMappingDialog.votes.test.tsx`.
+
+## Code Mapping — The Approver Cannot Be the Proposer
+
+`proposed_by` (on `SourceCodeConceptMapping` and `SourceCodeAxisVariant`) names
+the curator behind the destination now on a row, and a curator may not approve
+what they proposed (#2726). Rule and wording: `omop_core/services/mapping_approval.py`;
+the writer is `_upsert_source_code_mapping`. Full description:
+[concept_to_code_architecture.md](docs/concept_to_code_architecture.md#approval-needs-a-second-person-2726).
+
+- **Stamped** by a person's save that creates a row, moves its destination or
+  re-opens it from rejected; **kept** by note fixes and un-approvals; **null**
+  for machine proposals (Suggest and its group, Replace and reverse runs, a
+  Concept to Code propose/apply of a candidate a ranker chose, importers, service tokens) and
+  for rows that predate it. A writer that moves a destination for a machine
+  clears it (`machine_proposal=True` on `_upsert_source_code_mapping`, or
+  `proposed_by = None` in the bulk writers).
+- **Refused** with a 403 `{"detail", "code": "self_approval"}` (a DRF `PermissionDenied`), before any
+  save, including propose-and-approve in one request. Group approve skips the
+  actor's own proposals; a file upload that approves its uploader's proposal is a
+  400 with one error per row; axis variants follow the same rule.
+- **Switch**: `MAPPING_SEPARATE_APPROVER`, on where `DEBUG` is off, off under
+  `DEBUG` unless the variable is set. A one-administrator deployment sets it to
+  `false`. A test of the rule sets `settings.MAPPING_SEPARATE_APPROVER = True`.
+- Field mappings and custom fields are not covered. Row payloads carry
+  `proposed_by_id` (null when off); the pages disable Approve for the proposer.
 
 ## Code Mapping Lookup — Unit Conversion
 

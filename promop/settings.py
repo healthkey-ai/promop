@@ -387,6 +387,19 @@ MAPPING_VOTE_MAX_EMAILS_PER_DAY = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PE
 MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY = int(
     os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY', '200'))
 MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL', '500'))
+# Two-person rule for code mappings: the curator who proposed a destination may
+# not approve it (#2726, docs/concept_to_code_architecture.md). On wherever
+# DEBUG is off. A local development instance is usually one person, who could
+# otherwise approve nothing, so DEBUG (and with it the test runs, which set it)
+# turns it off unless MAPPING_SEPARATE_APPROVER says otherwise. Set it to false
+# on a deployed instance only when a single administrator runs it.
+def separate_approver_default(debug, raw):
+    """The setting's value: the variable when set, else on wherever DEBUG is off."""
+    raw = (raw or '').strip().lower()
+    return (not debug) if not raw else raw not in ('0', 'false', 'no', 'off')
+
+
+MAPPING_SEPARATE_APPROVER = separate_approver_default(DEBUG, os.environ.get('MAPPING_SEPARATE_APPROVER'))
 # Where the public voting throttles read the client's address. 0: the socket's
 # peer (REMOTE_ADDR), right only when nothing proxies the request. N >= 1: the
 # Nth entry from the right of X-Forwarded-For, the address the outermost of N
