@@ -1485,6 +1485,37 @@ never a patient, a date or a result value.
   plain text, and a reader without mapping write access is told why nothing
   opened.
 
+### Delete in Edit Mapping keeps a code patient data carries
+
+A mapping row is a destination and the queue entry for a source code, so
+removing the row hides the code as well. `DELETE /api/v1/code-mappings/<id>/`
+(`omop_core/services/mapping_removal.py`, #2744) therefore depends on the code:
+
+| The code | Delete does | Response |
+|---|---|---|
+| has no destination | nothing; an unmapped row is never deleted | 400 |
+| is in patient data (`occurrence_count` above 0, or the per-patient inventory holds it) | clears the destination, keeps the row as unmapped and proposed | 200 with the row, `removed: false`, `repoint` |
+| is in no patient data (a mistyped code, a proposal for a catalog code nobody has) | removes the row, as #1888 asked | 204 |
+
+- The kept row loses what described the destination (unit, reviewer,
+  proposer, confidence, provenance, edit lock) and keeps what describes the
+  code: description, Seen count, the curator's note, axis variants, and what
+  Suggest once proposed with its outcome.
+- **Its stored rows move back to concept 0 off the request**
+  (`repoint_jobs.queue_unpoint`; Celery when a broker is set, inline after
+  commit otherwise). Inline it was 79s for 718 rows on HealthTree and froze
+  the dialog. The old destination also joins `pending_repoint_concept_ids`, so
+  a lost task costs nothing lasting: the next approval moves those rows. The
+  task waits (retries) while a re-point of the same mapping is running.
+- The clinical tables are not scanned to decide: their source value is not
+  indexed. A code with a Seen count of 0 and no inventory row whose rows
+  exist anyway is still deleted, after its rows are un-mapped;
+  `enqueue_unmapped_source_codes` puts such a code back in the queue.
+- The mapping's GET carries `delete_effect` (`unmap`, `delete` or null), so
+  the dialog's button reads "Remove destination" or "Delete mapping", states
+  the consequence, asks before sending, and sends one request however often
+  it is pressed.
+
 ### A code's rows follow its mapping to another table
 
 A curator who changes a mapping's Domain re-files it under another clinical

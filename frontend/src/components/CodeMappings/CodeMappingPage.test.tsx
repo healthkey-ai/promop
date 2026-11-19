@@ -153,6 +153,7 @@ type TestMappingRow = Omit<typeof proposedRow, "status"> & {
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
   source_evidence?: Record<string, unknown>;
+  delete_effect?: "unmap" | "delete";
   source_system_context?: SourceSystemContext;
   suggestion_confidence?: number | null;
 };
@@ -508,7 +509,8 @@ describe("CodeMappingPage", () => {
         rows.splice(1, 1);
         return Promise.resolve({ data: {} });
       });
-      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove destination" }));
+      fireEvent.click(within(screen.getByRole("group", { name: "Confirm removal" })).getByRole("button", { name: "Remove destination" }));
       await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/102/"));
       await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
       expect(await screen.findByRole("button", { name: "Edit A02.0" })).toBeInTheDocument();
@@ -1995,10 +1997,94 @@ describe("CodeMappingPage", () => {
       });
     });
 
-    it("deletes a mis-keyed mapping", async () => {
-      await openDialog();
-      fireEvent.click(screen.getByRole("button", { name: /Delete/ }));
-      await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/"));
+    describe("Delete (#2744)", () => {
+      const confirmation = () => screen.getByRole("group", { name: "Confirm removal" });
+      const openOn = async (deleteEffect: "unmap" | "delete") => {
+        renderPage([{ ...proposedRow, delete_effect: deleteEffect }, approvedRow]);
+        fireEvent.click(await screen.findByRole("button", { name: "Edit M-PROTEIN, SERUM" }));
+        await screen.findByRole("dialog");
+      };
+
+      it("removes only the destination of a code patient data carries, after asking", async () => {
+        await openOn("unmap");
+        mockDelete.mockResolvedValue({ status: 200, data: { removed: false } });
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        expect(mockDelete).not.toHaveBeenCalledWith("/v1/code-mappings/7/");
+        expect(confirmation()).toHaveTextContent(
+          "Remove the destination from M-PROTEIN, SERUM? The source code stays in the list as unmapped, and its stored results go back to unmapped.");
+
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Remove destination" }));
+
+        await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/"));
+        expect(await screen.findByText(
+          "Destination removed. M-PROTEIN, SERUM is back in the unmapped queue; its stored results are being moved back to unmapped.",
+        )).toBeInTheDocument();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+
+      it("deletes the mapping of a code no patient data carries, and says that is what it will do", async () => {
+        await openOn("delete");
+        mockDelete.mockResolvedValue({ status: 204, data: "" });
+        fireEvent.click(await screen.findByRole("button", { name: "Delete mapping" }));
+        expect(confirmation()).toHaveTextContent(
+          "Delete this mapping? No patient data carries M-PROTEIN, SERUM, so it leaves the list.");
+
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Delete mapping" }));
+
+        expect(await screen.findByText("Mapping for M-PROTEIN, SERUM deleted.")).toBeInTheDocument();
+      });
+
+      it("sends nothing when the curator keeps it", async () => {
+        await openOn("unmap");
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Keep it" }));
+
+        expect(screen.queryByRole("group", { name: "Confirm removal" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Remove destination" })).toBeEnabled();
+        expect(mockDelete).not.toHaveBeenCalledWith("/v1/code-mappings/7/");
+      });
+
+      it("sends one request however often the button is pressed while it runs", async () => {
+        await openOn("unmap");
+        let finish: (value: unknown) => void = () => {};
+        mockDelete.mockImplementation((url: string) => (
+          url === "/v1/code-mappings/7/" ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ data: {} })));
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        const confirm = within(confirmation()).getByRole("button", { name: "Remove destination" });
+
+        fireEvent.click(confirm);
+        const busy = await within(confirmation()).findByRole("button", { name: "Removing…" });
+        expect(busy).toBeDisabled();
+        fireEvent.click(busy);
+        fireEvent.click(busy);
+        expect(within(confirmation()).getByRole("button", { name: "Keep it" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Update Mapping" })).toBeDisabled();
+
+        expect(mockDelete.mock.calls.filter(([url]) => url === "/v1/code-mappings/7/")).toHaveLength(1);
+        finish({ status: 200, data: { removed: false } });
+        await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      });
+
+      it("shows why the server refused, and leaves the dialog open", async () => {
+        await openOn("unmap");
+        mockDelete.mockImplementation((url: string) => (url === "/v1/code-mappings/7/"
+          ? Promise.reject({ response: { status: 423, data: { detail: "Mapping is locked by another user." } } })
+          : Promise.resolve({ data: {} })));
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Remove destination" }));
+
+        expect(await screen.findByText("Mapping is locked by another user.")).toBeInTheDocument();
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Remove destination" })).toBeEnabled();
+      });
+
+      it("words the question for either outcome when the mapping could not be read", async () => {
+        await openDialog();
+        fireEvent.click(screen.getByRole("button", { name: "Remove destination" }));
+
+        expect(confirmation()).toHaveTextContent(
+          "A code patient data carries stays in the list as unmapped; one no patient data carries is deleted.");
+      });
     });
   });
 

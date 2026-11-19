@@ -176,7 +176,11 @@ type MetricFields = { category: string; measure_class: string; metric_key: strin
 const METRIC_FIELD_KEYS = ["category", "measure_class", "metric_key"] as const;
 const BLANK_METRIC_FIELDS: MetricFields = { category: "", measure_class: "", metric_key: "" };
 /** GET /v1/code-mappings/<id>/: the stored row and its destination options. */
-type StoredMapping = CodeMappingRow & { destination_options: DestinationOption[] };
+type StoredMapping = CodeMappingRow & {
+  destination_options: DestinationOption[];
+  /** What Delete would do: clear the destination of a code patient data carries, or remove the row (#2744). */
+  delete_effect?: "unmap" | "delete" | null;
+};
 
 // ── Component ───────────────────────────────────────────────────────
 
@@ -305,6 +309,13 @@ export default function EditMappingDialog({
    */
   const [existingMapping, setExistingMapping] = useState<ExistingMappingConflict | null>(null);
   const [saving, setSaving] = useState(false);
+  // Delete (#2744): what the server said it would do for this row (null until
+  // its GET settles, or when that failed), the confirmation step, and the
+  // request in flight. One request at a time: a second click used to send a
+  // second delete.
+  const [deleteEffect, setDeleteEffect] = useState<"unmap" | "delete" | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
   const [mintUnitOpen, setMintUnitOpen] = useState(false);
   const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
@@ -595,6 +606,8 @@ export default function EditMappingDialog({
       setDestinationError("");
       setSourceEvidence(null);
       setSourceEvidenceError("");
+      setDeleteEffect(null);
+      setConfirmingDelete(false);
       if (!open || mode !== "edit" || !selectedRow?.mapping_id) return;
       setLoadingDestinations(true);
       try {
@@ -605,6 +618,7 @@ export default function EditMappingDialog({
         setDestinationOptions(data.destination_options || []);
         const evidence = data.source_evidence || null;
         setSourceEvidence(evidence);
+        setDeleteEffect(data.delete_effect ?? null);
         // What the mapping stores is the truth to show and to compare a save
         // against; kept so a later rebuild of the form can apply it again.
         hydration.current = { mappingId: selectedRow.mapping_id, data };
@@ -1165,16 +1179,28 @@ export default function EditMappingDialog({
   };
 
   const deleteMapping = useCallback(async (row: CodeMappingRow) => {
-    if (!row.mapping_id) return;
+    if (!row.mapping_id || deleting) return;
     setError("");
+    setDeleting(true);
     try {
-      await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
+      // 204: the row is gone. 200: the server kept the source code in the
+      // queue and cleared only its destination, because patient data carries
+      // the code; its stored rows move back to unmapped in the background.
+      const response = await api.delete<{ removed?: boolean } | "">(`/v1/code-mappings/${row.mapping_id}/`);
+      const kept = response.status === 200;
       onDeleted(row);
+      onBanner?.(kept
+        ? `Destination removed. ${row.source_code} is back in the unmapped queue; its stored results are being moved back to unmapped.`
+        : `Mapping for ${row.source_code} deleted.`);
       closeDialog();
-    } catch {
-      setError("Failed to delete code mapping.");
+    } catch (failure) {
+      const detail = (failure as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      setError(typeof detail === "string" && detail ? detail : "Failed to delete code mapping.");
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
     }
-  }, [onDeleted, closeDialog]);
+  }, [onDeleted, onBanner, closeDialog, deleting]);
 
   // ── Render ──────────────────────────────────────────────────────
 
@@ -1902,15 +1928,40 @@ export default function EditMappingDialog({
                 </button>
                 {calcNote && <span role="note" data-testid="calc-note" className="max-w-xs text-xs text-slate-600">{calcNote}</span>}
               </div>
-              {selectedRow?.mapping_id && selectedRow?.destination_concept_id && (
+              {selectedRow?.mapping_id && selectedRow?.destination_concept_id && !confirmingDelete && (
                 <button
                   type="button"
-                  onClick={() => void deleteMapping(selectedRow)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                  onClick={() => setConfirmingDelete(true)}
+                  disabled={saving || deleting}
+                  title={deleteEffect === "delete"
+                    ? "No patient data carries this code: the mapping is deleted."
+                    : "The source code stays in the list as unmapped; only its destination goes."}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
                 >
                   <Trash2 size={13} />
-                  Delete
+                  {deleteEffect === "delete" ? "Delete mapping" : "Remove destination"}
                 </button>
+              )}
+              {selectedRow?.mapping_id && confirmingDelete && (
+                <div role="group" aria-label="Confirm removal"
+                  className="flex max-w-md flex-wrap items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-900">
+                  <span>
+                    {deleteEffect === "delete"
+                      ? `Delete this mapping? No patient data carries ${selectedRow.source_code}, so it leaves the list.`
+                      : deleteEffect === "unmap"
+                        ? `Remove the destination from ${selectedRow.source_code}? The source code stays in the list as unmapped, and its stored results go back to unmapped.`
+                        : `Remove the destination from ${selectedRow.source_code}? A code patient data carries stays in the list as unmapped; one no patient data carries is deleted.`}
+                  </span>
+                  <button type="button" onClick={() => void deleteMapping(selectedRow)} disabled={deleting}
+                    className="inline-flex items-center gap-1.5 rounded bg-red-700 px-2 py-1 font-medium text-white hover:bg-red-800 disabled:opacity-60">
+                    {deleting && <Loader2 size={13} className="animate-spin" aria-hidden="true" />}
+                    {deleting ? "Removing…" : deleteEffect === "delete" ? "Delete mapping" : "Remove destination"}
+                  </button>
+                  <button type="button" onClick={() => setConfirmingDelete(false)} disabled={deleting}
+                    className="font-medium text-red-800 underline hover:text-red-950 disabled:opacity-60">
+                    Keep it
+                  </button>
+                </div>
               )}
             </div>
             <div className="flex justify-end gap-2">
@@ -1923,7 +1974,7 @@ export default function EditMappingDialog({
               </button>
               <button
                 type="submit"
-                disabled={saving}
+                disabled={saving || deleting}
                 className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
               >
                 {saving
