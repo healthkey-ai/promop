@@ -68,6 +68,7 @@ class Command(BaseCommand):
             )
             call_command(
                 'load_athena_vocabularies', **source, migration_bootstrap=True,
+                skip_suggest_embeddings=True,
                 verbosity=options['verbosity'],
             )
 
