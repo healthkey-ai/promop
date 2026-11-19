@@ -179,8 +179,9 @@ def test_a_reviewed_fallback_keeps_its_outcome_and_is_in_no_score(client, albumi
     unreviewed.refresh_from_db()
     assert unreviewed.suggestion_outcome == ''
 
-    legacy = client.get('/api/v1/code-mappings/accuracy/').data['overall']
-    assert legacy['review_totals'] == {'approved': 1, 'rejected': 0, 'overridden': 0}
+    legacy = client.get('/api/v1/code-mappings/accuracy/').data
+    assert legacy['overall']['review_totals'] == {'approved': 1, 'rejected': 0, 'overridden': 0}
+    assert legacy['fallbacks'] == {'suggestions': 4, 'reviewed': 3}
 
 
 def test_a_dashboard_with_only_fallbacks_scores_nothing_and_says_how_many(client, albumin_goal):
@@ -226,9 +227,10 @@ def test_the_backfill_marks_stored_fallbacks_and_nothing_else(albumin_goal):
         row('FALLBACK', albumin_goal, notes=FALLBACK_NOTE),
         row('FALLBACK-REVIEWED', albumin_goal, notes=FALLBACK_NOTE, status='approved',
             suggestion_outcome='overridden'),
-        row('FALLBACK-LOWER', albumin_goal, notes='best-match fallback (score 0.5). ranking model unavailable.'),
     ]
     left = [
+        # Curator text that merely quotes the phrase is not a fallback's note.
+        row('QUOTED', albumin_goal, notes='Checked: this is not a Best-match fallback.'),
         row('RANKED', albumin_goal, notes='Jev selected this concept with high confidence.'),
         # Nothing was chosen by that run, so the suggestion on the row is an earlier, real one.
         row('UNRESOLVED', albumin_goal, notes=UNRESOLVED_NOTE),
@@ -238,7 +240,7 @@ def test_the_backfill_marks_stored_fallbacks_and_nothing_else(albumin_goal):
     ]
     before = {m.pk: m.updated_at for m in marked}
 
-    migration = import_module('omop_core.migrations.0359_suggestion_fallback')
+    migration = import_module('omop_core.migrations.0360_backfill_suggestion_fallback')
     migration.mark_fallbacks(apps, None)
     migration.mark_fallbacks(apps, None)   # a replay changes nothing
 

@@ -1323,7 +1323,7 @@ def is_fallback_note(note):
     """Whether *note* is the one a ranker that could not run leaves behind.
 
     The note is how a fallback is told from a selection everywhere a result is
-    handled, and what migration 0359 backfilled ``suggestion_fallback`` from.
+    handled, and what migration 0360 backfilled ``suggestion_fallback`` from.
     """
     return 'ranking model unavailable' in (note or '').lower()
 

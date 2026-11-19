@@ -1422,16 +1422,20 @@ row holds and whether its outcome is scored at all (#2743).
   "Best-match fallback … Ranking model unavailable". That is a destination to
   review, not the model's answer, so the row carries `suggestion_fallback`
   (forward Suggest and group Suggest set it from `suggestions.is_fallback_note`;
-  a real pick that replaces the fallback clears it; migration `0359` marked
-  the rows already written, from the note). The outcome still lands on the
-  row. `_suggestion_accuracy_groups` and `code_mapping_accuracy_analytics`
+  a real pick that replaces the fallback clears it; migration `0360` marked
+  the rows already written, best effort, from a note that begins with the
+  fallback text: a fallback written onto a row that already had a note never
+  carried it, and a review archived before the migration is not marked). The
+  outcome still lands on the row. `_suggestion_accuracy_groups` and `code_mapping_accuracy_analytics`
   leave marked rows out of every score, and each page says how many it set
-  aside (`fallbacks` on the dashboard, `unscored_fallbacks` on analytics). On
+  aside (`fallbacks` on the dashboard and the legacy accuracy endpoint,
+  `unscored_fallbacks` on analytics). On
   HealthTree one unanswered "albumin" ranking, written by a group run to every
   hospital's local code, was 1,530 of 1,539 "Other destination" outcomes:
   4% precision as reported, 66 approved / 9 other / 1 rejected without it. An
-  archived review (`MappingSuggestionReview`) keeps the mark, and it travels
-  with `copy_reference_data`.
+  archived review (`MappingSuggestionReview`) keeps the mark. The mapping's own
+  mark travels with `copy_reference_data`; archived reviews are system data and
+  stay on the instance that made them.
 - **A reverse ranker's pick becomes the stored suggestion.** A destination a
   ranker chose from the Concept to Code side (`machine_proposal`: reverse
   Suggest's auto-propose, a new row or a moved proposal accepted from a saved

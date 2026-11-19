@@ -15411,24 +15411,38 @@ def _suggestion_accuracy_from_counts(counts):
     }
 
 
-def _suggestion_accuracy_groups(fallback=False):
+def _suggestion_accuracy_groups():
     """Current suggestions and archived reviews, in one bounded grouped query.
 
-    Scores are over the ranking models' own answers. A fallback, the first
-    retrieval candidate written because no ranker could be reached, is not
-    one: counting it gave HealthTree 4% precision for a single unanswered
-    "albumin" ranking written to 1,531 hospital codes (#2743). *fallback*
-    returns those rows instead, so a page can say how many it set aside.
+    Every group carries ``suggestion_fallback``. Scores are over the ranking
+    models' own answers, and a fallback, the first retrieval candidate written
+    because no ranker could be reached, is not one: counting it gave
+    HealthTree 4% precision for a single unanswered "albumin" ranking written
+    to 1,531 hospital codes (#2743). Callers read the groups through
+    ``_scored_accuracy_groups``.
     """
     def groups(model):
-        return model.objects.filter(
-            suggestion_model_version__gt='', suggestion_fallback=fallback,
-        ).order_by().values(
+        return model.objects.filter(suggestion_model_version__gt='').order_by().values(
             'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
+            'suggestion_fallback',
         ).annotate(total=Count('id'))
 
     # ALL matters: equal groups in the two tables are independent reviews.
     return groups(SourceCodeConceptMapping).union(groups(MappingSuggestionReview), all=True)
+
+
+def _scored_accuracy_groups():
+    """``(scored groups, fallbacks)`` from one scan: the groups the scores are
+    over, and ``{'suggestions': n, 'reviewed': n}`` for those set aside."""
+    scored, fallbacks = [], {'suggestions': 0, 'reviewed': 0}
+    for group in _suggestion_accuracy_groups():
+        if group['suggestion_fallback']:
+            fallbacks['suggestions'] += group['total']
+            if group['suggestion_outcome']:
+                fallbacks['reviewed'] += group['total']
+        else:
+            scored.append(group)
+    return scored, fallbacks
 
 
 def _suggestion_version_key(version):
@@ -15449,7 +15463,8 @@ def code_mapping_accuracy(request):
 
     sources = defaultdict(lambda: defaultdict(Counter))
     overall_versions = defaultdict(Counter)
-    for group in _suggestion_accuracy_groups():
+    groups, fallbacks = _scored_accuracy_groups()
+    for group in groups:
         source = canonical_source(group['source_vocabulary_id'])
         version, outcome, total = (group['suggestion_model_version'], group['suggestion_outcome'], group['total'])
         sources[source][version][outcome] += total
@@ -15487,6 +15502,7 @@ def code_mapping_accuracy(request):
     return Response({
         'overall': snapshot(overall_versions),
         'by_source_vocabulary': {source: snapshot(versions) for source, versions in sources.items()},
+        'fallbacks': fallbacks,
         'suggest_model_version': SUGGESTION_MODEL_VERSION,
     })
 
@@ -15499,14 +15515,12 @@ def code_mapping_accuracy_dashboard(request):
     from collections import Counter, defaultdict
     counts = defaultdict(Counter)
     totals = Counter()
-    for group in _suggestion_accuracy_groups():
+    groups, fallbacks = _scored_accuracy_groups()
+    for group in groups:
         outcome, total = group['suggestion_outcome'], group['total']
         counts[group['suggestion_model_version']][outcome] += total
         totals[outcome] += total
     versions = sorted(counts, key=_suggestion_version_key, reverse=True)
-    fallbacks = Counter()
-    for group in _suggestion_accuracy_groups(fallback=True):
-        fallbacks[group['suggestion_outcome']] += group['total']
     return Response({
         'models': [
             {'model_version': version, **_suggestion_accuracy_from_counts(counts[version])}
@@ -15515,10 +15529,7 @@ def code_mapping_accuracy_dashboard(request):
         'overall': _suggestion_accuracy_from_counts(totals) if versions else None,
         # Written while no ranking model could be reached, and in no score
         # above: how many there are, and how many a curator has reviewed.
-        'fallbacks': {
-            'suggestions': sum(fallbacks.values()),
-            'reviewed': sum(total for outcome, total in fallbacks.items() if outcome),
-        },
+        'fallbacks': fallbacks,
     })
 
 
