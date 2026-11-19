@@ -236,3 +236,29 @@ def service_token_scope_check(app_configs, **kwargs):
                 id='patient_portal.W007',
             ))
     return warnings
+
+
+@register()
+def record_mappings_check(app_configs, **kwargs):
+    """Refuse a record mapping that cannot be used (patient_portal.survey_record_mapping).
+
+    Mappings are loaded when a response is submitted; a broken file would
+    otherwise fail every submission of that survey, quietly, in the log. Here
+    it fails `check` and the deploy instead. Whether each mapping fits its
+    survey version (questions, options) needs the database:
+    `manage.py apply_record_mappings --check`.
+    """
+    from patient_portal import survey_record_mapping as srm
+
+    if not srm.mapping_dirs():
+        return []
+    srm.reset_cache()
+    try:
+        srm.mappings()
+    except srm.MappingError as exc:
+        return [Error(
+            f'A record mapping cannot be used: {exc}',
+            hint='Fix the file in PROLOG_RECORD_MAPPING_DIRS; until then its survey writes nothing to the record.',
+            id='patient_portal.E007',
+        )]
+    return []

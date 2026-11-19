@@ -1628,9 +1628,16 @@ _CANONICAL_DISEASES = frozenset({
 
 
 def _condition_slug(condition) -> str:
-    concept_name = _usable_concept_name(condition.condition_concept) if condition.condition_concept_id else None
-    name = concept_name or condition.condition_source_value or ''
-    return _disease_name_to_slug(_canonicalize_disease(name)) if name.strip() else ''
+    # Canonicalizing a name reads the curated disease categories, and the ranking
+    # and the slug list both ask for every cancer's slug on each refresh: one
+    # answer per row object, which lives as long as one snapshot.
+    memo = condition.__dict__.get('_slug_memo')
+    if memo is None:
+        concept_name = _usable_concept_name(condition.condition_concept) if condition.condition_concept_id else None
+        name = concept_name or condition.condition_source_value or ''
+        memo = condition.__dict__['_slug_memo'] = (
+            _disease_name_to_slug(_canonicalize_disease(name)) if name.strip() else '')
+    return memo
 
 
 def _cancers_with_lines(person, snapshot: OmopSnapshot, today) -> tuple[set, set]:
@@ -1943,6 +1950,24 @@ def _disease_name_to_slug(name: str) -> str:
     return slug[:100]
 
 
+def recent_medications(drug_exposures) -> tuple[list, list]:
+    """(names, rows) of the medications ``concomitant_medications`` lists.
+
+    *drug_exposures* is ordered oldest first. Of the last ten rows, the five
+    newest are taken, newest first, and a nameless one among them is dropped
+    rather than replaced by an older row, so fewer than five names are possible. Shared with the
+    provisional pass, which runs it over provisional rows only and needs the
+    rows to say which proposals decided the field.
+    """
+    names, rows = [], []
+    for drug in list(reversed(drug_exposures[-10:]))[:5]:
+        name = _usable_concept_name(drug.drug_concept) or drug.drug_source_value
+        if name:
+            names.append(name)
+            rows.append(drug)
+    return names, rows
+
+
 def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
@@ -1958,13 +1983,7 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data['medication_contexts'] = {str(pk): values for pk, values in
         medication_contexts(person.pk, [row.pk for row in drug_exposures]).items()}
 
-    recent_drugs = list(reversed(drug_exposures[-10:]))
-
-    current_meds = []
-    for drug in recent_drugs[:5]:
-        name = _usable_concept_name(drug.drug_concept) or drug.drug_source_value
-        if name:
-            current_meds.append(name)
+    current_meds, _ = recent_medications(drug_exposures)
     if current_meds:
         data['concomitant_medications'] = ', '.join(current_meds)
 

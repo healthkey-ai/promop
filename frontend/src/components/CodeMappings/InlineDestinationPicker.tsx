@@ -10,11 +10,13 @@ type Props = {
   vocabularies?: { vocabulary_id: string; vocabulary_name: string }[];
   initialVocabulary?: string;
   canApprove?: boolean;
+  /** The proposer may not approve (#2726): choosing a destination here proposes it, so it cannot be approved in the same save. */
+  separateApprover?: boolean;
   onSaved: (mapping: SavedMapping, concept: DestinationConcept) => void;
   onCancel: () => void;
 };
 
-export default function InlineDestinationPicker({ mappingId, sourceLabel, vocabularies = [], initialVocabulary = '', canApprove = false, onSaved, onCancel }: Props) {
+export default function InlineDestinationPicker({ mappingId, sourceLabel, vocabularies = [], initialVocabulary = '', canApprove = false, separateApprover = false, onSaved, onCancel }: Props) {
   const listId = useId();
   const [query, setQuery] = useState('');
   const [vocabulary, setVocabulary] = useState(initialVocabulary);
@@ -132,7 +134,7 @@ export default function InlineDestinationPicker({ mappingId, sourceLabel, vocabu
       </div>}
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" disabled={!selected || !current || saving} onClick={() => void save(false)} className="rounded-md bg-slate-950 px-3 py-2 font-medium text-white hover:bg-slate-800 disabled:opacity-40">{saving ? 'Saving…' : 'Save choice'}</button>
-        {canApprove && <button type="button" disabled={!selected || !current || saving} onClick={() => void save(true)} className="rounded-md border border-slate-300 bg-white px-3 py-2 font-medium hover:bg-slate-100 disabled:opacity-40">Save & approve</button>}
+        {canApprove && !separateApprover && <button type="button" disabled={!selected || !current || saving} onClick={() => void save(true)} className="rounded-md border border-slate-300 bg-white px-3 py-2 font-medium hover:bg-slate-100 disabled:opacity-40">Save & approve</button>}
         <button type="button" disabled={saving} onClick={onCancel} className="rounded-md px-3 py-2 text-slate-600 hover:bg-slate-200 disabled:opacity-40">Cancel</button>
         <span className="text-xs text-slate-500">Save choice keeps the mapping proposed for review.</span>
       </div>

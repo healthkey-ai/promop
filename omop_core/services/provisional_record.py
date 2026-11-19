@@ -19,9 +19,25 @@ A reader sees the picture through ``overlay``: the normal patient-record read la
 each proposed value over the field the real record leaves empty and says which
 fields those are, so no one asks for it separately.
 
-Readers that combine many rows (therapy lines, staging, genomics, ...) are not
-run: those columns equal ``patient_record``. Computed fields (BMI, scores) are
-not recomputed from a provisional input either, so they equal the real record.
+Two composite readers also run, over provisional conditions and drug exposures
+only (#2534), each with the same rule (a value only where the record is empty,
+the lowest confidence among the rows that decide it):
+
+- the disease fields (``disease``, ``disease_slug``, ``diagnosis_date``,
+  ``diagnosis_date_precision``, ``condition_clinical_status``), from the cancer
+  the real reader picks among the provisional conditions, and only when the
+  record has no disease yet or names the same one;
+- ``concomitant_medications``, from the provisional exposures, through the
+  real reader's own ``recent_medications``.
+
+The other composite readers are not run, and those columns equal
+``patient_record``: therapy lines read persisted Episodes, which a proposal must
+not create; staging, cytogenetics, SCT and cancer details read curator-written
+observation keys, not proposal-fed concepts; and the fields of
+``active_malignancies``, ``disease_slugs``, ``genetic_mutations`` and
+``prior_procedures`` are JSON, which has no confidence column. Computed fields
+(BMI, scores) are recomputed from a provisional input only for the inputs in
+``COMPUTED_INPUTS``.
 """
 from __future__ import annotations
 
@@ -277,42 +293,145 @@ def _after_clears(snapshot, provisional_rows, target):
     return [row for row in provisional_rows if id(row) in visible]
 
 
+# The disease fields one provisional cancer condition decides together. They
+# are read as a group: a diagnosis date or a status taken from a different
+# cancer than the one the disease names would be a fact about another illness.
+DISEASE_FIELDS = (
+    'disease', 'disease_slug', 'diagnosis_date', 'diagnosis_date_precision',
+    'condition_clinical_status',
+)
+
+
+def _disease_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
+    """(values, confidences) of the disease fields a provisional cancer decides.
+
+    The real reader (``_get_disease_data``) runs over the provisional
+    conditions only, and only when one of them is a cancer: with none, its
+    fallbacks would take a diagnosis date from a symptom or a status from an
+    unrelated condition. The group is offered only where it describes the
+    person's own cancer: the record has no disease yet, or names the same one
+    (same slug). Each field is then kept on its own rule, only where the record
+    is empty. One row decides all of them, the cancer the real reader picks,
+    so its confidence is theirs.
+
+    Nothing is offered, and nothing is read, when a person typed the disease or
+    its slug (the group would describe another cancer than the one they named),
+    or when the record already answers every field of the group. The reader
+    fails closed: a typed disease with no slug does not match any proposal's
+    slug, so it blocks the group too. The primary cancer is the real ranking's
+    choice (not currently resolved, has a line, not in remission, newest),
+    whatever the confidence: a 55% row that wins on recency gives every disease
+    field 55.
+    """
+    from omop_core.services.patient_record_service import (
+        _cancer_conditions, _get_disease_data, _is_empty, _primary_cancer_condition,
+    )
+    if 'disease' in blocked or 'disease_slug' in blocked:
+        return {}, {}
+    if not any(_is_empty(getattr(record, field, None)) and field not in blocked
+               for field in DISEASE_FIELDS):
+        return {}, {}
+    conditions = snapshot.provisional_conditions
+    cancers = _cancer_conditions(conditions)
+    if not cancers:
+        return {}, {}
+    # The real observations answer the disease-status fallback; a provisional
+    # view has none of its own, so it gets none.
+    view = dataclasses.replace(snapshot, conditions=conditions, obs_by_source={}, obs_by_code={})
+    primary = _primary_cancer_condition(person, view, cancers)
+    read = _get_disease_data(person, view)
+    if primary is None or _is_empty(read.get('disease')):
+        return {}, {}
+    if not _is_empty(record.disease) and record.disease_slug != read.get('disease_slug'):
+        return {}, {}
+    values = {field: read[field] for field in DISEASE_FIELDS if not _is_empty(read.get(field))}
+    return values, {field: primary.confidence for field in values}
+
+
+def _medication_proposals(snapshot) -> tuple[dict, dict]:
+    """(values, confidences) of ``concomitant_medications`` from provisional drug rows.
+
+    The list is the real reader's own (``recent_medications``) over the
+    provisional exposures, and carries the lowest confidence among the rows
+    that are in it. Therapy lines are not proposed: they come from persisted
+    Episodes, which nothing here may create (see the module docstring).
+    """
+    from omop_core.services.patient_record_service import recent_medications
+    names, rows = recent_medications(snapshot.provisional_drug_exposures)
+    if not names:
+        return {}, {}
+    return ({'concomitant_medications': ', '.join(names)},
+            {'concomitant_medications': min(row.confidence for row in rows)})
+
+
+def composite_proposals(person, record, snapshot, blocked=(), taken=()) -> tuple[dict, dict]:
+    """(values, confidences) the composite readers add from provisional conditions and drugs.
+
+    Each reader runs over provisional rows only, exactly as the real refresh
+    runs it, and a field is kept only where the record has no answer, nobody
+    typed one (*blocked*) and no earlier reader proposed it (*taken*: a curated
+    mapping's value wins, as it does in the real refresh): real beats
+    provisional. Each reader runs in its own savepoint, so one that raises, even
+    on a database error, costs only its own fields.
+    """
+    from omop_core.services.patient_record_service import _is_empty
+    names = _confidence_names()
+    values, confidences = {}, {}
+    for reader in (lambda: _disease_proposals(person, record, snapshot, blocked),
+                   lambda: _medication_proposals(snapshot)):
+        try:
+            with transaction.atomic():
+                found, marks = reader()
+        except Exception:  # noqa: BLE001 -- one reader must not cost the person's other proposals
+            logger.exception('Provisional composite reader failed for person_id=%s.', person.person_id)
+            continue
+        for field, value in found.items():
+            if (field in names and field not in blocked and field not in values and field not in taken
+                    and not _is_empty(value) and _is_empty(getattr(record, field, None))
+                    and _storable(field, value)):
+                values[field], confidences[field] = value, marks[field]
+    return values, confidences
+
+
 def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name."""
     from omop_core.services.patient_record_service import _is_empty
     measurements = _usable_vitals(_after_clears(snapshot, snapshot.provisional_measurements, 'measurement'))
     observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
-    if not (measurements or observations):
-        return {}, {}
     confidence_names = _confidence_names()
     blocked = set(user_edited) | set(record.user_edited_fields or [])
-    routing = {}
-    values = _read_values(person, record, _view(snapshot, measurements, observations, routing))
-    # A value is provisional only if its confidence can be recorded, and only
-    # where the real record has no answer and nobody has typed one.
-    kept = {
-        field: value for field, value in values.items()
-        if field in confidence_names and field not in blocked
-        and not _is_empty(value) and _is_empty(getattr(record, field, None))
-        and _storable(field, value)
-    }
-    # A proposed weight or height is dropped when the record's own unit for it
-    # differs from the unit the proposal is in: laid together, the number would
-    # read as the wrong unit (70 kg shown as 70 lb).
-    for field, units_field in _VALUE_UNITS.items():
-        own = (getattr(record, units_field, None) or '').strip().lower()
-        proposed = str(values.get(units_field) or '').strip().lower()
-        if field in kept and own and proposed and own != proposed:
-            del kept[field]
-    if not kept:
+    kept, confidences = {}, {}
+    if measurements or observations:
+        routing = {}
+        values = _read_values(person, record, _view(snapshot, measurements, observations, routing))
+        # A value is provisional only if its confidence can be recorded, and only
+        # where the real record has no answer and nobody has typed one.
+        kept = {
+            field: value for field, value in values.items()
+            if field in confidence_names and field not in blocked
+            and not _is_empty(value) and _is_empty(getattr(record, field, None))
+            and _storable(field, value)
+        }
+        # A proposed weight or height is dropped when the record's own unit for it
+        # differs from the unit the proposal is in: laid together, the number would
+        # read as the wrong unit (70 kg shown as 70 lb).
+        for field, units_field in _VALUE_UNITS.items():
+            own = (getattr(record, units_field, None) or '').strip().lower()
+            proposed = str(values.get(units_field) or '').strip().lower()
+            if field in kept and own and proposed and own != proposed:
+                del kept[field]
+        if kept:
+            confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
+    composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept)
+    if not (kept or composite):
         return {}, {}
-    confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
     try:
         computed, computed_marks = computed_proposals(record, kept, confidences, blocked)
     except Exception:  # noqa: BLE001 -- a calculation must not cost the person's other proposals
         logger.exception('Provisional calculation failed for person_id=%s.', person.person_id)
         computed, computed_marks = {}, {}
-    return {**kept, **computed}, {**confidences, **computed_marks}
+    return ({**kept, **composite, **computed},
+            {**confidences, **composite_marks, **computed_marks})
 
 
 def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
@@ -360,6 +479,11 @@ def mirror_user_edit(record, edited_fields) -> None:
     confidence = PatientRecordConfidence.objects.filter(person_id=record.person_id).first()
     from omop_core.services.patient_record_service import _is_empty
     edited = set(edited_fields)
+    # The disease fields describe one cancer together: editing the disease or its
+    # slug makes the whole group the person's, so no field is left attributed to
+    # the cancer a proposal named.
+    if edited & {'disease', 'disease_slug'}:
+        edited |= set(DISEASE_FIELDS)
     names = _confidence_names()
     try:
         with transaction.atomic():

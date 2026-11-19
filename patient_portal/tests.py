@@ -26258,6 +26258,19 @@ class PersonLanguageSkillPatchTest(_SmartBase):
             self._url(), {'language_skills': ['speak']},
             content_type='application/json', **self._auth())
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        # The view answers this before the shared save path (apply_patient_record_patch),
+        # with the same body as before that path moved out of the view.
+        self.assertEqual(resp.json(), {
+            'detail': "'language_skills' must be an object mapping a language to its capabilities.",
+        })
+
+    def test_a_refused_language_write_saves_nothing_else_from_the_request(self):
+        before = PatientRecord.objects.get(person=self.person).stage
+        resp = self.client.patch(
+            self._url(), {'stage': 'IV', 'language_skills': {'klingon': ['speak']}},
+            content_type='application/json', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(PatientRecord.objects.get(person=self.person).stage, before)
 
     # -- authorization -----------------------------------------------------
 

@@ -19,7 +19,12 @@ All notable changes to PRomop are documented here.
   mapping writes only what an answer gives and never clears a field; applying
   again writes the same values. `manage.py apply_record_mappings --check`
   checks the mappings against their survey versions, and `--survey`/`--response`
-  apply them to responses submitted earlier. Off by default: with no mapping
+  apply them to responses submitted earlier. It runs once, when a response
+  becomes submitted, on a worker when Celery has a broker; a line the writer
+  refuses is left out without losing the rest; a line from the EHR or a
+  clinician is never overwritten; a response through an invitation link writes
+  nothing; and a broken mapping file fails the system check
+  `patient_portal.E007`. Off by default: with no mapping
   directories, answers stay in the survey tables. See
   [Survey record mapping](docs/survey-record-mapping_architecture.md).
 - **How the cancer is managed, how it is today, and where care happens** —
