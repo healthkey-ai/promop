@@ -263,3 +263,98 @@ def test_the_command_checks_mappings_and_backfills_earlier_responses(mapped, pat
 
     assert 'OK: 1 mapped survey version(s)' in capsys.readouterr().out
     assert PatientRecord.objects.get(pk=record.pk).stage == 'III'
+
+
+
+# --- review follow-ups (#2736) ---------------------------------------------------
+
+
+@pytest.mark.parametrize('dates, refused', [
+    ({'started': {'date': '2019'}, 'ended': {'date': '2018'}}, 'end before start'),
+    ({'started': {'date': '2099-01'}}, 'a future start'),
+    ({}, 'no start date'),
+])
+def test_a_line_the_writer_refuses_leaves_the_rest_of_the_response(
+        mapped, patient, dates, refused, django_capture_on_commit_callbacks):
+    record, _ = patient
+    answers = {k: v for k, v in ANSWERS.items() if k not in ('started', 'ended')} | dates
+
+    submit(mapped, record, answers, django_capture_on_commit_callbacks)
+
+    record = PatientRecord.objects.get(pk=record.pk)
+    assert record.stage == 'III', refused
+    assert record.ecog_performance_status == 1, refused
+    assert not Episode.objects.filter(person=record.person, episode_number=1).exists(), refused
+
+
+def test_a_line_from_the_ehr_is_never_overwritten_by_an_answer(mapped, patient, django_capture_on_commit_callbacks):
+    from omop_core.services.episode_service import author_therapy_line
+
+    record, _ = patient
+    author_therapy_line(record.person, line_number=1, start_date=dt.date(2018, 2, 1), source_value='R-CVP')
+
+    submit(mapped, record, ANSWERS, django_capture_on_commit_callbacks)
+
+    line = Episode.objects.get(person=record.person, episode_number=1)
+    assert (line.episode_source_value, line.episode_start_date) == ('R-CVP', dt.date(2018, 2, 1))
+    assert PatientRecord.objects.get(pk=record.pk).stage == 'III'  # the rest is written
+
+
+def test_a_line_the_patient_reported_is_updated_by_a_later_answer(mapped, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    submit(mapped, record, ANSWERS, django_capture_on_commit_callbacks)
+
+    submit(mapped, record, {**ANSWERS, 'started': {'date': '2019-07'}}, django_capture_on_commit_callbacks)
+
+    assert Episode.objects.get(person=record.person, episode_number=1).episode_start_date == dt.date(2019, 7, 1)
+
+
+def test_a_response_through_an_invitation_link_writes_nothing(mapped, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    response = SurveyResponse.objects.create(survey_version=mapped, participant_id=record.person_id, language='en',
+                                             status=ResponseStatus.SUBMITTED, submitted_at=timezone.now())
+    response.answers.create(question_key='stage', value={'option': 'stage_3'}, option_keys=['stage_3'])
+
+    response.administration_id = 1  # answered through an invitation's administration (not saved)
+
+    assert srm.apply_response(response) is None
+    assert PatientRecord.objects.get(pk=record.pk).stage == ''
+
+
+def test_only_the_submission_applies_the_mapping_not_a_later_save(mapped, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    response = submit(mapped, record, ANSWERS, django_capture_on_commit_callbacks)
+    PatientRecord.objects.filter(pk=record.pk).update(stage='IV')  # a newer edit
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response.save()  # an admin or script save of the submitted response
+
+    assert PatientRecord.objects.get(pk=record.pk).stage == 'IV'
+
+
+def test_a_broken_mapping_file_fails_the_system_check(settings, tmp_path):
+    from patient_portal.checks import record_mappings_check
+
+    (tmp_path / 'broken.json').write_text('{"mapping_version": 1, "survey": ')
+    settings.PROLOG_RECORD_MAPPING_DIRS = [str(tmp_path)]
+
+    errors = record_mappings_check(None)
+    srm.reset_cache()
+
+    assert [e.id for e in errors] == ['patient_portal.E007']
+    assert 'broken.json' in errors[0].msg
+
+
+def test_a_line_with_no_medicine_reads_as_the_record_unless_the_patient_reported_it(
+        mapped, patient, django_capture_on_commit_callbacks):
+    from omop_core.services.episode_service import author_therapy_line
+    from rest_framework.test import APIClient
+
+    record, identity = patient
+    author_therapy_line(record.person, line_number=1, start_date=dt.date(2018, 2, 1), source_value='R-CVP')
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    lines = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
+
+    assert [line['source']['kind'] for line in lines] == ['record']

@@ -21,14 +21,21 @@ wording and no deployment's rules.
 ## What happens on submit
 
 1. PROlog's submit saves the response with `status=submitted`.
-2. A `post_save` receiver (`patient_portal.apps`) sees a submitted response and,
-   only when `PROLOG_RECORD_MAPPING_DIRS` is set, schedules the mapping for
-   after the submit's transaction commits. A failure is logged and never undoes
-   the submission.
+2. A `post_save` receiver (`patient_portal.apps`) sees a response *become*
+   submitted (created submitted, or saved with its `status`) and, only when
+   `PROLOG_RECORD_MAPPING_DIRS` is set, schedules the mapping for after the
+   save commits: on a worker (`patient_portal.apply_record_mapping`) when Celery
+   has a broker, inline otherwise. Another save of a submitted response (an
+   admin edit, a script) applies nothing, so it never writes old answers over
+   newer edits. A failure is logged with the command that retries it and never
+   undoes the submission.
 3. `apply_response` finds the mapping for the response's survey slug and
    version. None means nothing is written.
 4. It writes as the participant's account (`PatientUser.identity`). A response
-   with no account behind it writes nothing.
+   with no account behind it writes nothing, and nor does one answered through
+   an invitation link (`administration`): the link is its own credential, so
+   whoever holds it answers as the person it names, and that is not the
+   person's own edit.
    - **Record fields** go through `apply_patient_record_patch`, the save path of
      the patient's own `PATCH /api/v1/patient-records/me/`: the serializer's
      validation, `user_edited_fields`, the revision history (changed by the
@@ -36,8 +43,14 @@ wording and no deployment's rules.
      and the provisional mirror.
    - **Lines of therapy** go through `author_therapy_line`, with every row typed
      32865 and the line asserted by `questionnaire`. A line's composition stays
-     unknown; the answer's label is its source value.
-5. Everything for one response is one transaction.
+     unknown; the answer's label is its source value. A line that is already on
+     the record from the EHR or a clinician (not self-report, not asserted by a
+     questionnaire) is never overwritten by an answer.
+5. Everything for one response is one transaction, but each line is written in
+   its own savepoint: a line the writer refuses (no start date, a future start,
+   an end before the start) is logged and left out, and the record fields and
+   the other lines stand. A record that names no cancer yet takes its lines
+   unfiled, as the primary cancer's.
 
 ## The rules
 
@@ -59,8 +72,10 @@ survey overwrites what an earlier one wrote, field by field and line by line.
 
 `apply_record_mappings --check` loads every mapping and checks it against the
 survey versions it names: every question it reads exists, every option it lists
-is offered. Loading refuses a mapping that names a field `PatientRecord` does
-not have, or that maps one survey version twice.
+is offered. Loading refuses a mapping that is not readable JSON, names a field
+`PatientRecord` does not have, or maps one survey version twice, and the system
+check `patient_portal.E007` runs the load at startup, so a broken file fails
+`check` and the deploy rather than every submission.
 
 ## Not yet
 
@@ -70,4 +85,3 @@ not have, or that maps one survey version twice.
 - Fields with no `PatientRecord` column yet; their answers stay in the survey
   tables.
 - Date precision on therapy lines.
-- Running the mapping on a worker rather than after the submit's commit.

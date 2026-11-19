@@ -98,7 +98,10 @@ def _load(dirs: tuple[str, ...]) -> dict[tuple[str, str], dict[str, Any]]:
     found: dict[tuple[str, str], dict[str, Any]] = {}
     for directory in dirs:
         for path in sorted(Path(directory).glob('*.json')):
-            mapping = json.loads(path.read_text())
+            try:
+                mapping = json.loads(path.read_text())
+            except (OSError, ValueError) as exc:
+                raise MappingError(f'{path}: not a readable JSON mapping ({exc})') from exc
             check_mapping(mapping, source=str(path))
             for version in mapping['versions']:
                 key = (mapping['survey'], version)
@@ -316,13 +319,16 @@ class Applied:
 
 def apply_response(response) -> Applied | None:
     """Write what a submitted response gives into its participant's record, as
-    the participant. None when its survey version has no mapping, or nobody
-    holds the participant's account (no patient to write as)."""
+    the participant. None when its survey version has no mapping, when it was
+    answered through an invitation link, or when nobody holds the participant's
+    account (no patient to write as)."""
     from omop_core.api.serializers import outcome_aliases
     from omop_core.models import PatientRecord, Person
+    from omop_core.services.disease_episodes import primary_disease_slug
     from omop_core.services.episode_service import author_therapy_line
     from omop_core.services.omop_projection import patient_self_report_type
     from omop_core.services.patient_record_service import refresh_patient_record
+    from omop_core.services.therapy_errors import TherapyLineValidationError
     from omop_core.signals import suppress_patient_record_refresh
     from patient_portal.api.views import apply_patient_record_patch
     from patient_portal.models import PatientUser
@@ -330,6 +336,11 @@ def apply_response(response) -> Applied | None:
     version = response.survey_version
     mapping = mapping_for(version.survey.slug, version.version)
     if mapping is None or not response.submitted_at:
+        return None
+    if response.administration_id is not None:
+        # An invitation link is its own credential: whoever holds it answers as
+        # the person it names, so its answers are not that person's own edit.
+        logger.info('survey_record_mapping: response %s came through an invitation link; not written', response.pk)
         return None
     person = Person.objects.filter(person_id=response.participant_id).first()
     account = PatientUser.objects.filter(person=person).select_related('identity').first() if person else None
@@ -341,7 +352,7 @@ def apply_response(response) -> Applied | None:
     submitted_on = response.submitted_at.date()
     patch = record_patch(mapping, answers, submitted_on)
     lines = therapy_lines(mapping, answers)
-    applied = Applied(str(response.pk), sorted(patch), [line['line_number'] for line in lines])
+    applied = Applied(str(response.pk), sorted(patch))
     with transaction.atomic():
         record, _ = PatientRecord.objects.get_or_create(person=person)
         if patch:
@@ -352,15 +363,34 @@ def apply_response(response) -> Applied | None:
             # disease catalogue stores it, as the therapy-lines API accepts it; one
             # the catalogue lacks is left out rather than written.
             aliases = outcome_aliases(record.disease)
+            if not primary_disease_slug(person):
+                # A record that names no cancer yet: a line filed under none is the
+                # primary cancer's, whichever the record names later.
+                for line in lines:
+                    line.pop('disease', None)
             with suppress_patient_record_refresh():
                 for line in lines:
                     if 'outcome' in line:
                         outcome = aliases.get(line.pop('outcome'))
                         if outcome is not None:
                             line['outcome'] = outcome
-                    author_therapy_line(
-                        person, asserted_by=QUESTIONNAIRE, type_concept_id=patient_self_report_type(), **line,
-                    )
+                    if not _writable_line(person, line):
+                        logger.warning('survey_record_mapping: response %s line %s is not the patient\'s; left as it is',
+                                       response.pk, line['line_number'])
+                        continue
+                    try:
+                        with transaction.atomic():
+                            author_therapy_line(
+                                person, asserted_by=QUESTIONNAIRE, type_concept_id=patient_self_report_type(), **line,
+                            )
+                    except TherapyLineValidationError as exc:
+                        # A line the writer refuses (no start date, a future one, an
+                        # end before the start, a cancer the record does not have) is
+                        # left out; the rest of the response stands.
+                        logger.warning('survey_record_mapping: response %s line %s refused: %s',
+                                       response.pk, line['line_number'], exc)
+                        continue
+                    applied.lines.append(line['line_number'])
             refresh_patient_record(person)
     logger.info(
         'survey_record_mapping: response %s wrote fields %s and lines %s',
@@ -369,28 +399,65 @@ def apply_response(response) -> Applied | None:
     return applied
 
 
+def _writable_line(person, line: dict[str, Any]) -> bool:
+    """Whether a mapping may write this line: a new one, or one the patient
+    reported (typed patient self-report, or asserted by a questionnaire). A line
+    from the EHR or a clinician is never overwritten by an answer."""
+    from omop_core.services.episode_service import _find_line, _line_parent
+    from omop_core.services.omop_projection import PATIENT_SELF_REPORT_TYPE
+    from omop_core.services.therapy_errors import TherapyLineValidationError
+
+    try:
+        parent, primary = _line_parent(person, line.get('disease'), None)
+    except TherapyLineValidationError:
+        return True  # the writer refuses it, and says why
+    existing = _find_line(person, line['line_number'], parent, primary)
+    if existing is None:
+        return True
+    asserted = getattr(getattr(existing, 'assertion', None), 'source', None)
+    return existing.episode_type_concept_id == PATIENT_SELF_REPORT_TYPE or asserted == QUESTIONNAIRE
+
+
+def run_response(response_id) -> None:
+    """Apply a response's mapping by id (the task, or inline): a failure is
+    logged with the command that retries it, and never raised."""
+    from prolog_surveys.models import SurveyResponse
+
+    try:
+        response = SurveyResponse.objects.select_related('survey_version__survey').get(pk=response_id)
+        apply_response(response)
+    except Exception:
+        logger.exception(
+            'survey_record_mapping: response %s was not written to the record; '
+            'retry with `manage.py apply_record_mappings --response %s`', response_id, response_id,
+        )
+
+
 def on_response_saved(sender, instance, created, update_fields=None, **kwargs):
-    """post_save of a PROlog response: once a mapped response is submitted and
-    committed, apply its mapping. A failure is logged and never undoes the
-    submission; ``apply_record_mappings`` retries it."""
+    """post_save of a PROlog response: when a response to a mapped survey
+    becomes submitted (created submitted, or saved with its status), apply its
+    mapping once the save commits, on a worker when there is one. Any other save
+    of a submitted response (an admin edit, a script) applies nothing, so it
+    never writes old answers over newer edits; ``apply_record_mappings`` does
+    that on purpose."""
+    from django.conf import settings as django_settings
     from prolog_surveys.models import ResponseStatus
 
     if instance.status != ResponseStatus.SUBMITTED:
         return
-    if update_fields is not None and 'status' not in update_fields:
+    if not created and (update_fields is None or 'status' not in update_fields):
         return
     if not mapping_dirs():
         return
-    response_id = instance.pk
+    response_id = str(instance.pk)
 
     def apply():
-        from prolog_surveys.models import SurveyResponse
+        if getattr(django_settings, 'CELERY_BROKER_URL', ''):
+            from patient_portal.tasks import apply_record_mapping_task
 
-        try:
-            response = SurveyResponse.objects.select_related('survey_version__survey').get(pk=response_id)
-            apply_response(response)
-        except Exception:
-            logger.exception('survey_record_mapping: response %s was not written to the record', response_id)
+            apply_record_mapping_task.delay(response_id)
+        else:
+            run_response(response_id)
 
     transaction.on_commit(apply)
 
@@ -401,7 +468,7 @@ def reset_cache() -> None:
 
 
 __all__ = [
-    'Applied', 'MappingError', 'answer_date', 'apply_response', 'check_against_definition',
+    'Applied', 'MappingError', 'answer_date', 'apply_response', 'check_against_definition', 'run_response',
     'check_mapping', 'mapping_for', 'mappings', 'on_response_saved', 'record_patch', 'reset_cache',
     'therapy_lines',
 ]
