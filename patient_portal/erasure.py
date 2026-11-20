@@ -15,31 +15,38 @@ so it is logged whoever calls it, from a view, the shell or a command.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
+from django.core.files.storage import Storage
 from django.db import transaction
-from django.db.models import PROTECT, Q
+from django.db.models import PROTECT
 
-from omop_core.models import (
-    Measurement, MeasurementOwnership, PatientDocument, PatientGroupMembership, PatientRecord, Person,
-    VisitOccurrence,
+from omop_core.models import PatientDocument, PatientGroupMembership, PatientRecord, Person
+from omop_core.services.patient_cleanup import (
+    delete_omop_clinical_rows, delete_provenance, delete_unkeyed_rows,
 )
-from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.patient_record_service import refresh_patient_record
-from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.signals import suppress_patient_record_refresh
-from omop_oncology.models import Episode, EpisodeEvent
 from patient_portal.models import AuditEvent
+
+if TYPE_CHECKING:
+    from patient_portal.models import Identity
 
 logger = logging.getLogger(__name__)
 
+# An uploaded document's stored file: where it is kept, and its name there.
+StoredFile = tuple[Storage, str]
+
 # What withdrawing the record's permission leaves: the account, the
-# permission and document history, the invitation, and the person's own row
-# and location (name, year of birth, sex, ethnicity, country, postcode
-# district), which sign-up wrote and membership needs. Every other table
-# that hangs off the person is deleted, so a clinical table added later is
-# erased too, not missed.
+# permission and document history (current and legacy), the invitation, and
+# the person's own row and location (name, year of birth, sex, ethnicity,
+# country, postcode district), which sign-up wrote and membership needs.
+# Every other table that hangs off the person, or off one of these, is
+# deleted, so a clinical table added later is erased too, not missed
+# (tests/test_member_erasure.py pins the list, so a new one is a decision).
 KEPT_ON_WITHDRAWAL = frozenset({
     'patient_portal.PatientUser',
+    'patient_portal.PatientConsent',
     'patient_portal.ConsentEvent',
     'patient_portal.DocumentAcceptance',
     'patient_portal.PatientInvitation',
@@ -52,7 +59,7 @@ KEPT_ON_WITHDRAWAL = frozenset({
 _MEMBERSHIP_FIELDS = ('organization',)
 
 
-def close_account(person: Person, identity=None, *, actor=None) -> None:
+def close_account(person: Person, identity: Identity | None = None, *, actor: Identity | None = None) -> None:
     """Delete the person, their record and every row about them, and
     ``identity`` (their sign-in) when given. ``actor`` is who asked: the
     member themselves, or staff."""
@@ -72,7 +79,7 @@ def close_account(person: Person, identity=None, *, actor=None) -> None:
         _log('account', person_id, actor_id, identity_id=identity_id)
 
 
-def erase_record(person: Person, *, actor=None, purpose: str = '') -> PatientRecord:
+def erase_record(person: Person, *, actor: Identity | None = None, purpose: str = '') -> PatientRecord:
     """Delete the member's health answers and keep their account.
 
     Their questionnaire responses, every clinical row, journal entry and
@@ -87,28 +94,14 @@ def erase_record(person: Person, *, actor=None, purpose: str = '') -> PatientRec
             old = PatientRecord.objects.filter(person=person).first()
             kept = {name: getattr(old, name) for name in _MEMBERSHIP_FIELDS} if old else {}
 
-            delete_prolog_data_for_persons([person.person_id])
-            # Rows that name the person or their rows by bare id, not by key.
-            episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
-            if episode_ids:
-                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-            visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
-            measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
-            if visit_ids or measurement_ids:
-                MeasurementOwnership.objects.filter(
-                    Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
-                ).delete()
+            tables = withdrawal_tables()
+            delete_provenance(person, tables)
+            delete_unkeyed_rows(person)
             # A group assigned by rule was chosen from the health answers; one
             # assigned by hand, like a personal representative, is about access.
             PatientGroupMembership.objects.filter(person_id=person.person_id, source='rule').delete()
-            for relation in Person._meta.related_objects:
-                model = relation.related_model
-                # A many-to-many filter would select the other side's rows
-                # (a whole group, say), not the person's link to them.
-                if (model._meta.label in KEPT_ON_WITHDRAWAL or relation.on_delete is PROTECT
-                        or relation.many_to_many):
-                    continue
-                model._base_manager.filter(**{relation.field.name: person}).delete()
+            for model, lookup in tables:
+                model._base_manager.filter(**{lookup: person}).delete()
 
             PatientRecord.objects.create(person=person, **kept)
         record = refresh_patient_record(person)
@@ -117,7 +110,28 @@ def erase_record(person: Person, *, actor=None, purpose: str = '') -> PatientRec
     return record
 
 
-def _actor_id(actor) -> str:
+def withdrawal_tables() -> list[tuple[type, str]]:
+    """``(model, lookup)`` for every table ``erase_record`` empties for a
+    person: those that name the person, and those under a kept table (a
+    member's messages hang off their account), except what is kept. A
+    PROTECTing table is cleared first by ``delete_unkeyed_rows``; a
+    many-to-many filter would select the other side's rows, not the link."""
+    tables = []
+    for relation in Person._meta.related_objects:
+        model = relation.related_model
+        if relation.many_to_many or relation.on_delete is PROTECT:
+            continue
+        if model._meta.label not in KEPT_ON_WITHDRAWAL:
+            tables.append((model, relation.field.name))
+            continue
+        for below in model._meta.related_objects:
+            if below.many_to_many or below.related_model._meta.label in KEPT_ON_WITHDRAWAL:
+                continue
+            tables.append((below.related_model, f'{below.field.name}__{relation.field.name}'))
+    return tables
+
+
+def _actor_id(actor: Identity | None) -> str:
     return str(actor.pk) if getattr(actor, 'pk', None) is not None else 'system'
 
 
@@ -132,13 +146,13 @@ def _log(kind: str, person_id: int, actor_id: str, **extra) -> None:
     )
 
 
-def _document_files(person: Person) -> list:
+def _document_files(person: Person) -> list[StoredFile]:
     """Uploaded documents' stored files: deleting a row leaves its file."""
     return [(doc.file.storage, doc.file.name)
             for doc in PatientDocument.objects.filter(person=person).exclude(file='').exclude(file__isnull=True)]
 
 
-def _remove_files_on_commit(files: list, person_id: int) -> None:
+def _remove_files_on_commit(files: list[StoredFile], person_id: int) -> None:
     """Delete the stored files once the rows are gone for good; a rolled-back
     erasure keeps them."""
     def remove():

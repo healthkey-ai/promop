@@ -13,7 +13,10 @@ All notable changes to PRomop are documented here.
   file or admin) deletes, when withdrawn, the member's questionnaire responses,
   every clinical row, journal entries and documents, and rebuilds the record
   from what is left; the account, membership, sign-up facts and permission
-  history stay. Any answer that ends the grant does it, not only "withdrawn".
+  history stay. Any answer that ends the grant does it, not only "withdrawn";
+  a back-dated or migrated answer does not, and a token that may only read
+  cannot make one (`MemberWritePermission` on the member's consent endpoints).
+  Closing an account now also deletes the provenance of what it deleted.
   Each erasure, and each account closed, writes its own audit-trail entry
   (`method` `ERASE`) naming the person and who asked, with no content, from
   any caller; uploaded documents' stored files are deleted once it commits. See

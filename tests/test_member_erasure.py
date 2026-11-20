@@ -177,3 +177,203 @@ def test_uploaded_documents_files_are_deleted_once_the_erasure_commits(member, h
     assert r.status_code == 200
     assert not PatientDocument.objects.filter(pk=doc.pk).exists()
     assert not stored.exists()
+
+
+# ------------------------------------------------------------ review round 2
+
+
+def _token(identity, scope):
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from oauth2_provider.models import AccessToken, Application
+
+    app = Application.objects.create(
+        user=identity, name='a smart app', client_id=f'app-{len(scope)}', client_type=Application.CLIENT_PUBLIC,
+        authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE, redirect_uris='https://app.example.com/cb',
+    )
+    return AccessToken.objects.create(user=identity, application=app, token=f'tok-{len(scope)}', scope=scope,
+                                      expires=timezone.now() + timedelta(hours=1))
+
+
+@pytest.mark.parametrize('scope,allowed', [('openid patient/*.read', False), ('openid patient/*.read patient/*.write', True)])
+def test_a_token_that_may_only_read_cannot_withdraw(member, scope, allowed):
+    client = APIClient()
+    # Signed in by a SMART app's token, as OAuth2Authentication leaves the request.
+    client.force_authenticate(member['identity'], token=_token(member['identity'], scope))
+
+    assert client.get('/api/v1/phr/consent/').status_code == 200
+    r = withdraw(client, 'my_record')
+
+    assert r.status_code == (200 if allowed else 403)
+    assert svc.has_consent(member['person'], 'my_record') is (not allowed)
+    assert SurveyResponse.objects.filter(participant_id=member['person'].person_id).exists() is (not allowed)
+
+
+def test_a_back_dated_or_migrated_answer_erases_nothing(member):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    person = member['person']
+    svc.record_consent(person, 'my_record', ConsentEvent.DECLINED, source=ConsentEvent.STAFF,
+                       recorded_at=timezone.now() - timedelta(days=400))
+    svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, source=ConsentEvent.MIGRATION)
+
+    assert PatientRecord.objects.get(person=person).stage == 'III'
+    assert SurveyResponse.objects.filter(participant_id=person.person_id).exists()
+    assert erasures() == []
+
+
+def test_ask_me_later_after_a_grant_ends_it_and_erases(member):
+    from patient_portal.models import ConsentPurpose as P
+
+    P.objects.filter(key='my_record').update(answers=P.YES_NO_ASK_LATER)
+
+    svc.record_consent(member['person'], 'my_record', ConsentEvent.ASK_LATER, version='1.0')
+
+    assert PatientRecord.objects.get(person=member['person']).stage in (None, '')
+    assert [d['erasure'] for _, d in erasures()] == ['record']
+
+
+def test_withdrawal_keeps_exactly_the_account_and_permission_tables(member):
+    """What a withdrawal keeps and what it deletes, row by row."""
+    from omop_core.models import (
+        PatientGroup, PatientGroupMembership, PersonalRepresentative, PersonLanguageSkill, ProvenanceRecord,
+    )
+    from django.contrib.contenttypes.models import ContentType
+    from patient_portal.models import PatientConsent, PatientInvitation, PatientMessage
+    from tests.factories import ConceptFactory
+
+    person, record = member['person'], member['record']
+    user = PatientUser.objects.get(person=person)
+    helper = Identity.objects.create_user(email='daughter@example.test')
+    group = PatientGroup.objects.create(organization=record.organization, name='Pilot', slug='pilot')
+    rule_group = PatientGroup.objects.create(organization=record.organization, name='Relapsed', slug='relapsed')
+    PersonalRepresentative.objects.create(representative=helper, person_id=person.person_id, relationship='child')
+    PatientGroupMembership.objects.create(group=group, person_id=person.person_id, source='manual')
+    PatientGroupMembership.objects.create(group=rule_group, person_id=person.person_id, source='rule')
+    PersonLanguageSkill.objects.create(person=person, language_concept=ConceptFactory(), skill_level='speak')
+    PatientInvitation.objects.create(person=person, email='p@example.test', token='t-erase',
+                                     expires_at=EARLIER)
+    PatientConsent.objects.create(patient_user=user, consent_type='research')
+    PatientMessage.objects.create(patient_user=user, subject='my chemo', message='nausea after cycle 3')
+    on_record = ProvenanceRecord.objects.create(source='PATIENT_SELF', target_patient_id=str(person.person_id),
+                                                content_type=ContentType.objects.get_for_model(PatientRecord),
+                                                object_id=record.pk)
+    on_consent = ProvenanceRecord.objects.create(
+        source='PATIENT_SELF', content_type=ContentType.objects.get_for_model(ConsentEvent),
+        object_id=ConsentEvent.objects.filter(person=person).first().pk)
+
+    assert withdraw(member['client'], 'my_record').status_code == 200
+
+    pid = person.person_id
+    assert PersonalRepresentative.objects.filter(person_id=pid).count() == 1
+    assert list(PatientGroupMembership.objects.filter(person_id=pid).values_list('source', flat=True)) == ['manual']
+    assert PersonLanguageSkill.objects.filter(person=person).count() == 1
+    assert PatientInvitation.objects.filter(person=person).count() == 1
+    assert PatientConsent.objects.filter(patient_user=user).count() == 1
+    assert not PatientMessage.objects.filter(patient_user=user).exists()
+    assert not ProvenanceRecord.objects.filter(pk=on_record.pk).exists()
+    assert ProvenanceRecord.objects.filter(pk=on_consent.pk).exists()
+
+
+def test_every_table_a_withdrawal_reaches_is_a_decision():
+    """A new table under the person, or under a kept table, fails here until
+    it is added to this list or to KEPT_ON_WITHDRAWAL: deleted by default is
+    safe for privacy, but should never be by accident."""
+    from patient_portal.erasure import withdrawal_tables
+
+    erased = {model._meta.label for model, _ in withdrawal_tables()}
+
+    assert erased == {
+        'omop_core.ConditionEra', 'omop_core.ConditionOccurrence', 'omop_core.Death', 'omop_core.DoseEra',
+        'omop_core.DrugEra', 'omop_core.DrugExposure', 'omop_core.FhirConnection', 'omop_core.FhirOauthState',
+        'omop_core.ImageOccurrence', 'omop_core.Measurement', 'omop_core.Note', 'omop_core.Observation',
+        'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
+        'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional', 'omop_core.PatientSourceCode',
+        'omop_core.PatientSourceCodeUpload', 'omop_core.PatientTrialEnrollment', 'omop_core.ProcedureOccurrence',
+        'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TherapyHistoryAttestation',
+        'omop_core.TrialSearchPreferences', 'omop_core.VisitDetail', 'omop_core.VisitOccurrence',
+        'omop_core.WearableUpload', 'omop_oncology.CancerModifier', 'omop_oncology.Episode',
+        'omop_oncology.Histology', 'omop_oncology.StemTable', 'patient_portal.AiExplanation',
+        'patient_portal.PatientMessage', 'patient_portal.PatientStatement', 'patient_portal.RecordShare',
+        'prolog_surveys.MintedParticipant', 'prolog_surveys.ParticipantMergeCandidate',
+        'prolog_surveys.SurveyInvitation',
+    }
+
+
+def test_closing_an_account_takes_the_provenance_of_what_it_deleted(member):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    pid = member['person'].person_id
+    ProvenanceRecord.objects.create(source='EHR_SYNC', target_patient_id=str(pid),
+                                    content_type=ContentType.objects.get_for_model(Episode),
+                                    object_id=Episode.objects.filter(person_id=pid).first().pk)
+
+    member['client'].delete('/api/v1/patient-records/me/', {'confirm': 'DELETE'}, format='json')
+
+    assert not ProvenanceRecord.objects.filter(target_patient_id=str(pid)).exists()
+
+
+def test_an_admin_of_another_organisation_erases_nothing(member):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory
+
+    admin = Identity.objects.create_user(email='elsewhere@example.test')
+    GroupAccess.objects.create(identity=admin, org=OrganizationFactory(), role='org_admin')
+    client = APIClient()
+    client.force_authenticate(admin)
+    pid = member['person'].person_id
+
+    r = client.delete(f'/api/v1/patient-records/{pid}/admin-delete/', {'confirm': 'DELETE'}, format='json')
+
+    assert r.status_code == 403
+    assert Person.objects.filter(person_id=pid).exists() and erasures() == []
+
+
+def test_staff_deleting_a_member_who_is_also_a_provider_keeps_their_sign_in(member):
+    from omop_core.models import GroupAccess
+
+    GroupAccess.objects.create(identity=member['identity'], org=member['record'].organization, role='doctor')
+    staff = Identity.objects.create_user(email='staff2@example.test', is_staff=True)
+    client = APIClient()
+    client.force_authenticate(staff)
+    pid = member['person'].person_id
+
+    assert client.delete(f'/api/v1/patient-records/{pid}/admin-delete/', {'confirm': 'DELETE'},
+                         format='json').status_code == 200
+    assert not Person.objects.filter(person_id=pid).exists()
+    assert Identity.objects.filter(pk=member['identity'].pk).exists()
+    assert erasures() == [(str(staff.pk), {'erasure': 'account', 'person_id': pid})]
+
+
+def test_a_rolled_back_erasure_keeps_the_files(member, settings, tmp_path, django_capture_on_commit_callbacks):
+    from django.db import transaction
+
+    from patient_portal.erasure import erase_record
+
+    settings.MEDIA_ROOT = str(tmp_path)
+    doc = PatientDocument(person=member['person'], doc_type='FISH')
+    doc.file.save('report.pdf', ContentFile(b'%PDF-1.4'), save=True)
+
+    with django_capture_on_commit_callbacks(execute=True), pytest.raises(RuntimeError):
+        with transaction.atomic():
+            erase_record(member['person'])
+            raise RuntimeError('something after the erasure failed')
+
+    assert (tmp_path / doc.file.name).exists()
+    assert PatientDocument.objects.filter(pk=doc.pk).exists() and erasures() == []
+
+
+def test_a_mapping_job_for_an_erased_response_is_not_an_error():
+    import uuid
+    from unittest import mock
+
+    from patient_portal import survey_record_mapping as srm
+
+    with mock.patch.object(srm.logger, 'info') as info, mock.patch.object(srm.logger, 'exception') as error:
+        srm.run_response(uuid.uuid4())
+
+    assert error.call_count == 0 and 'no longer exists' in info.call_args.args[0]

@@ -5,7 +5,7 @@ Two things a member can ask for delete their data straight away:
 | Asked for | What goes | What stays |
 |---|---|---|
 | **Closing the account** (`DELETE /api/v1/patient-records/me/`, `{"confirm": "DELETE"}`) | The person and everything that hangs off them: the record, every OMOP row, questionnaire responses and answers, documents, journal entries, the invitation, the permission history, and the sign-in | The consent ledger (email, permission history; [consent-v2.md](consent-v2.md)) and the audit trail |
-| **Ending a grant of a purpose marked `erases_record_on_withdrawal`** (`POST /api/v1/phr/consent/` with `"withdrawn"`, or any other answer that replaces a standing `"granted"`) | The health answers: questionnaire responses and answers, every clinical row, journal entries and documents, and the record's derived fields | The account, the membership (the record's organisation), the sign-up facts on the person and their location (name, year of birth, sex, ethnicity, country, postcode district), the permission history, personal representatives and groups assigned by hand |
+| **Ending a grant of a purpose marked `erases_record_on_withdrawal`** (`POST /api/v1/phr/consent/` with `"withdrawn"`, or any other answer that replaces a standing `"granted"`) | The health answers: questionnaire responses and answers, every clinical row, journal entries, documents and their files, messages with providers, and the record's derived fields | The account, the membership (the record's organisation), the sign-up facts on the person and their location (name, year of birth, sex, ethnicity, country, postcode district), the permission history (current and legacy), personal representatives and groups assigned by hand |
 
 Both happen in one transaction with the request, so the member never sees the
 one without the other. Staff deleting a patient
@@ -16,19 +16,32 @@ as closing the account.
 
 `patient_portal/erasure.py`:
 
-- `close_account(person, identity)` removes the rows the person's cascade does
-  not reach (`delete_omop_clinical_rows`: questionnaire responses, which
-  `PROTECT` the person; `EpisodeEvent` and `MeasurementOwnership`, which hold
-  bare ids; groups and representatives), then the person, then the sign-in.
-- `erase_record(person)` deletes every table that hangs off the person except
-  `KEPT_ON_WITHDRAWAL` (account, permission and document history, invitation,
-  language skills, merge candidates). New clinical tables are therefore erased
-  by default, not missed. It then rebuilds the record from what is left,
-  carrying over its organisation, and re-derives it once.
+- Both start from `omop_core/services/patient_cleanup.py`:
+  `delete_unkeyed_rows` (questionnaire responses, which `PROTECT` the person;
+  `EpisodeEvent` and `MeasurementOwnership`, which hold bare ids) and
+  `delete_provenance` (`ProvenanceRecord` points at its row through a generic
+  key that no cascade follows).
+- `close_account(person, identity)` runs `delete_omop_clinical_rows` (the
+  above, all the person's provenance, groups and representatives), then
+  deletes the person, then the sign-in.
+- `erase_record(person)` empties `withdrawal_tables()`: every table that hangs
+  off the person, or off a kept one (a member's messages hang off their
+  account), except `KEPT_ON_WITHDRAWAL` (account, permission and document
+  history, legacy consents, invitation, language skills, merge candidates).
+  New clinical tables are therefore erased by default, not missed, and
+  `tests/test_member_erasure.py` pins the list so each new one is a decision.
+  It then rebuilds the record from what is left, carrying over its
+  organisation, and re-derives it once.
 
 `record_consent` calls `erase_record` when an answer ends a standing grant of a
 purpose with `erases_record_on_withdrawal`: `withdrawn`, but also `declined` or
-`ask_later` after `granted`, from the member, staff or a migration.
+`ask_later` after `granted`, from the member or staff. Only an answer that
+becomes the member's position does it: one back-dated behind the grant ends
+nothing, and a `migration` never erases (it replays history; nobody is
+withdrawing now). The member's consent endpoints (`ConsentView`,
+`ConsentDocumentsView`) take `MemberWritePermission`: a session or partner
+sign-in may write, an OAuth2 or service token needs a write scope, so a token
+that may only read cannot withdraw.
 Uploaded documents' stored files are deleted once the transaction commits;
 a rolled-back erasure keeps them. The flag is data, set per purpose in
 the deployment's consent file (`load_consent_texts`) or the admin; a purpose
