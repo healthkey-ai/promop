@@ -117,11 +117,12 @@ def test_second_line_carries_its_drug_id(vocab):
 
 def test_a_non_standard_vocabulary_drug_is_still_a_therapy(vocab):
     """The catalog gives cisplatin a non-standard SNOMED substance as its id:
-    being non-standard does not make a real concept a placeholder."""
+    being non-standard does not make a real concept a placeholder. Only a
+    standard drug is listed as a component, so it lists none of its own."""
     record = _write_line(PersonFactory(), CISPLATIN_SNOMED, name='cisplatin')
 
     assert record.first_line_therapy_id == CISPLATIN_SNOMED
-    assert CISPLATIN_SNOMED in record.first_line_component_ids
+    assert CISPLATIN_SNOMED not in (record.first_line_component_ids or [])
 
 
 def test_later_line_carries_its_procedure_id(vocab):
@@ -148,15 +149,20 @@ def test_retired_concept_stays_unresolved(vocab):
     assert record.first_line_therapy_id is None
 
 
-def test_a_quarantine_placeholder_is_not_a_therapy(vocab):
-    """An unmatched name is minted under an HK-* quarantine vocabulary as a
-    non-standard concept. It marks the line as unresolved; it is not an id."""
-    _concept(2_000_000_777, 'unmatched drug', 'HK-Drug', 'Drug', 'Ingredient', standard_concept=None)
+@pytest.mark.parametrize('concept_id, vocabulary', [
+    (2_000_000_777, 'HK-Drug'),     # quarantine, in the local id block
+    (1_900_000_777, 'HK-Drug'),     # quarantine vocabulary below the block
+    (500_777, 'LOCAL'),             # a legacy local placeholder without a source tag
+])
+def test_a_local_placeholder_is_not_a_therapy(vocab, concept_id, vocabulary):
+    """An unmatched name is minted under a local vocabulary as a placeholder. It
+    marks the line as unresolved; it is not an id."""
+    _concept(concept_id, 'unmatched drug', vocabulary, 'Drug', 'Ingredient', standard_concept=None)
 
-    record = _write_line(PersonFactory(), 2_000_000_777, name='unmatched drug')
+    record = _write_line(PersonFactory(), concept_id, name='unmatched drug')
 
     assert record.first_line_therapy_id is None
-    assert 2_000_000_777 not in (record.first_line_component_ids or [])
+    assert concept_id not in (record.first_line_component_ids or [])
 
 
 def test_hemonc_component_line_also_lists_its_drug(vocab):
@@ -198,16 +204,18 @@ def _episode_with_exposures(person, source, *drugs):
     return episode
 
 
-def test_an_unmatched_combination_is_not_named_after_one_of_its_drugs(vocab, monkeypatch):
+def test_exposures_of_other_care_do_not_unname_the_line(vocab, monkeypatch):
+    """The reverse-sync links exposures by an open-ended date window, so a later
+    drug lands on a procedure line. The line is still the procedure."""
     import omop_core.services.lot_regimens as lot_regimens
     person = PersonFactory()
-    _episode_with_exposures(person, vocab['tamoxifen'], vocab['tamoxifen'], vocab['lenalidomide'])
+    _episode_with_exposures(person, vocab['mastectomy'], vocab['lenalidomide'])
     monkeypatch.setattr(lot_regimens, 'get_regimen_concept_id', lambda _names: None)
 
     record = refresh_patient_record(person)
 
-    assert record.first_line_therapy_id is None
-    assert {TAMOXIFEN_RXNORM, LENALIDOMIDE_RXNORM} <= set(record.first_line_component_ids)
+    assert record.first_line_therapy_id == MASTECTOMY_SNOMED
+    assert LENALIDOMIDE_RXNORM in record.first_line_component_ids
 
 
 def test_a_line_of_its_own_drug_alone_keeps_its_id(vocab, monkeypatch):
