@@ -178,6 +178,16 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.6.0 added
+
+One definition setting, no migration:
+
+- **`participation.repeatable`** — an instrument answered again and again (a
+  regular check-in). When the response the browser holds is already
+  submitted, the runner starts a new one and says when the last was
+  completed, instead of showing it as completed. Scheduling the next one stays
+  with the host (`PHR_OUTCOME_SURVEYS`, a deployment's reminders).
+
 ### What v0.5.0 added
 
 Definition capabilities, no migration (0.4.9's section interstitial opt-out
