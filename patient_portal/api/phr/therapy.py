@@ -173,6 +173,9 @@ class _Context:
                 person=person, subject=PatientStatement.SUBJECT_THERAPY_LINE)
         }
         self.facility = record.facility_name if record else None
+        from omop_oncology.models import TherapyLineDetail
+
+        self.details = {d.episode_id: d for d in TherapyLineDetail.objects.filter(episode__person=person)}
 
 
 def _shape(ctx: _Context, entry: dict) -> dict[str, Any] | None:
@@ -202,6 +205,7 @@ def _shape(ctx: _Context, entry: dict) -> dict[str, Any] | None:
         'stopped_because': STOP_REASONS.get(reason.lower().replace(' ', '_'), reason) or None,
         'source': _line_source(ctx, _line_rows(ctx.person, entry.get('episode_id')), start, entry.get('episode_id')),
     }
+    line.update(_line_detail(ctx.details.get(entry.get('episode_id')), entry))
     told = ctx.reasons.get(line['id'])
     if told is not None:
         from .statements import END_REASONS
@@ -210,6 +214,40 @@ def _shape(ctx: _Context, entry: dict) -> dict[str, Any] | None:
             'reason': told.reason, 'label': END_REASONS.get(told.reason, told.reason), 'note': told.note or None,
         }.items() if v is not None}
     return {k: v for k, v in line.items() if v is not None and v != []}
+
+
+def _dated(day, precision) -> dict[str, Any] | None:
+    if day is None:
+        return None
+    iso = day if isinstance(day, str) else day.isoformat()
+    return {k: v for k, v in {'date': iso, 'precision': precision}.items() if v is not None}
+
+
+def _line_detail(detail, entry: dict) -> dict[str, Any]:
+    """What the patient said about the line beyond its dates and regimen
+    (TherapyLineDetail): each date's precision, when it came back, whether it
+    is still received, a clinical trial, maintenance and the expected end."""
+    if detail is None:
+        came = _dated(entry.get('progression_date'), None)
+        return {'came_back': came} if came else {}
+    maintenance = {k: v for k, v in {
+        'answer': detail.maintenance,
+        'medicine': detail.maintenance_medicine or None,
+        'start': _dated(detail.maintenance_start_date, detail.maintenance_start_date_precision),
+        'end': _dated(detail.maintenance_end_date, detail.maintenance_end_date_precision),
+        'ongoing': detail.maintenance_ongoing,
+    }.items() if v is not None}
+    precision = {k: v for k, v in {
+        'start': detail.start_date_precision, 'end': detail.end_date_precision,
+    }.items() if v}
+    return {k: v for k, v in {
+        'precision': precision or None,
+        'came_back': _dated(entry.get('progression_date'), detail.progression_date_precision),
+        'ongoing': detail.ongoing,
+        'clinical_trial': detail.clinical_trial,
+        'maintenance': maintenance or None,
+        'expected_end': _dated(detail.expected_end_date, detail.expected_end_date_precision),
+    }.items() if v is not None}
 
 
 def _primary(ctx: _Context) -> list[dict[str, Any]]:

@@ -171,6 +171,9 @@ PATIENT: frozenset[str] = frozenset({
     'omop_oncology.TherapyLineExposure',
     # Whether a line happened, and whether that claim was retracted (#1924).
     'omop_oncology.TherapyLineAssertion',
+    # What the patient said about a line beyond its Episode: date precisions,
+    # still receiving, trial, maintenance, expected end (survey record mapping).
+    'omop_oncology.TherapyLineDetail',
     'prolog_surveys.MintedParticipant', 'prolog_surveys.SurveyAnswer',
     'prolog_surveys.SurveyConsent', 'prolog_surveys.SurveyResponse',
     # An address kept beside a response, and the consents given with one:

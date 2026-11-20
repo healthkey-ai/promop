@@ -61,8 +61,25 @@ list, or a rule whose `when` does not hold writes nothing and clears nothing.
 what the same condition means in `visible_if`.
 
 A date answer is written as its first day; a record rule may name the field that
-keeps its precision (`diagnosis_date_precision`). Therapy lines have no date
-precision yet, so a month-and-year start is stored as the first of the month.
+keeps its precision (`diagnosis_date_precision`).
+
+## Lines
+
+A line rule names its line by number, as `"next"` (a new line after the
+person's last: a treatment reported at a later questionnaire) or as `"latest"`
+(their last line: a treatment reported as finished, or a return after it). A
+numbered or next line needs its treatment (`regimen`); a latest one updates only
+what its answers give, and is dropped when the person has no line yet.
+
+A line's Episode keeps whole dates. `TherapyLineDetail`, one per line, keeps
+what the Episode cannot: each date's precision (filled from the date answers),
+and the line's own answers with no OMOP row yet, written by the line's `details`
+rules: still receiving, a clinical trial, maintenance (whether, which medicine,
+its dates), the expected end. The PHR therapy view returns them with the line.
+
+The detail also lists the responses that wrote the line. Applying a response
+again resolves each of its rules to the line it wrote, so a retry never adds a
+line, and its "latest" stays the line that was latest before its own "next".
 
 Applying a response again writes the same values: a retry, or a backfill with
 `apply_record_mappings --survey <slug>`, is safe. A later response to the same
@@ -79,9 +96,7 @@ check `patient_portal.E007` runs the load at startup, so a broken file fails
 
 ## Not yet
 
-- Lines numbered by what is already on the record (a later "I started a new
-  treatment" as the next line), and updating the latest line from a later
-  answer ("I finished a treatment").
 - Fields with no `PatientRecord` column yet; their answers stay in the survey
   tables.
-- Date precision on therapy lines.
+- Maintenance as drug exposures inside the line: it is the line's detail until
+  its medicines are mapped to concepts.
