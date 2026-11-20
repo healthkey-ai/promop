@@ -1015,7 +1015,9 @@ lookup contract below remains for a caller that does want to write rows itself.
 - ~~FHIR sync opt-in per organization~~ dropped (2026-11-20): a patient decides
   whether to import their FHIR data, and an export never carries provisional data
   (see "Provisional data is never exported").
-- Patient-facing display policy.
+- ~~Patient-facing display policy~~ done: patients see approved and provisional
+  values, and each provisional value is marked (the "Provisional NN%" badge, "not yet
+  confirmed" in patient wording; open decisions 3 and 5).
 - #1532 auto-approval (default threshold 100%, curator-lowerable). It is a separate
   setting from the floor; the provisional band is floor to threshold, exclusive.
 
