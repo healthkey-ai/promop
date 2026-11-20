@@ -22,17 +22,22 @@ export interface AccuracySection {
   label: string;
   rows: AccuracyRow[];
 }
-interface AnalyticsResponse { sections: AccuracySection[] }
+interface AnalyticsResponse {
+  sections: AccuracySection[];
+  /** Reviewed decisions on a suggestion no ranking model made; in no Scored count (#2743). */
+  unscored_fallbacks?: number;
+}
 
 const metric = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
 const COLUMNS = ["Confidence", "Total", "Approved", "Proposed", "Rejected", "Scored", "Precision", "Recall", "F1"];
 
 export default function MappingAccuracyAnalyticsPage() {
   const [sections, setSections] = useState<AccuracySection[]>([]);
+  const [unscoredFallbacks, setUnscoredFallbacks] = useState(0);
   const [error, setError] = useState("");
   useEffect(() => {
     void api.get<AnalyticsResponse>("/v1/code-mappings/accuracy/analytics/")
-      .then(({ data }) => setSections(data.sections || []))
+      .then(({ data }) => { setSections(data.sections || []); setUnscoredFallbacks(data.unscored_fallbacks ?? 0); })
       .catch(() => setError("Failed to load mapping accuracy analytics."));
   }, []);
   return <div className="min-h-screen bg-slate-50 p-6"><main className="mx-auto max-w-6xl">
@@ -45,6 +50,11 @@ export default function MappingAccuracyAnalyticsPage() {
       hit, an overridden or rejected one a miss, and — means nothing to score yet. A decision no ranker scored counts
       in the Overall row only.
     </p>
+    {unscoredFallbacks > 0 && <p className="mt-2 text-sm text-slate-600">
+      {unscoredFallbacks.toLocaleString()} reviewed {unscoredFallbacks === 1 ? "decision was" : "decisions were"} on
+      a fallback destination, written while the ranking model was unavailable. {unscoredFallbacks === 1 ? "It counts" : "They count"} in
+      the status columns and {unscoredFallbacks === 1 ? "is" : "are"} not Scored: the model never proposed {unscoredFallbacks === 1 ? "it" : "them"}.
+    </p>}
     {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
     {sections.map(section => <section key={section.key} aria-labelledby={`accuracy-${section.key}`} className="mt-6">
       <h2 id={`accuracy-${section.key}`} className="text-lg font-semibold text-slate-950">{section.label}</h2>

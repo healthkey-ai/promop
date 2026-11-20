@@ -23,6 +23,32 @@ const sections: AccuracySection[] = [
 beforeEach(() => { get.mockReset(); });
 
 describe("MappingAccuracyAnalyticsPage (#2383)", () => {
+  it("says how many reviewed decisions were on a fallback and so are not scored (#2743)", async () => {
+    get.mockResolvedValue({ data: { sections, unscored_fallbacks: 1531 } });
+    const view = render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    expect(await screen.findByText(/1,531 reviewed decisions were on a fallback destination/)).toHaveTextContent(
+      "They count in the status columns and are not Scored: the model never proposed them.");
+    view.unmount();
+
+    get.mockResolvedValue({ data: { sections, unscored_fallbacks: 1 } });
+    render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    expect(await screen.findByText(/1 reviewed decision was on a fallback destination/)).toHaveTextContent(
+      "It counts in the status columns and is not Scored: the model never proposed it.");
+  });
+
+  it("says nothing about fallbacks when there are none, or when the answer predates the count", async () => {
+    get.mockResolvedValue({ data: { sections, unscored_fallbacks: 0 } });
+    const view = render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    await screen.findByRole("region", { name: "Overall" });
+    expect(screen.queryByText(/fallback/)).not.toBeInTheDocument();
+    view.unmount();
+
+    get.mockResolvedValue({ data: { sections } });
+    render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    await screen.findByRole("region", { name: "Overall" });
+    expect(screen.queryByText(/fallback/)).not.toBeInTheDocument();
+  });
+
   it("shows one table per surface with the confidence bands and the scored columns", async () => {
     get.mockResolvedValue({ data: { sections } });
     render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);

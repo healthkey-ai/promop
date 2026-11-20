@@ -1409,6 +1409,74 @@ ranking model is unavailable (the retrieval-order stand-in is never scored), or
 the rankers declined or preferred another concept. It writes nothing; Save
 stores it.
 
+### What is scored as the model's answer
+
+`suggestion_outcome` is the first curator disposition of the suggestion stored
+on a row (`suggested_target_concept`): `accepted` when the approved concept is
+that one, `overridden` when it is another, `rejected`. The History page and
+the analytics page score those outcomes. Two rules decide which suggestion a
+row holds and whether its outcome is scored at all (#2743).
+
+- **A fallback is recorded and never scored.** When no ranker can be reached,
+  Suggest writes the first retrieval candidate with a note beginning
+  "Best-match fallback … Ranking model unavailable". That is a destination to
+  review, not the model's answer, so the row carries `suggestion_fallback`
+  (forward Suggest and group Suggest set it from `suggestions.is_fallback_note`;
+  a real pick that replaces the fallback clears it; migration `0362` marked
+  the rows already written, best effort, from a note that begins with the
+  fallback text: a fallback written onto a row that already had a note never
+  carried it, and a review archived before the migration is not marked). The
+  outcome still lands on the row. `_suggestion_accuracy_groups` and `code_mapping_accuracy_analytics`
+  leave marked rows out of every score, and each page says how many it set
+  aside (`fallbacks` on the dashboard and the legacy accuracy endpoint,
+  `unscored_fallbacks` on analytics). On
+  HealthTree one unanswered "albumin" ranking, written by a group run to every
+  hospital's local code, was 1,530 of 1,539 "Other destination" outcomes:
+  4% precision as reported, 66 approved / 9 other / 1 rejected without it. An
+  archived review (`MappingSuggestionReview`) keeps the mark. The mapping's own
+  mark travels with `copy_reference_data`; archived reviews are system data and
+  stay on the instance that made them.
+- **A reverse ranker's pick becomes the stored suggestion.** A destination a
+  ranker chose from the Concept to Code side (`machine_proposal`: reverse
+  Suggest's auto-propose, a new row or a moved proposal accepted from a saved
+  preview whose candidate the ranker supported) replaces
+  `suggested_target_concept` and takes the current model version, in
+  `_upsert_source_code_mapping`. Approving it is then `accepted`, approving
+  something else `overridden`, rejecting it `rejected` against that pick,
+  including when Concept to Code moves and decides the row in one call. A
+  review the row already carries is archived first
+  (`suggestions.archive_suggestion_review`), as a forward run does. A
+  candidate nobody ranked, or a declined one, is the curator's own pick and
+  leaves the stored suggestion alone. Before this the older forward
+  suggestion stayed in place, and approving exactly what the ranker proposed
+  was scored as overriding it.
+- **Provenance follows who chose.** Reverse Suggest's own auto-propose stamps
+  `origin_system` `suggest vN` on a new row, or on one whose provenance was
+  blank or already `suggest*`, so Replace may re-answer a row no curator
+  touched. A row a curator, an importer or a pending Athena choice had
+  claimed keeps the writer's `curator` stamp. A curator who accepts a ranker-chosen candidate from a preview keeps
+  curator provenance (Replace leaves it alone) and the row is still scored
+  against the ranker's pick: scoring reads `suggested_target_concept`, never
+  `origin_system`.
+
+- **Ingest lookups mark too.** `_record_proposal(is_suggestion=True)` (the ETL
+  `code-mappings/lookup/` path) sets `suggestion_fallback` from the note it
+  stores, for the same reason.
+
+Not addressed:
+
+- A group decision is one outcome per member row, so one answer for a label
+  shared by 700 hospital codes counts 700 times.
+- Outcomes recorded before #2743 for reverse proposals cannot be
+  reconstructed.
+- A reverse pick is stamped with the forward model's version, and only the
+  picks a person later saves become outcomes (auto-propose is gated by its
+  confidence threshold), so the reverse ranker is scored on its selected
+  picks and v0.4's precision reads somewhat high for it. A distinct version
+  or direction would separate them.
+- A forward suggestion nobody has reviewed yet, replaced by a reverse pick,
+  is replaced silently and is not an archived review.
+
 ### Which notes are a curator's
 
 `SourceCodeConceptMapping.notes` is one column that Suggest (its rationale),

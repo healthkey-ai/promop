@@ -1319,9 +1319,42 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     return chosen, note, alternatives
 
 
+def is_fallback_note(note):
+    """Whether *note* is the one a ranker that could not run leaves behind.
+
+    The note is how a fallback is told from a selection everywhere a result is
+    handled, and what migration 0360 backfilled ``suggestion_fallback`` from.
+    """
+    return 'ranking model unavailable' in (note or '').lower()
+
+
 def _is_retrieval_fallback(chosen, note):
     """Whether a ranker's pick is the retrieval-order stand-in, not a selection."""
-    return chosen is not None and 'ranking model unavailable' in (note or '').lower()
+    return chosen is not None and is_fallback_note(note)
+
+
+def archive_suggestion_review(mapping):
+    """Move *mapping*'s completed review aside before its suggestion is replaced.
+
+    The mapping holds one suggestion and its first disposition. A new
+    suggestion, from a forward run or a ranker-chosen reverse proposal, would
+    otherwise erase a review that happened, or be scored against it. The
+    caller clears ``suggestion_outcome``. No-op for a row never reviewed.
+    """
+    if not mapping.suggestion_outcome:
+        return
+    from omop_core.models import MappingSuggestionReview
+    MappingSuggestionReview.objects.create(
+        mapping=mapping,
+        source_vocabulary_id=mapping.source_vocabulary_id,
+        source_code=mapping.source_code,
+        suggested_target_concept_id=(
+            mapping.suggested_target_concept_id or mapping.target_concept_id
+        ),
+        suggestion_model_version=mapping.suggestion_model_version,
+        suggestion_outcome=mapping.suggestion_outcome,
+        suggestion_fallback=mapping.suggestion_fallback,
+    )
 
 
 def _ranker_answered(chosen, note):
@@ -2364,18 +2397,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 if concept.pk != mapping.target_concept_id:
                     moved_off = mapping.target_concept_id
                     destination_moved = True
-                if mapping.suggestion_outcome:
-                    from omop_core.models import MappingSuggestionReview
-                    MappingSuggestionReview.objects.create(
-                        mapping=mapping,
-                        source_vocabulary_id=mapping.source_vocabulary_id,
-                        source_code=mapping.source_code,
-                        suggested_target_concept_id=(
-                            mapping.suggested_target_concept_id or mapping.target_concept_id
-                        ),
-                        suggestion_model_version=mapping.suggestion_model_version,
-                        suggestion_outcome=mapping.suggestion_outcome,
-                    )
+                archive_suggestion_review(mapping)
                 mapping.status = 'proposed'
                 mapping.suggestion_outcome = ''
                 mapping.suggested_action = ''
@@ -2398,6 +2420,11 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 # be recorded as having overridden one.
                 mapping.origin_system = SUGGESTION_PROVENANCE
                 mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+                # The first retrieval hit, written because no ranker could be
+                # reached, is a destination to review and not the model's
+                # answer: it is never scored as one (#2743). A real pick that
+                # replaces it takes the mark off.
+                mapping.suggestion_fallback = _is_retrieval_fallback(chosen, note)
                 mapping.suggestion_confidence = chosen_confidence(chosen, job.get('alternatives'))
                 # A destination the machine moved is its own, not whoever proposed
                 # the one it replaced; one it re-confirms stays its proposer's
@@ -2407,7 +2434,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 fields += [
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
-                    'suggestion_model_version', 'suggestion_confidence', 'proposed_by',
+                    'suggestion_model_version', 'suggestion_fallback',
+                    'suggestion_confidence', 'proposed_by',
                 ]
             # Notes is a free-text field a curator writes in, and the row we are
             # writing to may not be one a Suggest run created -- the candidate set is
