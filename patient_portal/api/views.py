@@ -1906,10 +1906,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         with transaction.atomic():
             # Survey responses, clinical rows, the person (cascading to the
             # record and the rest), and the sign-in.
-            close_account(patient_person, identity)
-        # The deletion log: the row has no user once the identity is gone, so
-        # it names who was deleted, and holds no content.
-        request._request.audit_detail = {'erasure': 'account', 'person_id': person_id, 'identity_id': identity_id}
+            close_account(patient_person, identity, actor=identity)
 
         # Log out the current session AFTER the transaction succeeds. If the
         # transaction rolled back, the identity would still exist and we must
@@ -1990,8 +1987,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         from patient_portal.erasure import close_account
         with transaction.atomic():
-            close_account(person, linked_identity)
-        request._request.audit_detail = {'erasure': 'account', 'person_id': person_id}
+            close_account(person, linked_identity, actor=actor)
 
         logger.info(
             'admin_patient_deleted person_id=%s by_identity_id=%s is_staff=%s',

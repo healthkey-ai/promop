@@ -297,8 +297,11 @@ def record_consent(
             raise ValidationError(f'{purpose.key} is not available in your country.')
     if decision not in purpose.allowed_decisions():
         raise ValidationError(f'{purpose.key} does not take the answer {decision!r}.')
+    latest = latest_events(person).get(purpose.id)
+    # Any answer that ends a standing grant ends it, "declined" as much as
+    # "withdrawn"; for a purpose the record depends on, the record goes too.
+    ends_grant = latest is not None and latest.decision == ConsentEvent.GRANTED and decision != ConsentEvent.GRANTED
     if decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER:
-        latest = latest_events(person).get(purpose.id)
         if latest is None or latest.decision != ConsentEvent.GRANTED:
             raise ValidationError(f'{purpose.key} is not granted, so there is nothing to withdraw.')
     texts = list(purpose.texts.all())
@@ -334,10 +337,10 @@ def record_consent(
             frequency=frequency, recorded_at=when,
         )
         # The record depends on this permission: its health answers go now,
-        # with the withdrawal, or neither is kept.
-        if decision == ConsentEvent.WITHDRAWN and purpose.erases_record_on_withdrawal:
+        # with the answer that ends it, or neither is kept.
+        if ends_grant and purpose.erases_record_on_withdrawal:
             from patient_portal.erasure import erase_record
-            erase_record(person)
+            erase_record(person, actor=recorded_by, purpose=purpose.key)
     return event
 
 

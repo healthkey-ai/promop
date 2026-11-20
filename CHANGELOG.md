@@ -13,8 +13,10 @@ All notable changes to PRomop are documented here.
   file or admin) deletes, when withdrawn, the member's questionnaire responses,
   every clinical row, journal entries and documents, and rebuilds the record
   from what is left; the account, membership, sign-up facts and permission
-  history stay. Each erasure, and each account closed, is logged in the audit
-  trail with the person's id and no content. See
+  history stay. Any answer that ends the grant does it, not only "withdrawn".
+  Each erasure, and each account closed, writes its own audit-trail entry
+  (`method` `ERASE`) naming the person and who asked, with no content, from
+  any caller; uploaded documents' stored files are deleted once it commits. See
   `docs/member_erasure_architecture.md`.
 
 - **Questionnaire answers can write the patient's own record** — a deployment

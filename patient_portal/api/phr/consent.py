@@ -124,11 +124,8 @@ class ConsentView(PhrView):
             return Response({'detail': e.messages[0]}, status=409)
         except ValidationError as e:
             return Response({'detail': e.messages[0]}, status=400)
-        erased = [p.key for p, item in pairs
-                  if item.get('decision') == ConsentEvent.WITHDRAWN and p.erases_record_on_withdrawal]
-        if erased:
-            # The deletion log: who and when, no content (patient_portal.erasure).
-            request._request.audit_detail = {'erasure': 'record', 'person_id': person.person_id, 'purpose': erased[0]}
+        if any(p.erases_record_on_withdrawal for p, _ in pairs):
+            # A withdrawal may have rebuilt the record (patient_portal.erasure).
             record = PatientRecord.objects.filter(person=person).first()
         return Response(self.build(person, record, language))
 
