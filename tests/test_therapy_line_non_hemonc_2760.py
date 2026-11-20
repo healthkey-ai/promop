@@ -39,6 +39,9 @@ MASTECTOMY_SNOMED = 4066543     # SNOMED procedure (PROMOP catalog row 296)
 GENOMIC_TESTING = 4233623       # SNOMED, domain Measurement
 TAMOXIFEN_HEMONC = 35803329     # HemOnc Component
 REGIMEN_ID = 35806260           # a HemOnc Regimen
+CISPLATIN_SNOMED = 4301188      # SNOMED Substance, non-standard (catalog row 257)
+G_CSF_CLASS = 35807374          # HemOnc Component Class, domain Drug
+LENALIDOMIDE_RXNORM = 19115    # a second RxNorm ingredient (test-local id)
 
 
 def _concept(concept_id, name, vocabulary, domain, concept_class, **extra):
@@ -65,6 +68,10 @@ def vocab():
         'tamoxifen_hemonc': _concept(TAMOXIFEN_HEMONC, 'Tamoxifen', 'HemOnc', 'Drug', 'Component',
                                      standard_concept=None),
         'regimen': _concept(REGIMEN_ID, 'VRd', 'HemOnc', 'Regimen', 'Regimen'),
+        'cisplatin': _concept(CISPLATIN_SNOMED, 'Cisplatin', 'SNOMED', 'Drug', 'Substance',
+                              standard_concept=None),
+        'g_csf': _concept(G_CSF_CLASS, 'G-CSF', 'HemOnc', 'Drug', 'Component Class', standard_concept='C'),
+        'lenalidomide': _concept(LENALIDOMIDE_RXNORM, 'lenalidomide', 'RxNorm', 'Drug', 'Ingredient'),
     }
 
 
@@ -93,10 +100,28 @@ def test_rxnorm_ingredient_line_reads_back_its_id_and_its_drug(vocab):
 
 
 def test_snomed_procedure_line_reads_back_its_id_but_is_not_a_drug(vocab):
-    record = _write_line(PersonFactory(), MASTECTOMY_SNOMED, name='mastectomy')
+    record = _write_line(PersonFactory(), MASTECTOMY_SNOMED, name='breast surgery')
 
     assert record.first_line_therapy_id == MASTECTOMY_SNOMED
     assert MASTECTOMY_SNOMED not in (record.first_line_component_ids or [])
+    # A resolved line is labelled by its concept, as a HemOnc line already is.
+    assert record.first_line_therapy == 'Mastectomy'
+
+
+def test_second_line_carries_its_drug_id(vocab):
+    record = _write_line(PersonFactory(), TAMOXIFEN_RXNORM, line=2, name='tamoxifen')
+
+    assert record.second_line_therapy_id == TAMOXIFEN_RXNORM
+    assert TAMOXIFEN_RXNORM in record.second_line_component_ids
+
+
+def test_a_non_standard_vocabulary_drug_is_still_a_therapy(vocab):
+    """The catalog gives cisplatin a non-standard SNOMED substance as its id:
+    being non-standard does not make a real concept a placeholder."""
+    record = _write_line(PersonFactory(), CISPLATIN_SNOMED, name='cisplatin')
+
+    assert record.first_line_therapy_id == CISPLATIN_SNOMED
+    assert CISPLATIN_SNOMED in record.first_line_component_ids
 
 
 def test_later_line_carries_its_procedure_id(vocab):
@@ -139,6 +164,53 @@ def test_hemonc_component_line_also_lists_its_drug(vocab):
 
     assert record.first_line_therapy_id == TAMOXIFEN_HEMONC     # resolved before this change too
     assert TAMOXIFEN_HEMONC in record.first_line_component_ids  # its drug was missing
+
+
+def test_a_hemonc_drug_class_is_not_one_of_the_lines_drugs(vocab):
+    record = _write_line(PersonFactory(), G_CSF_CLASS, name='G-CSF')
+
+    assert record.first_line_therapy_id == G_CSF_CLASS          # the HemOnc branch, as before
+    assert G_CSF_CLASS not in (record.first_line_component_ids or [])
+
+
+def _episode_with_exposures(person, source, *drugs):
+    episode = Episode.objects.create(
+        episode_id=27_600_000 + person.person_id % 1000, person=person, episode_number=1,
+        episode_concept_id=CONCEPT_TREATMENT_REGIMEN, episode_type_concept_id=CONCEPT_EHR_TYPE,
+        episode_object_concept_id=0, episode_source_concept=source,
+        episode_start_date=date(2024, 1, 10),
+    )
+    for drug in drugs:
+        exposure = DrugExposureFactory(
+            person=person, drug_concept=drug,
+            drug_exposure_start_date=date(2024, 1, 10), drug_exposure_end_date=date(2024, 3, 1))
+        EpisodeEvent.objects.create(
+            episode_id=episode.episode_id, event_id=exposure.drug_exposure_id,
+            episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD)
+    return episode
+
+
+def test_an_unmatched_combination_is_not_named_after_one_of_its_drugs(vocab, monkeypatch):
+    import omop_core.services.lot_regimens as lot_regimens
+    person = PersonFactory()
+    _episode_with_exposures(person, vocab['tamoxifen'], vocab['tamoxifen'], vocab['lenalidomide'])
+    monkeypatch.setattr(lot_regimens, 'get_regimen_concept_id', lambda _names: None)
+
+    record = refresh_patient_record(person)
+
+    assert record.first_line_therapy_id is None
+    assert {TAMOXIFEN_RXNORM, LENALIDOMIDE_RXNORM} <= set(record.first_line_component_ids)
+
+
+def test_a_line_of_its_own_drug_alone_keeps_its_id(vocab, monkeypatch):
+    import omop_core.services.lot_regimens as lot_regimens
+    person = PersonFactory()
+    _episode_with_exposures(person, vocab['tamoxifen'], vocab['tamoxifen'])
+    monkeypatch.setattr(lot_regimens, 'get_regimen_concept_id', lambda _names: None)
+
+    record = refresh_patient_record(person)
+
+    assert record.first_line_therapy_id == TAMOXIFEN_RXNORM
 
 
 def test_a_regimen_resolved_from_drug_names_still_wins(vocab, monkeypatch):

@@ -206,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 32
+DERIVATION_VERSION = 33
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -2762,46 +2762,52 @@ def _asserted_line_name(episode):
     return value
 
 
-# Domains of a concept that can identify a therapy line on its own: a single drug
-# (an RxNorm ingredient, a HemOnc component) or a procedure (surgery, a
-# transplant; the regimen catalog uses SNOMED procedures as therapy ids). A
-# Measurement is a test, not a treatment.
+# A therapy line's own concept, read when nothing else resolves it (#2760).
+#
+# It carries meaning when it is a real vocabulary concept: valid, not flagged as
+# a classification concept (standard_concept 'C'), and not HealthKey-local. An
+# HK-* quarantine concept is a placeholder minted for an unmatched name and must
+# read as unresolved. The standard flag is not the test:
+# a HemOnc Component and a SNOMED substance (cisplatin, 4301188, a catalog
+# therapy id) are non-standard yet name a real therapy.
+#
+# It identifies the line when its domain is Drug or Procedure: the regimen
+# catalog uses SNOMED procedures (surgery, a transplant) as therapy ids. A
+# Measurement is a test, not a treatment. HemOnc concepts are decided by the
+# HemOnc branch of the derivation, never here.
+#
+# It is one of the line's drugs when its domain is Drug and, for HemOnc, its
+# class is Component: other HemOnc classes with domain Drug (Regimen, Regimen
+# Class, Component Class, Route, Brand Name) are not one drug.
 _LINE_IDENTITY_DOMAINS = frozenset({'Drug', 'Procedure'})
 
 
-def _line_identity_concept(concept):
-    """The episode's own concept, when it can stand as the line's id (#2760).
+def _is_vocabulary_concept(concept) -> bool:
+    if concept is None or getattr(concept, 'invalid_reason', None):
+        return False
+    if getattr(concept, 'standard_concept', None) == 'C':
+        return False
+    vocabulary_id = getattr(concept, 'vocabulary_id', None) or ''
+    return not vocabulary_id.startswith('HK-') and getattr(concept, 'source', None) != 'HealthKey'
 
-    Nothing else resolves a non-HemOnc concept, so a line the writer stored with
-    one would otherwise derive no id at all. Only a standard, valid concept
-    qualifies: the HK-* quarantine concepts an unmatched name is minted under
-    are non-standard placeholders, and must read as unresolved, not as a therapy.
-    """
-    if (concept is not None and getattr(concept, 'domain_id', None) in _LINE_IDENTITY_DOMAINS
-            and getattr(concept, 'standard_concept', None) == 'S'
-            and not getattr(concept, 'invalid_reason', None)):
+
+def _line_identity_concept(concept):
+    """The line's own non-HemOnc concept, when it can stand as the line's id."""
+    if (_is_vocabulary_concept(concept)
+            and getattr(concept, 'vocabulary_id', None) != 'HemOnc'
+            and getattr(concept, 'domain_id', None) in _LINE_IDENTITY_DOMAINS):
         return concept
     return None
 
 
-# HemOnc classes that name a whole regimen (some carry domain Drug), not one drug.
-_REGIMEN_CONCEPT_CLASSES = frozenset({'Regimen', 'Modality'})
-
-
 def _line_own_drug_id(concept):
-    """The line's own concept as a component, when it is a single drug (#2760).
-
-    A HemOnc Component is non-standard (it maps to RxNorm) yet is the drug the
-    line is about; an RxNorm ingredient is standard. A regimen class is not one
-    drug, and a non-standard HK-* quarantine concept is a placeholder, not a drug.
-    """
-    if (concept is None or getattr(concept, 'domain_id', None) != 'Drug'
-            or getattr(concept, 'invalid_reason', None)
-            or getattr(concept, 'concept_class_id', None) in _REGIMEN_CONCEPT_CLASSES):
+    """The line's own concept as one of its drugs, when it is a single drug."""
+    if not _is_vocabulary_concept(concept) or getattr(concept, 'domain_id', None) != 'Drug':
         return None
-    if getattr(concept, 'standard_concept', None) == 'S' or getattr(concept, 'vocabulary_id', None) == 'HemOnc':
-        return concept.concept_id
-    return None
+    if (getattr(concept, 'vocabulary_id', None) == 'HemOnc'
+            and getattr(concept, 'concept_class_id', None) != 'Component'):
+        return None
+    return concept.concept_id
 
 
 def _is_asserted_regimen(concept) -> bool:
@@ -3166,9 +3172,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
                 origin = 'inferred'
         # Last of all, the source concept itself when it is a drug or a procedure
         # (#2760). Taken only when nothing above resolved, so a regimen found from
-        # the drug names still wins over a generic drug source. Never 'asserted':
-        # it is not a validated HemOnc regimen.
-        if not concept_id and _line_identity_concept(src_concept):
+        # the drug names still wins over a generic drug source, and only when the
+        # line's exposures are that concept alone: a combination the regimen
+        # lookup did not match is not one of its drugs. Never 'asserted': it is
+        # not a validated HemOnc regimen.
+        if (not concept_id and _line_identity_concept(src_concept)
+                and {de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id}
+                <= {episode.episode_source_concept_id}):
             concept_id = episode.episode_source_concept_id
             origin = 'inferred'
 
