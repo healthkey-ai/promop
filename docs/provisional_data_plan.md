@@ -621,7 +621,8 @@ fit a list the record may already fill, so a list has its own:
   added only when no real item says the same thing (`_item_key`: a string by its
   casefolded, trimmed text; a procedure by its concept id, or its name when the
   concept is unmapped, and its date; a variant by gene, variant, feature, marker
-  key and test date, ignoring origin, interpretation and the row id). A
+  key and test date, ignoring origin, interpretation and the row id; text compares
+  casefolded, so a typed `TP53` matches a proposed `tp53`). A
   user-edited list (`user_edited_fields`) is never added to, and a typed or
   cleared `disease` / `disease_slug` adds no `disease_slugs` proposal, as it
   blocks the scalar disease group.
@@ -649,7 +650,21 @@ fit a list the record may already fill, so a list has its own:
   from an incoming list before anything else: an echo of the merged list is a
   no-op (the real list and `user_edited_fields` unchanged, still a proposal), and
   a genuine edit stores only the real and the typed items. This covers every
-  list field, `genetic_mutations` and the `genomics_*` markers included.
+  list field, `genetic_mutations` and the `genomics_*` markers included
+  (`disease_slugs` is read-only in the record serializer, so no PATCH writes it).
+  Consequences worth knowing:
+  - **There is no PATCH path from a list proposal to approved data.** A typed item
+    identical to a proposed one is dropped as an echo (a 200 that stores nothing).
+    Approve a list proposal through its mapping or row approval, not a PATCH. The
+    editor keeps the list's mark while it still holds proposed items
+    (`withoutMarks` in `provisional.ts`), so the UI never shows it as approved
+    while the server keeps it proposed.
+  - **A genuine edit of a list drops every proposal for that list**, the untouched
+    ones included: a user-edited list (`user_edited_fields`) is never added to
+    again, and the PATCH mirror clears its mark.
+  - **The PATCH response is the approved record** (no `provisional_fields` or
+    `provisional_items`), as for the scalar fields: a client that needs the marks
+    re-reads the record.
 
 | Field | Reader (shared with the real refresh, over provisional rows only) | Confidence of an item |
 |---|---|---|

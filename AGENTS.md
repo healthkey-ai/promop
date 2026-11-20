@@ -1594,7 +1594,11 @@ items are proposals (the patient list and the PHR read the approved lists:
 adds no `disease_slugs` proposal, and the PATCH mirror drops a list's proposal only when
 that list (or the disease) is edited. `apply_patient_record_patch` strips the proposed
 items from an incoming list (`_drop_proposed_list_items`), so an autosave echo is a no-op
-and a proposal is never written as approved data. A marker the reader *derives* from
+and a proposal is never written as approved data: **approve a list proposal through its
+mapping or row approval, not a PATCH** (a typed item identical to a proposal is dropped as an
+echo; the editor keeps the list's mark while `provisional_items` is non-empty), and a genuine
+edit of a list drops every proposal for it, untouched ones included. The PATCH response is
+the approved record, so a client re-reads for the marks. A marker the reader *derives* from
 proposed findings is not offered. See [List fields as built](docs/provisional_data_plan.md#list-fields-as-built-2534).
 
 ### One patient's full provisional view: `fill_provisional_record`

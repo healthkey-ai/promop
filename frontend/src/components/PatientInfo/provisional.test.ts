@@ -20,4 +20,25 @@ describe('provisional marks', () => {
     const info = { provisional_fields: { b: 70 } };
     expect(withoutMarks(info, ['a'])).toBe(info);
   });
+
+  it('keeps the mark of a list that still holds proposed items, touched or not (#2534)', () => {
+    const info = {
+      prior_procedures: [{ procedure: 'X-ray' }, { procedure: 'PET' }],
+      provisional_fields: { prior_procedures: 72, a: 80 },
+      provisional_items: { prior_procedures: [{ procedure: 'PET' }] },
+    };
+    const next = withoutMarks(info, ['prior_procedures', 'a']);
+
+    // The server never approves a proposed list item through a save.
+    expect(next.provisional_fields).toEqual({ prior_procedures: 72 });
+    expect(withoutMarks(info, ['prior_procedures'])).toBe(info);
+  });
+
+  it('drops the mark of a list with no proposed items left', () => {
+    const info = {
+      provisional_fields: { prior_procedures: 72 },
+      provisional_items: { prior_procedures: [] },
+    };
+    expect(withoutMarks(info, ['prior_procedures']).provisional_fields).toEqual({});
+  });
 });

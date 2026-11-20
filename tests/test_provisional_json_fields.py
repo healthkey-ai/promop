@@ -534,7 +534,8 @@ def _variants_with_a_proposal(person):
 ECHOES = [
     ('prior_procedures', _procedures_with_a_proposal),
     ('active_malignancies', _malignancies_with_a_proposal),
-    ('disease_slugs', _slugs_with_a_proposal),
+    # disease_slugs is not here: it is read-only in the record serializer, so no PATCH
+    # can write it (test_disease_slugs_cannot_be_written_by_a_patch below).
     ('genetic_mutations', _variants_with_a_proposal),
     ('genomics_tp53', _variants_with_a_proposal),
 ]
@@ -572,6 +573,19 @@ def test_a_whole_record_autosave_echo_is_a_no_op(snomed, person, field, setup):
     assert getattr(after, field) == getattr(before, field)
     assert field not in edited_after
     assert marks(person).__dict__[field] is not None
+
+
+def test_disease_slugs_cannot_be_written_by_a_patch(snomed, person):
+    _slugs_with_a_proposal(person)
+    client = _staff()
+    body = _get(client, person)
+    before = real(person).disease_slugs
+
+    response = _patch(client, person, {'disease_slugs': [*body['disease_slugs'], 'typed-slug']})
+
+    assert response.status_code == 200
+    assert real(person).disease_slugs == before and 'disease_slugs' not in real(person).user_edited_fields
+    assert marks(person).disease_slugs is not None          # still a proposal
 
 
 def test_a_genuine_edit_beside_proposed_items_stores_only_real_and_edited_items(snomed, person):
@@ -757,7 +771,7 @@ def test_every_list_reader_is_flat_in_the_number_of_items(snomed, person, kind):
     with CaptureQueriesContext(connection) as many:
         provisional_record.provisional_values(person, record, snapshot)
 
-    assert len(many) <= len(few) + 3, (kind, len(few), len(many))
+    assert len(many) <= len(few), (kind, len(few), len(many))      # measured: 0 extra queries
 
 
 def test_a_curated_disease_name_canonicalizes_the_same_inside_and_outside_the_pass_memo(snomed):
@@ -771,3 +785,40 @@ def test_a_curated_disease_name_canonicalizes_the_same_inside_and_outside_the_pa
         unmapped = _canonicalize_disease('Unmapped thing')
 
     assert inside == outside and unmapped == 'Unmapped thing'
+
+
+def test_a_typed_variant_matches_a_proposed_one_whatever_the_case(snomed):
+    key = provisional_record._item_key
+    typed = {'gene': 'TP53', 'variant': 'C.743G>A', 'marker_key': 'TP53', 'test_date': '2024-02-01',
+             'origin': 'germline', 'id': 1}
+    proposed = {'gene': 'tp53', 'variant': 'c.743g>a', 'marker_key': 'tp53', 'test_date': '2024-02-01',
+                'interpretation': 'pathogenic', 'id': 2}
+    other = {'gene': 'tp53', 'variant': 'c.800C>T', 'marker_key': 'tp53', 'test_date': '2024-02-01'}
+
+    assert key('genetic_mutations', typed) == key('genetic_mutations', proposed)
+    assert key('genetic_mutations', typed) != key('genetic_mutations', other)
+    # So the proposal the editor typed itself is not added a second time.
+    added, level = provisional_record._added_items('genetic_mutations', [typed], [(proposed, 80)])
+    assert added == [] and level is None
+    assert key('prior_procedures', {'procedure': ' Chest X-ray ', 'date': '2024-01-01', 'concept_id': 0}) == \
+        key('prior_procedures', {'procedure': 'chest x-ray', 'date': '2024-01-01', 'concept_id': 0})
+
+
+def test_a_list_proposal_is_approved_through_its_row_never_a_patch(snomed, person):
+    _procedures_with_a_proposal(person)
+    client = _staff()
+    body = _get(client, person)
+    proposed = body['provisional_items']['prior_procedures']
+
+    # Typing the very item a proposal names stores nothing: it is dropped as an echo.
+    response = _patch(client, person, {'prior_procedures': [*real(person).prior_procedures, *proposed]})
+    assert response.status_code == 200
+    assert [p['procedure'] for p in real(person).prior_procedures] == ['Chest X-ray']
+    assert 'prior_procedures' not in real(person).user_edited_fields
+    assert marks(person).prior_procedures == 90
+
+    # Approving the row does.
+    ProcedureOccurrence.objects.filter(procedure_source_value='P4101').update(confidence=None)
+    refresh_patient_record(person)
+    assert {p['procedure'] for p in real(person).prior_procedures} == {'Chest X-ray', 'Bone marrow biopsy'}
+    assert marks(person).prior_procedures is None

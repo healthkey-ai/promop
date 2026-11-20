@@ -436,13 +436,18 @@ _PROCEDURE_IDENTITY = ('concept_id', 'procedure', 'date')
 _VARIANT_IDENTITY = ('gene', 'variant', 'genomic_feature', 'marker_key', 'test_date')
 
 
+def _fold(value):
+    """Text compares without case or edge whitespace (the reader writes ``tp53``, an editor ``TP53``)."""
+    return value.strip().casefold() if isinstance(value, str) else value
+
+
 def _item_key(field, item) -> str:
     """What makes two items of list *field* the same item, whoever asserted them."""
     if isinstance(item, dict):
         if field == 'prior_procedures':
-            ident = (item.get('concept_id') or item.get('procedure'), item.get('date'))
+            ident = (item.get('concept_id') or _fold(item.get('procedure')), item.get('date'))
         else:
-            ident = tuple(item.get(name) for name in _VARIANT_IDENTITY)
+            ident = tuple(_fold(item.get(name)) for name in _VARIANT_IDENTITY)
         return json.dumps(ident, default=str)
     return str(item).strip().casefold()
 
