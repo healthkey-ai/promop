@@ -157,6 +157,7 @@ def test_a_retired_mapping_names_no_drug(vocab):
     dict(invalid_reason='D'),
 ])
 def test_a_mapping_to_anything_but_a_live_standard_drug_names_no_drug(vocab, target):
+    target = dict(target)
     domain = target.pop('domain', 'Drug')
     _concept(CISPLATIN_RXNORM, 'cisplatin', 'RxNorm', domain, 'Ingredient', **target)
     _maps_to(CISPLATIN_SNOMED, CISPLATIN_RXNORM)
@@ -208,6 +209,9 @@ def test_retired_concept_stays_unresolved(vocab):
     (392_021_009, 'SNOMED'),        # a legacy FHIR-ingest mint without a source tag
     (9_000_123, 'SNOMED'),          # a legacy seeder mint
     (600_777, 'sct'),               # a concept minted from a FHIR coding
+    (600_778, 'FHIR'),              # a concept minted by the FHIR import
+    (9_099_999, 'SNOMED'),          # the legacy ranges are inclusive at both ends
+    (392_022_000, 'SNOMED'),
 ])
 def test_a_local_placeholder_is_not_a_therapy(vocab, concept_id, vocabulary):
     """An unmatched name is minted under a local vocabulary as a placeholder. It
