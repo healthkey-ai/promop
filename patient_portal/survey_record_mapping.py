@@ -542,6 +542,12 @@ def run_response(response_id) -> None:
 
     try:
         response = SurveyResponse.objects.select_related('survey_version__survey').get(pk=response_id)
+    except SurveyResponse.DoesNotExist:
+        # Erased after it was submitted (the member closed their account or
+        # withdrew their record's permission): there is nothing to write.
+        logger.info('survey_record_mapping: response %s no longer exists; nothing to write', response_id)
+        return
+    try:
         apply_response(response)
     except Exception:
         logger.exception(

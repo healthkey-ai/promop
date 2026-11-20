@@ -455,6 +455,19 @@ class PatientSelfScopePermission(BasePermission):
         return obj_person_id == patient_person.person_id
 
 
+class MemberWritePermission(ScopedTokenPermission):
+    """A member's own answers through the PHR (consent decisions, document
+    acceptance): a session or partner sign-in may write them; an OAuth2 or
+    service token must carry a write scope, as for any write. A token that
+    may only read cannot withdraw a permission, which can erase the record
+    (patient_portal.erasure)."""
+
+    def has_permission(self, request, view):
+        if request.auth is None or isinstance(request.auth, TokenClaims):
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
+
+
 class PatientDeletePermission(ScopedTokenPermission):
     """ScopedTokenPermission that also allows DELETE for patient account deletion.
 

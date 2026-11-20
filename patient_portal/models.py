@@ -776,6 +776,11 @@ class ConsentPurpose(models.Model):
         default=list, blank=True,
         help_text='Countries where a gated purpose is available, matched case-insensitively to the record.',
     )
+    erases_record_on_withdrawal = models.BooleanField(
+        default=False,
+        help_text="Withdrawing it deletes the member's health answers straight away and keeps the account "
+                  '(patient_portal.erasure.erase_record).',
+    )
     sort_order = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

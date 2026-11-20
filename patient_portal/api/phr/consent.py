@@ -20,6 +20,7 @@ from django.db import transaction
 from rest_framework.response import Response
 
 from patient_portal import consent as svc
+from patient_portal.api.permissions import MemberWritePermission
 from patient_portal.models import ConsentEvent, ConsentPurpose, DocumentAcceptance, LegalDocument
 
 from .views import PhrView
@@ -79,6 +80,9 @@ def document_payload(state: svc.DocumentState) -> dict:
 
 
 class ConsentView(PhrView):
+    # A withdrawal can erase the record: a read-only token may not make one.
+    permission_classes = [MemberWritePermission]
+
     def build(self, person, record, language=svc.DEFAULT_LANGUAGE):
         return {
             'language': language,
@@ -128,6 +132,7 @@ class ConsentView(PhrView):
 
 class ConsentDocumentsView(PhrView):
     http_method_names = ['post', 'head', 'options']
+    permission_classes = [MemberWritePermission]
 
     def post(self, request):
         person, record, error = self.resolve(request)

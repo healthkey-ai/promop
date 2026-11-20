@@ -40,7 +40,7 @@ from patient_portal.models import ConsentPurpose, ConsentText, LegalDocument, Le
 
 PURPOSE_SETTINGS = (
     'kind', 'answers', 'asks_frequency', 'frequency_options', 'stage',
-    'gated_by_country', 'enabled_countries', 'sort_order', 'is_active',
+    'gated_by_country', 'enabled_countries', 'erases_record_on_withdrawal', 'sort_order', 'is_active',
 )
 DOCUMENT_SETTINGS = ('name', 'sort_order', 'is_active')
 TEXT_FIELDS = ('title', 'summary', 'body')

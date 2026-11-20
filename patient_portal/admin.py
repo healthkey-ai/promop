@@ -223,7 +223,8 @@ class _KeyedAdmin(admin.ModelAdmin):
 
 @admin.register(ConsentPurpose)
 class ConsentPurposeAdmin(_KeyedAdmin):
-    list_display = ['key', 'kind', 'answers', 'asks_frequency', 'stage', 'gated_by_country', 'sort_order', 'is_active']
+    list_display = ['key', 'kind', 'answers', 'asks_frequency', 'stage', 'gated_by_country',
+                    'erases_record_on_withdrawal', 'sort_order', 'is_active']
     list_filter = ['kind', 'is_active', 'gated_by_country']
     search_fields = ['key']
     inlines = [ConsentTextInline]

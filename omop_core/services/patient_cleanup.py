@@ -18,20 +18,32 @@ from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_oncology.models import Episode, EpisodeEvent
 
 
-def delete_omop_clinical_rows(person):
-    """Delete patient-scoped rows that are not removed automatically by Person.delete().
+# Primary keys a ProvenanceRecord's integer object_id can name.
+_INTEGER_KEYS = frozenset({
+    'AutoField', 'BigAutoField', 'SmallAutoField', 'IntegerField', 'BigIntegerField',
+    'PositiveIntegerField', 'PositiveBigIntegerField',
+})
 
-    Call this inside an atomic transaction before deleting the Person. The caller is
-    still responsible for deleting the linked Identity, then the Person itself.
+
+def delete_unkeyed_rows(person):
+    """Delete the rows about ``person`` that no cascade from the person reaches.
+
+    A PROlog survey response PROTECTs its participant; ``EpisodeEvent`` and
+    ``MeasurementOwnership`` hold bare ids. Shared by every path that deletes a
+    person's clinical rows (``delete_omop_clinical_rows``, member erasure), so
+    the list is kept once. Call inside an atomic transaction.
     """
-    # A PROlog survey response PROTECTs its participant, so these come out
-    # before anything tries to delete the Person.
     delete_prolog_data_for_persons([person.person_id])
+
+    # Rows that name the person by a bare id (no foreign key, so no cascade):
+    # who may act for them, and the groups they were placed in.
+    from omop_core.models import PatientGroupMembership, PersonalRepresentative
+    PersonalRepresentative.objects.filter(person_id=person.person_id).delete()
+    PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
 
     episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
     if episode_ids:
         EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-        Episode.objects.filter(person=person).delete()
 
     visit_ids = list(VisitOccurrence.objects.filter(person=person).values_list('visit_occurrence_id', flat=True))
     measurement_ids = list(Measurement.objects.filter(person=person).values_list('measurement_id', flat=True))
@@ -39,6 +51,49 @@ def delete_omop_clinical_rows(person):
         MeasurementOwnership.objects.filter(
             Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
         ).delete()
+
+
+def delete_provenance(person, tables, *, about_the_person=False):
+    """Delete the ``ProvenanceRecord`` rows of the rows about to be deleted.
+
+    Provenance points at its row through a generic key, which no cascade
+    follows. ``tables`` is ``(model, lookup)`` pairs, the lookup selecting the
+    person's rows in that model. ``about_the_person`` also takes every row
+    naming the person as its target and the person's own row: for when the
+    person goes too. Call before the rows themselves are deleted.
+    """
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import Person, ProvenanceRecord
+
+    q = Q()
+    if about_the_person:
+        q |= Q(target_patient_id=str(person.person_id))
+        q |= Q(content_type=ContentType.objects.get_for_model(Person), object_id=person.person_id)
+    for model, lookup in tables:
+        if model._meta.pk.get_internal_type() not in _INTEGER_KEYS:
+            continue
+        q |= Q(content_type=ContentType.objects.get_for_model(model),
+               object_id__in=model._base_manager.filter(**{lookup: person}).values('pk'))
+    if q:
+        ProvenanceRecord.objects.filter(q).delete()
+
+
+def person_tables():
+    """``(model, lookup)`` for every table that names a person by key."""
+    from omop_core.models import Person
+
+    return [(r.related_model, r.field.name) for r in Person._meta.related_objects if not r.many_to_many]
+
+
+def delete_omop_clinical_rows(person):
+    """Delete patient-scoped rows that are not removed automatically by Person.delete().
+
+    Call this inside an atomic transaction before deleting the Person. The caller is
+    still responsible for deleting the linked Identity, then the Person itself.
+    """
+    delete_provenance(person, person_tables(), about_the_person=True)
+    delete_unkeyed_rows(person)
+    Episode.objects.filter(person=person).delete()
 
     ConditionOccurrence.objects.filter(person=person).delete()
     DrugExposure.objects.filter(person=person).delete()

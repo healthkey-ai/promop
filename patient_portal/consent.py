@@ -297,8 +297,20 @@ def record_consent(
             raise ValidationError(f'{purpose.key} is not available in your country.')
     if decision not in purpose.allowed_decisions():
         raise ValidationError(f'{purpose.key} does not take the answer {decision!r}.')
-    if decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER:
-        latest = latest_events(person).get(purpose.id)
+    when = recorded_at or timezone.now()
+    member_withdrawal = decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER
+    latest = (latest_events(person).get(purpose.id)
+              if member_withdrawal or purpose.erases_record_on_withdrawal else None)
+    # Any answer that ends a standing grant ends it, "declined" as much as
+    # "withdrawn"; for a purpose the record depends on, the record goes too.
+    # Only an answer that becomes the member's position does: an older one,
+    # back-dated behind the grant, ends nothing. A migration replays history,
+    # it is not a member withdrawing now, so it never erases.
+    ends_grant = (
+        source != ConsentEvent.MIGRATION and latest is not None and latest.decision == ConsentEvent.GRANTED
+        and decision != ConsentEvent.GRANTED and when >= latest.recorded_at
+    )
+    if member_withdrawal:
         if latest is None or latest.decision != ConsentEvent.GRANTED:
             raise ValidationError(f'{purpose.key} is not granted, so there is nothing to withdraw.')
     texts = list(purpose.texts.all())
@@ -321,7 +333,6 @@ def record_consent(
     else:
         frequency = ''
 
-    when = recorded_at or timezone.now()
     addr = _ledger_email(person, email, purpose.key)
     with transaction.atomic():
         event = ConsentEvent.objects.create(
@@ -333,6 +344,11 @@ def record_consent(
             key=purpose.key, version=version, language=text.language, decision=decision,
             frequency=frequency, recorded_at=when,
         )
+        # The record depends on this permission: its health answers go now,
+        # with the answer that ends it, or neither is kept.
+        if ends_grant and purpose.erases_record_on_withdrawal:
+            from patient_portal.erasure import erase_record
+            erase_record(person, actor=recorded_by, purpose=purpose.key)
     return event
 
 
