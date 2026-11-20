@@ -20,7 +20,7 @@ needs no switch, and with ``--dry-run`` lists them without closing.
 from datetime import timedelta
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from omop_core.models import SourceCodeConceptMapping
 from omop_core.services import provisional_sweep
@@ -46,6 +46,13 @@ class Command(BaseCommand):
     def handle(self, *args, mapping_id, after_person_id, limit, dry_run, queue,
                close_stale=False, stale_minutes=provisional_sweep.STALE_RUN_MINUTES, **options):
         if close_stale:
+            if stale_minutes < 1:
+                raise CommandError('--stale-minutes must be at least 1.')
+            ignored = [flag for flag, given in (
+                ('--limit', limit != provisional_sweep.SWEEP_CHUNK), ('--mapping-id', mapping_id is not None),
+                ('--after-person-id', bool(after_person_id)), ('--queue', queue)) if given]
+            if ignored:
+                raise CommandError(f'--close-stale does not take {", ".join(ignored)}.')
             self._close_stale(stale_minutes, dry_run)
             return
         if not settings.PROVISIONAL_DATA_ENABLED:

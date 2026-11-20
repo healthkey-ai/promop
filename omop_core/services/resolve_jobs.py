@@ -37,8 +37,10 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
         run.save(update_fields=['state', 'error_detail', 'finished_at', 'updated_at'])
         return
 
+    # A run closed as stale whose task arrives late is reopened, as a sweep chunk does.
     run.state = SourceCodeResolveRun.RUNNING
-    run.save(update_fields=['state', 'updated_at'])
+    run.finished_at = None
+    run.save(update_fields=['state', 'finished_at', 'updated_at'])
 
     total_resolved = 0
     total_created = 0

@@ -579,13 +579,16 @@ STALE_RUN_MINUTES = 120      # no progress for this long: the worker holding it 
 def stale_runs(older_than=None):
     """Runs still pending or running whose last progress is older than *older_than*.
 
-    A run's heartbeat is ``updated_at`` (a run from before it existed counts
-    from ``created_at``). A chunk saves every few persons and is bounded by its
-    time budget, so a healthy run is never silent for long; the default of two
-    hours is far beyond that, and beyond the broker's redelivery window, so a
-    run this quiet has lost its task (a worker restarted by a deploy, a queue
-    flushed). The table is shared with the bulk resolve, whose runs are
-    reclaimed the same way.
+    A run's heartbeat is ``updated_at`` (``created_at`` stands in for a null). A
+    chunk saves every few persons and is bounded by its time budget, so a
+    healthy run is never silent for long; two hours is well past that, so a run
+    this quiet has most likely lost its task (a worker restarted by a deploy, a
+    task hard-killed by its time limit, the OOM killer or SIGKILL, none of which
+    reach ``on_failure``). It is a judgement, not proof: the broker's visibility
+    timeout is seven hours, so a message lost with a killed worker can still be
+    redelivered long after, and the chunk that then arrives reopens its closed
+    run (see ``run_sweep``). The table is shared with the bulk resolve, whose
+    runs are reclaimed the same way.
     """
     older_than = timedelta(minutes=STALE_RUN_MINUTES) if older_than is None else older_than
     return (SourceCodeResolveRun.objects
@@ -615,6 +618,7 @@ def close_stale_runs(older_than=None, *, dry_run=False):
                    .update(state=SourceCodeResolveRun.FAILED, finished_at=now, updated_at=now,
                            error_detail=(run.error_detail + [note])[:100]))
         if changed:
+            run.state = SourceCodeResolveRun.FAILED       # what the row says now
             closed.append(run)
     return closed
 

@@ -12,7 +12,7 @@ from io import StringIO
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
 from django.core.cache import cache
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -1080,7 +1080,8 @@ def test_close_stale_closes_only_pending_and_running_runs_with_no_recent_progres
     assert done_long_ago.state == SourceCodeResolveRun.COMPLETED
 
 
-def test_a_run_from_before_the_heartbeat_is_measured_from_its_creation(world):
+def test_a_run_with_no_heartbeat_falls_back_to_its_creation_time(world):
+    # Defensive: nothing writes a null (the migration stamped existing runs with its own time).
     old = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 400)
     SourceCodeResolveRun.objects.filter(pk=old.pk).update(updated_at=None)
 
@@ -1144,3 +1145,63 @@ def test_a_bulk_resolve_stamps_the_heartbeat_too(world):
 
     run.refresh_from_db()
     assert run.state == SourceCodeResolveRun.COMPLETED and run.updated_at is not None
+
+
+def test_the_command_lists_the_runs_it_closed_as_failed(world):
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 300)
+    out = StringIO()
+
+    call_command('sweep_provisional_rows', '--close-stale', stdout=out)
+
+    line = next(line for line in out.getvalue().splitlines() if str(run.pk) in line)
+    assert ' failed ' in line and ' running ' not in line
+
+
+@pytest.mark.parametrize('args', [
+    ['--stale-minutes', '0'], ['--stale-minutes', '-5'],
+    ['--limit', '10'], ['--mapping-id', '1'], ['--after-person-id', '5'], ['--queue'],
+])
+def test_close_stale_rejects_a_threshold_below_one_and_sweep_options_it_would_ignore(world, args):
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 300)
+
+    with pytest.raises(CommandError):
+        call_command('sweep_provisional_rows', '--close-stale', *args, stdout=StringIO())
+
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING                  # nothing was closed
+
+
+@pytest.mark.parametrize('error', [RuntimeError('database went away'), KeyboardInterrupt()])
+def test_the_command_marks_its_run_failed_when_it_crashes_or_is_interrupted(world, monkeypatch, error):
+    def boom(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(provisional_sweep, 'run_sweep', boom)
+
+    with pytest.raises(type(error)):
+        call_command('sweep_provisional_rows', stdout=StringIO())
+
+    run = SourceCodeResolveRun.objects.get()
+    assert run.state == SourceCodeResolveRun.FAILED and run.finished_at is not None
+    assert repr(error) in run.error_detail[0]['error']
+
+
+def test_a_bulk_resolve_that_starts_after_its_run_was_closed_reopens_and_completes_it(world, monkeypatch):
+    from omop_core.services import resolve_jobs
+    person = _person()
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.PENDING, total=1), 300)
+    provisional_sweep.close_stale_runs()
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.FAILED and run.finished_at is not None
+    seen = []
+    real = resolve_jobs.resolve_person_source_codes
+
+    def resolve(p):
+        seen.append(SourceCodeResolveRun.objects.values_list('state', 'finished_at').get(pk=run.pk))
+        return real(p)
+    monkeypatch.setattr(resolve_jobs, 'resolve_person_source_codes', resolve)
+
+    resolve_jobs.run_bulk_resolve(run.id, [person.person_id])         # the task that was only delayed
+
+    assert seen == [(SourceCodeResolveRun.RUNNING, None)]             # open while it works
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.COMPLETED and run.done == 1
