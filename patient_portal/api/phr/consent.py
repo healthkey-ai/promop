@@ -82,6 +82,8 @@ def document_payload(state: svc.DocumentState) -> dict:
 class ConsentView(PhrView):
     # A withdrawal can erase the record: a read-only token may not make one.
     permission_classes = [MemberWritePermission]
+    # Giving the permission again is how a record that is off comes back.
+    writes_record = False
 
     def build(self, person, record, language=svc.DEFAULT_LANGUAGE):
         return {
@@ -133,6 +135,7 @@ class ConsentView(PhrView):
 class ConsentDocumentsView(PhrView):
     http_method_names = ['post', 'head', 'options']
     permission_classes = [MemberWritePermission]
+    writes_record = False
 
     def post(self, request):
         person, record, error = self.resolve(request)

@@ -225,6 +225,30 @@ def has_consent(person, key: str) -> bool:
     return purpose.available_in(record_country(person))
 
 
+RECORD_OFF = ('You withdrew the permission your record depends on, so nothing can be added to it. '
+              'Give the permission again to start a new record.')
+
+
+def record_permitted(person) -> bool:
+    """Whether the member's record may be written on their behalf.
+
+    False while the member's latest answer to a purpose the record depends on
+    (``erases_record_on_withdrawal``) is anything but a grant: they withdrew
+    it (and their answers were erased then, patient_portal.erasure), or they
+    said no or "ask me later" and never agreed. Nothing they send is kept
+    until they give it. True where no active purpose is marked, or the member
+    has not answered one (a hospital's patient, a deployment without the
+    flag). One query: it runs on every questionnaire request.
+    """
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose__is_active=True,
+                                    purpose__erases_record_on_withdrawal=True)
+        .order_by('purpose_id', '-recorded_at', '-id').distinct('purpose_id')
+        .values_list('decision', flat=True)
+    )
+    return all(decision == ConsentEvent.GRANTED for decision in latest)
+
+
 def persons_granting(key: str) -> set[int]:
     """The ids of every person whose latest answer to the active purpose
     ``key`` is a grant, in two queries, for enforcement over a cohort (a

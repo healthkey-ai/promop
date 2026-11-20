@@ -259,6 +259,16 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # the provider UI PATCHes, and leaving the key in the body would 405 the
     # request below as a non-projection-owned field.
     patient_name, patch_data = _pop_patient_name(data)
+    # The member's own edit to a record whose permission they withdrew: their
+    # name is their account's, everything else is the record's. Only a real
+    # change is refused: an auto-save echoing what was shown changes nothing.
+    if patch_data and not getattr(actor, 'is_staff', False):  # staff act on the care relationship
+        from patient_portal.consent import RECORD_OFF, record_permitted
+        from patient_portal.services import patient_person_for
+        own = patient_person_for(actor)
+        if (own is not None and own.person_id == person.person_id and not record_permitted(person)
+                and _patch_changes_record(patient_info, patch_data, actor)):
+            raise PermissionDenied(RECORD_OFF)
     from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
     patch_data = _drop_proposed_list_items(patient_info, canonicalize_fields(patch_data))
     priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
@@ -741,6 +751,42 @@ def _rendered_patient_name(person):
     """
     full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
     return full_name or f"Patient {person.person_id}"
+
+
+_UNSHOWN = object()
+
+
+def _same_value(shown, sent) -> bool:
+    """``sent`` equals what the serializer shows, however it is spelled: a
+    decimal shown as "7.50" and sent back as 7.5 is the same value."""
+    if shown is _UNSHOWN:
+        return False
+    if shown == sent:
+        return True
+    if isinstance(shown, (str, int, float)) and isinstance(sent, (str, int, float)) \
+            and not isinstance(shown, bool) and not isinstance(sent, bool):
+        try:
+            from decimal import Decimal
+            return Decimal(str(shown)) == Decimal(str(sent))
+        except Exception:  # noqa: BLE001 - not numbers: they differ
+            return False
+    return False
+
+
+def _patch_changes_record(patient_info, patch_data, actor) -> bool:
+    """Whether ``patch_data`` asks for anything the record does not already
+    show. The editor auto-saves the whole GET representation, so a field
+    carried back as shown is no change; staff-only fields are dropped for
+    anyone else (apply_patient_record_patch), so they count only for staff."""
+    if not patch_data:
+        return False
+    shown = PatientRecordSerializer(patient_info).data
+    staff = getattr(actor, 'is_staff', False)
+    return any(
+        not _same_value(shown.get(field, _UNSHOWN), value)
+        for field, value in patch_data.items()
+        if staff or field not in PatientRecordViewSet._STAFF_ONLY_FIELDS
+    )
 
 
 def _pop_patient_name(data):
@@ -4921,6 +4967,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': 'No patient record linked to your account'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        from patient_portal.consent import RECORD_OFF, record_permitted
+        if not record_permitted(person):
+            return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
 
         # Parse the file
         try:

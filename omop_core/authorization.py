@@ -92,8 +92,13 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
 
     Doctors and org_admins, including scoped trust admins, may write; since
     #2416 that is the same set that may read, an analyst holding neither.
-    Self-access and personal representatives can always write their own data.
+    Self-access and personal representatives write the record on the member's
+    behalf, so they may not while the permission it depends on is withdrawn
+    (``consent.record_permitted``): one gate for every endpoint that asks
+    this. Staff and professionals act on the care relationship, not on that
+    permission.
     """
+    from patient_portal.consent import record_permitted
     from patient_portal.models import PatientUser
 
     # No actor (e.g. a userless OAuth client_credentials token) may write.
@@ -106,7 +111,7 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
     # Patients can write their own record
     try:
         if actor_identity.patient_user.person_id == target_person_id:
-            return True
+            return record_permitted(target_person_id)
     except PatientUser.DoesNotExist:
         pass
 
@@ -116,7 +121,7 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
         person_id=target_person_id,
         verification_status='VERIFIED',
     ).exists():
-        return True
+        return record_permitted(target_person_id)
 
     # Professional access: only doctor / org_admin roles may write
     return _professional_grants(

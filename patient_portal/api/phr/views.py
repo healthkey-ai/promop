@@ -57,8 +57,15 @@ class PhrView(APIView):
     # (SharedRecordMixin).
     show_provisional = False
 
+    # A write here adds to the member's record, so it is refused while the
+    # permission the record depends on is withdrawn (consent.record_permitted).
+    # Views that manage the permissions themselves set this False. Deleting is
+    # always allowed: removing data never goes against a withdrawal.
+    writes_record = True
+
     def resolve(self, request):
-        """(person, record, None), or (None, None, a 404) when the caller has no record."""
+        """(person, record, None), or (None, None, a 404) when the caller has no
+        record, or a 403 for a write while their record is off."""
         link = (
             PatientUser.objects.filter(identity=request.user, is_active=True)
             .select_related('person')
@@ -66,6 +73,10 @@ class PhrView(APIView):
         )
         if link is None:
             return None, None, Response({'detail': 'No record.'}, status=404)
+        if self.writes_record and request.method in ('POST', 'PUT', 'PATCH'):
+            from patient_portal.consent import RECORD_OFF, record_permitted
+            if not record_permitted(link.person):
+                return None, None, Response({'detail': RECORD_OFF}, status=403)
         return link.person, PatientRecord.objects.filter(person=link.person).first(), None
 
     def get(self, request):
