@@ -1783,7 +1783,9 @@ text by the same `disease_rules`, `diseaseTypeOf` / `disease_type`)
 a field, or the disease tab gets a section, regenerate or map it, or
 `tests/test_patient_visible_fields.py` and the frontend check fail. A control outside `Field`
 (GELF, FLIPI) is wrapped in `MarkedControl name="<field>"`: that shows the indicator and
-the quoted name is what the scan reads. A field no tab shows (`concomitant_medications`, the
+the quoted name is what the scan reads. A date's precision column (`<date>_precision`)
+follows its date and a name a tab shows only as text (`NOT_EDITABLE`) is skipped, so only
+the date blocks. A field no tab shows (`concomitant_medications`, the
 diagnosis date), the list fields and the treatment tab do not block, and a block on a field
 the patient cannot see could never be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
 approved data; for a select, pick another option and then the shown one again) or by

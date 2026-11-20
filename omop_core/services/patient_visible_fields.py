@@ -35,8 +35,13 @@ General tab's Clinician Validation section, hidden in patient mode and refused o
 patient's PATCH): a mark on one could never be cleared by a patient.
 
 Left out on purpose: the treatment tab (therapy lines are edited in their own
-dialog, and its planned-therapies picker is not a column that holds a proposal) and
-the read-only summary.
+dialog, and its planned-therapies picker is not a column that holds a proposal), the
+read-only summary, ``NOT_EDITABLE`` (a name a tab shows as text, not as a control) and
+every date-precision companion (``sct_date_precision``, ``diagnosis_date_precision``):
+the precision is proposed and shown beside its date, but it follows the date, so only
+the date blocks and entering the date lifts the block. A precision picker is neither a
+``Field`` nor a ``MarkedControl``, so it shows no indicator of its own, and re-picking
+a precision to clear a mark would rewrite a proposed date.
 """
 from __future__ import annotations
 
@@ -81,7 +86,15 @@ DISEASE_RULES = (
 # Functions of DiseaseTab.tsx that render no disease fields of their own.
 NOT_SECTIONS = ('DatePrecisionPicker', 'DiseaseTab')
 
+# Columns a scanned tab names only to show them as text, never as a control the
+# patient can edit: the disease tab's legacy cytogenetic summary.
+NOT_EDITABLE = ('cytogenetic_markers',)
+
 _QUOTED = re.compile(r"""['"]([a-z][a-z0-9_]*)['"]""")
+_BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.S)
+_LINE_COMMENT = re.compile(r'(?m)(^|\s)//.*$')
+_SWITCH_CASE = re.compile(r"case '(\w+)':\s*return <(\w+)")
+_AND_SECTION = re.compile(r"diseaseType === '(\w+)' && <(\w+)")
 _FUNCTION_START = re.compile(r'\n(?=(?:export default )?function \w+)')
 _FUNCTION_NAME = re.compile(r'(?:export default )?function (\w+)')
 
@@ -96,18 +109,45 @@ def scalar_confidence_columns() -> frozenset[str]:
     )
 
 
+def strip_comments(source: str) -> str:
+    """The source without its comments, so a field name written in one is not a field.
+
+    A ``//`` counts only at the start of a line or after whitespace, so a URL in a
+    string is left alone.
+    """
+    return _LINE_COMMENT.sub(r'\1', _BLOCK_COMMENT.sub('', source))
+
+
+def is_precision_companion(name: str, columns: frozenset[str]) -> bool:
+    """A date's precision column (``sct_date_precision``): it follows its date."""
+    return name.endswith('_precision') and name[:-len('_precision')] in columns
+
+
 def function_blocks(source: str) -> dict[str, str]:
     """A TSX file's top-level functions by name, each with the text up to the next."""
     blocks: dict[str, str] = {}
-    for part in _FUNCTION_START.split(source):
+    for part in _FUNCTION_START.split(strip_comments(source)):
         match = _FUNCTION_NAME.match(part)
         if match:
             blocks[match.group(1)] = part
     return blocks
 
 
+def switch_sections(source: str) -> dict[str, set[str]]:
+    """The sections ``DiseaseTab`` renders for each disease type, read from its switch."""
+    body = function_blocks(source)['DiseaseTab']
+    found: dict[str, set[str]] = {}
+    for kind, section in _SWITCH_CASE.findall(body) + _AND_SECTION.findall(body):
+        found.setdefault(kind, set()).add(section)
+    return found
+
+
 def _named(text: str, columns: frozenset[str]) -> set[str]:
-    return {token for token in _QUOTED.findall(text) if token in columns}
+    """The columns a tab's source names as a quoted string, less what never blocks."""
+    return {
+        token for token in _QUOTED.findall(strip_comments(text))
+        if token in columns and token not in NOT_EDITABLE and not is_precision_companion(token, columns)
+    }
 
 
 def scan(root: pathlib.Path = ROOT) -> list[str]:
@@ -134,6 +174,7 @@ def render(names: list[str], disease: dict[str, list[str]]) -> str:
     return json.dumps({
         'columns': sorted(scalar_confidence_columns()),
         'not_for_patients': list(NOT_FOR_PATIENTS),
+        'not_editable': list(NOT_EDITABLE),
         'fields': names,
         'disease_rules': [list(rule) for rule in DISEASE_RULES],
         'disease_sections': {kind: list(names) for kind, names in DISEASE_SECTIONS.items()},

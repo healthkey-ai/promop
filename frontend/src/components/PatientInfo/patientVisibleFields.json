@@ -280,6 +280,9 @@
     "validated_by",
     "validation_date"
   ],
+  "not_editable": [
+    "cytogenetic_markers"
+  ],
   "fields": [
     "active_energy_per_day_30d",
     "active_minutes_per_day_30d",
@@ -462,7 +465,6 @@
       "bone_marrow_involvement",
       "bulky_disease",
       "dlbcl_transformation_date",
-      "dlbcl_transformation_date_precision",
       "flipi_score",
       "gelf_criteria_options",
       "ldh_upper_limit_normal",
@@ -475,7 +477,6 @@
     "myeloma": [
       "bone_lesions",
       "clonal_plasma_cells",
-      "cytogenetic_markers",
       "involved_uninvolved_ratio",
       "kappa_flc",
       "kappa_lambda_ratio",
@@ -486,7 +487,6 @@
       "monoclonal_protein_urine",
       "mrd_status",
       "sct_date",
-      "sct_date_precision",
       "stage"
     ],
     "cll": [

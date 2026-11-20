@@ -52,6 +52,15 @@ describe('DiseaseTab provisional indicators', () => {
     expect(screen.getByTestId('provisional-gelf_criteria_options')).toBeInTheDocument();
   });
 
+  it('does not tell a patient to enter the calculated FLIPI score themselves', () => {
+    renderTab('lymphoma', { flipi_score: 66 }, true);
+
+    const title = screen.getByTestId('provisional-flipi_score').title;
+    expect(title).toMatch(/Not yet confirmed/);
+    expect(title).toMatch(/choosing the risk factors below/);
+    expect(title).not.toMatch(/enter it yourself/);
+  });
+
   it('words the indicator for a patient as not yet confirmed', () => {
     renderTab('lymphoma', { gelf_criteria_options: 80 }, true);
 

@@ -170,7 +170,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
           <div className="sm:col-span-2">
             {/* The score is what the control shows while the factor checklist is empty. The
                 checklist (flipi_score_options) is not a column that holds a proposal. */}
-            <MarkedControl name="flipi_score">
+            <MarkedControl name="flipi_score" via="the risk factors below">
               <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
             </MarkedControl>
           </div>

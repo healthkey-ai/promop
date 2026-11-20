@@ -67,3 +67,14 @@ describe('MarkedControl', () => {
     expect(screen.getByTestId('provisional-gelf_criteria_options').title).toMatch(/Not yet confirmed/);
   });
 });
+
+describe('ProvisionalBadge via', () => {
+  it('names what to edit when the value is calculated from other inputs', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { flipi_score: 66 }, patientMode: false }}>
+        <ProvisionalBadge name="flipi_score" via="the risk factors below" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByTestId('provisional-flipi_score').title).toMatch(/Edit the risk factors below to confirm/);
+  });
+});

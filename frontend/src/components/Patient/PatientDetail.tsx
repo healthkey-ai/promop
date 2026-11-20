@@ -807,10 +807,12 @@ export default function PatientDetail({
   );
   // The proposals still on the page that stop the patient confirming (#2761).
   const attestationBlockerCount = useMemo(
-    // With no write descriptor (the fetch failed) the page cannot tell which marks the
-    // patient can clear, so it offers the button and the server's 409 decides.
-    () => (patientMode && !writableFields.error
-      ? attestationBlockers(editedInfo, writableFields.loading ? null : writableFields.descriptors).length
+    // With no write descriptor (still loading, or the fetch failed) the page cannot tell
+    // which marks the patient can clear: a calculated field would be counted that the
+    // server does not count, and the banner would flash a number that then falls. So it
+    // counts none, offers the button, and the server's 409 decides.
+    () => (patientMode && !writableFields.error && !writableFields.loading
+      ? attestationBlockers(editedInfo, writableFields.descriptors).length
       : 0),
     [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors],
   );

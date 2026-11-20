@@ -6,6 +6,8 @@ page reads from the disease text, so a field of that section blocks only on a re
 with that disease; the treating institution picker and the GELF checklist render
 outside `Field` but are named in the tabs like any other field, so they block too.
 """
+from datetime import date
+
 import pytest
 from rest_framework.test import APIClient
 
@@ -147,5 +149,35 @@ def test_with_the_switch_off_the_disease_tab_blocks_nothing(settings):
     client, person = make_patient('Follicular Lymphoma')
     propose(person, b_symptom_fever=(True, 80))
     settings.PROVISIONAL_DATA_ENABLED = False
+
+    assert client.post(CONFIRM).status_code == 200
+
+
+def test_a_proposed_date_with_its_precision_blocks_through_the_date_alone():
+    # The sweep proposes the SCT date and its precision together. The precision picker
+    # shows no indicator and cannot lift a block, so only the date is counted.
+    client, person = make_patient('Multiple Myeloma')
+    propose(person, sct_date=(date(2020, 5, 12), 80), sct_date_precision=('day', 80))
+
+    assert refusal(client) == (409, ['sct_date'])
+
+
+def test_entering_the_date_lifts_the_block_and_leaves_the_precision_alone():
+    client, person = make_patient('Multiple Myeloma')
+    propose(person, sct_date=(date(2020, 5, 12), 80), sct_date_precision=('day', 80))
+    assert client.post(CONFIRM).status_code == 409
+
+    patch = client.patch('/api/patient-info/me/', {'sct_date': '2020-05-12'}, format='json')
+
+    assert patch.status_code == 200
+    shown = client.get('/api/patient-info/me/').json()['patient_info']
+    assert 'sct_date' not in shown['provisional_fields']
+    assert shown['sct_date'] == '2020-05-12'                 # the day was not rewritten
+    assert client.post(CONFIRM).status_code == 200
+
+
+def test_a_proposed_precision_with_no_proposed_date_does_not_block():
+    client, person = make_patient('Follicular Lymphoma')
+    propose(person, dlbcl_transformation_date_precision=('month', 70))
 
     assert client.post(CONFIRM).status_code == 200

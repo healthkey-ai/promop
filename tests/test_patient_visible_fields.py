@@ -133,3 +133,47 @@ def test_the_pages_own_rule_is_the_generated_one():
     source = (visible.ROOT / 'frontend/src/components/Patient/PatientDetail.tsx').read_text()
     assert re.search(r'getDiseaseType = \(\) => diseaseTypeOf\(', source)
     assert 'd.includes("mantle")' not in source
+
+
+def test_the_disease_tab_switch_renders_each_section_for_the_type_the_map_says():
+    # Swapping two `case` lines would put a section's fields on the wrong disease's list.
+    source = (visible.ROOT / visible.TAB_DIR / visible.DISEASE_TAB).read_text()
+    assert visible.switch_sections(source) == {
+        kind: set(names) for kind, names in visible.DISEASE_SECTIONS.items()}
+    assert _stored()['disease_sections'] == {
+        kind: list(names) for kind, names in visible.DISEASE_SECTIONS.items()}
+
+
+def test_the_switch_check_notices_swapped_cases():
+    source = (visible.ROOT / visible.TAB_DIR / visible.DISEASE_TAB).read_text()
+    swapped = source.replace('<CLLSection', '<TMPSection').replace(
+        '<MCLSection', '<CLLSection').replace('<TMPSection', '<MCLSection')
+    assert visible.switch_sections(swapped) != visible.switch_sections(source)
+
+
+def test_a_date_precision_follows_its_date_and_never_blocks_alone():
+    # The precision picker is neither a Field nor a MarkedControl: it shows no indicator,
+    # and re-picking a precision to clear a mark would rewrite a proposed date.
+    data = _stored()
+    columns = visible.scalar_confidence_columns()
+    assert visible.is_precision_companion('sct_date_precision', columns)
+    assert visible.is_precision_companion('dlbcl_transformation_date_precision', columns)
+    assert not visible.is_precision_companion('sct_date', columns)
+    assert not visible.is_precision_companion('some_other_precision', columns)   # no such date
+    for listed in (data['fields'], *data['disease_fields'].values()):
+        assert not [name for name in listed if visible.is_precision_companion(name, columns)]
+    assert 'sct_date' in data['disease_fields']['myeloma']
+    assert 'dlbcl_transformation_date' in data['disease_fields']['lymphoma']
+
+
+def test_a_name_a_tab_shows_only_as_text_is_not_listed():
+    data = _stored()
+    assert 'cytogenetic_markers' in data['not_editable']
+    assert 'cytogenetic_markers' not in data['disease_fields']['myeloma']
+
+
+def test_the_scan_ignores_names_in_comments_and_keeps_urls():
+    columns = frozenset({'hemoglobin_g_dl', 'sodium_meq_l'})
+    assert visible._named('{/* hemoglobin_g_dl */} // "sodium_meq_l"\n', columns) == set()
+    assert visible._named(
+        '<a href="https://x.test/">a</a> name="hemoglobin_g_dl" // note', columns) == {'hemoglobin_g_dl'}

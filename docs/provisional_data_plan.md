@@ -928,7 +928,17 @@ edit is still marked Provisional:
   `gelf_criteria_options` and, for the score the FLIPI control displays, `flipi_score`),
   and the same quoted name puts them in the lymphoma list: GELF blocks; the FLIPI score is
   calculated from the factor checklist, so it has no write path of its own and, as any
-  such field, does not. With the switch off, or no proposal on display, nothing blocks.
+  such field, does not (its indicator says to choose the risk factors, not to enter the
+  score). A date's **precision** column (`sct_date_precision`,
+  `dlbcl_transformation_date_precision`, any `<date>_precision`) follows its date: the pass
+  proposes it beside the date, but its picker is neither a `Field` nor a `MarkedControl`,
+  shows no indicator and, re-picked to clear a mark, would rewrite a proposed day, so
+  only the date blocks and entering the date lifts the block. A name a tab shows only as
+  text (the legacy cytogenetic summary) is also left out (`not_editable`), and the scan
+  ignores names inside comments. A test ties the `DiseaseTab` switch to the section map.
+  Until the write descriptor has loaded the page counts nothing (it would count a
+  calculated field the server does not) and offers the button; the server's 409 decides.
+  With the switch off, or no proposal on display, nothing blocks.
 - **The endpoint.** The record is locked first (as derivation does), so a sweep cannot
   add a proposal between the check and the save. 409 with
   `{detail, provisional_fields: [names], count}` and nothing stored on the record or

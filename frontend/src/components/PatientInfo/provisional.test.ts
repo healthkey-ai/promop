@@ -146,7 +146,7 @@ describe('attestationBlockers with the disease tab and the checklists (#2761)', 
     expect(attestationBlockers({ provisional_fields: { b_symptom_fever: 75 } }, null)).toEqual([]);
   });
 
-  it('follows the disease the page shows, a proposed one included', () => {
+  it('follows the disease of the record it is given', () => {
     const marks = { b_symptom_fever: 75 };
     expect(attestationBlockers({ disease: 'Follicular Lymphoma', provisional_fields: marks }, null)).toEqual(['b_symptom_fever']);
     expect(attestationBlockers({ disease: 'Breast Cancer', provisional_fields: marks }, null)).toEqual([]);
