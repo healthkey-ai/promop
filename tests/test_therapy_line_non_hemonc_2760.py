@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from omop_core.models import Concept
+from omop_core.models import Concept, ConceptRelationship, Relationship
 from omop_core.services.mappings import (
     CONCEPT_DRUG_EXPOSURE_FIELD,
     CONCEPT_EHR_TYPE,
@@ -42,6 +42,8 @@ REGIMEN_ID = 35806260           # a HemOnc Regimen
 CISPLATIN_SNOMED = 4301188      # SNOMED Substance, non-standard (catalog row 257)
 G_CSF_CLASS = 35807374          # HemOnc Component Class, domain Drug
 LENALIDOMIDE_RXNORM = 19115    # a second RxNorm ingredient (test-local id)
+CISPLATIN_RXNORM = 1397599      # RxNorm ingredient cisplatin 'Maps to' (catalog row 257's component)
+BRAND_RXNORM = 19023250         # an RxNorm Brand Name, non-standard, maps to nothing here
 
 
 def _concept(concept_id, name, vocabulary, domain, concept_class, **extra):
@@ -73,6 +75,15 @@ def vocab():
         'g_csf': _concept(G_CSF_CLASS, 'G-CSF', 'HemOnc', 'Drug', 'Component Class', standard_concept='C'),
         'lenalidomide': _concept(LENALIDOMIDE_RXNORM, 'lenalidomide', 'RxNorm', 'Drug', 'Ingredient'),
     }
+
+
+def _maps_to(c1, c2, **extra):
+    Relationship.objects.get_or_create(relationship_id='Maps to', defaults=dict(
+        relationship_name='Maps to', is_hierarchical=0, defines_ancestry=0,
+        reverse_relationship_id='Mapped from', relationship_concept_id=0))
+    return ConceptRelationship.objects.create(
+        concept_1_id=c1, concept_2_id=c2, relationship_id='Maps to',
+        valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31), **extra)
 
 
 def _write_line(person, concept_id, *, line=1, name='line', start=date(2024, 1, 10)):
@@ -117,12 +128,36 @@ def test_second_line_carries_its_drug_id(vocab):
 
 def test_a_non_standard_vocabulary_drug_is_still_a_therapy(vocab):
     """The catalog gives cisplatin a non-standard SNOMED substance as its id:
-    being non-standard does not make a real concept a placeholder. Only a
-    standard drug is listed as a component, so it lists none of its own."""
+    being non-standard does not make a real concept a placeholder. Its drug is
+    the standard concept it maps to, not the substance itself."""
+    _concept(CISPLATIN_RXNORM, 'cisplatin', 'RxNorm', 'Drug', 'Ingredient')
+    _maps_to(CISPLATIN_SNOMED, CISPLATIN_RXNORM)
+
     record = _write_line(PersonFactory(), CISPLATIN_SNOMED, name='cisplatin')
 
     assert record.first_line_therapy_id == CISPLATIN_SNOMED
-    assert CISPLATIN_SNOMED not in (record.first_line_component_ids or [])
+    assert CISPLATIN_RXNORM in record.first_line_component_ids
+    assert CISPLATIN_RXNORM in record.therapy_component_ids
+    assert CISPLATIN_SNOMED not in record.first_line_component_ids
+
+
+def test_a_retired_mapping_names_no_drug(vocab):
+    _concept(CISPLATIN_RXNORM, 'cisplatin', 'RxNorm', 'Drug', 'Ingredient')
+    _maps_to(CISPLATIN_SNOMED, CISPLATIN_RXNORM, invalid_reason='D')
+
+    record = _write_line(PersonFactory(), CISPLATIN_SNOMED, name='cisplatin')
+
+    assert record.first_line_therapy_id == CISPLATIN_SNOMED
+    assert CISPLATIN_RXNORM not in (record.first_line_component_ids or [])
+
+
+def test_a_drug_that_maps_to_nothing_keeps_its_id_and_names_no_drug(vocab):
+    _concept(BRAND_RXNORM, 'Advil', 'RxNorm', 'Drug', 'Brand Name', standard_concept=None)
+
+    record = _write_line(PersonFactory(), BRAND_RXNORM, name='Advil')
+
+    assert record.first_line_therapy_id == BRAND_RXNORM
+    assert not record.first_line_component_ids
 
 
 def test_later_line_carries_its_procedure_id(vocab):
