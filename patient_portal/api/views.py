@@ -262,7 +262,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # The member's own edit to a record whose permission they withdrew: their
     # name is their account's, everything else is the record's. Only a real
     # change is refused: an auto-save echoing what was shown changes nothing.
-    if patch_data:
+    if patch_data and not getattr(actor, 'is_staff', False):  # staff act on the care relationship
         from patient_portal.consent import RECORD_OFF, record_permitted
         from patient_portal.services import patient_person_for
         own = patient_person_for(actor)
@@ -756,6 +756,23 @@ def _rendered_patient_name(person):
 _UNSHOWN = object()
 
 
+def _same_value(shown, sent) -> bool:
+    """``sent`` equals what the serializer shows, however it is spelled: a
+    decimal shown as "7.50" and sent back as 7.5 is the same value."""
+    if shown is _UNSHOWN:
+        return False
+    if shown == sent:
+        return True
+    if isinstance(shown, (str, int, float)) and isinstance(sent, (str, int, float)) \
+            and not isinstance(shown, bool) and not isinstance(sent, bool):
+        try:
+            from decimal import Decimal
+            return Decimal(str(shown)) == Decimal(str(sent))
+        except Exception:  # noqa: BLE001 - not numbers: they differ
+            return False
+    return False
+
+
 def _patch_changes_record(patient_info, patch_data, actor) -> bool:
     """Whether ``patch_data`` asks for anything the record does not already
     show. The editor auto-saves the whole GET representation, so a field
@@ -766,7 +783,7 @@ def _patch_changes_record(patient_info, patch_data, actor) -> bool:
     shown = PatientRecordSerializer(patient_info).data
     staff = getattr(actor, 'is_staff', False)
     return any(
-        shown.get(field, _UNSHOWN) != value
+        not _same_value(shown.get(field, _UNSHOWN), value)
         for field, value in patch_data.items()
         if staff or field not in PatientRecordViewSet._STAFF_ONLY_FIELDS
     )

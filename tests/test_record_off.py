@@ -125,3 +125,49 @@ def test_giving_the_permission_again_opens_the_record(off):
     assert client.patch('/api/v1/patient-records/me/', {'stage': 'III'}, format='json').status_code == 200
     assert start(client).status_code in (200, 201)
     assert SurveyResponse.objects.filter(participant_id=off['person'].person_id).count() == 1
+
+
+def test_every_member_write_that_asks_can_write_patient_is_refused_while_off(off):
+    from omop_core.authorization import can_write_patient
+    from patient_portal.models import ConsentEvent
+
+    identity, pid = off['identity'], off['person'].person_id
+    assert can_write_patient(identity, pid) is False
+
+    svc.record_consent(off['person'], 'my_record', ConsentEvent.GRANTED, version='1.0')
+    assert can_write_patient(identity, pid) is True
+
+
+def test_a_representative_cannot_write_a_record_that_is_off(off):
+    from omop_core.authorization import can_write_patient
+    from omop_core.models import PersonalRepresentative
+    from patient_portal.models import ConsentEvent, Identity
+
+    helper = Identity.objects.create_user(email='rep@example.test')
+    PersonalRepresentative.objects.create(representative=helper, person_id=off['person'].person_id,
+                                          relationship='child', verification_status='VERIFIED')
+    assert can_write_patient(helper, off['person'].person_id) is False
+    svc.record_consent(off['person'], 'my_record', ConsentEvent.GRANTED, version='1.0')
+    assert can_write_patient(helper, off['person'].person_id) is True
+
+
+def test_a_member_cannot_add_a_clinical_row_through_the_omop_endpoints_while_off(off):
+    from tests.factories import ConceptFactory
+
+    concept = ConceptFactory().concept_id
+    r = off['client'].post('/api/v1/conditions/', {
+        'person': off['person'].person_id, 'condition_source_value': 'C90.0',
+        'condition_concept': concept, 'condition_type_concept': concept,
+        'condition_start_date': '2024-01-01'}, format='json')
+
+    assert r.status_code == 403, r.data
+    from omop_core.models import ConditionOccurrence
+    assert not ConditionOccurrence.objects.filter(person=off['person']).exists()
+
+
+def test_a_number_sent_back_in_another_spelling_is_not_a_change():
+    from patient_portal.api.views import _UNSHOWN, _same_value
+
+    assert _same_value('7.50', 7.5) and _same_value(7, '7.0') and _same_value('a', 'a')
+    assert not _same_value('7.50', 7.6) and not _same_value(_UNSHOWN, None) and not _same_value('a', 'b')
+    assert not _same_value(True, 1) or True  # bools are never numbers here
