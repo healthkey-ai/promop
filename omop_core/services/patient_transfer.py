@@ -78,6 +78,7 @@ from omop_oncology.models import (
     Histology,
     StemTable,
     TherapyLineAssertion,
+    TherapyLineDetail,
     TherapyLineExposure,
 )
 from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientStatement, PatientUser
@@ -150,6 +151,8 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     # copy corrects the copy's own facts rather than leaving them unowned.
     PatientTable(TherapyLineExposure, 'episode_id__in', parent=Episode),
     PatientTable(TherapyLineAssertion, 'episode_id__in', parent=Episode),
+    # What the patient said about the line (precisions, details): copied with it.
+    PatientTable(TherapyLineDetail, 'episode_id__in', parent=Episode),
     PatientTable(CancerModifier, 'person_id'),
     PatientTable(StemTable, 'person_id'),
     PatientTable(Histology, 'person_id'),
