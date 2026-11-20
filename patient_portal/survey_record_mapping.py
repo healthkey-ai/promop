@@ -446,6 +446,11 @@ def apply_response(response) -> Applied | None:
     if account is None:
         logger.info('survey_record_mapping: response %s has no patient account to write as', response.pk)
         return None
+    from patient_portal.consent import record_permitted
+    if not record_permitted(person):
+        logger.info('survey_record_mapping: response %s: the record is off (permission withdrawn); not written',
+                    response.pk)
+        return None
 
     answers = {a.question_key: a.value for a in response.answers.all()}
     submitted_on = response.submitted_at.date()

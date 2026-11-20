@@ -259,6 +259,14 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # the provider UI PATCHes, and leaving the key in the body would 405 the
     # request below as a non-projection-owned field.
     patient_name, patch_data = _pop_patient_name(data)
+    # The member's own edit to a record whose permission they withdrew: their
+    # name is their account's, everything else is the record's.
+    if patch_data:
+        from patient_portal.consent import RECORD_OFF, record_permitted
+        from patient_portal.services import patient_person_for
+        own = patient_person_for(actor)
+        if own is not None and own.person_id == person.person_id and not record_permitted(person):
+            raise PermissionDenied(RECORD_OFF)
     from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
     patch_data = _drop_proposed_list_items(patient_info, canonicalize_fields(patch_data))
     priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
@@ -4921,6 +4929,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': 'No patient record linked to your account'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        from patient_portal.consent import RECORD_OFF, record_permitted
+        if not record_permitted(person):
+            return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
 
         # Parse the file
         try:

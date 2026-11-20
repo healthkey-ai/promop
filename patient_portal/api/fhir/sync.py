@@ -1365,6 +1365,13 @@ class FhirSyncView(APIView):
         if person is None:
             return Response({'detail': 'Person not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+        if self.self_service_only:
+            # The member's own data, while the permission their record depends
+            # on is withdrawn: nothing they send is kept (consent.record_permitted).
+            from patient_portal.consent import RECORD_OFF, record_permitted
+            if not record_permitted(person):
+                return Response({'detail': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
+
         org = get_request_org(request)
         if not is_service_token(request) and org is None:
             if not can_write_patient(request.user, person_id):
