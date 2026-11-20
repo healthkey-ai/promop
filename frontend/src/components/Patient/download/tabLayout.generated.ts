@@ -1058,11 +1058,11 @@ export const TAB_LAYOUT: TabLayout = {
       "component": "BehaviorTab",
       "fields": [
         [
-          "Mental Health Disorders",
+          "No Mental Health Disorders",
           "no_mental_health_disorder_status"
         ],
         [
-          "Non-prescription Recreational Drug Use",
+          "No Non-prescription Recreational Drug Use",
           "no_substance_use_status"
         ],
         [
@@ -1076,7 +1076,7 @@ export const TAB_LAYOUT: TabLayout = {
       "component": "BehaviorTab",
       "fields": [
         [
-          "Geographic/Occupational/Environmental/Infectious Disease Exposure Risk",
+          "No Geographic/Occupational/Environmental/Infectious Disease Exposure Risk",
           "no_geographic_exposure_risk"
         ],
         [
