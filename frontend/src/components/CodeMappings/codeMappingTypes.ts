@@ -179,6 +179,8 @@ export interface Reference {
     off: boolean;
     min: number;
     max: number;
+    /** The most the Anthropic ranker can score; below every threshold, so it alone approves nothing. */
+    anthropic_max_percent?: number;
   };
 }
 

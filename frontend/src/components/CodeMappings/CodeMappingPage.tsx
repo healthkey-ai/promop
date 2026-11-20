@@ -519,9 +519,28 @@ export default function CodeMappingPage() {
   // Set once the curator touches either control, so a reference that arrives after
   // they started typing cannot put the saved value back over theirs.
   const autoApproveTouched = useRef(false);
-  const validAutoApprove = !autoApprove?.allowed || autoApproveOff || (
+  // Once the server has answered it decides who is offered the control; until then an
+  // approver by role sees it (with the saved value still loading), so what they type
+  // is theirs and the reference arriving later does not put the saved value over it.
+  const showAutoApprove = referenceReady ? !!autoApprove?.allowed : canApprove;
+  const autoApproveMin = autoApprove?.min ?? 90;
+  const autoApproveMax = autoApprove?.max ?? 100;
+  const validAutoApprove = !showAutoApprove || autoApproveOff || (
     autoApproveThreshold !== "" && Number.isInteger(autoApproveThreshold)
-    && autoApproveThreshold >= autoApprove.min && autoApproveThreshold <= autoApprove.max);
+    && autoApproveThreshold >= autoApproveMin && autoApproveThreshold <= autoApproveMax);
+  // The line under the Suggest controls, always shown to an approver: what this run will do.
+  const autoApproveLine = !referenceReady
+    ? "Loading your auto-approval setting…"
+    : !validAutoApprove
+      ? `Choose an auto-approval confidence between ${autoApproveMin} and ${autoApproveMax}, or turn it off.`
+      : !autoApprove?.available
+        ? `Auto-approval is unavailable here: ${autoApprove?.unavailable_reason ?? ""}`
+        : autoApproveOff
+          ? "Auto-approval off: every suggestion stays proposed for review."
+          : rankingModel === "anthropic" && (autoApprove.anthropic_max_percent ?? 85) < Number(autoApproveThreshold)
+            ? `Auto-approval is on at ${autoApproveThreshold}%, but the Anthropic ranker scores at most `
+              + `${autoApprove.anthropic_max_percent ?? 85}%, so this run will approve nothing. Choose Jev or Both to use it.`
+            : `Auto-approves at ${autoApproveThreshold}% or above and re-points patient data.`;
   const [inlineMappingId, setInlineMappingId] = useState<number | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
@@ -591,7 +610,7 @@ export default function CodeMappingPage() {
           setSuggestionLimit((current) => current === "" ? current : Math.min(current, data?.suggest_max_per_run || 100));
           if (data?.suggest_auto_approve?.allowed && !autoApproveTouched.current) {
             setAutoApproveThreshold(data.suggest_auto_approve.threshold);
-            setAutoApproveOff(data.suggest_auto_approve.off);
+            setAutoApproveOff(!!data.suggest_auto_approve.off);
           }
       }).catch(() => {
         setReferenceError("Could not load mapping options. Refresh to retry.");
@@ -1048,7 +1067,7 @@ export default function CodeMappingPage() {
       return;
     }
     if (!validAutoApprove) {
-      setError(`Choose an auto-approval confidence between ${autoApprove?.min} and ${autoApprove?.max}.`);
+      setError(`Choose an auto-approval confidence between ${autoApproveMin} and ${autoApproveMax}.`);
       return;
     }
     // Replace is only valid when a specific vocabulary is selected (the backend
@@ -1084,7 +1103,7 @@ export default function CodeMappingPage() {
           replace: effectiveReplace,
           include_activity: true,
           // Only an approver is offered it; the server ignores it for anyone else.
-          ...(autoApprove?.allowed
+          ...(showAutoApprove
             ? { auto_approve_threshold: autoApproveOff ? "off" : autoApproveThreshold }
             : {}),
         },
@@ -1742,8 +1761,10 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting || !hasRetrieval || !validSuggestionLimit || !validAutoApprove || overallTab}
-            title={overallTab ? "Select a specific vocabulary tab to run suggestions." : "Propose destinations for queued source codes on this tab."}
+            disabled={suggesting || !referenceReady || !hasRetrieval || !validSuggestionLimit || !validAutoApprove || overallTab}
+            title={overallTab ? "Select a specific vocabulary tab to run suggestions."
+              : !referenceReady ? "Loading mapping options…"
+              : "Propose destinations for queued source codes on this tab."}
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles size={13} />
@@ -1798,21 +1819,22 @@ export default function CodeMappingPage() {
               <option value="both">Both</option>
             </select>
           </label>
-          {autoApprove?.allowed && (
+          {showAutoApprove && (
             <label
               className="inline-flex items-center gap-1 text-xs text-slate-600"
               title={
                 `Suggestions the ranker is at least this confident in are approved as they are written; `
-                + `lower ones stay proposed for review. ${autoApprove.max} approves only certain matches. `
-                + `The lowest you can set is ${autoApprove.min}. Your choice is remembered for your next run.`
+                + `lower ones stay proposed for review. ${autoApproveMax} approves only a score of exactly 1.0. `
+                + `The lowest you can set is ${autoApproveMin}. Your choice is remembered for your next run.`
               }
             >
               Auto-approve at
               <input
                 aria-label="Auto-approve confidence"
+                aria-describedby="auto-approve-warning"
                 type="number"
-                min={autoApprove.min}
-                max={autoApprove.max}
+                min={autoApproveMin}
+                max={autoApproveMax}
                 value={autoApproveThreshold}
                 disabled={autoApproveOff}
                 onChange={(event) => {
@@ -1827,7 +1849,7 @@ export default function CodeMappingPage() {
               %
             </label>
           )}
-          {autoApprove?.allowed && (
+          {showAutoApprove && (
             <label className="inline-flex items-center gap-1 text-xs text-slate-600"
               title="Turn auto-approval off: every suggestion stays proposed for review. Remembered for your next run.">
               <input
@@ -1843,23 +1865,20 @@ export default function CodeMappingPage() {
         </div>
         {/* Always visible to an approver, not a tooltip: an approval re-points patient
             data, so the state this run starts in is stated where Suggest is clicked. */}
-        {autoApprove?.allowed && (
+        {/* Not a live region: it changes on every keystroke in the number box, and announcing
+            each one would be noise. The number box points at it with aria-describedby. */}
+        {showAutoApprove && (
           <p
-            role="status"
+            id="auto-approve-warning"
             data-testid="auto-approve-warning"
             className={
               "mb-2 text-xs "
-              + (!validAutoApprove ? "text-rose-700"
-                : autoApprove.available && !autoApproveOff ? "font-medium text-amber-800" : "text-slate-600")
+              + (referenceReady && !validAutoApprove ? "text-rose-700"
+                : referenceReady && autoApprove?.available && !autoApproveOff ? "font-medium text-amber-800"
+                  : "text-slate-600")
             }
           >
-            {!validAutoApprove
-              ? `Choose an auto-approval confidence between ${autoApprove.min} and ${autoApprove.max}, or turn it off.`
-              : !autoApprove.available
-                ? `Auto-approval is unavailable here: ${autoApprove.unavailable_reason}`
-                : autoApproveOff
-                  ? "Auto-approval off: every suggestion stays proposed for review."
-                  : `Auto-approves at ${autoApproveThreshold}% or above and re-points patient data.`}
+            {autoApproveLine}
           </p>
         )}
 

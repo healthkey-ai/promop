@@ -1524,7 +1524,9 @@ them and `suggest_jobs.execute_run` drives them.
   task validates the threshold again (a tampered or corrupt value approves
   nothing and is logged without data), re-checks `run.created_by`, and
   `approve()` re-reads the account and re-checks it for every row, so one that
-  loses the right or is deactivated mid-run approves nothing more.
+  loses the right or is deactivated mid-run approves nothing more. **A later
+  "off" wins**: a run queued at 95 before the curator switched off approves
+  nothing, and neither does the rest of a run they switch off partway.
 - **Only where a worker does the re-point.** An approval queues a re-point of
   every stored row of the code, which under the inline dispatcher (no
   `CELERY_BROKER_URL`) would run inside the request, so auto-approval is
@@ -1536,7 +1538,10 @@ them and `suggest_jobs.execute_run` drives them.
   `auto_approve_state`, `auto_approve_threshold`, `auto_approve_reason`,
   `auto_approved` and `auto_approve_errors`, and the counts are written as each
   row is approved, so a run that fails, is killed or is redelivered still audits
-  its approvals.
+  its approvals (a redelivered task carries the earlier attempt's counts on
+  rather than resetting them). The Suggest controls wait for the saved setting
+  to load before a run can start, and say when the chosen ranker cannot reach
+  the threshold (`reference.suggest_auto_approve.anthropic_max_percent`).
 - **It is a curator's approval, through the same path.** `approve()` calls
   `_upsert_source_code_mapping(..., {'status': 'approved'}, record_decision=False)`,
   so the status, reviewer (the person whose run it is), the re-point of stored

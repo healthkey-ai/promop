@@ -373,7 +373,7 @@ def test_the_threshold_is_sticky_between_runs(staff):
     with use_dispatcher(FakeDispatcher()):      # a deployment with a worker queue
         reference = client.get(REFERENCE).data['suggest_auto_approve']
     assert reference == {'allowed': True, 'available': True, 'unavailable_reason': '', 'threshold': 92,
-                         'off': False, 'min': 90, 'max': 100}
+                         'off': False, 'min': 90, 'max': 100, 'anthropic_max_percent': 85}
     # It is this curator's, not the deployment's.
     other = Identity.objects.create_user(email='other@example.test', is_staff=True)
     assert client_for(other).get(REFERENCE).data['suggest_auto_approve']['threshold'] == 100
@@ -575,6 +575,60 @@ def test_a_tampered_threshold_in_the_params_approves_nothing(monkeypatch, pick, 
     assert run_row.selection['auto_approve_reason'] == 'invalid'
     assert run_row.selection['auto_approved'] == 0
     assert not SourceCodeConceptMapping.objects.filter(status='approved').exists()
+
+
+def test_turning_it_off_after_a_run_was_queued_wins(monkeypatch, pick, staff):
+    """Queued at 95, switched off before the worker got to it: nothing is approved."""
+    queue_row()
+    rank_as(monkeypatch, pick, 1.0)
+    with use_dispatcher(FakeDispatcher()) as dispatcher:
+        client_for(staff).post(
+            SUGGEST, {'source_vocabulary_id': 'ICD10', 'auto_approve_threshold': 95, 'strategies': ['umls']},
+            format='json')
+        client_for(staff).post(
+            SUGGEST, {'source_vocabulary_id': 'ICD10', 'auto_approve_threshold': 'off'}, format='json')
+    [(run_id, params), _later] = dispatcher.calls
+    assert params['auto_approve_threshold'] == 95
+
+    with use_dispatcher(FakeDispatcher()):
+        suggest_jobs.execute_run(run_id, params)
+
+    run_row = SuggestRun.objects.get(pk=run_id)
+    assert run_row.state == SuggestRun.SUCCESS, run_row.error
+    assert (run_row.selection['auto_approve_state'], run_row.selection['auto_approved']) == ('off', 0)
+    assert not SourceCodeConceptMapping.objects.filter(status='approved').exists()
+
+
+def test_turning_it_off_partway_through_a_run_stops_the_approvals(monkeypatch, pick, staff):
+    first = queue_row(occurrence_count=9)
+    second = queue_row(source_code='C90.1')
+    rank_as(monkeypatch, pick, 1.0)
+    outcomes = []
+
+    def switch_off(outcome):
+        outcomes.append(outcome)
+        Identity.objects.filter(pk=staff.pk).update(suggest_auto_approve_off=True)
+
+    run(staff, 100, on_auto_approve=switch_off)
+
+    first.refresh_from_db(), second.refresh_from_db()
+    assert (first.status, second.status) == ('approved', 'proposed')
+    assert outcomes == ['approved']
+
+
+def test_a_redelivered_task_keeps_the_approvals_the_first_attempt_made(monkeypatch, pick, staff):
+    queue_row()
+    rank_as(monkeypatch, pick, 1.0)
+    run_row = SuggestRun.objects.create(
+        source_vocabulary_id='ICD10', created_by=staff, state=SuggestRun.RUNNING,
+        selection={'auto_approved': 2, 'auto_approve_errors': 1})
+
+    with use_dispatcher(FakeDispatcher()):
+        suggest_jobs.execute_run(str(run_row.pk), params_for(auto_approve_threshold=100, auto_approve_state='on'))
+
+    run_row.refresh_from_db()
+    assert run_row.selection['auto_approved'] == 3
+    assert run_row.selection['auto_approve_errors'] == 1
 
 
 def test_a_queued_run_on_a_deployment_that_lost_its_worker_approves_nothing(monkeypatch, pick, staff):

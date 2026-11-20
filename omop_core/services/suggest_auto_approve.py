@@ -126,7 +126,16 @@ def reference_for(user) -> dict:
         'off': is_off(user),
         'min': MIN_THRESHOLD,
         'max': MAX_THRESHOLD,
+        # The most the Anthropic ranker can score (its "high" label): below every threshold,
+        # so a run ranked by it alone approves nothing, and the controls say so.
+        'anthropic_max_percent': _anthropic_max_percent(),
     }
+
+
+def _anthropic_max_percent() -> int:
+    from omop_core.mapping.suggestions import ANTHROPIC_CONFIDENCE_MAP
+
+    return round(max(ANTHROPIC_CONFIDENCE_MAP.values()) * 100)
 
 
 def remember(user, value) -> None:
@@ -223,8 +232,10 @@ def approve(mapping, user, threshold, *, note_written=False) -> str:
 
     # Re-checked for every row: a run is long, and an account that lost the right, or was
     # deactivated, since it started must not approve the rest.
+    # A later "off" wins over a run that was queued before it: turning it off is the
+    # curator's last word, even for work already started.
     fresh = get_user_model().objects.filter(pk=getattr(user, 'pk', None), is_active=True).first()
-    if fresh is None or not eligible(fresh):
+    if fresh is None or is_off(fresh) or not eligible(fresh):
         return 'declined'
     try:
         with transaction.atomic():
@@ -244,7 +255,9 @@ def approve(mapping, user, threshold, *, note_written=False) -> str:
                 fields.append('notes')
             mapping.save(update_fields=fields)
     except APIException as exc:
-        logger.info('Auto-approval of mapping %s declined: %s', mapping.pk, exc.detail)
+        # The kind and code only: the detail can name another curator or a source code.
+        logger.info('Auto-approval of mapping %s declined (%s, %s).',
+                    mapping.pk, type(exc).__name__, getattr(exc, 'default_code', ''))
         mapping.refresh_from_db()
         return 'declined'
     except Exception as exc:  # noqa: BLE001 - one row must not fail the run

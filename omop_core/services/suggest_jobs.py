@@ -114,11 +114,17 @@ def _run_auto_approval(run, params):
         return None, None, 'off', ''
     if params.get('dry_run'):
         return None, None, 'disabled', suggest_auto_approve.REASON_DRY_RUN
-    if run.created_by is None or not suggest_auto_approve.eligible(run.created_by):
+    # Read again, not from an object loaded when the run was queued: a curator who has
+    # since turned auto-approval off (or lost the right) must win over what they asked for then.
+    from django.contrib.auth import get_user_model
+    starter = get_user_model().objects.filter(pk=run.created_by_id, is_active=True).first()
+    if starter is None or not suggest_auto_approve.eligible(starter):
         return None, None, 'disabled', suggest_auto_approve.REASON_NOT_APPROVER
+    if suggest_auto_approve.is_off(starter):
+        return None, None, 'off', ''
     if not suggest_auto_approve.available():
         return None, None, 'disabled', suggest_auto_approve.REASON_NO_WORKER
-    return threshold, run.created_by, 'on', ''
+    return threshold, starter, 'on', ''
 
 
 class SuggestDispatcher(Protocol):
@@ -305,6 +311,14 @@ def execute_run(run_id: str, params: dict) -> None:
     selection = selection_summary(params)
     selection.update(auto_approve_state=approve_state, auto_approve_threshold=threshold,
                      auto_approve_reason=approve_reason)
+    # A redelivered task (its worker was lost partway) starts again on a row that already
+    # holds what the first attempt approved; carry those counts on rather than reset them
+    # to zero, since the rows it approved are not approved a second time.
+    previous = run.selection if isinstance(run.selection, dict) else {}
+    for key in ('auto_approved', 'auto_approve_errors'):
+        count = previous.get(key)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            selection[key] = count
     SuggestRun.objects.filter(pk=run.pk).update(
         state=SuggestRun.RUNNING, model_version=SUGGESTION_MODEL_VERSION,
         selection=selection,
