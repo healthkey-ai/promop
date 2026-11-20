@@ -854,13 +854,16 @@ def attestation_blockers(record) -> list[str]:
 
     A patient's "Confirm my record" says what they saw is accurate. While the
     page lays a proposal over a field (``overlay``), part of what they see is
-    unapproved, so the attestation is refused until each marked field is
-    confirmed, which editing it does. The answer is the scalar fields the
-    overlay marks that a patient can edit: the list fields
-    (``PROVISIONAL_JSON_FIELDS``) are left out, because no patient tab shows or
-    edits them, and so is a field with no write path of its own (a calculated
-    or mirrored one), which clears with the field it follows. A field the write
-    descriptor does not know blocks, since nothing says it is not editable.
+    unapproved, so the attestation is refused until each marked field is entered
+    again, which saves it as approved data. The answer is the scalar fields the
+    overlay marks that a patient tab renders (``patient_visible_fields``) and the
+    patient can edit: a field no tab shows is marked in the record read but not on
+    screen, so blocking on it could never be lifted, and the list fields
+    (``PROVISIONAL_JSON_FIELDS``), the disease tab and the controls that bypass
+    ``Field`` are likewise left out (the module says why). A displayed field with no
+    write path of its own (a calculated or mirrored one, a unit picker) clears with
+    the field it follows, so it does not block either; a displayed field the write
+    descriptor does not know does.
 
     Empty with ``PROVISIONAL_DATA_ENABLED`` off, or no proposal on display. The
     frontend applies the same rule to the marks it holds
@@ -868,11 +871,13 @@ def attestation_blockers(record) -> list[str]:
     the endpoint agree.
     """
     marks = overlay(record, lists=False)[1]
-    if not marks:
+    from omop_core.services.patient_visible_fields import names
+    shown = [field for field in marks if field in names()]
+    if not shown:
         return []
     from omop_core.services.write_descriptor import build_writable_field_descriptor
     descriptor = build_writable_field_descriptor()
     return sorted(
-        field for field in marks
+        field for field in shown
         if field not in descriptor or descriptor[field].get('writable')
     )

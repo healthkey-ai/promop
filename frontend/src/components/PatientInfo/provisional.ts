@@ -4,6 +4,10 @@
  * Shared by the provider editor and the federated patient view so both treat a
  * proposal the same way.
  */
+import patientVisibleFields from './patientVisibleFields.json';
+
+/** The scalar fields a patient tab renders (generated; see `omop_core/services/patient_visible_fields.py`). */
+const VISIBLE: ReadonlySet<string> = new Set(patientVisibleFields.fields);
 
 /** The record's proposal marks (field to confidence), or none. */
 export function marksOf(info: Record<string, unknown> | null | undefined): Record<string, number> {
@@ -31,15 +35,17 @@ export function withoutMarks(
 }
 
 /** The fields that stop the patient confirming their record (#2761): the proposal
- *  marks on display that the patient can clear by editing the field.
+ *  marks on display that a patient tab renders and the patient can edit.
  *
  *  The same rule as `attestation_blockers` on the server, which refuses the
- *  confirmation: a list field (it has proposed items) is left out because no
- *  patient tab shows it, and so is a field the write descriptor says has no write
- *  path of its own (a calculated or mirrored value, a unit picker), which clears
- *  with the field it follows. A field the descriptor does not know blocks, and
- *  with no descriptor yet every scalar mark does. Editing a field removes its
- *  mark from `info`, so the count falls as the patient confirms values. */
+ *  confirmation. A mark counts only for a field in `patientVisibleFields.json`, the
+ *  scalar fields the patient tabs name: a field no tab shows is marked in the record
+ *  but never on screen, and a list field has proposed items (`provisional_items`) and
+ *  no tab edits it. Then, once the write descriptor has loaded, a field with no write
+ *  path of its own (a calculated or mirrored value, a unit picker) is left out, since
+ *  it clears with the field it follows, and a field the descriptor does not know
+ *  counts. Editing a field removes its mark from `info`, so the count falls as the
+ *  patient enters values. */
 export function attestationBlockers(
   info: Record<string, unknown> | null | undefined,
   descriptors?: Record<string, { writable?: boolean }> | null,
@@ -47,7 +53,7 @@ export function attestationBlockers(
   const items = (info?.provisional_items ?? {}) as Record<string, unknown[]>;
   const known = descriptors && Object.keys(descriptors).length > 0 ? descriptors : null;
   return Object.keys(marksOf(info))
-    .filter((field) => !(field in items))
+    .filter((field) => !(field in items) && VISIBLE.has(field))
     .filter((field) => !known || !(field in known) || !!known[field].writable)
     .sort();
 }

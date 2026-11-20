@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
  * the button returns once none that the patient can edit remain. Editing a marked
  * field confirms it as approved data, which removes its mark.
  */
-import { render as baseRender, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import PatientDetail from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -55,6 +55,8 @@ const DESCRIPTORS = {
   hemoglobin_g_dl: lab,
   // A mirror of another field: it has no write path of its own, so it never blocks.
   hemoglobin_level: { kind: 'alias', writable: false, canonical: 'hemoglobin_g_dl' },
+  // Shown on the General tab but calculated from height and weight.
+  bmi: { kind: 'computed', writable: false, target: 'patient_record', value_kind: 'number' },
 };
 
 const BASE = {
@@ -65,15 +67,24 @@ const BASE = {
   derivation_version: 1, user_edited_fields: [],
 };
 
-function serve(record: Record<string, unknown>) {
+/** The record the server returns: a fixed one, or a function so a later read can differ. */
+function serve(
+  record: Record<string, unknown> | (() => Record<string, unknown>),
+  descriptors: Record<string, unknown> = DESCRIPTORS,
+) {
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
-    if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+    if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
     if (url.includes('/patient-info/')) {
-      return Promise.resolve({ data: { patient_info: record, user: null, patient_name: BASE.patient_name } });
+      const body = typeof record === 'function' ? record() : record;
+      return Promise.resolve({ data: { patient_info: { ...body }, user: null, patient_name: BASE.patient_name } });
     }
     return Promise.resolve({ data: [] });
   });
 }
+
+const recordReads = () =>
+  (api.get as ReturnType<typeof vi.fn>).mock.calls
+    .filter((c) => String(c[0]).includes('/patient-info/') && !String(c[0]).includes('writable')).length;
 
 async function renderAsPatient() {
   render(<PatientDetail patientMode />);
@@ -106,15 +117,15 @@ describe('Confirm my record with proposals on the page', () => {
 
     const banner = await screen.findByTestId('record-confirmation-blocked');
     expect(banner).toHaveTextContent('1 value is marked Provisional');
-    expect(banner).toHaveTextContent('Editing a value confirms it as correct');
+    expect(banner).toHaveTextContent('enter the right value in its field');
     expect(screen.queryByRole('button', { name: 'Confirm Record' })).not.toBeInTheDocument();
   });
 
   it('does not count a list, or a field with no write path of its own', async () => {
     serve({
-      ...BASE, hemoglobin_g_dl: '11.5', hemoglobin_level: '11.5',
+      ...BASE, hemoglobin_g_dl: '11.5', hemoglobin_level: '11.5', bmi: 24,
       prior_procedures: [{ procedure: 'PET scan' }],
-      provisional_fields: { hemoglobin_g_dl: 82, hemoglobin_level: 82, prior_procedures: 72 },
+      provisional_fields: { hemoglobin_g_dl: 82, hemoglobin_level: 82, bmi: 80, prior_procedures: 72 },
       provisional_items: { prior_procedures: [{ procedure: 'PET scan' }] },
     });
     await renderAsPatient();
@@ -124,8 +135,8 @@ describe('Confirm my record with proposals on the page', () => {
 
   it('offers the button when only a list or a mirrored field is marked', async () => {
     serve({
-      ...BASE, hemoglobin_level: '11.5', prior_procedures: [{ procedure: 'PET scan' }],
-      provisional_fields: { hemoglobin_level: 82, prior_procedures: 72 },
+      ...BASE, hemoglobin_level: '11.5', bmi: 24, prior_procedures: [{ procedure: 'PET scan' }],
+      provisional_fields: { hemoglobin_level: 82, bmi: 80, prior_procedures: 72 },
       provisional_items: { prior_procedures: [{ procedure: 'PET scan' }] },
     });
     await renderAsPatient();
@@ -179,6 +190,81 @@ describe('Confirm my record with proposals on the page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm Record' }));
 
     expect(await screen.findByText(/2 values on your record are still marked Provisional/)).toBeInTheDocument();
+  });
+
+  it('does not count a marked field that no patient tab shows', async () => {
+    // concomitant_medications and the diagnosis date are proposed by the server, but
+    // no tab renders them, so the patient could never clear the mark.
+    serve({
+      ...BASE, concomitant_medications: 'Warfarin', diagnosis_date: '2024-03-01',
+      provisional_fields: { concomitant_medications: 85, diagnosis_date: 88, diagnosis_date_precision: 88 },
+    });
+    await renderAsPatient();
+
+    expect(await screen.findByRole('button', { name: 'Confirm Record' })).toBeInTheDocument();
+    expect(screen.queryByTestId('record-confirmation-blocked')).not.toBeInTheDocument();
+  });
+
+  it('applies the same rule before the write descriptor has loaded', async () => {
+    serve({
+      ...BASE, hemoglobin_g_dl: '11.5', concomitant_medications: 'Warfarin',
+      provisional_fields: { hemoglobin_g_dl: 82, concomitant_medications: 85 },
+    }, {});
+    await renderAsPatient();
+
+    const banner = await screen.findByTestId('record-confirmation-blocked');
+    expect(banner).toHaveTextContent('1 value is marked Provisional');
+  });
+
+  it('saves the patient\'s edit and reads the record again, so marks the server cleared go too', async () => {
+    let reads = 0;
+    serve(() => (reads++ < 1
+      ? { ...BASE, hemoglobin_g_dl: '11.5', provisional_fields: { hemoglobin_g_dl: 82 } }
+      : { ...BASE, hemoglobin_g_dl: '12', provisional_fields: {} }));
+    await renderAsPatient();
+    expect(await screen.findByTestId('record-confirmation-blocked')).toBeInTheDocument();
+    const before = recordReads();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
+    fireEvent.change(await screen.findByDisplayValue('11.5'), { target: { value: '12' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
+      expect.stringContaining('/patient-info/'), { hemoglobin_g_dl: 12 }));
+    await waitFor(() => expect(recordReads()).toBeGreaterThan(before));
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(await screen.findByRole('button', { name: 'Confirm Record' })).toBeInTheDocument();
+  });
+
+  it('sends an edit that is still waiting for the autosave before it confirms', async () => {
+    serve({ ...BASE, provisional_fields: {} });
+    await renderAsPatient();
+
+    fireEvent.change(screen.getByDisplayValue('1970-01-01'), { target: { value: '1971-02-03' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Record' }));
+
+    await waitFor(() => expect(confirmRecord).toHaveBeenCalled());
+    expect(api.patch).toHaveBeenCalledWith(expect.stringContaining('/patient-info/'), { date_of_birth: '1971-02-03' });
+    const patchOrder = (api.patch as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    const confirmOrder = (confirmRecord as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(patchOrder).toBeLessThan(confirmOrder);
+  });
+
+  it('reads the record again when the server refuses, so the banner shows the new count', async () => {
+    let reads = 0;
+    serve(() => (reads++ < 1
+      ? { ...BASE, provisional_fields: {} }
+      : { ...BASE, hemoglobin_g_dl: '11.5', provisional_fields: { hemoglobin_g_dl: 82 } }));
+    (confirmRecord as ReturnType<typeof vi.fn>).mockRejectedValue({
+      response: { status: 409, data: { detail: '1 value on your record is still marked Provisional.' } },
+    });
+    await renderAsPatient();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Record' }));
+
+    expect(await screen.findByTestId('record-confirmation-blocked')).toHaveTextContent('1 value is marked');
   });
 
   it('shows no attestation banner outside patient mode', async () => {

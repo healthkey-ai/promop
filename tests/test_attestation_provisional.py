@@ -2,10 +2,12 @@
 
 The page lays a proposed value over a field the approved record leaves empty and
 marks it. A patient who confirms their record says what they saw is accurate, so
-while a marked field they can edit is on display the endpoint refuses (409), and
-editing the field, which saves it as approved data, clears the block. List
-fields and fields with no write path of their own do not block.
+while a marked field a patient tab shows and the patient can edit is on display the
+endpoint refuses (409), and entering a value in the field, which saves it as
+approved data, clears the block. List fields, fields no tab shows and fields with no
+write path of their own do not block.
 """
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -122,6 +124,58 @@ def test_a_field_with_no_write_path_of_its_own_does_not_block(patient):
     assert response.status_code == 200
 
 
+def test_a_marked_field_no_patient_tab_shows_does_not_block(patient):
+    # The sweep proposes these (a medication list, the diagnosis date) but no tab
+    # renders them, so a block on them could never be lifted from the page.
+    client, person, _ = patient
+    propose(person, concomitant_medications=('Warfarin', 85), diagnosis_date=(date(2024, 3, 1), 88),
+            diagnosis_date_precision=('day', 88), condition_clinical_status=('active', 88),
+            blood_type=('A+', 90))
+
+    response = client.post(CONFIRM)
+
+    assert response.status_code == 200
+
+
+def test_a_shown_field_blocks_even_beside_hidden_ones(patient):
+    client, person, _ = patient
+    propose(person, concomitant_medications=('Warfarin', 85), hemoglobin_g_dl=(Decimal('11.5'), 82))
+
+    body = client.post(CONFIRM).json()
+
+    assert body['provisional_fields'] == ['hemoglobin_g_dl']
+
+
+def test_entering_the_disease_clears_the_whole_disease_group_and_the_block(patient):
+    client, person, _ = patient
+    propose(person, disease=('Squamous cell carcinoma', 88), disease_slug=('squamous-cell-carcinoma', 88),
+            diagnosis_date=(date(2024, 3, 1), 88))
+    assert client.post(CONFIRM).json()['provisional_fields'] == ['disease']
+
+    patch = client.patch('/api/patient-info/me/', {'disease': 'Multiple myeloma'}, format='json')
+
+    assert patch.status_code == 200
+    marks = client.get('/api/patient-info/me/').json()['patient_info']['provisional_fields']
+    assert marks == {}                                  # slug and date went with the disease
+    assert client.post(CONFIRM).status_code == 200
+
+
+def test_clearing_a_proposed_value_is_not_possible_yet(patient):
+    # #2671: a PATCH of null on a field the approved record already leaves empty is a
+    # no-op, so a patient who disagrees with a proposal has no way to remove it; they
+    # can only enter a value. The block therefore stays until they do. This test pins
+    # the limitation so that fixing #2671 changes it on purpose.
+    client, person, _ = patient
+    propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
+
+    patch = client.patch('/api/patient-info/me/', {'hemoglobin_g_dl': None}, format='json')
+
+    assert patch.status_code == 200
+    marks = client.get('/api/patient-info/me/').json()['patient_info']['provisional_fields']
+    assert marks == {'hemoglobin_g_dl': 82}
+    assert client.post(CONFIRM).status_code == 409
+
+
 def test_a_field_the_descriptor_does_not_know_blocks(patient, monkeypatch):
     client, person, _ = patient
     propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
@@ -171,16 +225,35 @@ def test_a_proposal_that_arrives_after_a_confirmation_refuses_a_reconfirmation(p
     assert stored(person)[0].validated                 # an earlier confirmation is not undone
 
 
-def test_someone_who_is_not_a_patient_is_not_asked_about_proposals(patient):
+def test_someone_who_is_not_a_patient_is_not_asked_about_proposals(patient, monkeypatch):
     _, person, _ = patient
     propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
+    ran = []
+    monkeypatch.setattr(
+        provisional_record, 'attestation_blockers', lambda record: ran.append(record) or ['x'])
     staff = APIClient()
     staff.force_authenticate(Identity.objects.create_user(
         email='staff@attest-prov.test', password='pw', is_staff=True))
 
     response = staff.post(CONFIRM)
 
-    assert response.status_code != 409                  # refused as before, for another reason
+    assert response.status_code == 404                  # no patient account behind this login
+    assert ran == []                                    # and the proposal check never ran
+
+
+def test_the_record_is_locked_before_the_proposals_are_read(patient):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    client, person, _ = patient
+    propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
+
+    with CaptureQueriesContext(connection) as queries:
+        client.post(CONFIRM)
+
+    sql = [q['sql'] for q in queries]
+    locked = next(i for i, q in enumerate(sql) if 'FOR UPDATE' in q and 'patient_record' in q)
+    read = [i for i, q in enumerate(sql) if 'patient_record_confidence' in q]
+    assert read and locked < min(read)
 
 
 def test_blockers_are_sorted_and_empty_without_a_pair(patient):

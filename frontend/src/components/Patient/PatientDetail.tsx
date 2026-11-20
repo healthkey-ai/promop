@@ -74,8 +74,8 @@ function RecordConfirmation({
           Record confirmed{validationDate ? ` on ${validationDate}` : ''}
           {pending && (
             <span className="block text-amber-800" data-testid="record-confirmation-pending">
-              {pending} and not covered by that confirmation. Edit each one to confirm it,
-              then you can confirm again.
+              {pending} and not covered by that confirmation. Enter the right value in
+              each one, then you can confirm again.
             </span>
           )}
         </span>
@@ -105,9 +105,9 @@ function RecordConfirmation({
               {pending} (not yet confirmed)
             </p>
             <p className="mt-1 text-sm text-amber-800">
-              Check each value marked Provisional. Editing a value confirms it as correct,
-              and you can enter your own answer if it is wrong. Confirm Record is available
-              once none are marked.
+              Check each value marked Provisional and enter the right value in its field
+              (entering the same value keeps it). Confirm Record is available once none
+              are marked.
             </p>
           </div>
         </div>
@@ -502,6 +502,8 @@ export default function PatientDetail({
   }, [personId, adoptServerRecord]);
 
    
+  // performSave runs before reloadPatientInfo is defined; it calls it through this ref.
+  const reloadRef = useRef<() => void>(() => {});
   const performSave = useCallback(async () => {
     if (!pendingDataRef.current || !personId) return;
     const seq = ++saveSeqRef.current;
@@ -573,6 +575,10 @@ export default function PatientDetail({
           confirmedWritesRef.current[f] = info[f];
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
+        // Saving a proposed value as the patient's own can clear other marks the
+        // server holds (the disease group, a calculated field): read the record
+        // again so the page and the confirmation banner follow it (#2761).
+        if (Object.keys(patchFields).some((f) => f in proposed)) reloadRef.current();
       }
       // Derived/read-only fields may change in the editor as a side effect of
       // an actual edit (for example tnbc_status). They were not sent, so they
@@ -681,6 +687,8 @@ export default function PatientDetail({
       .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
       .catch(() => {});
   }, [personId, adoptServerRecord]);
+
+  reloadRef.current = reloadPatientInfo;
 
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
@@ -1041,6 +1049,13 @@ export default function PatientDetail({
                         validationDate={editedInfo.validation_date as string | null}
                         provisionalCount={attestationBlockerCount}
                         onConfirm={async () => {
+                          // An edit the autosave has not sent yet is still marked on the
+                          // server: send it first, so the click does not meet a 409.
+                          if (autoSaveTimerRef.current) {
+                            clearTimeout(autoSaveTimerRef.current);
+                            autoSaveTimerRef.current = null;
+                          }
+                          await doSave();
                           const readRevision = saveRevisionRef.current;
                           try {
                             const result = await confirmRecord();
@@ -1054,6 +1069,7 @@ export default function PatientDetail({
                             // 409: the server still holds values marked Provisional
                             // (an edit not saved yet, or a proposal that arrived), and says so.
                             const res = (err as { response?: { status?: number; data?: { detail?: string } } })?.response;
+                            if (res?.status === 409) reloadPatientInfo();   // the banner follows the server's marks
                             setSaveErrorMsg(
                               res?.status === 409 && res.data?.detail
                                 ? res.data.detail

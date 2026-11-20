@@ -46,13 +46,21 @@ describe('provisional marks', () => {
 describe('attestationBlockers (#2761)', () => {
   const descriptors = {
     hemoglobin_g_dl: { writable: true },
-    hemoglobin_level: { writable: false },
     esr: { writable: true },
+    bmi: { writable: false },
   };
 
-  it('is the marked fields the patient can edit, sorted', () => {
-    const info = { provisional_fields: { esr: 70, hemoglobin_g_dl: 82, hemoglobin_level: 82 } };
+  it('is the marked fields a patient tab shows and the patient can edit, sorted', () => {
+    const info = { provisional_fields: { esr: 70, hemoglobin_g_dl: 82, bmi: 80 } };
     expect(attestationBlockers(info, descriptors)).toEqual(['esr', 'hemoglobin_g_dl']);
+  });
+
+  it('leaves out a marked field no patient tab shows', () => {
+    const info = {
+      provisional_fields: { concomitant_medications: 85, diagnosis_date: 88, blood_type: 90, esr: 70 },
+    };
+    expect(attestationBlockers(info, descriptors)).toEqual(['esr']);
+    expect(attestationBlockers(info, null)).toEqual(['esr']);
   });
 
   it('leaves out a list that still holds proposed items', () => {
@@ -63,14 +71,14 @@ describe('attestationBlockers (#2761)', () => {
     expect(attestationBlockers(info, descriptors)).toEqual(['esr']);
   });
 
-  it('blocks on a field the descriptor does not know, as the server does', () => {
-    expect(attestationBlockers({ provisional_fields: { mystery: 80 } }, descriptors)).toEqual(['mystery']);
+  it('blocks on a shown field the descriptor does not know, as the server does', () => {
+    expect(attestationBlockers({ provisional_fields: { heartrate: 80 } }, descriptors)).toEqual(['heartrate']);
   });
 
-  it('counts every scalar mark until a descriptor has loaded', () => {
-    const info = { provisional_fields: { hemoglobin_level: 82, esr: 70 } };
-    expect(attestationBlockers(info, null)).toEqual(['esr', 'hemoglobin_level']);
-    expect(attestationBlockers(info, {})).toEqual(['esr', 'hemoglobin_level']);
+  it('uses the shown fields alone until a descriptor has loaded', () => {
+    const info = { provisional_fields: { bmi: 80, esr: 70, concomitant_medications: 85 } };
+    expect(attestationBlockers(info, null)).toEqual(['bmi', 'esr']);
+    expect(attestationBlockers(info, {})).toEqual(['bmi', 'esr']);
   });
 
   it('is empty for a record with no marks', () => {
