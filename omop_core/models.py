@@ -4679,6 +4679,39 @@ class PatientRecordConfidence(models.Model):
         db_table = 'patient_record_confidence'
 
 
+class ProposalRejection(models.Model):
+    """A user's explicit rejection of the value a proposal gives one field (#2671).
+
+    The record shows a proposed value on a field it leaves empty. Clearing that
+    field is how the user says the proposal is wrong; the record has nothing to
+    clear, so the answer is kept here, per person and field, and the provisional
+    pass leaves the field empty (``provisional_record.held_rejections``).
+
+    ``origins`` are the provisional rows that decided the field when it was
+    rejected, as sorted ``[table, source_value, concept_id]`` triples. The
+    rejection holds while every row that decides the field now is one of them:
+    new readings of the same code under the same concept stay rejected, while a
+    code that is now mapped to another concept, or a different code that now
+    feeds the field, is a new proposal and is shown again. It deletes nothing:
+    the mapping and the clinical rows are untouched, and the user can still type
+    a value of their own.
+    """
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='proposal_rejections')
+    field_name = models.CharField(max_length=100)
+    origins = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'proposal_rejection'
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'field_name'], name='uq_proposal_rejection_field'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.field_name}'
+
+
 class FieldConceptMapping(models.Model):
     """A reviewer-approved OMOP concept assignment for a PatientRecord field.
 

@@ -107,7 +107,9 @@ function RecordConfirmation({
             <p className="mt-1 text-sm text-amber-800">
               Check each value marked Provisional and enter your own answer in its field:
               retype a number or text, or pick an option (to keep the option shown, pick
-              another and then it again). Confirm Record is available once none are marked.
+              another and then it again). If a value is wrong and you do not know the right one,
+              clear a number or text field to reject it. Confirm Record is available once none
+              are marked.
             </p>
           </div>
         </div>

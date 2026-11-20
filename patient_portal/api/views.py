@@ -307,6 +307,14 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
         # Match derivation's lock order and serialize the read/modify/write
         # of user_edited_fields as well as same-day OMOP projection.
         patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
+        # A blank value for a field the record shows only a proposal on is the user
+        # rejecting that proposal (#2671). The record holds nothing to clear, so it
+        # is not written as an edit: it is remembered below, and the field leaves
+        # the provisional picture.
+        from omop_core.services.provisional_record import proposal_clears
+        rejected = proposal_clears(patient_info, patch_data)
+        if rejected:
+            patch_data = {key: value for key, value in patch_data.items() if key not in rejected}
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
         # Validate location fields early, before serializer.save() writes
@@ -425,6 +433,11 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
 
         # A direct edit is approved: the provisional picture takes it too,
         # and drops any proposal's confidence on the edited fields.
+        if rejected:
+            # The fields that go with a rejected one leave the picture with it, and
+            # the pass keeps them out until the proposal changes.
+            from omop_core.services.provisional_record import reject_proposals
+            direct_fields = direct_fields | reject_proposals(person, patient_info, rejected)
         if direct_fields:
             from omop_core.services.provisional_record import mirror_user_edit
             mirror_user_edit(patient_info, direct_fields)

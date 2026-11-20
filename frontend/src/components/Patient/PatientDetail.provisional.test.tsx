@@ -129,6 +129,18 @@ describe('PatientDetail provisional values', () => {
     expect(patchBodies().at(-1)).toEqual({ hemoglobin_g_dl: 13 });
   });
 
+  it('sends a cleared proposal as an empty answer: that is how the user rejects it (#2671)', async () => {
+    await renderAndOpenLabs();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('11.5'), { target: { value: '' } });
+
+    expect(screen.queryByTestId('provisional-hemoglobin_g_dl')).not.toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBodies().at(-1)).toEqual({ hemoglobin_g_dl: null });
+  });
+
   it('lets the user confirm a proposal by landing on the same value', async () => {
     await renderAndOpenLabs();
     vi.useFakeTimers({ shouldAdvanceTime: true });

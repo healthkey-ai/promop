@@ -160,27 +160,26 @@ def test_entering_the_disease_clears_the_whole_disease_group_and_the_block(patie
     assert client.post(CONFIRM).status_code == 200
 
 
-def test_a_null_cannot_reject_a_proposal_yet(patient):
-    # #2671: a PATCH of null on a number field the approved record already leaves empty
-    # is a no-op, so nothing removes the proposal; the patient can only enter a value.
-    # The block therefore stays. This pins the limitation so that fixing #2671 changes
-    # it on purpose.
+def test_a_null_rejects_a_proposal_and_lifts_the_block(patient):
+    # #2671: clearing a displayed proposal on a number field the approved record leaves
+    # empty is the patient rejecting it. Nothing is approved or stored on the record, the
+    # mark goes, and the confirmation is no longer blocked by it.
     client, person, _ = patient
     propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
+    assert client.post(CONFIRM).status_code == 409
 
     patch = client.patch('/api/patient-info/me/', {'hemoglobin_g_dl': None}, format='json')
 
     assert patch.status_code == 200
-    marks = client.get('/api/patient-info/me/').json()['patient_info']['provisional_fields']
-    assert marks == {'hemoglobin_g_dl': 82}
-    assert client.post(CONFIRM).status_code == 409
+    shown = client.get('/api/patient-info/me/').json()['patient_info']
+    assert shown['provisional_fields'] == {} and shown['hemoglobin_g_dl'] is None
+    assert stored(person)[0].hemoglobin_g_dl is None
+    assert client.post(CONFIRM).status_code == 200
 
 
-def test_an_empty_string_on_a_text_field_is_stored_as_the_patients_answer(patient):
-    # Not a rejection feature: '' on a text or select field is accepted as an edit, so it
-    # clears the mark and stores '' in the approved record (an answer of "nothing", not a
-    # rejection). #2671 stays open: a number field takes no such value, and no control is
-    # built around this.
+def test_an_empty_string_on_a_text_field_rejects_a_proposal_and_stores_nothing(patient):
+    # '' on a text or select field with a proposal on display is a rejection too, not an
+    # answer of "nothing" written to the approved record.
     client, person, _ = patient
     propose(person, smoking_status=('Never', 80))
     assert client.post(CONFIRM).json()['provisional_fields'] == ['smoking_status']
@@ -189,7 +188,8 @@ def test_an_empty_string_on_a_text_field_is_stored_as_the_patients_answer(patien
 
     assert patch.status_code == 200
     record, _ = stored(person)
-    assert record.smoking_status == ''
+    assert record.smoking_status in (None, '')
+    assert 'smoking_status' not in (record.user_edited_fields or [])
     marks = client.get('/api/patient-info/me/').json()['patient_info']['provisional_fields']
     assert 'smoking_status' not in marks
     assert client.post(CONFIRM).status_code == 200

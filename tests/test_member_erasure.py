@@ -329,7 +329,7 @@ def test_every_table_a_withdrawal_reaches_is_a_decision():
         'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
         'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional', 'omop_core.PatientSourceCode',
         'omop_core.PatientSourceCodeUpload', 'omop_core.PatientTrialEnrollment', 'omop_core.ProcedureOccurrence',
-        'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TherapyHistoryAttestation',
+        'omop_core.ProposalRejection', 'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TherapyHistoryAttestation',
         'omop_core.TrialSearchPreferences', 'omop_core.VisitDetail', 'omop_core.VisitOccurrence',
         'omop_core.WearableUpload', 'omop_oncology.CancerModifier', 'omop_oncology.Episode',
         'omop_oncology.Histology', 'omop_oncology.StemTable', 'patient_portal.AiExplanation',

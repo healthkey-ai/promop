@@ -152,6 +152,8 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
     'omop_core.PatientSourceCode',
     'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional',
+    # A user's rejection of a proposed value, kept beside the record (#2671).
+    'omop_core.ProposalRejection',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
     # The patient's own confirmation that the treatment list is complete (#1924).
     'omop_core.TherapyHistoryAttestation',
