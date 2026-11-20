@@ -29,3 +29,25 @@ export function withoutMarks(
   }
   return changed ? { ...info, provisional_fields: marks } : info;
 }
+
+/** The fields that stop the patient confirming their record (#2761): the proposal
+ *  marks on display that the patient can clear by editing the field.
+ *
+ *  The same rule as `attestation_blockers` on the server, which refuses the
+ *  confirmation: a list field (it has proposed items) is left out because no
+ *  patient tab shows it, and so is a field the write descriptor says has no write
+ *  path of its own (a calculated or mirrored value, a unit picker), which clears
+ *  with the field it follows. A field the descriptor does not know blocks, and
+ *  with no descriptor yet every scalar mark does. Editing a field removes its
+ *  mark from `info`, so the count falls as the patient confirms values. */
+export function attestationBlockers(
+  info: Record<string, unknown> | null | undefined,
+  descriptors?: Record<string, { writable?: boolean }> | null,
+): string[] {
+  const items = (info?.provisional_items ?? {}) as Record<string, unknown[]>;
+  const known = descriptors && Object.keys(descriptors).length > 0 ? descriptors : null;
+  return Object.keys(marksOf(info))
+    .filter((field) => !(field in items))
+    .filter((field) => !known || !(field in known) || !!known[field].writable)
+    .sort();
+}

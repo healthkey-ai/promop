@@ -3,9 +3,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
+import { attestationBlockers, marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -40,10 +40,13 @@ type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 function RecordConfirmation({
   validated,
   validationDate,
+  provisionalCount,
   onConfirm,
 }: {
   validated: boolean;
   validationDate: string | null;
+  /** Values on the page still marked Provisional that the patient can confirm by editing (#2761). */
+  provisionalCount: number;
   onConfirm: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -57,20 +60,57 @@ function RecordConfirmation({
     }
   };
 
+  // What a patient confirms is what the page shows, so a value still marked
+  // Provisional (it comes from a record nobody has checked) is not covered.
+  const pending = provisionalCount > 0
+    ? `${provisionalCount} ${provisionalCount === 1 ? 'value is' : 'values are'} marked Provisional`
+    : null;
+
   if (validated) {
     return (
       <div className="mb-6 flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3">
         <ShieldCheck className="h-5 w-5 text-green-600" />
         <span className="text-sm text-green-800">
           Record confirmed{validationDate ? ` on ${validationDate}` : ''}
+          {pending && (
+            <span className="block text-amber-800" data-testid="record-confirmation-pending">
+              {pending} and not covered by that confirmation. Edit each one to confirm it,
+              then you can confirm again.
+            </span>
+          )}
         </span>
-        <button
-          onClick={handleConfirm}
-          disabled={confirming}
-          className="ml-auto text-sm text-green-700 underline hover:text-green-900 disabled:opacity-50"
-        >
-          Re-confirm
-        </button>
+        {!pending && (
+          <button
+            onClick={handleConfirm}
+            disabled={confirming}
+            className="ml-auto text-sm text-green-700 underline hover:text-green-900 disabled:opacity-50"
+          >
+            Re-confirm
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (pending) {
+    return (
+      <div
+        className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-5 py-4"
+        data-testid="record-confirmation-blocked"
+      >
+        <div className="flex items-start gap-3">
+          <ShieldCheck className="mt-0.5 h-5 w-5 text-amber-600" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-amber-900">
+              {pending} (not yet confirmed)
+            </p>
+            <p className="mt-1 text-sm text-amber-800">
+              Check each value marked Provisional. Editing a value confirms it as correct,
+              and you can enter your own answer if it is wrong. Confirm Record is available
+              once none are marked.
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
@@ -329,6 +369,7 @@ export default function PatientDetail({
   const params = useParams<{ personId: string }>();
   const personId = personIdOverride ?? params.personId;
   const navigate = useNavigate();
+  const writableFields = useWritableFields(personId);
 
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -755,6 +796,11 @@ export default function PatientDetail({
     () => ({ marks: marksOf(editedInfo), patientMode }),
     [editedInfo, patientMode],
   );
+  // The proposals still on the page that stop the patient confirming (#2761).
+  const attestationBlockerCount = useMemo(
+    () => (patientMode ? attestationBlockers(editedInfo, writableFields.loading ? null : writableFields.descriptors).length : 0),
+    [patientMode, editedInfo, writableFields.loading, writableFields.descriptors],
+  );
 
   if (loading) return <PatientDetailSkeleton />;
 
@@ -993,6 +1039,7 @@ export default function PatientDetail({
                       <RecordConfirmation
                         validated={!!editedInfo.validated}
                         validationDate={editedInfo.validation_date as string | null}
+                        provisionalCount={attestationBlockerCount}
                         onConfirm={async () => {
                           const readRevision = saveRevisionRef.current;
                           try {
@@ -1003,8 +1050,15 @@ export default function PatientDetail({
                               validated_by: result.validated_by,
                               validation_date: result.validation_date,
                             }, readRevision);
-                          } catch {
-                            setSaveErrorMsg('Failed to confirm record. Please try again.');
+                          } catch (err) {
+                            // 409: the server still holds values marked Provisional
+                            // (an edit not saved yet, or a proposal that arrived), and says so.
+                            const res = (err as { response?: { status?: number; data?: { detail?: string } } })?.response;
+                            setSaveErrorMsg(
+                              res?.status === 409 && res.data?.detail
+                                ? res.data.detail
+                                : 'Failed to confirm record. Please try again.',
+                            );
                           }
                         }}
                       />

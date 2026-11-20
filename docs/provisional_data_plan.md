@@ -867,6 +867,40 @@ view of their data while the concepts are mapped to codes. Analysts read no
 patient, so they see no proposals. With the switch off nothing is computed,
 stored or shown to anyone ([#2659](https://github.com/healthkey-ai/promop/issues/2659)).
 
+**Confirming a record that shows proposals (#2761).** A patient's "Confirm my record"
+(`POST /api/patient-info/me/confirm/`) says what the page shows is accurate, so
+it is not offered, and the server refuses it, while a value the patient can clear
+is still marked Provisional:
+
+- **What blocks.** The scalar fields the overlay marks for the patient's own record
+  (`attestation_blockers` in `provisional_record.py`: `overlay(record, lists=False)`
+  marks, kept when the write descriptor says the field is writable or does not
+  know it). The list fields (`PROVISIONAL_JSON_FIELDS`) do not block: no patient
+  tab shows or edits them. Nor does a field with no write path of its own (a
+  calculated or mirrored value such as `bmi` or `serum_sodium`, a unit picker),
+  which clears with the field it follows, so the block can always be cleared from
+  the page. With the switch off, or no proposal on display, nothing blocks.
+- **The endpoint.** 409 with `{detail, provisional_fields: [names], count}` and nothing
+  stored on the record or the person. The page applies the same rule to the marks
+  it holds (`attestationBlockers` in `PatientInfo/provisional.ts`), so the banner and
+  the endpoint agree; the one gap is an edit the autosave has not sent yet, which
+  the server still sees as marked and the page shows the 409's reason for.
+- **The page** (General tab, patient mode only). Not confirmed, with blockers: an amber
+  banner, "N values are marked Provisional (not yet confirmed)", saying that
+  editing a value confirms it as correct and that Confirm Record returns once none
+  are marked, with no button. Confirmed, with blockers: "Record confirmed on
+  <date>" and "N values are marked Provisional and not covered by that confirmation",
+  with Re-confirm hidden. Otherwise the banner and button are unchanged.
+- **Editing clears it.** An edit of a marked field saves as approved data
+  and drops its mark (the PATCH path above), so the count falls as the patient
+  confirms values and the button comes back when it reaches zero.
+- **What is stored.** `validated`, `validated_by` and `validation_date` still say
+  only that the patient pressed the button; the endpoint now guarantees that no
+  value they could edit was marked Provisional when they did. A proposal that
+  arrives later (a sweep) does not undo an earlier confirmation, and the page says
+  so; it blocks the next one. Confirmations made before this change are not
+  revisited.
+
 **PHR APIs and lists.** The same audiences see the same proposals on the PHR
 labs and other APIs and on the patient list, with `confidence` on each, never a
 different answer on another screen ([#2660](https://github.com/healthkey-ai/promop/issues/2660)).
@@ -974,7 +1008,7 @@ without a click:
 | Proposals are stored with a confidence on the mapping, kept on approval, recomputed by Calc | [#2668](https://github.com/healthkey-ai/promop/issues/2668) | done (#2670) |
 | Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
 | A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
-| The patient's "Confirm my record" attestation is still offered while proposals are shown | (no issue yet) | open |
+| The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked scalar field the patient can edit is on display; see "Confirming a record that shows proposals" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |
 

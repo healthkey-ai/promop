@@ -1601,6 +1601,22 @@ edit of a list drops every proposal for it, untouched ones included. The PATCH r
 the approved record, so a client re-reads for the marks. A marker the reader *derives* from
 proposed findings is not offered. See [List fields as built](docs/provisional_data_plan.md#list-fields-as-built-2534).
 
+### A patient's "Confirm my record" while proposals are on the page (#2761)
+
+`POST /api/patient-info/me/confirm/` is refused with 409 (`{detail, provisional_fields,
+count}`, nothing stored) while the page shows a scalar field marked Provisional that the
+patient can clear by editing it: `attestation_blockers(record)` in
+`omop_core/services/provisional_record.py` is the overlay's scalar marks
+(`overlay(record, lists=False)`) that the write descriptor lists as writable or does not
+list. The list fields, and a calculated, mirrored or unit-picker field (no write path of
+its own), never block, so the block can always be cleared from the page; an edit saves the
+field as approved data and drops its mark. `attestationBlockers` in
+`frontend/src/components/PatientInfo/provisional.ts` is the same rule over the marks the
+page holds: change one and change the other. The banner has three states (blocked: no
+button; confirmed with newer proposals: no Re-confirm; otherwise as before). With
+`PROVISIONAL_DATA_ENABLED` off nothing blocks. See
+[the plan](docs/provisional_data_plan.md), "Confirming a record that shows proposals".
+
 ### One patient's full provisional view: `fill_provisional_record`
 
 `manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much
