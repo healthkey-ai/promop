@@ -42,6 +42,12 @@ list its slug in `FAMILY_AUTH_RESET_APPS`, and the link is
 `https://phr.example.com/reset-password?uid=…&token=…`, completed with
 `POST /api/v1/auth/reset-password/ {uid, token, new_password}`; otherwise
 PROMOP's own reset page completes it (`family_auth.installations.reset_app_for`).
+A self-service reset email is handed to a Celery worker
+(`patient_portal.send_password_reset`, given only the account's id) when there
+is a broker, so the response time does not say whether the account exists.
+The worker tries a failing mail provider again (three times over about seven
+minutes). If the broker cannot take the task, or there is none, the email is
+sent inline: the request never fails over it.
 Both emails sign off as the org. An account belongs to an installation through
 a current grant at an active org; one that runs the org (`org_admin`,
 `analyst`), and staff, keep PROMOP's links and name. Everyone else keeps

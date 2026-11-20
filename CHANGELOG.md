@@ -308,6 +308,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A reset request's response time no longer says whether the account
+  exists** — only an existing account waited for the mail provider, so the
+  time to answer told an address with an account from one without. The email
+  is now handed to a Celery worker (`patient_portal.send_password_reset`,
+  given only the account's id) when there is a broker, which retries a failing
+  mail provider; when the broker cannot take it, or there is none, it is sent
+  inline, and the request never fails over it.
+
 - **Password-reset emails name the app the account belongs to** — like the
   verification email, a reset email names the installation's org and signs off
   as it, and its link goes to the installation's `/reset-password` page where
