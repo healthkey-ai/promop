@@ -260,12 +260,14 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # request below as a non-projection-owned field.
     patient_name, patch_data = _pop_patient_name(data)
     # The member's own edit to a record whose permission they withdrew: their
-    # name is their account's, everything else is the record's.
+    # name is their account's, everything else is the record's. Only a real
+    # change is refused: an auto-save echoing what was shown changes nothing.
     if patch_data:
         from patient_portal.consent import RECORD_OFF, record_permitted
         from patient_portal.services import patient_person_for
         own = patient_person_for(actor)
-        if own is not None and own.person_id == person.person_id and not record_permitted(person):
+        if (own is not None and own.person_id == person.person_id and not record_permitted(person)
+                and _patch_changes_record(patient_info, patch_data, actor)):
             raise PermissionDenied(RECORD_OFF)
     from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
     patch_data = _drop_proposed_list_items(patient_info, canonicalize_fields(patch_data))
@@ -749,6 +751,25 @@ def _rendered_patient_name(person):
     """
     full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
     return full_name or f"Patient {person.person_id}"
+
+
+_UNSHOWN = object()
+
+
+def _patch_changes_record(patient_info, patch_data, actor) -> bool:
+    """Whether ``patch_data`` asks for anything the record does not already
+    show. The editor auto-saves the whole GET representation, so a field
+    carried back as shown is no change; staff-only fields are dropped for
+    anyone else (apply_patient_record_patch), so they count only for staff."""
+    if not patch_data:
+        return False
+    shown = PatientRecordSerializer(patient_info).data
+    staff = getattr(actor, 'is_staff', False)
+    return any(
+        shown.get(field, _UNSHOWN) != value
+        for field, value in patch_data.items()
+        if staff or field not in PatientRecordViewSet._STAFF_ONLY_FIELDS
+    )
 
 
 def _pop_patient_name(data):

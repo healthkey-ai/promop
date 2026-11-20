@@ -63,12 +63,47 @@ def test_the_member_cannot_edit_the_record_but_can_still_change_their_name(off):
     assert PatientRecord.objects.get(person=off['person']).stage in (None, '')
 
 
+def test_an_auto_save_of_what_was_shown_is_not_refused(off):
+    """The editor PATCHes the whole GET representation; carried back as shown,
+    with a new name, it changes nothing of the record."""
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    client = off['client']
+    shown = dict(PatientRecordSerializer(PatientRecord.objects.get(person=off['person'])).data)
+    shown['validated'] = True  # staff-only: dropped for a member, so no change either
+
+    assert client.patch('/api/v1/patient-records/me/', {**shown, 'patient_name': 'Sam T'}, format='json').status_code == 200
+    assert client.patch('/api/v1/patient-records/me/', {**shown, 'stage': 'III'}, format='json').status_code == 403
+
+
+def test_saying_no_and_never_agreeing_keeps_the_record_off_too(member):
+    person = member['person']
+    svc.record_consent(person, 'my_record', ConsentEvent.DECLINED, version='1.0')
+
+    assert svc.record_permitted(person) is False
+
+
+def test_record_permitted_is_one_query(member, django_assert_num_queries):
+    with django_assert_num_queries(1):
+        svc.record_permitted(member['person'])
+
+
 def test_phr_writes_are_refused_and_deletes_are_not(off):
     client = off['client']
 
     assert client.post('/api/v1/phr/medications/add/', {'name': 'Rituximab'}, format='json').status_code == 403
     assert client.post('/api/v1/phr/shares/', {}, format='json').status_code == 403
-    assert client.delete('/api/v1/phr/shares/0/').status_code != 403
+    # Taking something away is never against a withdrawal: a share made before.
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from patient_portal.models import RecordShare
+    share = RecordShare.objects.create(person=off['person'], public_id='keep-or-revoke', recipient='doctor',
+                                       name='Dr Lee', method='link', expires_at=timezone.now() + timedelta(days=7))
+    assert client.delete(f'/api/v1/phr/shares/{share.public_id}/').status_code == 204
+    share.refresh_from_db()
+    assert share.revoked_at is not None
 
 
 def test_health_data_synced_or_uploaded_by_the_member_is_refused(off):

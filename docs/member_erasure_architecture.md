@@ -50,16 +50,17 @@ without it deletes nothing when withdrawn.
 ## While the record is off
 
 Erasing once is not enough: a member who has withdrawn could still send health
-data. `patient_portal.consent.record_permitted(person)` is false from the
-moment they end their grant of a marked purpose until they give it again, and
-true where no purpose is marked or the member never answered one. While it is
+data. `patient_portal.consent.record_permitted(person)` is false while the
+member's latest answer to a marked purpose is anything but a grant (they
+withdrew it, or said no and never agreed) until they give it, and true where
+no purpose is marked or the member never answered one. While it is
 false, nothing written on the member's behalf is kept:
 
 | Path | While the record is off |
 |---|---|
 | PROlog account questionnaires (`PROLOG_PARTICIPANT_RESOLVER`, `prolog_participant_id`) | the member resolves to no participant, so the runner refuses to start or continue one (403) |
 | Questionnaire record mappings (`survey_record_mapping.apply_response`) | not written, logged at info (a response submitted just before the withdrawal) |
-| `PATCH /api/v1/patient-records/me/`, and any patch the member makes (`apply_patient_record_patch`) | 403, except their name, which is their account's |
+| `PATCH /api/v1/patient-records/me/`, and any patch the member makes (`apply_patient_record_patch`) | 403 for a real change, except their name, which is their account's; an auto-save echoing what was shown is no change |
 | PHR writes (`PhrView`: medications, procedures, statements, notes, explanations, shares) | POST, PUT and PATCH 403; DELETE allowed, since removing data never goes against a withdrawal. The consent views stay open (`writes_record = False`), so the member can give the permission again |
 | The member's own sync (`/api/fhir/patient-sync/`) and wearable upload | 403 |
 

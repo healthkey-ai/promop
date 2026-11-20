@@ -232,18 +232,21 @@ RECORD_OFF = ('You withdrew the permission your record depends on, so nothing ca
 def record_permitted(person) -> bool:
     """Whether the member's record may be written on their behalf.
 
-    False once they have ended their grant of a purpose the record depends on
-    (``erases_record_on_withdrawal``): their answers were erased then
-    (patient_portal.erasure), and nothing they send is kept until they give
-    it again. True where no purpose is marked, or the member has not
-    answered one (a hospital's patient, a deployment without the flag).
+    False while the member's latest answer to a purpose the record depends on
+    (``erases_record_on_withdrawal``) is anything but a grant: they withdrew
+    it (and their answers were erased then, patient_portal.erasure), or they
+    said no or "ask me later" and never agreed. Nothing they send is kept
+    until they give it. True where no active purpose is marked, or the member
+    has not answered one (a hospital's patient, a deployment without the
+    flag). One query: it runs on every questionnaire request.
     """
-    marked = set(ConsentPurpose.objects.filter(is_active=True, erases_record_on_withdrawal=True)
-                 .values_list('id', flat=True))
-    if not marked:
-        return True
-    latest = latest_events(person)
-    return all(latest[pid].decision == ConsentEvent.GRANTED for pid in marked if pid in latest)
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose__is_active=True,
+                                    purpose__erases_record_on_withdrawal=True)
+        .order_by('purpose_id', '-recorded_at', '-id').distinct('purpose_id')
+        .values_list('decision', flat=True)
+    )
+    return all(decision == ConsentEvent.GRANTED for decision in latest)
 
 
 def persons_granting(key: str) -> set[int]:

@@ -9,11 +9,13 @@ All notable changes to PRomop are documented here.
 ### Added
 
 - **Nothing is added to a record while its permission is withdrawn** —
-  `consent.record_permitted(person)` is false from a member's ending their
-  grant of an `erases_record_on_withdrawal` purpose until they give it again.
+  `consent.record_permitted(person)` is false while a member's latest answer
+  to an `erases_record_on_withdrawal` purpose is anything but a grant (they
+  withdrew it, or said no and never agreed), until they give it.
   Meanwhile PROlog account questionnaires refuse to start, record mappings
   write nothing, the member's own record patches (other than their name), PHR
-  writes, patient sync and wearable uploads are refused with 403; deletes and
+  writes, patient sync and wearable uploads are refused with 403 (an auto-save
+  that changes nothing is not); deletes and
   the consent endpoints stay open. See `docs/member_erasure_architecture.md`.
 
 - **Withdrawing the permission a record depends on deletes the health
