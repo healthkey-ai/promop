@@ -153,6 +153,7 @@ def test_retired_concept_stays_unresolved(vocab):
     (2_000_000_777, 'HK-Drug'),     # quarantine, in the local id block
     (1_900_000_777, 'HK-Drug'),     # quarantine vocabulary below the block
     (500_777, 'LOCAL'),             # a legacy local placeholder without a source tag
+    (2_000_000_888, 'RxNorm'),      # an id in the local block, whatever vocabulary it claims
 ])
 def test_a_local_placeholder_is_not_a_therapy(vocab, concept_id, vocabulary):
     """An unmatched name is minted under a local vocabulary as a placeholder. It
