@@ -213,6 +213,36 @@ def _write_genetic_mutations(person, mutations, type_concept_id):
     replace_variants(person, mutations, type_concept_id=type_concept_id)
 
 
+def _drop_proposed_list_items(patient_info, patch_data):
+    """*patch_data* without the proposed items of the list fields it echoes (#2534).
+
+    The editor PATCHes the whole record it read, and a list field it read holds
+    the approved items and the proposed ones (``provisional_items``). The proposed
+    ones are not the user's to write: an echo of the merged list is a no-op, and a
+    genuine edit stores only the items that are not proposals, so a proposal never
+    becomes approved data by being carried back. Only a field the record holds
+    proposals for is touched; with the switch off nothing is.
+    """
+    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
+    present = [field for field in PROVISIONAL_JSON_FIELDS if field in patch_data]
+    if not present:
+        return patch_data
+    from omop_core.services.provisional_record import overlay, without_proposed
+    proposed = getattr(overlay(patient_info)[0], 'provisional_items', None) or {}
+    stripped = dict(patch_data)
+    for field in present:
+        if field not in proposed:
+            continue
+        kept = without_proposed(field, patch_data[field], proposed[field])
+        if (kept or []) == (getattr(patient_info, field) or []):
+            del stripped[field]                      # an echo: nothing to write
+        else:
+            # An edit: the rest of the pipeline (or the variant writers) sees the
+            # list without the proposed items.
+            stripped[field] = kept
+    return stripped
+
+
 def apply_patient_record_patch(person, patient_info, data, *, actor):
     """Apply a partial update to a person's PatientRecord, as ``actor`` writes it.
 
@@ -231,7 +261,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # request below as a non-projection-owned field.
     patient_name, patch_data = _pop_patient_name(data)
     from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
-    patch_data = canonicalize_fields(patch_data)
+    patch_data = _drop_proposed_list_items(patient_info, canonicalize_fields(patch_data))
     priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
     priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
 
@@ -255,7 +285,9 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # The editor PATCHes the complete GET representation.  A projected
     # mutation list carried back unchanged is therefore an autosave echo,
     # not an instruction to replace its OMOP rows (and it may be empty
-    # before the vocabulary has been loaded).
+    # before the vocabulary has been loaded).  Proposed items were stripped
+    # above (_drop_proposed_list_items), so the merged list the record read
+    # showed compares equal to the approved one here.
     if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
         mutations = None
     if mutations is not None and priority_edits:

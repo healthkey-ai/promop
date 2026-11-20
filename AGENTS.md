@@ -1588,10 +1588,14 @@ replaced and a provisional item is *added* when no real item says the same (`_it
 `patient_record_provisional` holds only the added items for such a column, never a copy
 of the real list, and `overlay` lays the live items first and the stored ones after, so
 the column cannot go stale. The one confidence is the lowest among the added items
-(not stored per item); `provisional_items` on the record read says which items are
-proposals. A user-edited list is never added to, and the PATCH mirror drops a list's
-proposal only when that list is edited. A marker the reader *derives* from proposed
-findings is not offered. See [List fields as built](docs/provisional_data_plan.md#list-fields-as-built-2534).
+(not stored per item); `provisional_items` on the patient-record detail read says which
+items are proposals (the patient list and the PHR read the approved lists:
+`overlay(record, lists=False)`). A user-edited list is never added to, a typed disease
+adds no `disease_slugs` proposal, and the PATCH mirror drops a list's proposal only when
+that list (or the disease) is edited. `apply_patient_record_patch` strips the proposed
+items from an incoming list (`_drop_proposed_list_items`), so an autosave echo is a no-op
+and a proposal is never written as approved data. A marker the reader *derives* from
+proposed findings is not offered. See [List fields as built](docs/provisional_data_plan.md#list-fields-as-built-2534).
 
 ### One patient's full provisional view: `fill_provisional_record`
 

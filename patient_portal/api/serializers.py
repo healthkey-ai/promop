@@ -357,15 +357,12 @@ class PatientListSerializer(serializers.ModelSerializer):
         # ``provisional_fields`` says which. The page's queryset carries the
         # provisional rows (select_related), so this adds no query per row.
         from omop_core.services.provisional_record import overlay
-        instance, marks = overlay(instance)
+        # The list rows show scalars only: the list summaries (genomics, data gaps)
+        # read the approved lists, and the proposed items are the record read's.
+        instance, marks = overlay(instance, lists=False)
         data = super().to_representation(instance)
         if marks:
             data['provisional_fields'] = marks
-        # Of a list field that holds both approved and proposed items, which ones
-        # are proposed (the field's own confidence is in ``provisional_fields``).
-        proposed_items = getattr(instance, 'provisional_items', None)
-        if proposed_items:
-            data['provisional_items'] = proposed_items
         # A reader without curation access -- a demo-org browse by an
         # analyst or a patient-role grant (#2460) -- is withheld every
         # patient's demographics, as if each had opted in; otherwise only

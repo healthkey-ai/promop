@@ -75,7 +75,9 @@ class PhrView(APIView):
         if record is not None and self.show_provisional:
             # A copy laid with the proposals for fields the record leaves empty;
             # the stored record is never changed.
-            shown, marks = overlay(record)
+            # Scalars only: the PHR's list sections (genetics, procedures, ...) read
+            # the rows themselves, so a proposed list item must not make one 'ready'.
+            shown, marks = overlay(record, lists=False)
             if marks:
                 shown.provisional_fields = marks
                 record = shown

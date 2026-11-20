@@ -308,7 +308,33 @@ DISEASE_FIELDS = (
 )
 
 
-def _disease_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
+def _provisional_disease(person, snapshot, shared):
+    """``(cancers, primary, read)`` of the provisional cancers, or None when there is none.
+
+    The real reader runs over the provisional conditions only. The scalar
+    disease group and the ``disease_slugs`` list both need it, so one pass of the
+    refresh reads it once (*shared* is that pass's memo).
+    """
+    if shared is not None and 'disease' in shared:
+        return shared['disease']
+    from omop_core.services.patient_record_service import (
+        _cancer_conditions, _get_disease_data, _primary_cancer_condition,
+    )
+    found = None
+    cancers = _cancer_conditions(snapshot.provisional_conditions)
+    if cancers:
+        # The real observations answer the disease-status fallback; a provisional
+        # view has none of its own, so it gets none.
+        view = dataclasses.replace(snapshot, conditions=snapshot.provisional_conditions,
+                                   obs_by_source={}, obs_by_code={})
+        found = (cancers, _primary_cancer_condition(person, view, cancers),
+                 _get_disease_data(person, view))
+    if shared is not None:
+        shared['disease'] = found
+    return found
+
+
+def _disease_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[dict, dict]:
     """(values, confidences) of the disease fields a provisional cancer decides.
 
     The real reader (``_get_disease_data``) runs over the provisional
@@ -329,23 +355,16 @@ def _disease_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict
     whatever the confidence: a 55% row that wins on recency gives every disease
     field 55.
     """
-    from omop_core.services.patient_record_service import (
-        _cancer_conditions, _get_disease_data, _is_empty, _primary_cancer_condition,
-    )
+    from omop_core.services.patient_record_service import _is_empty
     if 'disease' in blocked or 'disease_slug' in blocked:
         return {}, {}
     if not any(_is_empty(getattr(record, field, None)) and field not in blocked
                for field in DISEASE_FIELDS):
         return {}, {}
-    conditions = snapshot.provisional_conditions
-    cancers = _cancer_conditions(conditions)
-    if not cancers:
+    disease = _provisional_disease(person, snapshot, shared)
+    if disease is None:
         return {}, {}
-    # The real observations answer the disease-status fallback; a provisional
-    # view has none of its own, so it gets none.
-    view = dataclasses.replace(snapshot, conditions=conditions, obs_by_source={}, obs_by_code={})
-    primary = _primary_cancer_condition(person, view, cancers)
-    read = _get_disease_data(person, view)
+    _, primary, read = disease
     if primary is None or _is_empty(read.get('disease')):
         return {}, {}
     if not _is_empty(record.disease) and record.disease_slug != read.get('disease_slug'):
@@ -370,7 +389,7 @@ def _medication_proposals(snapshot) -> tuple[dict, dict]:
             {'concomitant_medications': min(row.confidence for row in rows)})
 
 
-def composite_proposals(person, record, snapshot, blocked=(), taken=()) -> tuple[dict, dict]:
+def composite_proposals(person, record, snapshot, blocked=(), taken=(), shared=None) -> tuple[dict, dict]:
     """(values, confidences) the composite readers add from provisional conditions and drugs.
 
     Each reader runs over provisional rows only, exactly as the real refresh
@@ -383,7 +402,7 @@ def composite_proposals(person, record, snapshot, blocked=(), taken=()) -> tuple
     from omop_core.services.patient_record_service import _is_empty
     names = _confidence_names()
     values, confidences = {}, {}
-    for reader in (lambda: _disease_proposals(person, record, snapshot, blocked),
+    for reader in (lambda: _disease_proposals(person, record, snapshot, blocked, shared),
                    lambda: _medication_proposals(snapshot)):
         try:
             with transaction.atomic():
@@ -459,29 +478,42 @@ def _added_items(field, live, candidates) -> tuple[list, int | None]:
     return list(added.values()), (min(levels.values()) if levels else None)
 
 
-def _disease_list_candidates(person, snapshot):
-    """``disease_slugs``: the real reader over provisional conditions, one slug per cancer."""
-    from omop_core.services.patient_record_service import (
-        _cancer_conditions, _condition_slug, _get_disease_data, _primary_cancer_condition,
-    )
-    cancers = _cancer_conditions(snapshot.provisional_conditions)
-    if not cancers:
+def without_proposed(field, incoming, proposed_items):
+    """*incoming*, a list a client sent back, without the items that are proposals for *field*.
+
+    A client that saves the whole record sends the merged list it read; the
+    proposed items in it must not become the record's own.
+    """
+    if not isinstance(incoming, list) or not proposed_items:
+        return incoming
+    proposed = {_item_key(field, item) for item in proposed_items}
+    return [item for item in incoming if _item_key(field, item) not in proposed]
+
+
+def _disease_list_candidates(person, snapshot, blocked=(), shared=None):
+    """``disease_slugs``: the real reader over provisional conditions, one slug per cancer.
+
+    Like the scalar disease group, nothing is offered when the person typed the
+    disease or its slug (the list would name cancers beside a disease they chose).
+    """
+    from omop_core.services.patient_record_service import _condition_slug
+    if 'disease' in blocked or 'disease_slug' in blocked:
         return {}
-    view = dataclasses.replace(snapshot, conditions=snapshot.provisional_conditions,
-                               obs_by_source={}, obs_by_code={})
-    primary = _primary_cancer_condition(person, view, cancers)
+    disease = _provisional_disease(person, snapshot, shared)
+    if disease is None:
+        return {}
+    cancers, primary, read = disease
     level = {}
     for condition in cancers:
         slug = _condition_slug(condition)
         level[slug] = min(level.get(slug, 100), condition.confidence)
-    read = _get_disease_data(person, view)
     return {'disease_slugs': [
         (slug, level.get(slug, primary.confidence if primary is not None else min(level.values())))
         for slug in read.get('disease_slugs', ())
     ]}
 
 
-def _malignancy_candidates(person, snapshot):
+def _malignancy_candidates(person, snapshot, blocked=(), shared=None):
     """``active_malignancies``: the real reader's current-condition rule over provisional conditions."""
     from django.utils import timezone
     from omop_core.services.patient_record_service import _condition_is_current, malignancy_rows
@@ -495,7 +527,7 @@ def _malignancy_candidates(person, snapshot):
     ]}
 
 
-def _procedure_candidates(person, snapshot):
+def _procedure_candidates(person, snapshot, blocked=(), shared=None):
     """``prior_procedures``: the real reader's item for each provisional procedure."""
     from omop_core.services.patient_record_service import procedure_item
     return {'prior_procedures': [
@@ -503,7 +535,7 @@ def _procedure_candidates(person, snapshot):
     ]}
 
 
-def _genomic_candidates(person, snapshot):
+def _genomic_candidates(person, snapshot, blocked=(), shared=None):
     """``genetic_mutations`` and the ``genomics_*`` markers from provisional findings.
 
     The real reader runs over the provisional measurements and observations
@@ -540,7 +572,7 @@ _LIST_READERS = (_disease_list_candidates, _malignancy_candidates, _procedure_ca
                  _genomic_candidates)
 
 
-def list_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
+def list_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[dict, dict]:
     """(values, confidences) of the list fields the provisional rows add to *record*.
 
     Each reader runs over provisional rows only, in its own savepoint, so one
@@ -552,7 +584,7 @@ def list_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
     for reader in _LIST_READERS:
         try:
             with transaction.atomic():
-                candidates = reader(person, snapshot)
+                candidates = reader(person, snapshot, blocked, shared)
         except Exception:  # noqa: BLE001 -- one reader must not cost the person's other proposals
             logger.exception('Provisional list reader %s failed for person_id=%s.',
                              reader.__name__, person.person_id)
@@ -568,7 +600,20 @@ def list_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
 
 def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name."""
+    from omop_core.services.patient_record_service import canonical_disease_names
+    if not _has_provisional_rows(snapshot):
+        return {}, {}
+    from omop_core.services.patient_record_service import _usable_concept_name
+    names = {name for c in snapshot.provisional_conditions
+             for name in (_usable_concept_name(c.condition_concept) if c.condition_concept_id else None,
+                          c.condition_source_value)}
+    with canonical_disease_names(names):
+        return _provisional_values(person, record, snapshot, user_edited)
+
+
+def _provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
     from omop_core.services.patient_record_service import _is_empty
+    shared = {}
     measurements = _usable_vitals(_after_clears(snapshot, snapshot.provisional_measurements, 'measurement'))
     observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
     confidence_names = _confidence_names()
@@ -595,8 +640,8 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
                 del kept[field]
         if kept:
             confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
-    composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept)
-    listed, listed_marks = list_proposals(person, record, snapshot, blocked)
+    composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept, shared=shared)
+    listed, listed_marks = list_proposals(person, record, snapshot, blocked, shared)
     if not (kept or composite or listed):
         return {}, {}
     try:
@@ -606,6 +651,13 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
         computed, computed_marks = {}, {}
     return ({**kept, **composite, **computed, **listed},
             {**confidences, **composite_marks, **computed_marks, **listed_marks})
+
+
+def _has_provisional_rows(snapshot) -> bool:
+    """Whether the person has any provisional clinical row (nothing to read when not)."""
+    return any((snapshot.provisional_measurements, snapshot.provisional_observations,
+                snapshot.provisional_conditions, snapshot.provisional_drug_exposures,
+                snapshot.provisional_procedures))
 
 
 def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
@@ -620,9 +672,7 @@ def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
     try:
         with transaction.atomic():
             values, confidences = provisional_values(person, record, snapshot, user_edited)
-            has_rows = any((snapshot.provisional_measurements, snapshot.provisional_observations,
-                            snapshot.provisional_conditions, snapshot.provisional_drug_exposures,
-                            snapshot.provisional_procedures))
+            has_rows = _has_provisional_rows(snapshot)
             if not has_rows and not PatientRecordProvisional.objects.filter(person=person).exists():
                 return
             row = {f.attname: getattr(record, f.attname) for f in _cloned_fields()}
@@ -657,7 +707,7 @@ def mirror_user_edit(record, edited_fields) -> None:
     # slug makes the whole group the person's, so no field is left attributed to
     # the cancer a proposal named.
     if edited & {'disease', 'disease_slug'}:
-        edited |= set(DISEASE_FIELDS)
+        edited |= {*DISEASE_FIELDS, 'disease_slugs'}
     names = _confidence_names()
     try:
         with transaction.atomic():
@@ -736,7 +786,7 @@ NEVER_OVERLAID = frozenset({
 })
 
 
-def overlay(record):
+def overlay(record, lists=True):
     """The record as a reader sees it: ``(record, marks)``.
 
     With ``PROVISIONAL_DATA_ENABLED`` on, a field the live record leaves empty
@@ -747,6 +797,11 @@ def overlay(record):
     override approved data. The record itself is not changed or saved: the caller
     gets a copy to serialize. With the switch off, or no provisional row, it is
     ``(record, {})``.
+
+    The list fields (``PROVISIONAL_JSON_FIELDS``) are merged and reported in
+    ``view.provisional_items`` only with ``lists=True``, the record read. A reader
+    that shows a summary or a section from the real rows (the patient list, the
+    PHR) passes ``lists=False`` and sees the real list.
 
     Access is the real record's: whoever may read this patient may read what is
     proposed for them, so this adds no check of its own.
@@ -771,6 +826,8 @@ def overlay(record):
             continue
         live = getattr(record, field.attname, None)
         if field.name in PROVISIONAL_JSON_FIELDS:
+            if not lists:
+                continue
             # A list: the live items first, then the stored proposals the record
             # does not already hold. Reading again over the result adds nothing.
             new = _unseen(field.name, live, getattr(provisional, field.attname))

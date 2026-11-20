@@ -409,7 +409,7 @@ def test_a_reader_that_raises_costs_only_its_own_fields(snomed, person, monkeypa
         procedure(person, 'Bone marrow biopsy', 4101, date(2024, 5, 1), 90)
         malignancy(person, 'Malignant neoplasm of breast', 8_900_022, 88, malignancy_root())
 
-    def boom(person, snapshot):
+    def boom(person, snapshot, blocked=(), shared=None):
         raise RuntimeError('bad reader')
     monkeypatch.setattr(provisional_record, '_LIST_READERS',
                         (boom, provisional_record._malignancy_candidates))
@@ -481,8 +481,169 @@ def test_a_record_with_no_proposed_items_carries_no_item_list(snomed, person):
     assert 'provisional_items' not in body and body['provisional_fields'] == {}
 
 
-def test_the_patient_list_carries_the_same(snomed, person):
+# --- a PATCH that echoes the record it read (review of #2758) -------------------------------
+
+def _patch(client, person, body):
+    return client.patch(f'/api/v1/patient-records/{person.person_id}/', body, format='json')
+
+
+def _get(client, person):
+    return client.get(f'/api/v1/patient-records/{person.person_id}/').json()['patient_info']
+
+
+def _unchanged(person, before_edited=None):
+    record = real(person)
+    return record, list(record.user_edited_fields or [])
+
+
+def _procedures_with_a_proposal(person):
     with suppress_patient_record_refresh():
+        procedure(person, 'Chest X-ray', 4102, date(2024, 1, 1))
+        procedure(person, 'Bone marrow biopsy', 4101, date(2024, 5, 1), 90)
+    refresh_patient_record(person)
+
+
+def _malignancies_with_a_proposal(person):
+    root = malignancy_root()
+    with suppress_patient_record_refresh():
+        malignancy(person, 'Malignant neoplasm of breast', 8_900_022, None, root)
+        malignancy(person, 'Malignant neoplasm of lung', 8_900_023, 81, root)
+    refresh_patient_record(person)
+
+
+def _slugs_with_a_proposal(person):
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=person, condition_concept=_concept('Condition', 4001, 'C4001', 'Squamous cell carcinoma'),
+            condition_source_value='C4001', condition_start_date=date(2023, 1, 1))
+        ConditionOccurrenceFactory(
+            person=person, condition_concept=_concept('Condition', 4002, 'C4002', 'Basal cell carcinoma'),
+            condition_source_value='C4002', condition_start_date=date(2024, 1, 1), confidence=77)
+    refresh_patient_record(person)
+
+
+def _variants_with_a_proposal(person):
+    from django.core.management import call_command
+    call_command('seed_genomics_catalog')
+    with suppress_patient_record_refresh():
+        variant(person, 'BRCA1', 'c.68_69delAG', None)
+        variant(person, 'TP53', 'c.743G>A', 78)
+    refresh_patient_record(person)
+
+
+ECHOES = [
+    ('prior_procedures', _procedures_with_a_proposal),
+    ('active_malignancies', _malignancies_with_a_proposal),
+    ('disease_slugs', _slugs_with_a_proposal),
+    ('genetic_mutations', _variants_with_a_proposal),
+    ('genomics_tp53', _variants_with_a_proposal),
+]
+
+
+@pytest.mark.parametrize('field,setup', ECHOES)
+def test_echoing_a_merged_list_is_a_no_op_and_keeps_the_proposal(snomed, person, field, setup):
+    setup(person)
+    client = _staff()
+    body = _get(client, person)
+    assert field in body['provisional_fields'], field          # the read says it is a proposal
+    before, edited = _unchanged(person)
+
+    response = _patch(client, person, {field: body[field]})
+
+    assert response.status_code == 200, response.content
+    after, edited_after = _unchanged(person)
+    assert getattr(after, field) == getattr(before, field)     # the real list is unchanged
+    assert edited_after == edited and field not in edited_after
+    assert marks(person).__dict__[field] is not None             # still a proposal
+    assert field in _get(client, person)['provisional_fields']
+
+
+@pytest.mark.parametrize('field,setup', ECHOES)
+def test_a_whole_record_autosave_echo_is_a_no_op(snomed, person, field, setup):
+    setup(person)
+    client = _staff()
+    body = _get(client, person)
+    before, edited = _unchanged(person)
+
+    response = _patch(client, person, body)
+
+    assert response.status_code == 200, response.content
+    after, edited_after = _unchanged(person)
+    assert getattr(after, field) == getattr(before, field)
+    assert field not in edited_after
+    assert marks(person).__dict__[field] is not None
+
+
+def test_a_genuine_edit_beside_proposed_items_stores_only_real_and_edited_items(snomed, person):
+    _procedures_with_a_proposal(person)
+    client = _staff()
+    body = _get(client, person)
+    typed = {'procedure': 'Typed', 'date': '2024-07-01', 'concept_id': 0}
+
+    response = _patch(client, person, {'prior_procedures': [*body['prior_procedures'], typed]})
+
+    assert response.status_code == 200, response.content
+    stored = real(person).prior_procedures
+    assert [p['procedure'] for p in stored] == ['Chest X-ray', 'Typed']   # never the proposed item
+    assert 'prior_procedures' in real(person).user_edited_fields
+
+
+def test_deleting_a_real_item_while_echoing_proposals_stores_the_remaining_real_items(snomed, person):
+    with suppress_patient_record_refresh():
+        procedure(person, 'Chest X-ray', 4102, date(2024, 1, 1))
+        procedure(person, 'PET scan', 4103, date(2024, 2, 1))
+        procedure(person, 'Bone marrow biopsy', 4101, date(2024, 5, 1), 90)
+    refresh_patient_record(person)
+    client = _staff()
+    body = _get(client, person)
+    kept = [p for p in body['prior_procedures'] if p['procedure'] != 'PET scan']
+
+    response = _patch(client, person, {'prior_procedures': kept})
+
+    assert response.status_code == 200, response.content
+    assert [p['procedure'] for p in real(person).prior_procedures] == ['Chest X-ray']
+
+
+def test_a_genuine_variant_edit_beside_a_proposed_one_never_approves_the_proposal(snomed, person):
+    from omop_core.models import Measurement
+    from tests.factories import ConceptFactory
+    ConceptFactory(vocabulary__vocabulary_id='CDM', concept_code='measurement.measurement_id')
+    ConceptFactory(concept_id=45876022, concept_code='36908-2', concept_name='Gene mutations tested for')
+    ConceptFactory(concept_id=32865, concept_code='32865', concept_name='Patient self-report')
+    _variants_with_a_proposal(person)
+    client = _staff()
+    body = _get(client, person)
+    real_only = [v for v in body['genetic_mutations'] if v['gene'].lower() == 'brca1']
+    new = {'gene': 'KRAS', 'mutation': 'c.35G>A', 'test_date': '2024-03-01'}
+
+    response = _patch(client, person, {'genetic_mutations': [*body['genetic_mutations'], new]})
+
+    assert response.status_code == 200, response.content
+    genes = {v['gene'].lower() for v in real(person).genetic_mutations}
+    assert 'kras' in genes and 'brca1' in genes and 'tp53' not in genes      # the proposal is not approved
+    assert Measurement.objects.get(person=person, qualifier_source_value='TP53').confidence == 78
+    assert real_only
+
+
+def test_with_the_switch_off_an_echo_is_untouched_behaviour(snomed, person, settings):
+    settings.PROVISIONAL_DATA_ENABLED = False
+    with suppress_patient_record_refresh():
+        procedure(person, 'Chest X-ray', 4102, date(2024, 1, 1))
+    refresh_patient_record(person)
+    client = _staff()
+    body = _get(client, person)
+
+    assert _patch(client, person, {'prior_procedures': body['prior_procedures']}).status_code == 200
+    assert 'prior_procedures' not in real(person).user_edited_fields
+
+
+# --- the patient list and the PHR read the approved lists (review of #2758) -----------------
+
+def test_the_patient_list_summaries_come_from_the_approved_lists(snomed, person):
+    from django.core.management import call_command
+    call_command('seed_genomics_catalog')
+    with suppress_patient_record_refresh():
+        variant(person, 'TP53', 'c.743G>A', 78)                   # proposed only
         procedure(person, 'Bone marrow biopsy', 4101, date(2024, 5, 1), 90)
     refresh_patient_record(person)
 
@@ -490,5 +651,123 @@ def test_the_patient_list_carries_the_same(snomed, person):
     rows = rows['results'] if isinstance(rows, dict) else rows
     row = next(r for r in rows if r['person_id'] == person.person_id)
 
-    assert row['provisional_fields']['prior_procedures'] == 90
-    assert [p['procedure'] for p in row['provisional_items']['prior_procedures']] == ['Bone marrow biopsy']
+    assert not row['genomics_summary']                            # not shown as an approved finding
+    assert 'Genomics' in row['data_gaps']                         # the gap is still a gap
+    assert 'provisional_items' not in row                         # no variant dicts in the list payload
+    assert 'prior_procedures' not in row.get('provisional_fields', {})
+
+
+def test_the_phr_does_not_call_genetics_ready_on_a_proposed_variant(snomed, person):
+    from django.core.management import call_command
+    from tests.test_phr_read_model import signed_in
+    call_command('seed_genomics_catalog')
+    record = real(person)
+    with suppress_patient_record_refresh():
+        variant(person, 'TP53', 'c.743G>A', 78)
+    refresh_patient_record(person)
+
+    client = signed_in(record)
+
+    assert client.get('/api/v1/phr/status/').json()['sections']['genetics'] == 'empty'
+
+
+# --- the disease list follows the typed disease (review of #2758) ---------------------------
+
+def test_a_typed_disease_adds_no_slug_proposal(snomed, person):
+    PatientRecord.objects.filter(person=person).update(
+        disease='multiple myeloma', disease_slug='multiple-myeloma', user_edited_fields=['disease'])
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=person, condition_concept=_concept('Condition', 4001, 'C4001', 'Squamous cell carcinoma'),
+            condition_source_value='C4001', condition_start_date=date(2024, 1, 1), confidence=90)
+
+    refresh_patient_record(person)
+
+    assert marks(person).disease_slugs is None
+
+
+def test_editing_the_disease_takes_back_a_slug_proposal(snomed, person):
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=person, condition_concept=_concept('Condition', 4001, 'C4001', 'Squamous cell carcinoma'),
+            condition_source_value='C4001', condition_start_date=date(2024, 1, 1), confidence=90)
+    refresh_patient_record(person)
+    assert marks(person).disease_slugs == 90
+
+    PatientRecord.objects.filter(person=person).update(
+        disease='multiple myeloma', disease_slug='multiple-myeloma', user_edited_fields=['disease'])
+    provisional_record.mirror_user_edit(real(person), ['disease'])
+
+    assert marks(person).disease_slugs is None and marks(person).disease is None
+
+
+# --- cost (review of #2758) -----------------------------------------------------------------
+
+def test_a_person_with_no_provisional_row_reads_nothing_more(snomed, person):
+    snapshot = _build_snapshot(person)
+    record = real(person)
+    with CaptureQueriesContext(connection) as queries:
+        assert provisional_record.provisional_values(person, record, snapshot) == ({}, {})
+    assert len(queries) == 0
+
+
+def test_the_disease_is_read_once_when_both_the_group_and_the_list_need_it(snomed, person, monkeypatch):
+    from omop_core.services import patient_record_service
+    calls = []
+    original = patient_record_service._get_disease_data
+    monkeypatch.setattr(patient_record_service, '_get_disease_data',
+                        lambda *args, **kw: calls.append(1) or original(*args, **kw))
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=person, condition_concept=_concept('Condition', 4001, 'C4001', 'Squamous cell carcinoma'),
+            condition_source_value='C4001', condition_start_date=date(2024, 1, 1), confidence=90)
+
+    provisional_record.provisional_values(person, real(person), _build_snapshot(person))
+
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('kind', ['disease', 'malignancy', 'genomic'])
+def test_every_list_reader_is_flat_in_the_number_of_items(snomed, person, kind):
+    from django.core.management import call_command
+    call_command('seed_genomics_catalog')
+    root = malignancy_root()
+
+    def add(n):
+        with suppress_patient_record_refresh():
+            for i in range(n):
+                k = 100 + i + (0 if n == 5 else 50)
+                if kind == 'disease':
+                    cancer = _concept('Condition', 5000, 'CC', 'Cancer type')    # one name, many rows
+                    ConditionOccurrenceFactory(
+                        person=person, condition_concept=cancer, condition_source_value=f'CC{k}',
+                        condition_start_date=date(2024, 1, 1) + timedelta(days=k), confidence=80)
+                elif kind == 'malignancy':
+                    malignancy(person, f'Malignant neoplasm {k}', 8_950_000 + k, 80, root)
+                else:
+                    variant(person, 'BRCA1', f'c.{k}A>G', 80, when=f'2024-02-{1 + i % 27:02d}')
+
+    record = real(person)
+    add(5)
+    snapshot = _build_snapshot(person)
+    with CaptureQueriesContext(connection) as few:
+        provisional_record.provisional_values(person, record, snapshot)
+    add(30)
+    snapshot = _build_snapshot(person)
+    with CaptureQueriesContext(connection) as many:
+        provisional_record.provisional_values(person, record, snapshot)
+
+    assert len(many) <= len(few) + 3, (kind, len(few), len(many))
+
+
+def test_a_curated_disease_name_canonicalizes_the_same_inside_and_outside_the_pass_memo(snomed):
+    from omop_core.models import DiseaseCategoryMapping
+    from omop_core.services.patient_record_service import _canonicalize_disease, canonical_disease_names
+    DiseaseCategoryMapping.objects.create(disease_name='Odd cancer name', category='multiple_myeloma')
+    outside = _canonicalize_disease('odd cancer NAME')
+
+    with canonical_disease_names({'Odd cancer name', 'Unmapped thing'}):
+        inside = _canonicalize_disease('odd cancer NAME')
+        unmapped = _canonicalize_disease('Unmapped thing')
+
+    assert inside == outside and unmapped == 'Unmapped thing'

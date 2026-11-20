@@ -619,9 +619,12 @@ fit a list the record may already fill, so a list has its own:
 
 - **Real items are never replaced; provisional items are added.** An item is
   added only when no real item says the same thing (`_item_key`: a string by its
-  lowercased text, a procedure by concept and date, a variant by gene, variant,
-  feature, marker key and test date). A user-edited list (`user_edited_fields`)
-  is never added to.
+  casefolded, trimmed text; a procedure by its concept id, or its name when the
+  concept is unmapped, and its date; a variant by gene, variant, feature, marker
+  key and test date, ignoring origin, interpretation and the row id). A
+  user-edited list (`user_edited_fields`) is never added to, and a typed or
+  cleared `disease` / `disease_slug` adds no `disease_slugs` proposal, as it
+  blocks the scalar disease group.
 - **The provisional column holds only the added items**, never a copy of the real
   ones. The reader lays the live items first and the stored ones after
   (`overlay`), so the column cannot go stale against the record: an item the
@@ -634,10 +637,19 @@ fit a list the record may already fill, so a list has its own:
   `provisional_items` (below); a sidecar can be added later without changing the
   rule.
 - **Which items are proposals** travels with the record as `provisional_items`,
-  `{field: [added items]}`, on the same reads that carry `provisional_fields`
-  (the patient-record detail and list, and the federation host's read). It is
-  absent when nothing is added; the frontend treats it as read-only
-  (`LIFECYCLE`).
+  `{field: [added items]}`, on the patient-record detail read only, next to
+  `provisional_fields`; it is absent when nothing is added. The patient list and
+  the PHR read the **approved** lists (`overlay(record, lists=False)`): a list's
+  summaries (genomics, data gaps) and the PHR's Genetics readiness must not take
+  a proposal for an approved finding, and the list payload carries no variant
+  dicts. The frontend treats `provisional_items` as read-only (`LIFECYCLE`).
+- **A PATCH never turns a proposal into approved data.** The editor saves the
+  whole record it read, and a list it read holds the proposed items too.
+  `apply_patient_record_patch` removes the items named in `provisional_items`
+  from an incoming list before anything else: an echo of the merged list is a
+  no-op (the real list and `user_edited_fields` unchanged, still a proposal), and
+  a genuine edit stores only the real and the typed items. This covers every
+  list field, `genetic_mutations` and the `genomics_*` markers included.
 
 | Field | Reader (shared with the real refresh, over provisional rows only) | Confidence of an item |
 |---|---|---|
@@ -656,8 +668,16 @@ still equal the real record. A reader costs only its own fields (its own
 savepoint), and the lists add no query per item.
 
 The Genomics tab lists variants from its own endpoint over approved findings, so
-a proposed variant appears in the record read, the PHR and the downloads but not
-yet in that table; the other lists have no control on the provider page.
+a proposed variant appears in the patient-record detail read but not yet in that
+table, the patient list or the PHR; the other lists have no control on the
+provider page.
+
+Cost: a person with no provisional row reads nothing (no query). The disease
+read runs once per refresh for the scalar group and the slug list together, and
+the cancer names of the provisional conditions are canonicalized with one
+`DiseaseCategoryMapping` query (`canonical_disease_names`) instead of one per
+row. The migration adds columns to `patient_record_confidence`, so it waits
+behind a running derivation that holds a lock on the table.
 
 ### Computed fields
 
