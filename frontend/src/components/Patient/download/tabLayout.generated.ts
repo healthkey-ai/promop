@@ -1000,7 +1000,7 @@ export const TAB_LAYOUT: TabLayout = {
           "no_mental_health_disorder_status"
         ],
         [
-          "No Non-prescription Recreational Drug Use",
+          "No Recreational Drug Use (non-prescription)",
           "no_substance_use_status"
         ],
         [

@@ -145,7 +145,7 @@ export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
       <Section title="Mental Health and Substance Use">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="No Mental Health Disorders" name="no_mental_health_disorder_status" descriptor={descriptors.no_mental_health_disorder_status} type="boolean" value={formData?.no_mental_health_disorder_status} onChange={onChange} />
-          <ClinicalField label="No Non-prescription Recreational Drug Use" name="no_substance_use_status" descriptor={descriptors.no_substance_use_status} type="boolean" value={formData?.no_substance_use_status} onChange={onChange} />
+          <ClinicalField label="No Recreational Drug Use (non-prescription)" name="no_substance_use_status" descriptor={descriptors.no_substance_use_status} type="boolean" value={formData?.no_substance_use_status} onChange={onChange} />
           <div className="sm:col-span-2">
             <ClinicalField label="Substance Use Details" name="substance_use_details" descriptor={descriptors.substance_use_details} type="text" value={formData?.substance_use_details} onChange={onChange} />
           </div>

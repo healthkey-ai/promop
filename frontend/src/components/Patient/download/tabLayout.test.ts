@@ -22,7 +22,7 @@ describe('tab layout', () => {
   // boolean control shows true as "Yes". A label naming the thing itself
   // ("Mental Health Disorders") makes every answer read and save as its
   // opposite (#2755).
-  it('labels every no_* field by what true means', () => {
+  it('labels every no_* field in the PDF tabs by what true means', () => {
     const misread = Object.entries(extractAll() as Record<string, { fields: [string, string][] }[]>)
       .flatMap(([tab, sections]) => sections.flatMap((section) => section.fields
         .filter(([label, name]) => name.startsWith('no_') && !/^(No|Not)\b/.test(label))
