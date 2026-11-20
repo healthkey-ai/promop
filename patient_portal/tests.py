@@ -16322,9 +16322,11 @@ class SelfServicePasswordResetTest(TestCase):
 
     def test_known_email_returns_200_and_sends_email(self):
         from django.core import mail
-        resp = APIClient().post('/api/v1/auth/request-reset/', {
-            'email': 'self-reset@test.com',
-        })
+        # The email goes once the request commits (queue_password_reset).
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = APIClient().post('/api/v1/auth/request-reset/', {
+                'email': 'self-reset@test.com',
+            })
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn('self-reset@test.com', mail.outbox[0].to)
@@ -16350,9 +16352,10 @@ class SelfServicePasswordResetTest(TestCase):
             )
             federated.set_unusable_password()
             federated.save()
-        response = APIClient().post('/api/v1/auth/request-reset/', {
-            'email': self.identity.email.upper(),
-        })
+        with self.captureOnCommitCallbacks(execute=True):
+            response = APIClient().post('/api/v1/auth/request-reset/', {
+                'email': self.identity.email.upper(),
+            })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(mail.outbox), 1)
         uid = urlsafe_base64_encode(force_bytes(self.identity.pk))

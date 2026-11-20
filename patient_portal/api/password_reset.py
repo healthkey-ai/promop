@@ -60,6 +60,39 @@ def make_reset_link(identity: Identity, app: Installation | None = None) -> str:
     return f"{reset_app_for(identity, app).url}/reset-password?uid={uidb64}&token={token}"
 
 
+def queue_password_reset(identity: Identity, *, by_administrator: bool) -> None:
+    """Send the reset email once the request's transaction commits, on a
+    Celery worker when there is a broker. Only the account's id goes to the
+    broker, never its address or the link. A deployment without a broker
+    sends it inline, so there the response still waits for the mail provider."""
+    from django.db import transaction
+
+    identity_id = identity.pk
+
+    def send():
+        if getattr(settings, 'CELERY_BROKER_URL', ''):
+            from patient_portal.tasks import send_password_reset_task
+
+            send_password_reset_task.delay(identity_id, by_administrator)
+        else:
+            send_password_reset_to(identity_id, by_administrator=by_administrator)
+
+    transaction.on_commit(send)
+
+
+def send_password_reset_to(identity_id: int, *, by_administrator: bool) -> None:
+    """The reset email for the account ``identity_id``, if it can still have
+    one (active, with a password). A failure is logged, never raised: nobody
+    is waiting for it."""
+    identity = Identity.objects.filter(pk=identity_id, is_active=True).first()
+    if identity is None or not identity.has_usable_password():
+        return
+    try:
+        send_password_reset_email(identity, by_administrator=by_administrator)
+    except PasswordResetEmailError:
+        pass  # logged by send_password_reset_email
+
+
 def send_password_reset_email(identity: Identity, *, by_administrator: bool) -> None:
     """Email the reset link. ``by_administrator`` says who asked: an
     administrator (the admin action), or the account holder themselves
@@ -127,10 +160,10 @@ def request_password_reset(request):
     if not identity.has_usable_password():
         return Response(success_msg)
 
-    try:
-        send_password_reset_email(identity, by_administrator=False)
-    except PasswordResetEmailError:
-        pass  # Don't reveal failure — same response either way
+    # Sending is the slow part (the mail provider's API), and only an account
+    # that exists has it: done here, the response time would say which
+    # addresses have accounts. It runs after the response, on a worker.
+    queue_password_reset(identity, by_administrator=False)
     return Response(success_msg)
 
 
