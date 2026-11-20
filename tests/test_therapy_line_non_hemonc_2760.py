@@ -61,7 +61,9 @@ def vocab():
         'tamoxifen': _concept(TAMOXIFEN_RXNORM, 'tamoxifen', 'RxNorm', 'Drug', 'Ingredient'),
         'mastectomy': _concept(MASTECTOMY_SNOMED, 'Mastectomy', 'SNOMED', 'Procedure', 'Procedure'),
         'genomic': _concept(GENOMIC_TESTING, 'Genomic testing', 'SNOMED', 'Measurement', 'Procedure'),
-        'tamoxifen_hemonc': _concept(TAMOXIFEN_HEMONC, 'Tamoxifen', 'HemOnc', 'Drug', 'Component'),
+        # HemOnc Components are non-standard (they map to RxNorm), as in the loaded vocabulary.
+        'tamoxifen_hemonc': _concept(TAMOXIFEN_HEMONC, 'Tamoxifen', 'HemOnc', 'Drug', 'Component',
+                                     standard_concept=None),
         'regimen': _concept(REGIMEN_ID, 'VRd', 'HemOnc', 'Regimen', 'Regimen'),
     }
 
@@ -119,6 +121,17 @@ def test_retired_concept_stays_unresolved(vocab):
     record = _write_line(PersonFactory(), TAMOXIFEN_RXNORM, name='tamoxifen')
 
     assert record.first_line_therapy_id is None
+
+
+def test_a_quarantine_placeholder_is_not_a_therapy(vocab):
+    """An unmatched name is minted under an HK-* quarantine vocabulary as a
+    non-standard concept. It marks the line as unresolved; it is not an id."""
+    _concept(2_000_000_777, 'unmatched drug', 'HK-Drug', 'Drug', 'Ingredient', standard_concept=None)
+
+    record = _write_line(PersonFactory(), 2_000_000_777, name='unmatched drug')
+
+    assert record.first_line_therapy_id is None
+    assert 2_000_000_777 not in (record.first_line_component_ids or [])
 
 
 def test_hemonc_component_line_also_lists_its_drug(vocab):

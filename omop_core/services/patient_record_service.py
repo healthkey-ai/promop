@@ -2773,11 +2773,34 @@ def _line_identity_concept(concept):
     """The episode's own concept, when it can stand as the line's id (#2760).
 
     Nothing else resolves a non-HemOnc concept, so a line the writer stored with
-    one would otherwise derive no id at all.
+    one would otherwise derive no id at all. Only a standard, valid concept
+    qualifies: the HK-* quarantine concepts an unmatched name is minted under
+    are non-standard placeholders, and must read as unresolved, not as a therapy.
     """
     if (concept is not None and getattr(concept, 'domain_id', None) in _LINE_IDENTITY_DOMAINS
+            and getattr(concept, 'standard_concept', None) == 'S'
             and not getattr(concept, 'invalid_reason', None)):
         return concept
+    return None
+
+
+# HemOnc classes that name a whole regimen (some carry domain Drug), not one drug.
+_REGIMEN_CONCEPT_CLASSES = frozenset({'Regimen', 'Modality'})
+
+
+def _line_own_drug_id(concept):
+    """The line's own concept as a component, when it is a single drug (#2760).
+
+    A HemOnc Component is non-standard (it maps to RxNorm) yet is the drug the
+    line is about; an RxNorm ingredient is standard. A regimen class is not one
+    drug, and a non-standard HK-* quarantine concept is a placeholder, not a drug.
+    """
+    if (concept is None or getattr(concept, 'domain_id', None) != 'Drug'
+            or getattr(concept, 'invalid_reason', None)
+            or getattr(concept, 'concept_class_id', None) in _REGIMEN_CONCEPT_CLASSES):
+        return None
+    if getattr(concept, 'standard_concept', None) == 'S' or getattr(concept, 'vocabulary_id', None) == 'HemOnc':
+        return concept.concept_id
     return None
 
 
@@ -3207,9 +3230,9 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
         # A line whose own concept is a single drug lists that drug too (#2760):
         # with no exposures recorded it would otherwise offer no component.
         line_drug_ids = [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id]
-        own = _line_identity_concept(episode.episode_source_concept)
-        if own is not None and own.domain_id == 'Drug':
-            line_drug_ids.append(own.concept_id)
+        own_drug_id = _line_own_drug_id(episode.episode_source_concept)
+        if own_drug_id:
+            line_drug_ids.append(own_drug_id)
         components = _expand_component_ids(
             [concept_id] if concept_id else [],
             line_drug_ids,
