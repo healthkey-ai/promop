@@ -10,7 +10,7 @@ import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
 import {
   COUNTRY_OPTIONS, US_STATES,
-  ECOG_OPTIONS, KARNOFSKY_OPTIONS,
+  ECOG_OPTIONS, KARNOFSKY_OPTIONS, DISEASE_MANAGEMENT_OPTIONS, DISEASE_STATUS_OPTIONS, CARE_SETTING_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
@@ -268,6 +268,9 @@ export default function GeneralTab({
           {field('ECOG Performance Status', 'ecog_performance_status', 'select', { options: ECOG_OPTIONS, vocabSource: ecogSource })}
           {field('ECOG Assessment Date', 'ecog_assessment_date', 'date')}
           {field('Karnofsky Performance Score', 'karnofsky_performance_score', 'select', { options: KARNOFSKY_OPTIONS, vocabSource: karnofskySource })}
+          {field('Disease Management', 'disease_management', 'select', { options: DISEASE_MANAGEMENT_OPTIONS })}
+          {field('Disease Status Today', 'disease_status', 'select', { options: DISEASE_STATUS_OPTIONS })}
+          {field('Main Care Setting', 'care_setting', 'select', { options: CARE_SETTING_OPTIONS })}
         </div>
       </Section>
 

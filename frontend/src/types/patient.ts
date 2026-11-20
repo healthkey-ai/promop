@@ -48,6 +48,9 @@ export interface PatientInfo {
   stage?: string;
   karnofsky_performance_status?: number;
   ecog_performance_status?: number;
+  disease_management?: string | null;
+  disease_status?: string | null;
+  care_setting?: string | null;
   no_other_active_malignancies?: boolean;
   no_active_infection_status?: boolean;
   preexisting_conditions?: string[];

@@ -6,7 +6,7 @@
  * writable and the rest are refused for three different reasons, so this is the
  * tab where "render what the server says" has to mean more than one thing.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -75,6 +75,10 @@ const DESCRIPTORS: Record<string, unknown> = {
     kind: 'unmapped', writable: false, group: 'needs-concept-set',
     reason: 'No concept set assigned yet.',
   },
+  // Written directly to PatientRecord until a concept is curated.
+  disease_management: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  disease_status: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  care_setting: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
 };
 
 beforeEach(() => {
@@ -137,6 +141,39 @@ describe('GeneralTab', () => {
 
     expect(screen.getByText('Female')).toBeInTheDocument();
     expect(screen.queryByTestId('reason-gender')).not.toBeInTheDocument();
+  });
+
+  it('shows how the cancer is managed, how it is today and where care happens, as editable choices', async () => {
+    renderTab({ disease_management: 'Maintenance treatment', disease_status: 'In remission', care_setting: 'Local clinic' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText('Disease Management')).toBeInTheDocument();
+    expect(screen.getByText('Maintenance treatment')).toBeInTheDocument();
+    expect(screen.getByText('In remission')).toBeInTheDocument();
+    expect(screen.getByText('Local clinic')).toBeInTheDocument();
+    for (const name of ['disease_management', 'disease_status', 'care_setting']) {
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
+    }
+  });
+
+  it('offers the patient-facing choices for how the cancer is managed, and reports the one picked', async () => {
+    const onChange = vi.fn();
+    renderTab({}, onChange);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const box = screen.getByText('Disease Management').closest('div')!.parentElement!;
+    const trigger = within(box).getByRole('combobox');
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole('listbox');
+    const offered = within(listbox).getAllByRole('option').map((o) => o.textContent?.trim()).filter((t) => t && !t.startsWith('—'));
+    expect(offered).toEqual([
+      'Watch and wait, never treated', 'Receiving first treatment', 'Monitored after first treatment',
+      'Receiving treatment after relapse', 'Monitored after relapse', 'Maintenance treatment',
+      'No regular follow-up or treatment', 'Other', 'Not sure',
+    ]);
+    fireEvent.click(within(listbox).getByRole('option', { name: 'Maintenance treatment' }));
+    expect(onChange).toHaveBeenCalledWith('disease_management', 'Maintenance treatment');
   });
 
   it('renders date of birth as an editable calendar control', async () => {

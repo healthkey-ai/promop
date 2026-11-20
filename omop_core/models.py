@@ -4251,6 +4251,12 @@ class PatientRecord(models.Model):
     splenomegaly = models.BooleanField(blank=True, null=True)
     spleen_size = models.FloatField(blank=True, null=True)
     disease_activity = models.TextField(blank=True, null=True)
+    # How the patient's cancer is managed now, how it is today, and where they
+    # mainly receive care, as the patient describes them (questionnaire answers
+    # through survey record mappings, or the record editor).
+    disease_management = models.TextField(blank=True, null=True, help_text="How the cancer is being managed now (e.g. watch and wait, receiving treatment, maintenance)")
+    disease_status = models.TextField(blank=True, null=True, help_text="How the cancer is today (e.g. in remission, stable, relapsed)")
+    care_setting = models.TextField(blank=True, null=True, help_text="Where the patient mainly receives care for their cancer")
     btk_inhibitor_refractory = models.BooleanField(blank=True, null=True)
     bcl2_inhibitor_refractory = models.BooleanField(blank=True, null=True)
     absolute_lymphocyte_count = models.FloatField(blank=True, null=True)

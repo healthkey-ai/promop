@@ -27,6 +27,13 @@ All notable changes to PRomop are documented here.
   `patient_portal.E007`. Off by default: with no mapping
   directories, answers stay in the survey tables. See
   [Survey record mapping](docs/survey-record-mapping_architecture.md).
+- **How the cancer is managed, how it is today, and where care happens** —
+  three `PatientRecord` fields (migration `omop_core` 0359, with the provisional
+  table): `disease_management` (watch and wait, receiving treatment, monitored,
+  maintenance, …), `disease_status` (in remission, stable, relapsed or
+  progressed, …) and `care_setting`. Written directly to the record until
+  concepts are curated, editable in the General tab with patient-facing
+  choices, and writable by survey record mappings.
 - **Record mappings name a line as "next" or "latest", and keep what the patient
   said about it** — a later questionnaire can add the next line after the
   person's last, or update their latest (an end date, a return). The new
