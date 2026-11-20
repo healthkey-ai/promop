@@ -74,7 +74,7 @@ function RecordConfirmation({
           Record confirmed{validationDate ? ` on ${validationDate}` : ''}
           {pending && (
             <span className="block text-amber-800" data-testid="record-confirmation-pending">
-              {pending} and not covered by that confirmation. Enter the right value in
+              {pending} and not covered by that confirmation. Enter your own answer in
               each one, then you can confirm again.
             </span>
           )}
@@ -105,9 +105,9 @@ function RecordConfirmation({
               {pending} (not yet confirmed)
             </p>
             <p className="mt-1 text-sm text-amber-800">
-              Check each value marked Provisional and enter the right value in its field
-              (entering the same value keeps it). Confirm Record is available once none
-              are marked.
+              Check each value marked Provisional and enter your own answer in its field:
+              retype a number or text, or pick an option (to keep the option shown, pick
+              another and then it again). Confirm Record is available once none are marked.
             </p>
           </div>
         </div>
@@ -503,9 +503,9 @@ export default function PatientDetail({
 
    
   // performSave runs before reloadPatientInfo is defined; it calls it through this ref.
-  const reloadRef = useRef<() => void>(() => {});
-  const performSave = useCallback(async () => {
-    if (!pendingDataRef.current || !personId) return;
+  const reloadRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const performSave = useCallback(async (): Promise<boolean> => {
+    if (!pendingDataRef.current || !personId) return true;
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
@@ -577,8 +577,10 @@ export default function PatientDetail({
         }
         // Saving a proposed value as the patient's own can clear other marks the
         // server holds (the disease group, a calculated field): read the record
-        // again so the page and the confirmation banner follow it (#2761).
-        if (Object.keys(patchFields).some((f) => f in proposed)) reloadRef.current();
+        // again so the page and the confirmation banner follow it (#2761). The
+        // save waits for the read, so a confirmation that follows it cannot be
+        // overwritten by a read that began before it.
+        if (Object.keys(patchFields).some((f) => f in proposed)) await reloadRef.current();
       }
       // Derived/read-only fields may change in the editor as a side effect of
       // an actual edit (for example tnbc_status). They were not sent, so they
@@ -597,6 +599,7 @@ export default function PatientDetail({
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
       }
+      return true;
     } catch (err) {
       if (seq === saveSeqRef.current) {
         setSaveStatus("error");
@@ -635,10 +638,11 @@ export default function PatientDetail({
         }
         setSaveErrorMsg(detail);
       }
+      return false;
     }
   }, [personId]);
 
-  const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const doSave = useCallback(() => {
     // An edit made while a prior PATCH is still in flight must not reach the
     // server first: the older response could otherwise overwrite it. This also
@@ -680,10 +684,10 @@ export default function PatientDetail({
   // form does not own -- wearable imports, and language skills, whose eight
   // flattened columns are derived from PersonLanguageSkill rows rather than
   // patched directly.
-  const reloadPatientInfo = useCallback(() => {
-    if (!personId) return;
+  const reloadPatientInfo = useCallback((): Promise<void> => {
+    if (!personId) return Promise.resolve();
     const readRevision = saveRevisionRef.current;
-    api.get(`/patient-info/${personId}/`)
+    return api.get(`/patient-info/${personId}/`)
       .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
       .catch(() => {});
   }, [personId, adoptServerRecord]);
@@ -806,8 +810,12 @@ export default function PatientDetail({
   );
   // The proposals still on the page that stop the patient confirming (#2761).
   const attestationBlockerCount = useMemo(
-    () => (patientMode ? attestationBlockers(editedInfo, writableFields.loading ? null : writableFields.descriptors).length : 0),
-    [patientMode, editedInfo, writableFields.loading, writableFields.descriptors],
+    // With no write descriptor (the fetch failed) the page cannot tell which marks the
+    // patient can clear, so it offers the button and the server's 409 decides.
+    () => (patientMode && !writableFields.error
+      ? attestationBlockers(editedInfo, writableFields.loading ? null : writableFields.descriptors).length
+      : 0),
+    [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors],
   );
 
   if (loading) return <PatientDetailSkeleton />;
@@ -1055,16 +1063,21 @@ export default function PatientDetail({
                             clearTimeout(autoSaveTimerRef.current);
                             autoSaveTimerRef.current = null;
                           }
-                          await doSave();
+                          // A failed save has shown its own error: do not confirm over it.
+                          if ((await doSave()) === false) return;
                           const readRevision = saveRevisionRef.current;
                           try {
                             const result = await confirmRecord();
-                            adoptServerRecord({
-                              ...patientInfoRef.current,
+                            const confirmed = {
                               validated: result.validated,
                               validated_by: result.validated_by,
                               validation_date: result.validation_date,
-                            }, readRevision);
+                            };
+                            adoptServerRecord({ ...patientInfoRef.current, ...confirmed }, readRevision);
+                            // A read that began before the confirmation is stale, whenever it
+                            // lands: count the confirmation as a write the way an edit is.
+                            saveRevisionRef.current += 1;
+                            Object.assign(confirmedWritesRef.current, confirmed);
                           } catch (err) {
                             // 409: the server still holds values marked Provisional
                             // (an edit not saved yet, or a proposal that arrived), and says so.

@@ -10,12 +10,17 @@ would be a block no patient could lift.
 The list is ``frontend/src/components/PatientInfo/patientVisibleFields.json``: one
 file, imported by the frontend (``PatientInfo/provisional.ts``, whose image is built
 from ``frontend/`` alone) and read here (every backend image carries ``frontend/``).
-It is generated, not written: the names of the confidence columns that appear as a
-quoted string in the tab components below. ``tests/test_patient_visible_fields.py``
-and a vitest check fail when a tab changes and the file does not follow; regenerate
-it with::
+It is generated, not written: ``fields`` is the confidence columns that appear as a
+quoted string in the tab components below, less ``not_for_patients``; ``columns``
+is every scalar confidence column, so the frontend check can redo the scan without
+the models. ``tests/test_patient_visible_fields.py`` and a vitest check fail, in
+both directions, when a tab changes and the file does not follow; regenerate it with::
 
     python -m omop_core.services.patient_visible_fields --write
+
+``not_for_patients`` names the fields the scanned tabs render only for staff (the
+General tab's Clinician Validation section, hidden in patient mode and refused on a
+patient's PATCH): a mark on one could never be cleared by a patient.
 
 Left out on purpose: the disease tab (its fields show only for the patient's own
 disease, which the page decides from the disease text, so a static list cannot
@@ -37,6 +42,9 @@ TAB_DIR = pathlib.Path('frontend/src/components/PatientInfo/tabs')
 SCANNED_TABS = ('GeneralTab.tsx', 'LabsTab.tsx', 'BehaviorTab.tsx', 'WearableTab.tsx')
 LIST_FILE = pathlib.Path('frontend/src/components/PatientInfo/patientVisibleFields.json')
 
+# Rendered only outside patient mode (GeneralTab's Clinician Validation section).
+NOT_FOR_PATIENTS = ('validated', 'validated_by', 'validation_date')
+
 _QUOTED = re.compile(r"""['"]([a-z][a-z0-9_]*)['"]""")
 
 
@@ -57,11 +65,15 @@ def scan(root: pathlib.Path = ROOT) -> list[str]:
     for tab in SCANNED_TABS:
         source = (root / TAB_DIR / tab).read_text()
         names.update(token for token in _QUOTED.findall(source) if token in columns)
-    return sorted(names)
+    return sorted(names - set(NOT_FOR_PATIENTS))
 
 
 def render(names: list[str]) -> str:
-    return json.dumps({'fields': names}, indent=2) + '\n'
+    return json.dumps({
+        'columns': sorted(scalar_confidence_columns()),
+        'not_for_patients': list(NOT_FOR_PATIENTS),
+        'fields': names,
+    }, indent=2) + '\n'
 
 
 @functools.lru_cache(maxsize=1)

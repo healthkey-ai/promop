@@ -117,7 +117,8 @@ describe('Confirm my record with proposals on the page', () => {
 
     const banner = await screen.findByTestId('record-confirmation-blocked');
     expect(banner).toHaveTextContent('1 value is marked Provisional');
-    expect(banner).toHaveTextContent('enter the right value in its field');
+    expect(banner).toHaveTextContent('enter your own answer in its field');
+    expect(banner).toHaveTextContent('pick another and then it again');
     expect(screen.queryByRole('button', { name: 'Confirm Record' })).not.toBeInTheDocument();
   });
 
@@ -265,6 +266,71 @@ describe('Confirm my record with proposals on the page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm Record' }));
 
     expect(await screen.findByTestId('record-confirmation-blocked')).toHaveTextContent('1 value is marked');
+  });
+
+  it('waits for the read that follows a save before confirming, so a late read cannot undo the confirmation', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let reads = 0;
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (!url.includes('/patient-info/')) return Promise.resolve({ data: [] });
+      const first = reads++ === 0;
+      const body = first
+        ? { ...BASE, hemoglobin_g_dl: '11.5', provisional_fields: { hemoglobin_g_dl: 82 } }
+        : { ...BASE, hemoglobin_g_dl: '12', validated: false, provisional_fields: {} };
+      const reply = { data: { patient_info: body, user: null, patient_name: BASE.patient_name } };
+      return first ? Promise.resolve(reply) : gate.then(() => reply);   // the read after the save is slow
+    });
+    await renderAsPatient();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
+    fireEvent.change(await screen.findByDisplayValue('11.5'), { target: { value: '12' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Record' }));
+
+    // The slow read has not landed, so the confirmation has not been sent.
+    await act(async () => { await Promise.resolve(); });
+    expect(confirmRecord).not.toHaveBeenCalled();
+    release();
+
+    await waitFor(() => expect(confirmRecord).toHaveBeenCalled());
+    expect(await screen.findByText(/Record confirmed on 2026-10-12/)).toBeInTheDocument();
+  });
+
+  it('does not confirm over a save that failed, and shows the save error', async () => {
+    serve({ ...BASE, provisional_fields: {} });
+    (api.patch as ReturnType<typeof vi.fn>).mockRejectedValue({
+      response: { status: 400, data: { detail: 'That date is not valid.' } },
+    });
+    await renderAsPatient();
+
+    fireEvent.change(screen.getByDisplayValue('1970-01-01'), { target: { value: '1971-02-03' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Record' }));
+
+    expect(await screen.findByText(/That date is not valid\./)).toBeInTheDocument();
+    expect(confirmRecord).not.toHaveBeenCalled();
+  });
+
+  it('still offers the button when the write descriptor cannot be fetched, and the server decides', async () => {
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.reject(new Error('network'));
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({ data: {
+          patient_info: { ...BASE, hemoglobin_g_dl: '11.5', provisional_fields: { hemoglobin_g_dl: 82 } },
+          user: null, patient_name: BASE.patient_name,
+        } });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAsPatient();
+
+    expect(await screen.findByRole('button', { name: 'Confirm Record' })).toBeInTheDocument();
+    expect(screen.queryByTestId('record-confirmation-blocked')).not.toBeInTheDocument();
   });
 
   it('shows no attestation banner outside patient mode', async () => {

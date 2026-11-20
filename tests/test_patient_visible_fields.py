@@ -34,6 +34,18 @@ def test_fields_the_server_proposes_but_no_patient_tab_shows_are_not_listed():
         assert shown in listed
 
 
+def test_fields_a_patient_cannot_see_or_edit_are_not_listed():
+    data = json.loads((visible.ROOT / visible.LIST_FILE).read_text())
+    for staff_only in ('validated', 'validated_by', 'validation_date'):
+        assert staff_only not in visible.names()
+        assert staff_only in data['not_for_patients']
+
+
+def test_the_stored_columns_are_the_models_scalar_confidence_columns():
+    data = json.loads((visible.ROOT / visible.LIST_FILE).read_text())
+    assert data['columns'] == sorted(visible.scalar_confidence_columns()), REGENERATE
+
+
 def test_the_file_is_sorted_json():
     data = json.loads((visible.ROOT / visible.LIST_FILE).read_text())
     assert data['fields'] == sorted(set(data['fields']))

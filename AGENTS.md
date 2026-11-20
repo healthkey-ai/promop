@@ -1616,8 +1616,12 @@ Labs, Behavior and Wearable tab components
 a field, regenerate, or `tests/test_patient_visible_fields.py` and the frontend check fail. A field no tab shows (`concomitant_medications`, the diagnosis date),
 the list fields, the disease and treatment tabs and the controls that bypass `Field` do
 not block: a gap the plan lists, and a block on a field the patient cannot see could never
-be lifted. A block is lifted by entering a value in the field (an edit saves it as
-approved data); a proposal cannot be rejected yet (#2671). `attestationBlockers` in
+be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
+approved data; for a select, pick another option and then the shown one again): a proposal
+cannot be rejected explicitly yet (#2671), so a patient who disagrees must enter their own
+value. A PATCH of `null` on an empty number field is a no-op; `''` on a text or select
+field is accepted and stores `''` in the approved record. The fields the General tab shows
+only outside patient mode (`validated`, ...) are excluded (`NOT_FOR_PATIENTS`). `attestationBlockers` in
 `frontend/src/components/PatientInfo/provisional.ts` is the same rule over the marks the
 page holds: change one and change the other. With `PROVISIONAL_DATA_ENABLED` off nothing
 blocks. See [the plan](docs/provisional_data_plan.md), "Confirming a record that shows

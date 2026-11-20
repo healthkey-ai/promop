@@ -1876,8 +1876,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     'detail': (
                         f"{len(blockers)} value{'' if len(blockers) == 1 else 's'} on your record "
                         f"{'is' if len(blockers) == 1 else 'are'} still marked Provisional. "
-                        'Enter the right value in each one (entering the same value keeps it), '
-                        'then confirm your record.'
+                        'Enter your own answer in each one (retype it, or for a choice pick '
+                        'another option and then it again), then confirm your record.'
                     ),
                     'provisional_fields': blockers,
                     'count': len(blockers),

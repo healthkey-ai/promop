@@ -883,7 +883,9 @@ edit is still marked Provisional:
   fail when the tabs and the file drift. Of those, a field with no
   write path of its own (calculated, mirrored, a unit picker) does not block, since it
   clears with the field it follows, and a shown field the write descriptor does not
-  know does. Left out: a field no tab renders (`concomitant_medications`, the
+  know does. Left out: the fields the General tab renders only outside patient mode (`validated`,
+  `validated_by`, `validation_date`: staff see them, and a patient's PATCH refuses them,
+  so a mark on one could never be cleared by a patient), a field no tab renders (`concomitant_medications`, the
   diagnosis date, `blood_type`, ...), which the sweep proposes but is marked only in
   the record read; the list fields, which no patient tab shows; the **disease tab**
   (its fields show only for the patient's own disease, which the page decides from the
@@ -908,14 +910,20 @@ edit is still marked Provisional:
   that Confirm Record returns once none are marked, with no button. Confirmed, with
   blockers: "Record confirmed on <date>" and "N values are marked Provisional and not
   covered by that confirmation", Re-confirm hidden. Otherwise unchanged.
-- **How a block is lifted.** By entering a value in the marked field: that saves it as
-  approved data and drops its mark (the PATCH path above); the disease group goes
-  together. **There is no way to say a proposal is wrong and leave the field empty
-  (#2671):** a PATCH of null on a field the approved record already leaves empty is a
-  no-op, so a patient who disagrees with a proposal and does not know the right value
-  stays blocked until a clinician or the mapping settles it. A test pins this; an
-  explicit "reject" needs a rule for how a rejection persists without freezing the field
-  against later approved data (`user_edited_fields` would), so it is its own change.
+- **How a block is lifted.** By entering your own answer in the marked field: that saves
+  it as approved data and drops its mark (the PATCH path above), and the disease group goes
+  together. For a number or text field that means retyping a value; for a select or a
+  boolean, picking another option and then the shown one again (choosing the option that is
+  already selected sends no change), so the banner says so. **Explicitly rejecting a
+  proposal is still open (#2671), so a patient who disagrees must enter their own value:**
+  a PATCH of `null` on a number (or other non-text) field the approved record already
+  leaves empty is a no-op and the mark stays. A text or select field is different: `''` is
+  accepted as an edit, which clears the mark and stores `''` in the approved record, an
+  answer of "nothing" and not a rejection. A patient who does not know the right value
+  therefore stays blocked on a number field until a clinician or the mapping settles it.
+  Tests pin both behaviours. A real "reject" needs a rule for how a rejection persists
+  without freezing the field against later approved data (`user_edited_fields` would), so
+  it is its own change.
 - **What is stored.** `validated`, `validated_by` and `validation_date` still say only
   that the patient pressed the button; the endpoint guarantees that no value from the
   list above was marked Provisional when they did. A proposal that arrives later (a

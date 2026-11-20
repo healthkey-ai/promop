@@ -160,11 +160,11 @@ def test_entering_the_disease_clears_the_whole_disease_group_and_the_block(patie
     assert client.post(CONFIRM).status_code == 200
 
 
-def test_clearing_a_proposed_value_is_not_possible_yet(patient):
-    # #2671: a PATCH of null on a field the approved record already leaves empty is a
-    # no-op, so a patient who disagrees with a proposal has no way to remove it; they
-    # can only enter a value. The block therefore stays until they do. This test pins
-    # the limitation so that fixing #2671 changes it on purpose.
+def test_a_null_cannot_reject_a_proposal_yet(patient):
+    # #2671: a PATCH of null on a number field the approved record already leaves empty
+    # is a no-op, so nothing removes the proposal; the patient can only enter a value.
+    # The block therefore stays. This pins the limitation so that fixing #2671 changes
+    # it on purpose.
     client, person, _ = patient
     propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
 
@@ -174,6 +174,25 @@ def test_clearing_a_proposed_value_is_not_possible_yet(patient):
     marks = client.get('/api/patient-info/me/').json()['patient_info']['provisional_fields']
     assert marks == {'hemoglobin_g_dl': 82}
     assert client.post(CONFIRM).status_code == 409
+
+
+def test_an_empty_string_on_a_text_field_is_stored_as_the_patients_answer(patient):
+    # Not a rejection feature: '' on a text or select field is accepted as an edit, so it
+    # clears the mark and stores '' in the approved record (an answer of "nothing", not a
+    # rejection). #2671 stays open: a number field takes no such value, and no control is
+    # built around this.
+    client, person, _ = patient
+    propose(person, smoking_status=('Never', 80))
+    assert client.post(CONFIRM).json()['provisional_fields'] == ['smoking_status']
+
+    patch = client.patch('/api/patient-info/me/', {'smoking_status': ''}, format='json')
+
+    assert patch.status_code == 200
+    record, _ = stored(person)
+    assert record.smoking_status == ''
+    marks = client.get('/api/patient-info/me/').json()['patient_info']['provisional_fields']
+    assert 'smoking_status' not in marks
+    assert client.post(CONFIRM).status_code == 200
 
 
 def test_a_field_the_descriptor_does_not_know_blocks(patient, monkeypatch):
