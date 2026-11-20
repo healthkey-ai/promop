@@ -1910,6 +1910,25 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         attester = getattr(user, 'email', '') or str(user)
 
         with transaction.atomic():
+            # What the patient sees is what they attest to: while the page shows a
+            # value from a proposed mapping that they can edit, there is something
+            # unapproved on it (#2761). The record is locked first, as derivation
+            # does, so a sweep cannot add a proposal between this check and the save.
+            patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
+            from omop_core.services.provisional_record import attestation_blockers
+            blockers = attestation_blockers(patient_info)
+            if blockers:
+                return Response({
+                    'detail': (
+                        f"{len(blockers)} value{'' if len(blockers) == 1 else 's'} on your record "
+                        f"{'is' if len(blockers) == 1 else 'are'} still marked Provisional. "
+                        'Enter your own answer in each one (retype it, or for a choice pick '
+                        'another option and then it again), then confirm your record.'
+                    ),
+                    'provisional_fields': blockers,
+                    'count': len(blockers),
+                }, status=status.HTTP_409_CONFLICT)
+
             patient_info.validated = True
             patient_info.validated_by = attester
             patient_info.validation_date = now

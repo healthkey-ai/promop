@@ -1669,6 +1669,32 @@ edit of a list drops every proposal for it, untouched ones included. The PATCH r
 the approved record, so a client re-reads for the marks. A marker the reader *derives* from
 proposed findings is not offered. See [List fields as built](docs/provisional_data_plan.md#list-fields-as-built-2534).
 
+### A patient's "Confirm my record" while proposals are on the page (#2761)
+
+`POST /api/patient-info/me/confirm/` is refused with 409 (`{detail, provisional_fields,
+count}`, nothing stored, the record locked first) while the page shows a scalar field
+marked Provisional that a patient tab renders and the patient can edit:
+`attestation_blockers(record)` in `omop_core/services/provisional_record.py` is the
+overlay's scalar marks (`overlay(record, lists=False)`) in
+`frontend/src/components/PatientInfo/patientVisibleFields.json`, less the fields the write
+descriptor says have no write path of their own (calculated, mirrored, unit pickers). That
+one file, imported by the frontend and read by the server, is generated from the General,
+Labs, Behavior and Wearable tab components
+(`python -m omop_core.services.patient_visible_fields --write`); when a tab adds or drops
+a field, regenerate, or `tests/test_patient_visible_fields.py` and the frontend check fail. A field no tab shows (`concomitant_medications`, the diagnosis date),
+the list fields, the disease and treatment tabs and the controls that bypass `Field` do
+not block: a gap the plan lists, and a block on a field the patient cannot see could never
+be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
+approved data; for a select, pick another option and then the shown one again): a proposal
+cannot be rejected explicitly yet (#2671), so a patient who disagrees must enter their own
+value. A PATCH of `null` on an empty number field is a no-op; `''` on a text or select
+field is accepted and stores `''` in the approved record. The fields the General tab shows
+only outside patient mode (`validated`, ...) are excluded (`NOT_FOR_PATIENTS`). `attestationBlockers` in
+`frontend/src/components/PatientInfo/provisional.ts` is the same rule over the marks the
+page holds: change one and change the other. With `PROVISIONAL_DATA_ENABLED` off nothing
+blocks. See [the plan](docs/provisional_data_plan.md), "Confirming a record that shows
+proposals".
+
 ### One patient's full provisional view: `fill_provisional_record`
 
 `manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much
