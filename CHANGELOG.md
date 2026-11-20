@@ -308,16 +308,20 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
-- **Password-reset emails go to the app the account belongs to** — like the
-  verification email, the reset link points at the installation's
-  `/reset-password` page and the email names its org (`FAMILY_AUTH_APP_URLS`,
-  `family_auth.installations.app_for`). A reset the account holder asked for
-  no longer says an administrator started it.
+- **Password-reset emails name the app the account belongs to** — like the
+  verification email, a reset email names the installation's org and signs off
+  as it, and its link goes to the installation's `/reset-password` page where
+  that app has one (`FAMILY_AUTH_RESET_APPS`; otherwise PROMOP's page, as
+  before). Staff, and grants that run the org, expired or at an inactive org,
+  keep PROMOP's links. A reset the account holder asked for no longer says an
+  administrator started it.
 - **A reset request was refused after a few unrelated anonymous requests** —
   the reset limit (5 a minute) had no scope of its own, so it inherited DRF's
   `anon` history and counted every anonymous request from the address against
-  5: on a shared network the first reset could get 429. It now counts reset
-  requests only (`password_reset`).
+  5: on a shared network the first reset could get 429. Asking for a link and
+  completing a reset now each have their own limit (`password_reset`,
+  `password_reset_confirm`), and both count a signed-in caller too: the views
+  take no authentication, as an anonymous rate limit skips anyone signed in.
 
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only

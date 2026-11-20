@@ -5,7 +5,10 @@ signed reset token (tied to the account's password hash + last_login, so it is
 invalidated once the password changes or after PASSWORD_RESET_TIMEOUT). The
 email is sent through the project's configured backend (Mailgun/anymail in prod).
 """
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from django.conf import settings
 from django.contrib.auth.tokens import default_token_generator
@@ -14,19 +17,31 @@ from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 
 
 class PasswordResetThrottle(AnonRateThrottle):
-    # Its own history: under the inherited 'anon' scope it counted every
-    # anonymous request from the address, so a shared network was refused.
+    """Asking for a reset link, by address. Its own history: under the
+    inherited 'anon' scope it counted every anonymous request from the
+    address, so a shared network was refused. The views take no
+    authentication, so a signed-in caller is counted too (an AnonRateThrottle
+    skips anyone authenticated)."""
     scope = 'password_reset'
     rate = '5/minute'
 
+
+class PasswordResetConfirmThrottle(PasswordResetThrottle):
+    """Completing a reset: a history of its own, so asking for a link does
+    not use up the tries at choosing the new password."""
+    scope = 'password_reset_confirm'
+
 from patient_portal.models import Identity
+
+if TYPE_CHECKING:
+    from family_auth.installations import Installation
 
 logger = logging.getLogger(__name__)
 
@@ -35,17 +50,17 @@ class PasswordResetEmailError(Exception):
     """Raised when a reset email cannot be sent."""
 
 
-def make_reset_link(identity) -> str:
-    """The installation's /reset-password page (family_auth.installations),
-    so a phr installation's patient resets where they signed up."""
-    from family_auth.installations import app_for
+def make_reset_link(identity: Identity, app: Installation | None = None) -> str:
+    """The reset page for this account: its installation's when that app has
+    one, else PROMOP's (family_auth.installations.reset_app_for)."""
+    from family_auth.installations import reset_app_for
 
     uidb64 = urlsafe_base64_encode(force_bytes(identity.pk))
     token = default_token_generator.make_token(identity)
-    return f"{app_for(identity).url}/reset-password?uid={uidb64}&token={token}"
+    return f"{reset_app_for(identity, app).url}/reset-password?uid={uidb64}&token={token}"
 
 
-def send_password_reset_email(identity, *, by_administrator: bool = True) -> None:
+def send_password_reset_email(identity: Identity, *, by_administrator: bool) -> None:
     """Email the reset link. ``by_administrator`` says who asked: an
     administrator (the admin action), or the account holder themselves
     (``request_password_reset``), and the email says so."""
@@ -53,8 +68,9 @@ def send_password_reset_email(identity, *, by_administrator: bool = True) -> Non
 
     if not identity.email:
         raise PasswordResetEmailError('Identity has no email address.')
-    url = make_reset_link(identity)
-    app_name = app_for(identity).name
+    app = app_for(identity)
+    url = make_reset_link(identity, app)
+    app_name = app.name
     subject = f"Reset your {app_name} password"
     who = ("An administrator has started a password reset" if by_administrator
            else "We received a request to reset the password")
@@ -65,14 +81,14 @@ def send_password_reset_email(identity, *, by_administrator: bool = True) -> Non
         f"  {url}\n\n"
         "The link can be used once and expires. If you weren't expecting this, you can "
         "ignore this email — your password stays unchanged.\n\n"
-        "— The HealthKey team"
+        f"— {app.sign_off}"
     )
     if settings.DEBUG:
         logger.info("Password reset email preview\nTo: %s\n\n%s", identity.email, body)
     try:
         sent = send_mail(subject, body, settings.DEFAULT_FROM_EMAIL, [identity.email])
     except Exception as exc:
-        logger.exception("Failed to send password reset email to %s: %s", identity.email, exc)
+        logger.exception("Failed to send a password reset email to identity %s", identity.pk)
         raise PasswordResetEmailError from exc
     if sent != 1:
         raise PasswordResetEmailError('Email backend did not report the reset email as sent.')
@@ -80,6 +96,7 @@ def send_password_reset_email(identity, *, by_administrator: bool = True) -> Non
 
 @csrf_exempt
 @api_view(['POST'])
+@authentication_classes([])  # anonymous by design, and so always counted by the throttle
 @permission_classes([AllowAny])
 @throttle_classes([PasswordResetThrottle])
 def request_password_reset(request):
@@ -119,8 +136,9 @@ def request_password_reset(request):
 
 @csrf_exempt
 @api_view(['POST'])
+@authentication_classes([])
 @permission_classes([AllowAny])
-@throttle_classes([PasswordResetThrottle])
+@throttle_classes([PasswordResetConfirmThrottle])
 def reset_password(request):
     """Public: complete a reset via the emailed link's `uid` + `token` (TI.1.1#08)."""
     from patient_portal.services import (

@@ -14743,7 +14743,7 @@ class PasswordResetFlowTest(TestCase):
     def test_admin_action_emails_reset_link(self):
         from django.core import mail
         from patient_portal.api.password_reset import send_password_reset_email
-        send_password_reset_email(self.identity)
+        send_password_reset_email(self.identity, by_administrator=True)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn('reset-me@test.com', mail.outbox[0].to)
         self.assertIn('/reset-password?uid=', mail.outbox[0].body)

@@ -42,11 +42,13 @@ class ResendVerificationThrottle(UserRateThrottle):
     rate = '3/minute'
 
 
-def make_verification_link(identity) -> str:
+def make_verification_link(identity, app=None) -> str:
+    """The installation's /verify-email page, else PROMOP's
+    (family_auth.installations.app_for); ``app`` when already looked up."""
     from family_auth.installations import app_for
 
     token = signing.dumps({'id': identity.pk, 'email': identity.email.lower()}, salt=_SALT)
-    return f"{app_for(identity).url}/verify-email?token={token}"
+    return f"{(app or app_for(identity)).url}/verify-email?token={token}"
 
 
 def send_verification_email(identity) -> bool:
@@ -59,8 +61,9 @@ def send_verification_email(identity) -> bool:
         return False
     from family_auth.installations import app_for
 
-    url = make_verification_link(identity)
-    app_name = app_for(identity).name
+    app = app_for(identity)
+    url = make_verification_link(identity, app)
+    app_name = app.name
     body = (
         "Hi,\n\n"
         f"Please confirm this is your email address for {app_name}:\n\n"
@@ -69,7 +72,7 @@ def send_verification_email(identity) -> bool:
         "organization that trusts your email domain -- stays switched off.\n\n"
         f"The link expires in 3 days. If you did not create a {app_name} account, ignore "
         "this email; the account cannot use your address without this step.\n\n"
-        "— The HealthKey team"
+        f"— {app.sign_off}"
     )
     if settings.DEBUG:
         logger.info("Verification email preview\nTo: %s\n\n%s", identity.email, body)
