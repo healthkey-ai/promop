@@ -27,6 +27,7 @@ from omop_core.models import (
     format_language_skills,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
+from omop_core.services.pk import LOCAL_CONCEPT_MIN_ID
 from omop_core.services.mappings import (
     CONCEPT_DISEASE_FIRST_OCCURRENCE,
     CONCEPT_DRUG_EXPOSURE_FIELD,
@@ -2766,7 +2767,7 @@ def _asserted_line_name(episode):
 #
 # It carries meaning when it is a real vocabulary concept: valid, not flagged as
 # a classification concept (standard_concept 'C'), and not local (an HK-* or
-# LOCAL vocabulary, source 'HealthKey', or an id in the local block). An HK-*
+# other non-Athena vocabulary, source 'HealthKey', or a local id range). An HK-*
 # quarantine concept is a placeholder minted for an unmatched name and must
 # read as unresolved. The standard flag is not the test:
 # a HemOnc Component and a SNOMED substance (cisplatin, 4301188, a catalog
@@ -2785,9 +2786,12 @@ def _asserted_line_name(episode):
 # with domain Drug (Regimen, Regimen Class, Component Class, Route, Brand Name)
 # are not one drug. A line that names no drug keeps its id all the same.
 _LINE_IDENTITY_DOMAINS = frozenset({'Drug', 'Procedure'})
-# OHDSI reserves concept_id >= 2e9 for locally authored concepts (as in
-# concept_fixtures and backfill_concept_source, which keep their own copy).
-LOCAL_CONCEPT_ID_MIN = 2_000_000_000
+# Locally minted concepts that may still lack source='HealthKey' (an install
+# that has not run `backfill_concept_source --apply`): the same evidence as that
+# command's RULES -- a non-Athena vocabulary, a legacy mint range, or the OHDSI
+# custom range.
+_LOCAL_VOCABULARIES = frozenset({'LOCAL', 'sct', 'FHIR'})
+_LEGACY_LOCAL_ID_RANGES = ((9_000_000, 9_099_999), (392_021_000, 392_022_000))
 
 
 def _is_vocabulary_concept(concept) -> bool:
@@ -2795,10 +2799,11 @@ def _is_vocabulary_concept(concept) -> bool:
         return False
     if getattr(concept, 'standard_concept', None) == 'C':
         return False
-    if (getattr(concept, 'concept_id', None) or 0) >= LOCAL_CONCEPT_ID_MIN:
+    concept_id = getattr(concept, 'concept_id', None) or 0
+    if concept_id >= LOCAL_CONCEPT_MIN_ID or any(lo <= concept_id <= hi for lo, hi in _LEGACY_LOCAL_ID_RANGES):
         return False
     vocabulary_id = getattr(concept, 'vocabulary_id', None) or ''
-    return (not vocabulary_id.startswith('HK-') and vocabulary_id != 'LOCAL'
+    return (not vocabulary_id.startswith('HK-') and vocabulary_id not in _LOCAL_VOCABULARIES
             and getattr(concept, 'source', None) != 'HealthKey')
 
 

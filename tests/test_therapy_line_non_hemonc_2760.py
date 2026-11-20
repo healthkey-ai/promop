@@ -151,6 +151,22 @@ def test_a_retired_mapping_names_no_drug(vocab):
     assert CISPLATIN_RXNORM not in (record.first_line_component_ids or [])
 
 
+@pytest.mark.parametrize('target', [
+    dict(domain='Device'),
+    dict(standard_concept=None),
+    dict(invalid_reason='D'),
+])
+def test_a_mapping_to_anything_but_a_live_standard_drug_names_no_drug(vocab, target):
+    domain = target.pop('domain', 'Drug')
+    _concept(CISPLATIN_RXNORM, 'cisplatin', 'RxNorm', domain, 'Ingredient', **target)
+    _maps_to(CISPLATIN_SNOMED, CISPLATIN_RXNORM)
+
+    record = _write_line(PersonFactory(), CISPLATIN_SNOMED, name='cisplatin')
+
+    assert record.first_line_therapy_id == CISPLATIN_SNOMED
+    assert CISPLATIN_RXNORM not in (record.first_line_component_ids or [])
+
+
 def test_a_drug_that_maps_to_nothing_keeps_its_id_and_names_no_drug(vocab):
     _concept(BRAND_RXNORM, 'Advil', 'RxNorm', 'Drug', 'Brand Name', standard_concept=None)
 
@@ -189,6 +205,9 @@ def test_retired_concept_stays_unresolved(vocab):
     (1_900_000_777, 'HK-Drug'),     # quarantine vocabulary below the block
     (500_777, 'LOCAL'),             # a legacy local placeholder without a source tag
     (2_000_000_888, 'RxNorm'),      # an id in the local block, whatever vocabulary it claims
+    (392_021_009, 'SNOMED'),        # a legacy FHIR-ingest mint without a source tag
+    (9_000_123, 'SNOMED'),          # a legacy seeder mint
+    (600_777, 'sct'),               # a concept minted from a FHIR coding
 ])
 def test_a_local_placeholder_is_not_a_therapy(vocab, concept_id, vocabulary):
     """An unmatched name is minted under a local vocabulary as a placeholder. It
