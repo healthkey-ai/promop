@@ -16,6 +16,8 @@ export interface PatientInfo {
   /** Fields shown from a proposed (unapproved) mapping, with the confidence percentage.
    *  Absent or empty when everything shown is approved. */
   provisional_fields?: Record<string, number>;
+  /** Of a list field holding approved and proposed items, the proposed ones. */
+  provisional_items?: Record<string, unknown[]>;
   email?: string;
   
   // General

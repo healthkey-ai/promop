@@ -357,7 +357,9 @@ class PatientListSerializer(serializers.ModelSerializer):
         # ``provisional_fields`` says which. The page's queryset carries the
         # provisional rows (select_related), so this adds no query per row.
         from omop_core.services.provisional_record import overlay
-        instance, marks = overlay(instance)
+        # The list rows show scalars only: the list summaries (genomics, data gaps)
+        # read the approved lists, and the proposed items are the record read's.
+        instance, marks = overlay(instance, lists=False)
         data = super().to_representation(instance)
         if marks:
             data['provisional_fields'] = marks
@@ -716,6 +718,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             if concept_ids else {}
         )
         data = super().to_representation(instance)
+        # A record seen through ``overlay`` says which items of a list it holds
+        # are proposals; the views add the field marks (``provisional_fields``).
+        proposed_items = getattr(instance, 'provisional_items', None)
+        if proposed_items:
+            data['provisional_items'] = proposed_items
         return self._apply_demographic_redaction(instance, data)
 
     # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.

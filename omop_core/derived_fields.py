@@ -179,3 +179,15 @@ _OMOP_DERIVED_FIELDS = [
 
 # Genomic markers are catalogue data; they are derived the same way.
 _OMOP_DERIVED_FIELDS.extend(_genomic_patient_fields())
+
+# The JSON-typed derived fields that carry a provisional confidence (#2534). Each
+# is a list the real record may already fill; a provisional item is added to it,
+# never put in its place, and the one mark says how sure the least sure added
+# item is. Only fields whose reader can run over provisional rows alone are
+# here: the therapy-line id lists and medication_contexts come from persisted
+# Episodes and contexts, and the SCT lists from curator-written observation
+# keys, so they have no column.
+PROVISIONAL_JSON_FIELDS = (
+    'disease_slugs', 'active_malignancies', 'prior_procedures', 'genetic_mutations',
+    *_genomic_patient_fields(),
+)

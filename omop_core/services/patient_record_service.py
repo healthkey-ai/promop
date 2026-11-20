@@ -6,6 +6,8 @@ Usage:
     patient_info = refresh_patient_record(person)
 """
 
+import contextlib
+import contextvars
 import dataclasses
 import logging
 import math
@@ -18,7 +20,7 @@ from datetime import date, datetime, timedelta
 from django.conf import settings
 from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
-from django.db.models.functions import Cast, Coalesce
+from django.db.models.functions import Cast, Coalesce, Lower
 from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
@@ -1557,6 +1559,45 @@ def invalidate_category_titles_cache():
     _category_titles_cache = None
 
 
+# One answer per name while a caller holds ``canonical_disease_names()``: the
+# provisional pass asks for the same few cancer names over and over (one per
+# condition row, per reader) and a curator's edit cannot land inside one pass.
+# Outside it every call reads the table, as before.
+_DISEASE_NAME_MEMO = contextvars.ContextVar('disease_name_memo', default=None)
+
+
+@contextlib.contextmanager
+def canonical_disease_names(names=()):
+    """Memoize ``_canonicalize_disease`` inside the block; *names* are read in one query.
+
+    A name outside the alias table costs one lookup. A pass that knows its names
+    up front reads them together, so its cost does not grow with the number of
+    distinct names.
+    """
+    memo = {}
+    wanted = {name.strip() for name in names if name and name.strip()
+              and name.strip().lower() not in _DISEASE_ALIASES}
+    if wanted:
+        try:
+            from omop_core.models import DiseaseCategoryMapping
+            lowered = {name.lower(): name for name in wanted}
+            found = {}
+            for row in (DiseaseCategoryMapping.objects.annotate(_lower=Lower('disease_name'))
+                        .filter(_lower__in=list(lowered)).order_by('disease_name')):
+                found.setdefault(row._lower, row)      # the first row, as ``.first()`` would take
+            titles = _category_titles()
+            for key in lowered:
+                row = found.get(key)
+                memo[key] = titles.get(row.category) if row else None
+        except DatabaseError:
+            memo.clear()      # Table may not exist during early migrations
+    token = _DISEASE_NAME_MEMO.set(memo)
+    try:
+        yield
+    finally:
+        _DISEASE_NAME_MEMO.reset(token)
+
+
 def _canonicalize_disease(name: str) -> str:
     """Map a raw OMOP condition concept name to EXACT's canonical disease title.
 
@@ -1571,15 +1612,21 @@ def _canonicalize_disease(name: str) -> str:
     alias = _DISEASE_ALIASES.get(normalized)
     if alias:
         return alias
+    memo = _DISEASE_NAME_MEMO.get()
+    if memo is not None and normalized in memo:
+        return memo[normalized] or name         # None: no title, keep the caller's spelling
     # Fallback: consult the DiseaseCategoryMapping table
+    title = None
     try:
         from omop_core.models import DiseaseCategoryMapping
         row = DiseaseCategoryMapping.objects.filter(disease_name__iexact=name.strip()).first()
         if row:
-            return _category_titles().get(row.category, name)
+            title = _category_titles().get(row.category)
     except DatabaseError:
         pass  # Table may not exist during early migrations
-    return name
+    if memo is not None:
+        memo[normalized] = title
+    return title or name
 
 
 SAMPLE_DISEASE_STATUS_SOURCE_VALUE = 'sample-patient-disease-status'
@@ -1925,20 +1972,33 @@ def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) ->
             for condition in current_conditions
         )
 
+    malignancies = malignancy_rows(current_conditions)
+    if malignancies is not None:
+        data['active_malignancies'] = sorted(malignancies)
+
+    return data
+
+
+def malignancy_rows(current_conditions) -> dict | None:
+    """Name -> the conditions that give it, for ``active_malignancies``; None when the
+    malignancy hierarchy is not loaded.
+
+    *current_conditions* are already filtered to the current ones. Shared with the
+    provisional pass, which runs it over provisional conditions and needs the rows
+    to say which proposals decided each name.
+    """
     malignancy_ids = _active_condition_descendant_ids(
         _ACTIVE_CONDITION_ROOT_CODES['active_malignancies']
     )
-    if malignancy_ids is not None:
-        names = {
-            name
-            for condition in current_conditions
-            if condition.condition_concept_id in malignancy_ids
-            for name in [_usable_concept_name(condition.condition_concept)]
-            if name
-        }
-        data['active_malignancies'] = sorted(names)
-
-    return data
+    if malignancy_ids is None:
+        return None
+    named = {}
+    for condition in current_conditions:
+        if condition.condition_concept_id in malignancy_ids:
+            name = _usable_concept_name(condition.condition_concept)
+            if name:
+                named.setdefault(name, []).append(condition)
+    return named
 
 
 def _disease_name_to_slug(name: str) -> str:
@@ -4885,16 +4945,18 @@ def _get_prior_procedures(person: Person, snapshot: OmopSnapshot = None) -> dict
     procedures = snapshot.procedures  # already ordered -procedure_date
 
     if procedures:
-        procedure_list = []
-        for proc in procedures:
-            procedure_list.append({
-                'procedure': proc.procedure_concept.concept_name if proc.procedure_concept else 'Unknown',
-                'date': str(proc.procedure_date) if proc.procedure_date else None,
-                'concept_id': proc.procedure_concept_id,
-            })
-        data['prior_procedures'] = procedure_list
+        data['prior_procedures'] = [procedure_item(proc) for proc in procedures]
 
     return data
+
+
+def procedure_item(proc) -> dict:
+    """One ``prior_procedures`` entry. Shared with the provisional pass."""
+    return {
+        'procedure': proc.procedure_concept.concept_name if proc.procedure_concept else 'Unknown',
+        'date': str(proc.procedure_date) if proc.procedure_date else None,
+        'concept_id': proc.procedure_concept_id,
+    }
 
 
 # ---------------------------------------------------------------------------

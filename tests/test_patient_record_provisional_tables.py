@@ -56,17 +56,19 @@ def test_provisional_adds_no_index_or_unique_of_its_own():
     assert PatientRecordProvisional._meta.get_field('organization').remote_field.related_name == '+'
 
 
-def test_confidence_is_exactly_the_derived_non_json_columns():
+def test_confidence_is_exactly_the_derived_non_json_columns_and_the_covered_json_lists():
+    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
     expected = set()
     for name in _OMOP_DERIVED_FIELDS:
         try:
             field = PatientRecord._meta.get_field(name)
         except Exception:  # noqa: BLE001 -- a derived name that is not a column
             continue
-        if not isinstance(field, models.JSONField):
+        if not isinstance(field, models.JSONField) or name in PROVISIONAL_JSON_FIELDS:
             expected.add(name)
     assert set(_columns(PatientRecordConfidence)) - {'person'} == expected
     assert len(expected) > 250  # the plan counts 274 today; a collapse to a few is a bug
+    assert {'prior_procedures', 'genetic_mutations', 'active_malignancies', 'disease_slugs'} <= expected
 
 
 def test_confidence_columns_are_nullable_percentages_named_like_the_field():

@@ -275,7 +275,8 @@ write-time conversion is an approved mapping's privilege (#2157).
   `organization` is rebuilt by hand because a foreign key cannot be
   deconstructed while models load, and keeps its own index for tenancy.
   `PatientRecordConfidence` has one nullable `PositiveSmallIntegerField` per
-  non-JSON column in `_OMOP_DERIVED_FIELDS`: 274. A field added to
+  non-JSON column in `_OMOP_DERIVED_FIELDS`: 274 at first, plus the 46 JSON
+  lists of `PROVISIONAL_JSON_FIELDS` (#2534, migration 0360). A field added to
   `PatientRecord` therefore needs the same migration to add its twin, which
   `makemigrations` writes by itself.
 - **`_OMOP_DERIVED_FIELDS` moved** to `omop_core/derived_fields.py`, plain data,
@@ -555,8 +556,9 @@ answer and cannot attribute a confidence to a field without reworking each
 one. The provisional pass does not run them: those columns in the provisional
 table equal `patient_record`. A later phase can take them one at a time; the
 rule for a composite field is the **minimum** confidence of the provisional
-rows that joined its answer. JSON-typed fields are in this group, so the
-confidence table has no column for them until then.
+rows that joined its answer. JSON-typed fields were in this group; the lists
+a reader can run over provisional rows alone are now covered
+([List fields as built](#list-fields-as-built-2534)).
 
 ### Composite readers as built (#2534)
 
@@ -576,10 +578,10 @@ names the same one (same slug): a second cancer's dates must not fill the first
 one's gaps. Left out: therapy lines (they read persisted Episodes, which a
 proposal must not create), staging, cytogenetics, SCT and cancer details (they
 read curator-written observation source keys that a proposed concept never
-carries), the fields of `active_malignancies`, `disease_slugs`,
-`genetic_mutations`, `prior_procedures` and the `genomics_*` markers (JSON: no
-confidence column until the JSON phase), and `active_infection_status` (a
-"none found" over a provisional-only view says nothing). A patient whose
+carries), the JSON lists (now covered: see
+[List fields as built](#list-fields-as-built-2534)), and
+`active_infection_status` (a "none found" over a provisional-only view says
+nothing). A patient whose
 approved record already holds these fields, such as one with many approved
 rows, shows nothing new from them: real beats provisional.
 
@@ -604,6 +606,93 @@ Rules worth knowing, each held by a test:
   field of the group, and a cancer's slug is worked out once per row.
   `_condition_slug` memoizes on the row object (one snapshot), which also saves
   the real refresh a category lookup per cancer per call.
+
+
+### List fields as built (#2534)
+
+Five kinds of JSON-typed field carry a confidence now: `disease_slugs`,
+`active_malignancies`, `prior_procedures`, `genetic_mutations` and the
+`genomics_*` markers (`PROVISIONAL_JSON_FIELDS`, 46 columns; migration `0360`
+adds only their confidence twins, and its reverse drops them, which loses marks
+and nothing else). The scalar rule "only where the record is empty" does not
+fit a list the record may already fill, so a list has its own:
+
+- **Real items are never replaced; provisional items are added.** An item is
+  added only when no real item says the same thing (`_item_key`: a string by its
+  casefolded, trimmed text; a procedure by its concept id, or its name when the
+  concept is unmapped, and its date; a variant by gene, variant, feature, marker
+  key and test date, ignoring origin, interpretation and the row id; text compares
+  casefolded, so a typed `TP53` matches a proposed `tp53`). A
+  user-edited list (`user_edited_fields`) is never added to, and a typed or
+  cleared `disease` / `disease_slug` adds no `disease_slugs` proposal, as it
+  blocks the scalar disease group.
+- **The provisional column holds only the added items**, never a copy of the real
+  ones. The reader lays the live items first and the stored ones after
+  (`overlay`), so the column cannot go stale against the record: an item the
+  record has since gained stops being provisional by itself, and reading an
+  overlay again adds nothing. The picture of a list is made at read time.
+- **One confidence per field: the lowest among the added items.** Per-item
+  confidence is not stored. The record shows one indicator per field, the lowest
+  is never an over-statement, and a sidecar would need a row-to-item attribution
+  for each reader. A reader who must tell the items apart gets them from
+  `provisional_items` (below); a sidecar can be added later without changing the
+  rule.
+- **Which items are proposals** travels with the record as `provisional_items`,
+  `{field: [added items]}`, on the patient-record detail read only, next to
+  `provisional_fields`; it is absent when nothing is added. The patient list and
+  the PHR read the **approved** lists (`overlay(record, lists=False)`): a list's
+  summaries (genomics, data gaps) and the PHR's Genetics readiness must not take
+  a proposal for an approved finding, and the list payload carries no variant
+  dicts. The frontend treats `provisional_items` as read-only (`LIFECYCLE`).
+- **A PATCH never turns a proposal into approved data.** The editor saves the
+  whole record it read, and a list it read holds the proposed items too.
+  `apply_patient_record_patch` removes the items named in `provisional_items`
+  from an incoming list before anything else: an echo of the merged list is a
+  no-op (the real list and `user_edited_fields` unchanged, still a proposal), and
+  a genuine edit stores only the real and the typed items. This covers every
+  list field, `genetic_mutations` and the `genomics_*` markers included
+  (`disease_slugs` is read-only in the record serializer, so no PATCH writes it).
+  Consequences worth knowing:
+  - **There is no PATCH path from a list proposal to approved data.** A typed item
+    identical to a proposed one is dropped as an echo (a 200 that stores nothing).
+    Approve a list proposal through its mapping or row approval, not a PATCH. The
+    editor keeps the list's mark while it still holds proposed items
+    (`withoutMarks` in `provisional.ts`), so the UI never shows it as approved
+    while the server keeps it proposed.
+  - **A genuine edit of a list drops every proposal for that list**, the untouched
+    ones included: a user-edited list (`user_edited_fields`) is never added to
+    again, and the PATCH mirror clears its mark.
+  - **The PATCH response is the approved record** (no `provisional_fields` or
+    `provisional_items`), as for the scalar fields: a client that needs the marks
+    re-reads the record.
+
+| Field | Reader (shared with the real refresh, over provisional rows only) | Confidence of an item |
+|---|---|---|
+| `disease_slugs` | `_get_disease_data`: one slug per provisional cancer | the lowest among the cancers with that slug |
+| `active_malignancies` | `malignancy_rows`, the real current-condition rule | the lowest among the current conditions giving that name |
+| `prior_procedures` | `procedure_item`, the real item | the lowest among procedures giving that item |
+| `genetic_mutations`, `genomics_*` | `_get_genetic_mutations` over provisional measurements and observations | the finding's own row, lowered by any linked component row |
+
+Left out, with the reason: the therapy-line id lists and `medication_contexts`
+(persisted Episodes and contexts, which a proposal must not create), the SCT
+lists (curator-written observation keys), and a `genomics_*` marker the reader
+*derives* from findings (a derivation over only the proposed parents says
+nothing about the others; today's derivations are stubs, and a test holds the
+guard). The calculated fields that read a list (`no_other_active_malignancies`)
+still equal the real record. A reader costs only its own fields (its own
+savepoint), and the lists add no query per item.
+
+The Genomics tab lists variants from its own endpoint over approved findings, so
+a proposed variant appears in the patient-record detail read but not yet in that
+table, the patient list or the PHR; the other lists have no control on the
+provider page.
+
+Cost: a person with no provisional row reads nothing (no query). The disease
+read runs once per refresh for the scalar group and the slug list together, and
+the cancer names of the provisional conditions are canonicalized with one
+`DiseaseCategoryMapping` query (`canonical_disease_names`) instead of one per
+row. The migration adds columns to `patient_record_confidence`, so it waits
+behind a running derivation that holds a lock on the table.
 
 ### Computed fields
 
@@ -700,12 +789,13 @@ migration, three `AddField` operations instead of one.
 
 **`patient_record_confidence`.** One row per person, primary key `person`.
 One nullable `PositiveSmallIntegerField` per non-JSON field in
-`_OMOP_DERIVED_FIELDS`, 274 today, named exactly as the field is. Generated
-the same way. Phase 3 adds the JSON-typed derived fields.
+`_OMOP_DERIVED_FIELDS`, 274 at first, named exactly as the field is, plus one
+per covered JSON list (`PROVISIONAL_JSON_FIELDS`, #2534). Generated the same
+way.
 
 A parity test fails the build when the three tables drift: the provisional
 table must have every cloned column of `patient_record`, and the confidence
-table must have exactly the derived non-JSON fields. The model pair is
+table must have exactly the derived non-JSON fields and the covered JSON lists. The model pair is
 classified in `omop_core/services/instance_data.py` like `PatientRecord`:
 derived and re-derived after `copy_patient`, not copied
 ([Copying data between instances](../AGENTS.md#copying-data-between-instances)).
@@ -861,7 +951,7 @@ lookup contract below remains for a caller that does want to write rows itself.
 
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
-- JSON derived fields and custom fields in the confidence table.
+- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table.
 - FHIR sync opt-in per organization.
 - Patient-facing display policy.
 - #1532 auto-approval reading the same floor.
@@ -886,7 +976,7 @@ without a click:
 | A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
 | The patient's "Confirm my record" attestation is still offered while proposals are shown | (no issue yet) | open |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
-| Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields and `concomitant_medications`; therapy lines, staging, genomics, JSON fields open |
+| Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |
 
 The rule for all of them: with the switch off, no provisional data is computed,
 stored or shown to anyone.
