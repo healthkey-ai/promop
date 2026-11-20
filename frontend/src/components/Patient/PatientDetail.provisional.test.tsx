@@ -138,7 +138,21 @@ describe('PatientDetail provisional values', () => {
     await act(async () => { vi.advanceTimersByTime(2100); });
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
-    expect(patchBodies().at(-1)).toEqual({ hemoglobin_g_dl: null });
+    // The save names the proposal it rejected: a bare blank rejects nothing on the server.
+    expect(patchBodies().at(-1)).toEqual({ hemoglobin_g_dl: null, rejected_proposals: ['hemoglobin_g_dl'] });
+  });
+
+  it('names no rejection when a field that showed no proposal is cleared', async () => {
+    render(<PatientDetail />);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Alishia Tawny Howell')).toBeInTheDocument(),
+    );
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('1970-01-01'), { target: { value: '' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBodies().every((b) => !('rejected_proposals' in b))).toBe(true);
   });
 
   it('lets the user confirm a proposal by landing on the same value', async () => {

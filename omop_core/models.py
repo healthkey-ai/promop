@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils import timezone
 from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
@@ -4694,13 +4695,19 @@ class ProposalRejection(models.Model):
     code that is now mapped to another concept, or a different code that now
     feeds the field, is a new proposal and is shown again. It deletes nothing:
     the mapping and the clinical rows are untouched, and the user can still type
-    a value of their own.
+    a value of their own. A row is not removed when the field is later approved or
+    typed over: it simply has no proposal to hold, and is ignored.
+
+    ``rejected_by`` is the Identity id (as text) of whoever rejected, so a doctor
+    rejecting for a patient leaves a trace; ``rejected_at`` is when. Both describe
+    the last rejection of the field, and neither means anything on another instance
+    (``copy_patient`` clears ``rejected_by``).
     """
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='proposal_rejections')
     field_name = models.CharField(max_length=100)
     origins = models.JSONField(default=list)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    rejected_by = models.CharField(max_length=120, blank=True, default='')
+    rejected_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         db_table = 'proposal_rejection'

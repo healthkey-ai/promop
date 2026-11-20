@@ -154,6 +154,7 @@ from .permissions import (
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
+    is_interactive_session,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
@@ -243,7 +244,7 @@ def _drop_proposed_list_items(patient_info, patch_data):
     return stripped
 
 
-def apply_patient_record_patch(person, patient_info, data, *, actor):
+def apply_patient_record_patch(person, patient_info, data, *, actor, allow_reject=False):
     """Apply a partial update to a person's PatientRecord, as ``actor`` writes it.
 
     The save path of ``PATCH /api/v1/patient-records/<id>/`` and ``/me/``,
@@ -253,6 +254,12 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     of each field the patch touched. ``actor`` decides authorship: the
     patient's own edit is typed patient self-report and carries PATIENT_SELF
     provenance (``_patient_authorship``).
+
+    ``allow_reject`` is set only by the interactive editor (a signed-in person's own
+    PATCH, ``PatientRecordViewSet._patch_record``). With it, a field the body names in
+    ``rejected_proposals`` and sends blank is the person rejecting the proposal the
+    record shows there (#2671). Without it (the survey mapping, a machine credential,
+    any other caller) the key is ignored and a blank is stored exactly as it always was.
     """
     # patient_name targets Person, not PatientRecord, so it is handled by hand
     # here exactly as /patient-info/me/ handles it — through the same pair of
@@ -260,15 +267,20 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
     # the provider UI PATCHes, and leaving the key in the body would 405 the
     # request below as a non-projection-owned field.
     patient_name, patch_data = _pop_patient_name(data)
+    declared_rejections = _pop_rejected_proposals(patch_data) if allow_reject else ()
+    if 'rejected_proposals' in patch_data:
+        patch_data = {key: value for key, value in patch_data.items() if key != 'rejected_proposals'}
     # The member's own edit to a record whose permission they withdrew: their
     # name is their account's, everything else is the record's. Only a real
-    # change is refused: an auto-save echoing what was shown changes nothing.
+    # change is refused: an auto-save echoing what was shown changes nothing. A
+    # rejected proposal is a change the record's own read does not show (it carries
+    # no value), so a declared rejection counts as one.
     if patch_data and not getattr(actor, 'is_staff', False):  # staff act on the care relationship
         from patient_portal.consent import RECORD_OFF, record_permitted
         from patient_portal.services import patient_person_for
         own = patient_person_for(actor)
         if (own is not None and own.person_id == person.person_id and not record_permitted(person)
-                and _patch_changes_record(patient_info, patch_data, actor)):
+                and (declared_rejections or _patch_changes_record(patient_info, patch_data, actor))):
             raise PermissionDenied(RECORD_OFF)
     from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
     patch_data = _drop_proposed_list_items(patient_info, canonicalize_fields(patch_data))
@@ -312,7 +324,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
         # is not written as an edit: it is remembered below, and the field leaves
         # the provisional picture.
         from omop_core.services.provisional_record import proposal_clears
-        rejected = proposal_clears(patient_info, patch_data)
+        rejected = proposal_clears(patient_info, patch_data, declared_rejections)
         if rejected:
             patch_data = {key: value for key, value in patch_data.items() if key not in rejected}
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
@@ -437,7 +449,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor):
             # The fields that go with a rejected one leave the picture with it, and
             # the pass keeps them out until the proposal changes.
             from omop_core.services.provisional_record import reject_proposals
-            direct_fields = direct_fields | reject_proposals(person, patient_info, rejected)
+            direct_fields = direct_fields | reject_proposals(person, patient_info, rejected, actor)
         if direct_fields:
             from omop_core.services.provisional_record import mirror_user_edit
             mirror_user_edit(patient_info, direct_fields)
@@ -801,6 +813,20 @@ def _patch_changes_record(patient_info, patch_data, actor) -> bool:
         for field, value in patch_data.items()
         if staff or field not in PatientRecordViewSet._STAFF_ONLY_FIELDS
     )
+
+
+def _pop_rejected_proposals(data) -> list[str]:
+    """The fields a PATCH body declares it rejected the proposal of (``rejected_proposals``).
+
+    A list of field names; anything else is a 400. The key itself is removed by the
+    caller, so it never reaches the serializer.
+    """
+    declared = data.get('rejected_proposals') if 'rejected_proposals' in data else None
+    if declared is None:
+        return []
+    if not isinstance(declared, list) or not all(isinstance(name, str) for name in declared):
+        raise ValidationError({'rejected_proposals': 'Expected a list of field names.'})
+    return declared
 
 
 def _pop_patient_name(data):
@@ -1602,8 +1628,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                            "language to its capabilities."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Only a signed-in person at the editor may reject a proposal by clearing it
+        # (#2671): never a machine credential (an ETL sending null), and a credential a
+        # person handed out (an OAuth2 token) is not the person at the page either.
+        allow_reject = is_interactive_session(request) and not is_machine_request(request)
         patient_info, previous_values = apply_patient_record_patch(
-            person, patient_info, request.data, actor=request.user,
+            person, patient_info, request.data, actor=request.user, allow_reject=allow_reject,
         )
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
@@ -1936,7 +1966,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         f"{len(blockers)} value{'' if len(blockers) == 1 else 's'} on your record "
                         f"{'is' if len(blockers) == 1 else 'are'} still marked Provisional. "
                         'Enter your own answer in each one (retype it, or for a choice pick '
-                        'another option and then it again), then confirm your record.'
+                        'another option and then it again), or clear a value that is wrong to '
+                        'reject it, then confirm your record.'
                     ),
                     'provisional_fields': blockers,
                     'count': len(blockers),

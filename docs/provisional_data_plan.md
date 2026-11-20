@@ -946,31 +946,49 @@ edit is still marked Provisional:
   one. Confirmations made before this change are not revisited.
 
 **Rejecting a proposal (#2671).** A user who sees a wrong proposed value clears the field.
-The editor sends `null` (a number or other non-text field) or `''` (text or select) for a
-field the real record already leaves empty, which used to change nothing, so the proposal
-came back at the next derivation. Now a blank value for a **scalar field the record read
-marks** is a rejection, in `apply_patient_record_patch` (`proposal_clears`,
-`reject_proposals` in `provisional_record.py`):
+The editor sends `null` (or `''`) for a field the real record already leaves empty, which
+used to change nothing, so the proposal came back at the next derivation. Now such a clear
+is a rejection, in `apply_patient_record_patch` (`proposal_clears`, `reject_proposals` in
+`provisional_record.py`), when **all** of these hold:
+
+- **A signed-in person at the editor asked for it** (`allow_reject`, set only by
+  `PatientRecordViewSet._patch_record` for a session or partner-authenticated user, never a
+  machine credential or a token someone handed out). The survey mapping, an ETL sending
+  `{field: null}` and every other caller leave a blank exactly as it always was: stored,
+  or a no-op for `null` on an empty field.
+- **The client declared it.** The body names the cleared field in `rejected_proposals`
+  (`rejectedProposals` in `PatientInfo/provisional.ts`, sent by the page and the federated
+  view: the fields it showed a proposal on and that are now cleared). A stale page or a
+  client that sends a whole representation carries blanks it never chose and declares
+  nothing, so it rejects nothing; a malformed list is a 400. A client that does not send
+  the key (an older or third-party one) therefore cannot reject.
+- **The field is a scalar the record marks**, and the real record leaves it empty.
+
+What follows from it:
 
 - **Not an edit, not an approval.** Nothing is written to `patient_record` (no `''`, no
   `user_edited_fields` entry) and no clinical row or mapping is deleted or changed.
   Entering a value, including the proposed one, is still an approval.
-- **What is not a rejection.** The echo of the displayed value (not blank); a blank for a
-  field that shows no proposal; clearing a real value (the ordinary clear); a calculated
-  field (it goes when its inputs do), a list field (their proposed items are not the
-  user's to write) and a unit (it goes with its value). With `PROVISIONAL_DATA_ENABLED` off
-  nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
+- **What is not a rejection.** A value (including the echo of the displayed one); a blank
+  for a field that shows no proposal; clearing a real value (the ordinary clear); a
+  calculated field (it goes when its inputs do), a list field (their proposed items are not
+  the user's to write) and a unit (it goes with its value). With `PROVISIONAL_DATA_ENABLED`
+  off nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
   (`RECORDED_EMPTY_FIELDS`) are the exception to "`''` is blank": their `''` is a recorded
   answer ("Record no GELF criteria" is Not Met, "Record no risk factors" a FLIPI of 0), so
   `''` is saved as before and only `null` ("Mark not assessed") rejects. Another control
   that sends `''` on purpose belongs in that set.
 - **Where it is kept.** `ProposalRejection` (one row per person and field, migration
-  `0363`): the field and the provisional rows that decided it when it was rejected, as
-  `(table, source_value, concept_id)` triples. `user_edited_fields` cannot hold it:
-  derivation drops an entry whose value matches, and for a clear of an empty field it always
-  does. A clear marker row in OMOP cannot either, because it hides only rows with the same
-  source value and concept, and a proposal's rows carry the hospital's own code. It is
-  patient data (`copy_patient` carries it, erasure removes it) and is never exported.
+  `0363`): the field, the provisional rows that fed it when it was rejected, as
+  `(table, source_value, concept_id)` triples, and who (`rejected_by`, the Identity id as
+  text, so a doctor or a representative rejecting for a patient leaves a trace) and when
+  (`rejected_at`). `user_edited_fields` cannot hold it: derivation drops an entry whose value
+  matches, and for a clear of an empty field it always does. A clear marker row in OMOP
+  cannot either, because it hides only rows with the same source value and concept, and a
+  proposal's rows carry the hospital's own code. It is patient data (`copy_patient` carries
+  it with `rejected_by` cleared, since an Identity id means nothing on another instance;
+  erasure removes it) and is never exported. A row is **not deleted** when the field is later
+  approved or the user types a value: it then has no proposal to hold and is ignored.
 - **What it does.** The pass (`_provisional_values`) drops a rejected field from the
   proposals before it reads the lists and calculated fields, so a BMI from a rejected
   weight goes with it, and the same request rewrites the provisional pair
@@ -978,17 +996,32 @@ marks** is a rejection, in `apply_patient_record_patch` (`proposal_clears`,
   goes with the ones that are the same proposal: a weight's unit, a lab's aliases and their
   unit, and rejecting the disease or its slug rejects the whole disease group and the
   `disease_slugs` list.
-- **When a rejection lapses.** It holds while every provisional row that decides the field
-  is one of the rows that decided it when it was rejected (`held_rejections`): the same
+- **The rows it is held against.** The rows that feed the field, not every provisional row of
+  the person (`_field_origins`, found only for a field that has a rejection, since it reads
+  the rows again per code group): the code groups the field changes without, or, when several
+  codes agree and none decides it alone, those that give the same value on their own. The
+  disease group and the medication list use the condition or drug rows they read. A person
+  with more than `MAX_ORIGIN_GROUPS` code groups, or a field no group explains, falls back to
+  every measurement and observation row, which can only lapse a rejection more often. An
+  unrelated new proposal never lapses one.
+- **When a rejection lapses.** It holds while every provisional row that feeds the field
+  is one of the rows that fed it when it was rejected (`held_rejections`): the same
   source code under the same concept. A new reading of that code stays rejected. A code now
   mapped to another concept, or another code that now feeds the field, is a new proposal
   and shows again, marked. Approval is not a case: an approved mapping makes the value real
-  data, which a rejected proposal never blocks. The user can still type a value of their
-  own at any time, and a field no proposal feeds has nothing to hold. There is no undo
-  control beyond that.
-- **Access.** The same as any edit of the record: a patient's own, a verified
-  representative's, staff's. A member whose permission for the record is withdrawn is
-  refused, since the clear differs from what the record shows (`_patch_changes_record`).
+  data, which a rejected proposal never blocks.
+- **An accidental clear.** The page's date control emits `null` when emptied, and its
+  select's "Unknown" emits `''` after the two-second autosave, so a user can reject a
+  proposal without meaning to. There is no control that restores a rejected proposal, and
+  the page shows nothing where it was; **typing a value in the field is the only way back**
+  (until a different code or concept proposes the field again). A "show proposal again"
+  control would need the record read to list the rejections and a way to delete one; it is
+  left for later.
+- **Access.** Whoever may write the record: the patient's own, a verified representative's,
+  a doctor's or an org admin's, staff's (`can_write_patient`, `patient_person_for`); an
+  analyst is refused as for any patient write. A member whose permission for the record is
+  withdrawn is refused on `/me/` by the record-off rule, which counts a declared rejection
+  as the change it is, and through the id route by `can_write_patient`.
 
 **PHR APIs and lists.** The same audiences see the same proposals on the PHR
 labs and other APIs and on the patient list, with `confidence` on each, never a

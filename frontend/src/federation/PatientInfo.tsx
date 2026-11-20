@@ -6,7 +6,7 @@ import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
+import { marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
@@ -212,7 +212,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       }
 
       const renamed = typeof info.patient_name === "string";
-      const combined = { ...patchFields };
+      // A cleared proposal is named in rejected_proposals: that, not a bare blank, is
+      // how the user rejects it (#2671).
+      const rejected = rejectedProposals(patchFields, marksOf(baseline));
+      const combined = rejected.length ? { ...patchFields, rejected_proposals: rejected } : { ...patchFields };
       const payload = renamed
         ? { ...combined, patient_name: info.patient_name }
         : combined;

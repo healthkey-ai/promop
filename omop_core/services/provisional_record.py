@@ -141,13 +141,8 @@ def _row_origins(rows) -> set:
                              'observation_source_value', 'observation_concept_id'))
 
 
-def _attribute(person, record, snapshot, kept, measurements, observations, routing) -> tuple[dict, dict]:
-    """``(confidence, origins)`` of each kept field.
-
-    The confidence is the lowest among the code groups deciding the field. The
-    origins are those groups' rows as ``_origin`` triples: what a rejection of the
-    field is held against (``held_rejections``).
-    """
+def _attribute(person, record, snapshot, kept, measurements, observations, routing) -> dict:
+    """The confidence of each kept field: the lowest among the code groups deciding it."""
     from omop_core.services.patient_record_service import _derived_value_matches
     rows = measurements + observations
     lowest = min(row.confidence for row in rows)
@@ -156,10 +151,9 @@ def _attribute(person, record, snapshot, kept, measurements, observations, routi
         groups['m', row.measurement_source_value].append(row)
     for row in observations:
         groups['o', row.observation_source_value].append(row)
-    everything = _row_origins(rows)
     if len(groups) > MAX_ATTRIBUTION_GROUPS:
-        return {field: lowest for field in kept}, {field: set(everything) for field in kept}
-    confidence, origins = {}, {}
+        return {field: lowest for field in kept}
+    confidence = {}
     for group in groups.values():
         gone = {id(row) for row in group}
         without = _read_values(person, record, _view(
@@ -173,12 +167,65 @@ def _attribute(person, record, snapshot, kept, measurements, observations, routi
             # A field that changes when a group's rows go is a field they decide.
             if not _derived_value_matches(field, without.get(field), value):
                 confidence[field] = min(confidence.get(field, 100), level)
-                origins.setdefault(field, set()).update(_row_origins(group))
     # Not decided by any one group (several codes agree): the lowest of all.
     for field in kept:
         confidence.setdefault(field, lowest)
-        origins.setdefault(field, set(everything))
-    return confidence, origins
+    return confidence
+
+
+# A rejection is held against the rows that feed its field, found only for the fields
+# that have one (a few, rarely), so the search may take a read per code group where the
+# confidence above is bounded by MAX_ATTRIBUTION_GROUPS.
+MAX_ORIGIN_GROUPS = 200
+
+
+def _field_origins(person, record, snapshot, kept, fields, measurements, observations, routing) -> dict:
+    """``_origin`` triples of the provisional rows that feed each of *fields* (kept values).
+
+    A group of rows (one source code) feeds a field when the field changes without it
+    (it decides it) or, when no single group decides it (several codes agree), when that
+    group alone gives the same value. Rows of other codes, and of other fields, are not
+    among them, so a rejection is not undone by an unrelated proposal. A field no such
+    group explains, or a person with more than ``MAX_ORIGIN_GROUPS`` groups, falls back
+    to every provisional measurement and observation row: it can only lapse more.
+    """
+    from omop_core.services.patient_record_service import _derived_value_matches
+    fields = [field for field in fields if field in kept]
+    if not fields:
+        return {}
+    groups = defaultdict(list)
+    for row in measurements:
+        groups['m', row.measurement_source_value].append(row)
+    for row in observations:
+        groups['o', row.observation_source_value].append(row)
+    everything = _row_origins(measurements + observations)
+    if len(groups) > MAX_ORIGIN_GROUPS:
+        return {field: set(everything) for field in fields}
+    origins = {}
+    for group in groups.values():
+        gone = {id(row) for row in group}
+        without = _read_values(person, record, _view(
+            snapshot,
+            [row for row in measurements if id(row) not in gone],
+            [row for row in observations if id(row) not in gone],
+            routing,
+        ))
+        for field in fields:
+            if not _derived_value_matches(field, without.get(field), kept[field]):
+                origins.setdefault(field, set()).update(_row_origins(group))
+    undecided = [field for field in fields if field not in origins]
+    if undecided:
+        for group in groups.values():
+            alone = _read_values(person, record, _view(
+                snapshot,
+                [row for row in group if isinstance(row, Measurement)],
+                [row for row in group if isinstance(row, Observation)],
+                routing,
+            ))
+            for field in undecided:
+                if _derived_value_matches(field, alone.get(field), kept[field]):
+                    origins.setdefault(field, set()).update(_row_origins(group))
+    return {field: origins.get(field) or set(everything) for field in fields}
 
 
 # The calculated fields a provisional input can move, and the stored fields
@@ -642,14 +689,16 @@ def list_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[d
 
 
 def provisional_values(person, record, snapshot, user_edited=(), origins=None,
-                       hold_rejections=True) -> tuple[dict, dict]:
+                       hold_rejections=True, origin_fields=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name.
 
     A field the user rejected (``ProposalRejection``) is left out while the
     rejection holds (``held_rejections``); ``hold_rejections=False`` reads the
     proposals as if none had been rejected, which is how a rejection finds what it
-    is made against. *origins*, when a dict, is filled with the rows that decide
-    each proposed scalar field (``_origin`` triples).
+    is made against. *origins*, when a dict, is filled with the rows that feed the
+    proposed fields (``_origin`` triples): the composite fields always, the others only
+    those of *origin_fields* and of a field the person has rejected, since finding them
+    reads the rows again per code group.
     """
     from omop_core.services.patient_record_service import canonical_disease_names
     if not _has_provisional_rows(snapshot):
@@ -659,7 +708,8 @@ def provisional_values(person, record, snapshot, user_edited=(), origins=None,
              for name in (_usable_concept_name(c.condition_concept) if c.condition_concept_id else None,
                           c.condition_source_value)}
     with canonical_disease_names(names):
-        return _provisional_values(person, record, snapshot, user_edited, origins, hold_rejections)
+        return _provisional_values(person, record, snapshot, user_edited, origins, hold_rejections,
+                                   origin_fields)
 
 
 # Fields that go with a rejected one: a rejected weight leaves no unit to show, and
@@ -689,31 +739,32 @@ def rejection_group(fields) -> set[str]:
     return group
 
 
-def held_rejections(person, origins) -> set[str]:
+def held_rejections(rejections, origins) -> set[str]:
     """The fields the user rejected whose rejection still holds: leave them empty.
 
-    A rejection holds while every provisional row that decides the field now
-    (*origins*, by field) is one that decided it when it was rejected: the same
-    source code under the same concept. A new reading of that code stays
-    rejected. A code now mapped to another concept, or another code that now
-    feeds the field, is a new proposal and shows again. A field nothing proposes
-    now has nothing to hold. The fields that go with a held one are held too.
+    *rejections* maps a rejected field to the ``_origin`` triples that fed it then;
+    *origins* maps a field to those that feed it now. A rejection holds while every
+    row that feeds the field now is one that fed it when it was rejected: the same
+    source code under the same concept. A new reading of that code stays rejected. A
+    code now mapped to another concept, or another code that now feeds the field, is a
+    new proposal and shows again. A field nothing proposes now has nothing to hold. The
+    fields that go with a held one are held too.
     """
-    if not origins:
-        return set()
-    held = set()
-    for rejection in ProposalRejection.objects.filter(person=person, field_name__in=list(origins)):
-        stored = {tuple(origin) for origin in rejection.origins or []}
-        if origins[rejection.field_name] <= stored:
-            held.add(rejection.field_name)
+    held = {field for field, stored in rejections.items()
+            if field in origins and origins[field] <= stored}
     return rejection_group(held)
 
 
 def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
-                        hold_rejections=True) -> tuple[dict, dict]:
+                        hold_rejections=True, origin_fields=()) -> tuple[dict, dict]:
     from omop_core.services.patient_record_service import _is_empty
     shared = {}
     origins = {} if origins is None else origins
+    rejections = {}
+    if hold_rejections and settings.PROVISIONAL_DATA_ENABLED:
+        rejections = {r.field_name: {tuple(origin) for origin in r.origins or []}
+                      for r in ProposalRejection.objects.filter(person=person)}
+    origin_fields = set(origin_fields) | set(rejections)
     measurements = _usable_vitals(_after_clears(snapshot, snapshot.provisional_measurements, 'measurement'))
     observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
     confidence_names = _confidence_names()
@@ -739,15 +790,17 @@ def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
             if field in kept and own and proposed and own != proposed:
                 del kept[field]
         if kept:
-            confidences, found = _attribute(person, record, snapshot, kept, measurements, observations, routing)
-            origins.update(found)
+            confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
+            if origin_fields & kept.keys():
+                origins.update(_field_origins(person, record, snapshot, kept, origin_fields,
+                                              measurements, observations, routing))
     composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept,
                                                      shared=shared, origins=origins)
-    if hold_rejections and settings.PROVISIONAL_DATA_ENABLED:
+    if rejections:
         # A field the user rejected stays empty while the rejection holds (#2671).
         # Dropping it here, before the lists and calculated fields are read, takes
         # a calculation made from it (BMI from a rejected weight) with it.
-        held = held_rejections(person, {f: o for f, o in origins.items() if f in kept or f in composite})
+        held = held_rejections(rejections, {f: o for f, o in origins.items() if f in kept or f in composite})
         for field in held:
             for proposals, marks in ((kept, confidences), (composite, composite_marks)):
                 proposals.pop(field, None)
@@ -868,53 +921,70 @@ def _is_rejection(field, value) -> bool:
     return value is None if field in RECORDED_EMPTY_FIELDS else _is_blank(value)
 
 
-def proposal_clears(record, patch_data) -> list[str]:
-    """The fields of a PATCH that explicitly clear a proposal the record read shows (#2671).
+def proposal_clears(record, patch_data, declared) -> list[str]:
+    """The fields of a PATCH that explicitly reject a proposal the record read shows (#2671).
 
     A proposal is laid over a field the real record leaves empty, so a client that
-    clears the displayed value sends null (or an empty string) for a field the
-    record already holds empty. That is no edit, and it is not an echo either: the
-    editor sends back what it displays, which for such a field is the proposed value.
-    Only a blank value for a field the overlay marks counts. Calculated fields clear
-    with their inputs, list fields are never rejected (their proposed items are not the
-    user's to write, ``views._drop_proposed_list_items``), and neither is a unit (a
-    picker that goes with its value, ``rejection_group``). For a field in
-    ``RECORDED_EMPTY_FIELDS`` only null counts: its empty string is a recorded answer.
-    Empty
-    with ``PROVISIONAL_DATA_ENABLED`` off, since nothing is then marked.
+    clears the displayed value sends a blank for a field the record already holds empty.
+    That is no edit, and it is not an echo either: the editor sends back what it
+    displays, which for such a field is the proposed value. A field is rejected only
+    when all of these hold, so nothing a client sends by accident or for another reason
+    can reject a proposal the person never saw:
+
+    - the client *declared* it (``rejected_proposals`` in the body: the fields whose
+      shown proposal it cleared), so a stale client that never saw the proposal, or one
+      that sends a whole representation, rejects nothing;
+    - its value is blank: null, or text with nothing in it, except for a field in
+      ``RECORDED_EMPTY_FIELDS`` whose empty string is a recorded answer and only null
+      counts;
+    - the overlay marks it, and the real record leaves it empty.
+
+    Calculated fields clear with their inputs, list fields are never rejected (their
+    proposed items are not the user's to write, ``views._drop_proposed_list_items``),
+    and neither is a unit (a picker that goes with its value, ``rejection_group``).
+    Who may reject is the caller's rule (``views.apply_patient_record_patch``,
+    ``allow_reject``). Nothing is read when no declared field is blank, and nothing is
+    marked with ``PROVISIONAL_DATA_ENABLED`` off.
     """
+    candidates = [field for field in declared
+                  if field in patch_data and _is_rejection(field, patch_data[field])]
+    if not candidates:
+        return []
     marks = overlay(record, lists=False)[1]
     if not marks:
         return []
     from omop_core.services.patient_record_service import _is_empty
     return sorted(
-        field for field, value in patch_data.items()
+        field for field in set(candidates)
         if field in marks and field not in COMPUTED_INPUTS and field not in PROVISIONAL_JSON_FIELDS
-        and not field.endswith('_units') and _is_rejection(field, value)
-        and _is_empty(getattr(record, field, None))
+        and not field.endswith('_units') and _is_empty(getattr(record, field, None))
     )
 
 
-def reject_proposals(person, record, fields) -> set[str]:
+def reject_proposals(person, record, fields, actor=None) -> set[str]:
     """Keep the user's rejection of the proposals now on *fields*; every field to take out of view.
 
-    Each field is remembered with the provisional rows that decide it today
+    Each field is remembered with the provisional rows that feed it today
     (``ProposalRejection``), so the pass leaves it empty from now on, until a
-    different code or concept proposes it (``held_rejections``). Nothing is deleted
-    or approved. The caller mirrors the returned fields out of the provisional
-    picture (``mirror_user_edit``), which also drops a calculation made from them.
-    A field no proposal feeds any more has nothing to hold; it is still returned,
-    so a stale displayed value goes.
+    different code or concept proposes it (``held_rejections``), and with who rejected
+    it (*actor*'s Identity id) and when. Nothing is deleted or approved. The caller
+    mirrors the returned fields out of the provisional picture (``mirror_user_edit``),
+    which also drops a calculation made from them. A field no proposal feeds any more
+    has nothing to hold; it is still returned, so a stale displayed value goes.
     """
+    from django.utils import timezone
     from omop_core.services.patient_record_service import _build_snapshot
     origins = {}
-    provisional_values(person, record, _build_snapshot(person), origins=origins, hold_rejections=False)
+    provisional_values(person, record, _build_snapshot(person), origins=origins,
+                       hold_rejections=False, origin_fields=fields)
+    by = str(actor.pk) if getattr(actor, 'pk', None) is not None else ''
     for field in fields:
         found = origins.get(field)
         if found:
             ProposalRejection.objects.update_or_create(
                 person=person, field_name=field,
-                defaults={'origins': [list(origin) for origin in sorted(found)]})
+                defaults={'origins': [list(origin) for origin in sorted(found)],
+                          'rejected_by': by, 'rejected_at': timezone.now()})
     return rejection_group(fields)
 
 

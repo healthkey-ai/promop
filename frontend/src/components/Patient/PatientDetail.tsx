@@ -5,7 +5,7 @@ import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { attestationBlockers, marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
+import { attestationBlockers, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -108,8 +108,7 @@ function RecordConfirmation({
               Check each value marked Provisional and enter your own answer in its field:
               retype a number or text, or pick an option (to keep the option shown, pick
               another and then it again). If a value is wrong and you do not know the right one,
-              clear a number or text field to reject it. Confirm Record is available once none
-              are marked.
+              clear it to reject it. Confirm Record is available once none are marked.
             </p>
           </div>
         </div>
@@ -562,11 +561,14 @@ export default function PatientDetail({
         }
       }
 
-      // All fields ride the single PatientRecord PATCH.
+      // All fields ride the single PatientRecord PATCH. A cleared proposal is named in
+      // rejected_proposals: that, not a bare blank, is how the user rejects it (#2671).
+      const rejected = rejectedProposals(patchFields, proposed);
+      const body = rejected.length ? { ...patchFields, rejected_proposals: rejected } : patchFields;
       if (renamed || Object.keys(patchFields).length > 0) {
         await api.patch(
           `/patient-info/${personId}/`,
-          renamed ? { ...patchFields, patient_name: data.name } : patchFields,
+          renamed ? { ...body, patient_name: data.name } : body,
         );
         saveRevisionRef.current += 1;
         if (patientInfoRef.current) {

@@ -40,7 +40,7 @@ def patient():
     GroupAccess.objects.create(identity=identity, org=org, role='patient')
     PatientUser.objects.create(identity=identity, person=person, is_active=True)
     client = APIClient()
-    client.force_authenticate(identity)
+    client.force_login(identity)          # a signed-in person's session: the editor's own
     return client, person, record
 
 
@@ -168,7 +168,8 @@ def test_a_null_rejects_a_proposal_and_lifts_the_block(patient):
     propose(person, hemoglobin_g_dl=(Decimal('11.5'), 82))
     assert client.post(CONFIRM).status_code == 409
 
-    patch = client.patch('/api/patient-info/me/', {'hemoglobin_g_dl': None}, format='json')
+    patch = client.patch('/api/patient-info/me/',
+                         {'hemoglobin_g_dl': None, 'rejected_proposals': ['hemoglobin_g_dl']}, format='json')
 
     assert patch.status_code == 200
     shown = client.get('/api/patient-info/me/').json()['patient_info']
@@ -184,7 +185,8 @@ def test_an_empty_string_on_a_text_field_rejects_a_proposal_and_stores_nothing(p
     propose(person, smoking_status=('Never', 80))
     assert client.post(CONFIRM).json()['provisional_fields'] == ['smoking_status']
 
-    patch = client.patch('/api/patient-info/me/', {'smoking_status': ''}, format='json')
+    patch = client.patch('/api/patient-info/me/',
+                         {'smoking_status': '', 'rejected_proposals': ['smoking_status']}, format='json')
 
     assert patch.status_code == 200
     record, _ = stored(person)

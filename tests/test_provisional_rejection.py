@@ -39,11 +39,31 @@ def provisional_on(settings):
     settings.CELERY_BROKER_URL = ''
 
 
+class Editor(APIClient):
+    """The page: a signed-in person's session, whose autosave names a cleared field in
+    ``rejected_proposals`` (``rejectedProposals`` in provisional.ts). ``bare`` sends the
+    body as it is, a blank with no such declaration."""
+
+    def patch(self, path, data=None, format=None, **extra):
+        if isinstance(data, dict) and 'rejected_proposals' not in data:
+            blanks = [field for field, value in data.items() if value is None or value == '']
+            if blanks:
+                data = {**data, 'rejected_proposals': blanks}
+        return super().patch(path, data, format=format, **extra)
+
+    def bare(self, path, data):
+        return super().patch(path, data, format='json')
+
+
+def signed_in(identity):
+    client = Editor()
+    client.force_login(identity)
+    return client
+
+
 @pytest.fixture()
 def staff():
-    client = APIClient()
-    client.force_authenticate(Identity.objects.create_user(email='rej-staff@example.test', is_staff=True))
-    return client
+    return signed_in(Identity.objects.create_user(email='rej-staff@example.test', is_staff=True))
 
 
 def url(person):
@@ -152,13 +172,14 @@ def test_the_hold_is_every_deciding_row_being_one_that_was_rejected():
     ProposalRejection.objects.create(person=person, field_name='weight', origins=[
         ['measurement', 'W1', 1], ['measurement', 'W2', 1]])
     held = provisional_record.held_rejections
-    assert held(person, {'weight': {('measurement', 'W1', 1)}}) == {'weight', 'weight_units'}
-    assert held(person, {'weight': {('measurement', 'W1', 1), ('measurement', 'W2', 1)}}) == {
+    stored_rejections = {'weight': {('measurement', 'W1', 1), ('measurement', 'W2', 1)}}
+    assert held(stored_rejections, {'weight': {('measurement', 'W1', 1)}}) == {'weight', 'weight_units'}
+    assert held(stored_rejections, {'weight': {('measurement', 'W1', 1), ('measurement', 'W2', 1)}}) == {
         'weight', 'weight_units'}
-    assert held(person, {'weight': {('measurement', 'W1', 2)}}) == set()          # re-pointed concept
-    assert held(person, {'weight': {('measurement', 'W3', 1)}}) == set()          # another code
-    assert held(person, {'height': {('measurement', 'W1', 1)}}) == set()          # no rejection for height
-    assert held(person, {}) == set()
+    assert held(stored_rejections, {'weight': {('measurement', 'W1', 2)}}) == set()   # re-pointed concept
+    assert held(stored_rejections, {'weight': {('measurement', 'W3', 1)}}) == set()   # another code
+    assert held(stored_rejections, {'height': {('measurement', 'W1', 1)}}) == set()  # no rejection for height
+    assert held(stored_rejections, {}) == set()
 
 
 # --- what does not count as a rejection ------------------------------------------------
@@ -225,7 +246,8 @@ def test_with_the_switch_off_a_blank_value_changes_nothing(snomed, record, staff
 
     assert response.status_code == 200, response.content
     assert not ProposalRejection.objects.exists()
-    assert provisional_record.proposal_clears(stored(record.person), {'hemoglobin_g_dl': None}) == []
+    assert provisional_record.proposal_clears(
+        stored(record.person), {'hemoglobin_g_dl': None}, ['hemoglobin_g_dl']) == []
     settings.PROVISIONAL_DATA_ENABLED = True
     assert shown(staff, record.person)['provisional_fields']['hemoglobin_g_dl'] == 82    # untouched
 
@@ -289,8 +311,7 @@ def patient(snomed):
     identity = Identity.objects.create_user(email='rej-patient@example.test', password='pw')
     GroupAccess.objects.create(identity=identity, org=org, role='patient')
     PatientUser.objects.create(identity=identity, person=person, is_active=True)
-    client = APIClient()
-    client.force_authenticate(identity)
+    client = signed_in(identity)
     propose_hemoglobin(person)
     return client, person
 
@@ -388,18 +409,259 @@ def test_an_untouched_gelf_proposal_is_not_rejected_by_a_save_of_another_field(g
     assert response.status_code == 200, response.content
     assert not ProposalRejection.objects.exists()
     assert shown(client, person)['provisional_fields']['gelf_criteria_options'] == 77
-    assert provisional_record.proposal_clears(stored(person), {'gelf_criteria_options': ''}) == []
-    assert provisional_record.proposal_clears(stored(person), {'gelf_criteria_options': None}) == [
-        'gelf_criteria_options']
+    declared = ['gelf_criteria_options']
+    assert provisional_record.proposal_clears(stored(person), {'gelf_criteria_options': ''}, declared) == []
+    assert provisional_record.proposal_clears(stored(person), {'gelf_criteria_options': None}, declared) == declared
     # Every other text field still treats '' as a blank.
     assert provisional_record._is_rejection('smoking_status', '') is True
     assert provisional_record._is_rejection('flipi_score_options', '') is False
 
 
-def test_a_rejection_travels_with_the_patient_and_is_erased_with_them():
-    from omop_core.services import instance_data
-    from omop_core.services.patient_transfer import PATIENT_TABLES
-    assert 'omop_core.ProposalRejection' in instance_data.PATIENT
-    assert ProposalRejection in {table.model for table in PATIENT_TABLES}
-    from patient_portal.erasure import withdrawal_tables
-    assert ProposalRejection in {model for model, _ in withdrawal_tables()}
+# --- who may reject, and what the client declared (#2671 review) -------------------------
+
+def test_a_blank_the_client_did_not_declare_is_not_a_rejection(snomed, record, staff):
+    # A stale page, or a client that sends a whole representation, carries blanks it never
+    # chose: nothing names the proposal as the thing cleared, so nothing is rejected and a
+    # blank is stored as it always was.
+    propose_hemoglobin(record.person)
+
+    response = staff.bare(url(record.person), {'hemoglobin_g_dl': None, 'smoking_status': ''})
+
+    assert response.status_code == 200, response.content
+    assert not ProposalRejection.objects.exists()
+    assert stored(record.person).smoking_status == ''                 # the answer, as before
+    assert shown(staff, record.person)['provisional_fields']['hemoglobin_g_dl'] == 82
+
+
+def test_a_declared_field_with_a_value_is_an_approval_not_a_rejection(snomed, record, staff):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    propose_hemoglobin(record.person)
+
+    response = staff.bare(url(record.person), {'hemoglobin_g_dl': '13', 'rejected_proposals': ['hemoglobin_g_dl']})
+
+    assert response.status_code == 200, response.content
+    assert not ProposalRejection.objects.exists()
+    assert float(stored(record.person).hemoglobin_g_dl) == 13
+
+
+def test_rejected_proposals_must_be_a_list_of_field_names(snomed, record, staff):
+    propose_hemoglobin(record.person)
+
+    for bad in ('hemoglobin_g_dl', {'hemoglobin_g_dl': True}, [1]):
+        response = staff.bare(url(record.person), {'hemoglobin_g_dl': None, 'rejected_proposals': bad})
+        assert response.status_code == 400, bad
+    assert not ProposalRejection.objects.exists()
+
+
+def test_the_survey_path_stores_a_blank_as_it_always_did(snomed, record):
+    # survey_record_mapping writes its answers through apply_patient_record_patch with no
+    # allow_reject: neither a blank nor a declaration of one is a rejection there.
+    from patient_portal.api.views import apply_patient_record_patch
+    propose_hemoglobin(record.person)
+    identity = Identity.objects.create_user(email='rej-survey@example.test')
+
+    apply_patient_record_patch(
+        record.person, stored(record.person),
+        {'smoking_status': '', 'hemoglobin_g_dl': None, 'rejected_proposals': ['hemoglobin_g_dl', 'smoking_status']},
+        actor=identity)
+
+    assert not ProposalRejection.objects.exists()
+    assert stored(record.person).smoking_status == ''
+    assert PatientRecordConfidence.objects.get(person=record.person).hemoglobin_g_dl == 82
+
+
+def test_a_machine_credential_sending_null_does_not_reject(snomed, record, settings):
+    from patient_portal.api.permissions import SERVICE_TOKEN
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.read patient/*.write'
+    propose_hemoglobin(record.person)
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(email='rej-etl@example.test', is_staff=True),
+                              token=SERVICE_TOKEN)
+
+    response = client.patch(url(record.person),
+                            {'hemoglobin_g_dl': None, 'rejected_proposals': ['hemoglobin_g_dl']}, format='json')
+
+    assert response.status_code == 200, response.content
+    assert not ProposalRejection.objects.exists()
+    assert PatientRecordConfidence.objects.get(person=record.person).hemoglobin_g_dl == 82
+
+
+def test_the_view_gates_rejection_on_a_signed_in_person(monkeypatch):
+    from rest_framework.authentication import SessionAuthentication, TokenAuthentication
+    from patient_portal.api import views
+    from patient_portal.api.permissions import SERVICE_TOKEN
+    seen = []
+    monkeypatch.setattr(views, 'apply_patient_record_patch',
+                        lambda *args, **kwargs: seen.append(kwargs['allow_reject']) or (None, {}))
+    monkeypatch.setattr(views, 'PatientRecordSerializer', lambda record: type('S', (), {'data': {}})())
+    viewset = views.PatientRecordViewSet()
+    human = Identity(email='gate@example.test')
+
+    def request(auth, authenticator):
+        return type('R', (), {'data': {}, 'user': human, 'auth': auth, 'successful_authenticator': authenticator})()
+
+    viewset._patch_record(request(None, SessionAuthentication()), None, None)
+    assert seen[-1] is True                                      # a person at the editor
+    viewset._patch_record(request(SERVICE_TOKEN, None), None, None)
+    assert seen[-1] is False                                     # a service credential
+    viewset._patch_record(request(object(), TokenAuthentication()), None, None)
+    assert seen[-1] is False                                     # a token someone handed out
+
+
+def test_a_verified_representative_can_reject_and_it_is_attributed(patient):
+    from omop_core.models import PersonalRepresentative
+    _, person = patient
+    caregiver = Identity.objects.create_user(email='rej-caregiver@example.test')
+    PersonalRepresentative.objects.create(
+        representative=caregiver, person_id=person.person_id, relationship='caregiver',
+        verification_status='VERIFIED')
+
+    response = signed_in(caregiver).patch(url(person), {'hemoglobin_g_dl': None}, format='json')
+
+    assert response.status_code == 200, response.content
+    assert ProposalRejection.objects.get(person=person).rejected_by == str(caregiver.pk)
+
+
+def test_a_doctor_rejecting_for_a_patient_leaves_a_trace(patient):
+    _, person = patient
+    org = stored(person).organization
+    doctor = Identity.objects.create_user(email='rej-doctor@example.test', password='pw')
+    GroupAccess.objects.create(identity=doctor, org=org, role='doctor')
+
+    response = signed_in(doctor).patch(url(person), {'hemoglobin_g_dl': None}, format='json')
+
+    assert response.status_code == 200, response.content
+    rejection = ProposalRejection.objects.get(person=person, field_name='hemoglobin_g_dl')
+    assert rejection.rejected_by == str(doctor.pk) and rejection.rejected_at is not None
+
+
+def test_the_patients_own_rejection_names_the_patient(patient):
+    client, person = patient
+
+    client.patch(url(person), {'hemoglobin_g_dl': None}, format='json')
+
+    own = PatientUser.objects.get(person=person).identity
+    assert ProposalRejection.objects.get(person=person).rejected_by == str(own.pk)
+
+
+def test_a_patient_whose_permission_is_withdrawn_cannot_reject_through_me_either(patient, monkeypatch):
+    # /me/ has no can_write_patient gate in front of it: the refusal there is the record-off
+    # rule in apply_patient_record_patch, which sees a blank for a proposal as the change it is.
+    from patient_portal.consent import RECORD_OFF
+    client, person = patient
+    monkeypatch.setattr('patient_portal.consent.record_permitted', lambda person: False)
+
+    response = client.patch('/api/v1/patient-records/me/', {'hemoglobin_g_dl': None}, format='json')
+
+    assert response.status_code == 403
+    assert RECORD_OFF in str(response.json())
+    assert not ProposalRejection.objects.exists()
+
+
+def test_an_analyst_is_refused_and_rejects_nothing(patient):
+    _, person = patient
+    analyst = Identity.objects.create_user(email='rej-analyst@example.test', password='pw')
+    GroupAccess.objects.create(identity=analyst, org=stored(person).organization, role='analyst')
+
+    response = signed_in(analyst).patch(url(person), {'hemoglobin_g_dl': None}, format='json')
+
+    assert response.status_code in (403, 404)
+    assert not ProposalRejection.objects.exists()
+    assert PatientRecordConfidence.objects.get(person=person).hemoglobin_g_dl == 82
+
+
+def test_a_patch_with_nothing_blank_reads_no_proposals(snomed, record, staff, monkeypatch):
+    # The rejection check must cost an ordinary save nothing: no overlay (and so no read of
+    # the provisional tables) unless a declared field is blank.
+    propose_hemoglobin(record.person)
+    calls = []
+    real = provisional_record.overlay
+    monkeypatch.setattr(provisional_record, 'overlay', lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    staff.patch(url(record.person), {'blood_type': 'A+'}, format='json')
+    staff.bare(url(record.person), {'sodium_meq_l': None})                   # blank, not declared
+    staff.bare(url(record.person), {'sodium_meq_l': 140, 'rejected_proposals': ['sodium_meq_l']})
+    assert calls == []
+
+    staff.patch(url(record.person), {'hemoglobin_g_dl': None}, format='json')
+    assert calls                                                              # a declared blank reads them
+
+
+# --- the rows a rejection is held against ----------------------------------------------
+
+def test_an_unrelated_proposal_does_not_lapse_a_rejection(snomed, record, staff):
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)                                  # hemoglobin, code 718-7
+        _weight(record.person, 70, conf=75)                                  # an unrelated analyte
+    refresh_patient_record(record.person)
+
+    staff.patch(url(record.person), {'hemoglobin_g_dl': None}, format='json')
+    rejection = ProposalRejection.objects.get(person=record.person, field_name='hemoglobin_g_dl')
+    assert rejection.origins == [['measurement', '718-7', 3000963]]          # not the weight's rows
+
+    with suppress_patient_record_refresh():
+        _height(record.person, 170, conf=60)                                 # a new, unrelated code
+        _weight(record.person, 72, conf=75)
+    refresh_patient_record(record.person)
+
+    after = shown(staff, record.person)
+    assert after['hemoglobin_g_dl'] is None
+    assert after['provisional_fields']['weight'] == 75                       # the other proposals stand
+
+
+def test_codes_that_agree_are_the_feeders_and_an_unrelated_code_is_not(snomed, record, staff):
+    with suppress_patient_record_refresh():
+        hemoglobin(record.person, 11.5, date(2024, 6, 1), source='HGB-A')
+        hemoglobin(record.person, 11.5, date(2024, 6, 1), source='HGB-B')   # a second code, same answer
+        _weight(record.person, 70, conf=75)
+    refresh_patient_record(record.person)
+
+    staff.patch(url(record.person), {'hemoglobin_g_dl': None}, format='json')
+
+    rejection = ProposalRejection.objects.get(person=record.person, field_name='hemoglobin_g_dl')
+    assert rejection.origins == [['measurement', 'HGB-A', 3000963], ['measurement', 'HGB-B', 3000963]]
+    with suppress_patient_record_refresh():
+        _height(record.person, 170, conf=60)
+    refresh_patient_record(record.person)
+    assert shown(staff, record.person)['hemoglobin_g_dl'] is None
+
+
+def test_too_many_code_groups_fall_back_to_every_row_and_can_only_lapse_more(snomed, record, staff, monkeypatch):
+    monkeypatch.setattr(provisional_record, 'MAX_ORIGIN_GROUPS', 0)
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+        _weight(record.person, 70, conf=75)
+    refresh_patient_record(record.person)
+
+    staff.patch(url(record.person), {'hemoglobin_g_dl': None}, format='json')
+
+    origins = ProposalRejection.objects.get(person=record.person).origins
+    assert len(origins) == 2                                                   # the weight's row too
+
+
+# --- what travels and what is erased ---------------------------------------------------
+
+def test_erasing_a_record_deletes_its_rejections(snomed, record, staff):
+    from patient_portal.erasure import erase_record
+    propose_hemoglobin(record.person)
+    staff.patch(url(record.person), {'hemoglobin_g_dl': None}, format='json')
+    other = PatientRecordFactory().person
+    ProposalRejection.objects.create(person=other, field_name='weight', origins=[])
+    assert ProposalRejection.objects.filter(person=record.person).count() == 1
+
+    erase_record(record.person)
+
+    assert not ProposalRejection.objects.filter(person=record.person).exists()
+    assert ProposalRejection.objects.filter(person=other).exists()           # nobody else's
+
+
+def test_a_rejection_is_not_removed_by_approval_or_typing_and_is_then_ignored(snomed, record, staff):
+    _concept('Type Concept', 32865, '32865', 'Patient self-reported', 'Type Concept')
+    propose_hemoglobin(record.person)
+    staff.patch(url(record.person), {'hemoglobin_g_dl': None}, format='json')
+
+    staff.patch(url(record.person), {'hemoglobin_g_dl': '13'}, format='json')
+
+    assert ProposalRejection.objects.filter(person=record.person, field_name='hemoglobin_g_dl').exists()
+    after = shown(staff, record.person)
+    assert float(after['hemoglobin_g_dl']) == 13 and 'hemoglobin_g_dl' not in after['provisional_fields']

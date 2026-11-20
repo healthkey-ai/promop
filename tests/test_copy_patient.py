@@ -25,6 +25,7 @@ from omop_core.models import (
     PatientDocument,
     PatientRecord,
     Person,
+    ProposalRejection,
     ProvenanceRecord,
     RecordRevision,
     SupportiveTherapyCourse,
@@ -203,6 +204,17 @@ def test_source_timestamps_survive_auto_now_fields(patient: Person):
     _copy()
 
     assert RecordRevision.objects.get(patient_record__person_id=TARGET_ID).changed_at == past
+
+
+def test_a_proposal_rejection_is_copied_without_the_source_account(patient: Person):
+    ProposalRejection.objects.create(
+        person=patient, field_name='weight', origins=[['measurement', 'W1', 3_000_001]], rejected_by='592')
+    _copy()
+
+    copied = ProposalRejection.objects.get(person_id=TARGET_ID)
+    assert copied.field_name == 'weight' and copied.origins == [['measurement', 'W1', 3_000_001]]
+    assert copied.rejected_by == ''                       # the source's Identity id means nothing here
+    assert ProposalRejection.objects.get(person_id=SOURCE_ID).rejected_by == '592'
 
 
 def test_revision_author_is_cleared_but_system_is_kept(patient: Person):

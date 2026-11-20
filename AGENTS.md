@@ -1688,9 +1688,11 @@ be lifted. A block is lifted by entering your own answer in the field (an edit s
 approved data; for a select, pick another option and then the shown one again) or by
 rejecting the proposal: a blank value (`null`, or `''` for text and select, except the GELF
 and FLIPI checklists, whose `''` is a recorded answer and only `null` rejects) for a marked
-scalar field the record leaves empty is stored as a `ProposalRejection` (#2671) and writes
-nothing to the approved record; the pass then leaves the field empty until a different code
-or concept proposes it (`held_rejections`; see the plan, "Rejecting a proposal"). The fields the General tab shows
+scalar field the record leaves empty, named in the body's `rejected_proposals` by a signed-in
+person at the editor (`allow_reject`; never the survey mapping or a machine credential), is
+stored as a `ProposalRejection` (#2671) and writes nothing to the approved record; the pass
+then leaves the field empty until a different code or concept proposes it
+(`held_rejections`; see the plan, "Rejecting a proposal"). The fields the General tab shows
 only outside patient mode (`validated`, ...) are excluded (`NOT_FOR_PATIENTS`). `attestationBlockers` in
 `frontend/src/components/PatientInfo/provisional.ts` is the same rule over the marks the
 page holds: change one and change the other. With `PROVISIONAL_DATA_ENABLED` off nothing
