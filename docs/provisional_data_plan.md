@@ -959,7 +959,11 @@ marks** is a rejection, in `apply_patient_record_patch` (`proposal_clears`,
   field that shows no proposal; clearing a real value (the ordinary clear); a calculated
   field (it goes when its inputs do), a list field (their proposed items are not the
   user's to write) and a unit (it goes with its value). With `PROVISIONAL_DATA_ENABLED` off
-  nothing is marked, so nothing is a rejection.
+  nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
+  (`RECORDED_EMPTY_FIELDS`) are the exception to "`''` is blank": their `''` is a recorded
+  answer ("Record no GELF criteria" is Not Met, "Record no risk factors" a FLIPI of 0), so
+  `''` is saved as before and only `null` ("Mark not assessed") rejects. Another control
+  that sends `''` on purpose belongs in that set.
 - **Where it is kept.** `ProposalRejection` (one row per person and field, migration
   `0363`): the field and the provisional rows that decided it when it was rejected, as
   `(table, source_value, concept_id)` triples. `user_edited_fields` cannot hold it:

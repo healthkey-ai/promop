@@ -856,6 +856,18 @@ def _is_blank(value) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
 
 
+# Fields whose empty string is a recorded answer, not a blank: a checklist saved with
+# nothing ticked ("Record no GELF criteria" is Not Met, "Record no risk factors" is a
+# FLIPI of 0), against null, "Mark not assessed". For these only null rejects a proposal;
+# '' stays a value the user records, as it was before #2671. A new control that sends
+# '' on purpose belongs here.
+RECORDED_EMPTY_FIELDS = frozenset({'gelf_criteria_options', 'flipi_score_options'})
+
+
+def _is_rejection(field, value) -> bool:
+    return value is None if field in RECORDED_EMPTY_FIELDS else _is_blank(value)
+
+
 def proposal_clears(record, patch_data) -> list[str]:
     """The fields of a PATCH that explicitly clear a proposal the record read shows (#2671).
 
@@ -866,7 +878,9 @@ def proposal_clears(record, patch_data) -> list[str]:
     Only a blank value for a field the overlay marks counts. Calculated fields clear
     with their inputs, list fields are never rejected (their proposed items are not the
     user's to write, ``views._drop_proposed_list_items``), and neither is a unit (a
-    picker that goes with its value, ``rejection_group``). Empty
+    picker that goes with its value, ``rejection_group``). For a field in
+    ``RECORDED_EMPTY_FIELDS`` only null counts: its empty string is a recorded answer.
+    Empty
     with ``PROVISIONAL_DATA_ENABLED`` off, since nothing is then marked.
     """
     marks = overlay(record, lists=False)[1]
@@ -876,7 +890,8 @@ def proposal_clears(record, patch_data) -> list[str]:
     return sorted(
         field for field, value in patch_data.items()
         if field in marks and field not in COMPUTED_INPUTS and field not in PROVISIONAL_JSON_FIELDS
-        and not field.endswith('_units') and _is_blank(value) and _is_empty(getattr(record, field, None))
+        and not field.endswith('_units') and _is_rejection(field, value)
+        and _is_empty(getattr(record, field, None))
     )
 
 

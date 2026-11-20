@@ -1686,7 +1686,8 @@ the list fields, the disease and treatment tabs and the controls that bypass `Fi
 not block: a gap the plan lists, and a block on a field the patient cannot see could never
 be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
 approved data; for a select, pick another option and then the shown one again) or by
-rejecting the proposal: a blank value (`null`, or `''` for text and select) for a marked
+rejecting the proposal: a blank value (`null`, or `''` for text and select, except the GELF
+and FLIPI checklists, whose `''` is a recorded answer and only `null` rejects) for a marked
 scalar field the record leaves empty is stored as a `ProposalRejection` (#2671) and writes
 nothing to the approved record; the pass then leaves the field empty until a different code
 or concept proposes it (`held_rejections`; see the plan, "Rejecting a proposal"). The fields the General tab shows

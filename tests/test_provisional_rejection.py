@@ -331,6 +331,71 @@ def test_a_patient_whose_record_permission_is_withdrawn_cannot_reject(patient, m
     assert PatientRecordConfidence.objects.get(person=person).hemoglobin_g_dl == 82
 
 
+# --- a checklist whose empty string is a recorded answer (GELF, FLIPI) ------------------
+
+@pytest.fixture()
+def gelf_patient(patient, monkeypatch):
+    """The patient above, with a proposed GELF answer that the attestation counts.
+
+    The GELF control bypasses ``Field`` and is not yet on the list of fields that block a
+    confirmation, so the list is widened here the way the change that adds it will.
+    """
+    client, person = patient
+    PatientRecordProvisional.objects.filter(person=person).update(gelf_criteria_options='large_mass')
+    PatientRecordConfidence.objects.filter(person=person).update(gelf_criteria_options=77)
+    from omop_core.services import patient_visible_fields
+    widened = frozenset({*patient_visible_fields.names(), 'gelf_criteria_options'})
+    monkeypatch.setattr(patient_visible_fields, 'names', lambda: widened)
+    return client, person
+
+
+def test_null_on_a_proposed_gelf_rejects_it_and_lifts_the_block(gelf_patient):
+    client, person = gelf_patient
+    assert 'gelf_criteria_options' in provisional_record.attestation_blockers(stored(person))
+
+    response = client.patch(url(person), {'gelf_criteria_options': None, 'hemoglobin_g_dl': None},
+                            format='json')                                  # "Mark not assessed"
+
+    assert response.status_code == 200, response.content
+    after = shown(client, person)
+    assert after['gelf_criteria_options'] is None
+    assert 'gelf_criteria_options' not in after['provisional_fields']
+    record = stored(person)
+    assert record.gelf_criteria_options is None and record.gelf_criteria_status is None   # not assessed
+    assert 'gelf_criteria_options' not in (record.user_edited_fields or [])
+    assert client.post(CONFIRM).status_code == 200
+
+
+def test_an_empty_string_on_a_proposed_gelf_records_not_met_and_lifts_the_block(gelf_patient):
+    client, person = gelf_patient
+
+    response = client.patch(url(person), {'gelf_criteria_options': '', 'hemoglobin_g_dl': None},
+                            format='json')                                  # "Record no GELF criteria"
+
+    assert response.status_code == 200, response.content
+    record = stored(person)
+    assert record.gelf_criteria_options == '' and record.gelf_criteria_status == 'Not Met'
+    assert 'gelf_criteria_options' not in shown(client, person)['provisional_fields']
+    assert not ProposalRejection.objects.filter(field_name='gelf_criteria_options').exists()
+    assert client.post(CONFIRM).status_code == 200
+
+
+def test_an_untouched_gelf_proposal_is_not_rejected_by_a_save_of_another_field(gelf_patient):
+    client, person = gelf_patient
+
+    response = client.patch(url(person), {'blood_type': 'A+'}, format='json')
+
+    assert response.status_code == 200, response.content
+    assert not ProposalRejection.objects.exists()
+    assert shown(client, person)['provisional_fields']['gelf_criteria_options'] == 77
+    assert provisional_record.proposal_clears(stored(person), {'gelf_criteria_options': ''}) == []
+    assert provisional_record.proposal_clears(stored(person), {'gelf_criteria_options': None}) == [
+        'gelf_criteria_options']
+    # Every other text field still treats '' as a blank.
+    assert provisional_record._is_rejection('smoking_status', '') is True
+    assert provisional_record._is_rejection('flipi_score_options', '') is False
+
+
 def test_a_rejection_travels_with_the_patient_and_is_erased_with_them():
     from omop_core.services import instance_data
     from omop_core.services.patient_transfer import PATIENT_TABLES
