@@ -12,6 +12,8 @@ import path from 'path';
  *     .venv/bin/python manage.py runserver 8011 --noreload
  *   cd frontend && npx vitest run --config vitest.itest.config.ts
  *
+ * Needs ITEST_SESSION_ID and ITEST_CSRF_TOKEN set (see src/test/itestSession.ts).
+ *
  * The unit tests mock axios, so they prove a component asks for the right thing.
  * They cannot prove the server accepts it, that derivation reads it back, or
  * that the two halves agree on field names and value columns. Every real defect

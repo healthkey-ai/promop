@@ -13,7 +13,7 @@ Usage:
 """
 
 import json
-import sys
+import os
 
 from django.core.management.base import BaseCommand, CommandError
 
@@ -63,14 +63,15 @@ class Command(BaseCommand):
         json_str = json.dumps(bundle, indent=2)
 
         if output_path:
-            with open(output_path, 'w') as f:
+            # A patient's record: readable by the owner only.
+            fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as f:
                 f.write(json_str)
             self.stderr.write(self.style.SUCCESS(
                 f'Exported {bundle["total"]} resources for person_id={person_id} → {output_path}'
             ))
         else:
-            sys.stdout.write(json_str)
-            sys.stdout.write('\n')
+            self.stdout.write(json_str)
             self.stderr.write(self.style.SUCCESS(
                 f'Exported {bundle["total"]} resources for person_id={person_id}'
             ))
@@ -100,8 +101,7 @@ class Command(BaseCommand):
                 f'Exported {len(bundles)} patients for org="{org_slug}" → {output_path}'
             ))
         else:
-            sys.stdout.write(json_str)
-            sys.stdout.write('\n')
+            self.stdout.write(json_str)
             self.stderr.write(self.style.SUCCESS(
                 f'Exported {len(bundles)} patients for org="{org_slug}"'
             ))

@@ -12,6 +12,7 @@
  * Uses a throwaway patient so nothing real is touched and cleanup is a delete.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
+import { signInForItest } from '@/test/itestSession';
 import { fetchWritableFields, __resetWritableFieldsCache,
          type FieldDescriptor } from '@/hooks/useWritableFields';
 import { writeFieldValue, writeFieldValues } from '@/api/clinicalFacts';
@@ -20,8 +21,7 @@ import api from '@/api/axios';
 const PERSON = 990001;
 
 beforeAll(() => {
-  document.cookie = 'sessionid=svlpo0jc6pm4ey52ih43ruykpv2cio51';
-  document.cookie = 'csrftoken=aTaONYK8cVsQ9ZR0dOt8QlfacFA4iomG';
+  signInForItest();
   __resetWritableFieldsCache();
 });
 

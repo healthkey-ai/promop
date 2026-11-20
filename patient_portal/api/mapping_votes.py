@@ -31,6 +31,7 @@ from omop_core.services import mapping_votes as votes
 from omop_core.services import wearable_mapping_export as export
 
 from .permissions import is_machine_request
+from .public_errors import public_errors
 
 NOT_AVAILABLE = {'detail': 'This link is not available.'}
 CONFIRMATION_INVALID = {'detail': 'This confirmation link is no longer valid.'}
@@ -101,13 +102,11 @@ def vote_share_list(request):
         return Response(_ADMIN_DENIED, status=status.HTTP_403_FORBIDDEN)
     if not isinstance(request.data, dict):
         return Response({'detail': 'A JSON object is required.'}, status=status.HTTP_400_BAD_REQUEST)
-    try:
+    with public_errors(votes.SubmissionError, field='detail'):
         share = votes.create_share(
             request.user, request.data.get('title'), request.data.get('note'),
             request.data.get('expires_at'), request.data.get('source_vocabularies'),
         )
-    except votes.SubmissionError as error:
-        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
     return _no_store(Response(votes.serialize_share(share, with_link=True), status=status.HTTP_201_CREATED))
 
 
@@ -322,10 +321,9 @@ class PublicVoteExportView(_PublicVoteView):
             return Response({'detail': 'The source systems of this link are no longer available.'},
                             status=status.HTTP_400_BAD_REQUEST)
         try:
-            filename, content_type, content = export.export_file(
-                file_format, destination=destination, public=True, sources=usable)
-        except export.SourceTargetError as error:
-            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+            with public_errors(export.SourceTargetError, field='detail'):
+                filename, content_type, content = export.export_file(
+                    file_format, destination=destination, public=True, sources=usable)
         except export.FormatError:
             # What is left is the Word document's row limit.
             return Response({'detail': 'This file is too large to build. Download the CSV instead.'},
@@ -354,9 +352,8 @@ class PublicVoteSubmitView(_PublicVoteView):
         if share is None:
             return _not_available()
         try:
-            votes.submit(share, data.get('email'), data.get('votes'))
-        except votes.SubmissionError as error:
-            return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+            with public_errors(votes.SubmissionError, field='detail'):
+                votes.submit(share, data.get('email'), data.get('votes'))
         except votes.Unavailable:
             return Response({'detail': votes.UNAVAILABLE_DETAIL}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({'detail': votes.SUBMITTED_DETAIL}, status=status.HTTP_202_ACCEPTED)

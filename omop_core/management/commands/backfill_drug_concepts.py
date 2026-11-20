@@ -16,7 +16,6 @@ Note: .update() is used for the writes, which does not fire post_save signals.
 PatientRecord does not derive any fields from drug_concept_id (only from
 drug_source_value), so no refresh_patient_record call is needed here.
 """
-import re
 import logging
 from django.core.management.base import BaseCommand
 from django.db.models import Count
@@ -27,7 +26,17 @@ logger = logging.getLogger(__name__)
 
 # Strips any trailing parenthetical — intentionally broad so it catches
 # brand names like "(Revlimid)" as well as qualifiers like "(oral)".
-_BRAND_RE = re.compile(r'\s*\([^)]+\)\s*$')
+def _strip_trailing_parenthetical(text):
+    """"Lenalidomide (Revlimid)" -> "Lenalidomide". Linear scan, not a regex:
+    ``\\s*\\([^)]+\\)\\s*$`` backtracks quadratically on long runs of blanks."""
+    body = text.rstrip()
+    if not body.endswith(')'):
+        return text
+    body = body[:-1]
+    opening = body.find('(', body.rfind(')') + 1)
+    if opening == -1 or opening == len(body) - 1:
+        return text
+    return body[:opening].rstrip()
 
 # Explicit CVX mapping for the HealthTree vaccine source values.
 _CVX_MAP = {
@@ -133,7 +142,7 @@ class Command(BaseCommand):
             return None
 
         # 1. Strip trailing parenthetical: "Lenalidomide (Revlimid)" → "Lenalidomide"
-        generic = _BRAND_RE.sub('', source_value).strip()
+        generic = _strip_trailing_parenthetical(source_value).strip()
 
         # 2. RxNorm Ingredient — try generic name first, then raw source value
         for name in (generic, source_value):

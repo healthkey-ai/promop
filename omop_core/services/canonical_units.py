@@ -212,7 +212,7 @@ def property_for(concept, metadata=None, axes=None):
         return axes.property_code
     if metadata and metadata.property:
         return metadata.property
-    match = re.search(r'\[([^]]+)\]', concept.concept_name or '')
+    match = re.search(r'\[([^\[\]]+)\]', concept.concept_name or '')
     return PROPERTY_NAMES.get(match.group(1).lower(), '') if match else ''
 
 

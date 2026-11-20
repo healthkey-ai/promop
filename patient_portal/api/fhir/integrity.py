@@ -78,9 +78,9 @@ def _asserted_digest(request) -> str | None:
     if rfc:
         # Digest may carry multiple algorithms, comma-separated.
         for part in rfc.split(','):
-            m = re.match(r'\s*sha-256\s*=\s*(.+)\s*$', part, re.IGNORECASE)
-            if m:
-                token = m.group(1).strip()
+            algorithm, _, value = part.partition('=')
+            token = value.strip()
+            if algorithm.strip().lower() == 'sha-256' and token:
                 # Accept either base64 (RFC 3230) or bare hex.
                 if re.fullmatch(r'[0-9a-fA-F]{64}', token):
                     return token.lower()

@@ -136,9 +136,16 @@ def test_dump_with_tables_filter():
 # ── load_field_curation ──────────────────────────────────────────────────
 
 
+def _temp_json_path():
+    """A fresh, private temp file path (created atomically, then closed)."""
+    fd, path = tempfile.mkstemp(suffix='.json')
+    os.close(fd)
+    return path
+
+
 def _dump_fixture():
     """Dump current curation to a temp file and return the path."""
-    path = tempfile.mktemp(suffix='.json')
+    path = _temp_json_path()
     call_command('dump_field_curation', '--output', path)
     return path
 
@@ -182,7 +189,7 @@ def test_load_rejects_wrong_schema_version():
 
 
 def test_load_rejects_non_dict():
-    path = tempfile.mktemp(suffix='.json')
+    path = _temp_json_path()
     try:
         with open(path, 'w') as f:
             json.dump([1, 2, 3], f)
@@ -268,7 +275,7 @@ def test_load_prune_removes_local_only_rows():
 
 
 def test_load_no_tables_raises():
-    path = tempfile.mktemp(suffix='.json')
+    path = _temp_json_path()
     try:
         data = {'schema_version': 1}  # no 'tables' key
         with open(path, 'w') as f:

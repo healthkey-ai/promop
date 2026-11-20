@@ -17,6 +17,8 @@ from rest_framework.response import Response
 
 from omop_core.mapping import axis_variants, loinc_axes
 from omop_core.services import concept_lock
+
+from .public_errors import public_errors
 from omop_core.models import Concept, LoincCodeClass, SourceCodeConceptMapping, SuggestRun
 
 AXIS_VALUE_LIMIT = 25
@@ -96,10 +98,8 @@ def code_mapping_loinc_axes(request, mapping_id):
         views._check_mapping_lock(mapping, request.user)
     except views.MappingLocked as exc:
         return exc.as_response()
-    try:
+    with public_errors(ValueError, field='loinc_axes'):
         overrides = loinc_axes.clean_overrides(request.data.get('loinc_axes'))
-    except ValueError as exc:
-        return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     mapping.loinc_axes = overrides
     mapping.updated_by = request.user
     mapping.save(update_fields=['loinc_axes', 'updated_by', 'updated_at'])
@@ -165,11 +165,9 @@ def code_mapping_axis_variant(request, mapping_id):
         if variant is None:
             return Response({'axis_key': 'This code has no such axis variant.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        try:
+        with public_errors(ValueError, field='detail'):
             repoint = axis_variants.set_destination(variant, concept, approve=approve,
                                                     user=request.user, reopen=reopen)
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     payload = _payload(mapping)
     payload['variant_status'] = variant.status
     if repoint is not None:
@@ -216,11 +214,9 @@ def code_mapping_axis_variant_suggest(request, mapping_id):
     if ranking_model not in RANKING_MODELS:
         return Response({'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
                         status=status.HTTP_400_BAD_REQUEST)
-    try:
+    with public_errors(ValueError, field='loinc_axes'):
         overrides = (loinc_axes.clean_overrides(request.data.get('loinc_axes'))
                      if 'loinc_axes' in request.data else None)
-    except ValueError as exc:
-        return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     dispatcher = get_dispatcher()
     # Inline (no broker) the run executes in this request: as many pipelines
     # as that dispatcher allows a run, never more.
@@ -345,10 +341,8 @@ def code_mapping_snomed_attributes(request, mapping_id):
         views._check_mapping_lock(mapping, request.user)
     except views.MappingLocked as exc:
         return exc.as_response()
-    try:
+    with public_errors(ValueError, field='snomed_attributes'):
         settings_ = snomed_attributes.clean_overrides(request.data.get('snomed_attributes'))
-    except ValueError as exc:
-        return Response({'snomed_attributes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     reference = settings_.get('reference_concept_id')
     if reference and not Concept.objects.filter(
             pk=reference, vocabulary_id='SNOMED', standard_concept='S', invalid_reason__isnull=True).exists():
