@@ -27,6 +27,7 @@ from omop_core.models import (
     format_language_skills,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
+from omop_core.services.pk import LOCAL_CONCEPT_MIN_ID
 from omop_core.services.mappings import (
     CONCEPT_DISEASE_FIRST_OCCURRENCE,
     CONCEPT_DRUG_EXPOSURE_FIELD,
@@ -206,7 +207,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 32
+DERIVATION_VERSION = 33
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -2762,6 +2763,91 @@ def _asserted_line_name(episode):
     return value
 
 
+# A therapy line's own concept, read when nothing else resolves it (#2760).
+#
+# It carries meaning when it is a real vocabulary concept: valid, not flagged as
+# a classification concept (standard_concept 'C'), and not local (an HK-* or
+# other non-Athena vocabulary, source 'HealthKey', or a local id range). An HK-*
+# quarantine concept is a placeholder minted for an unmatched name and must
+# read as unresolved. The standard flag is not the test:
+# a HemOnc Component and a SNOMED substance (cisplatin, 4301188, a catalog
+# therapy id) are non-standard yet name a real therapy.
+#
+# It identifies the line when its domain is Drug or Procedure: the regimen
+# catalog uses SNOMED procedures (surgery, a transplant) as therapy ids. A
+# Measurement is a test, not a treatment. HemOnc concepts are decided by the
+# HemOnc branch of the derivation, never here.
+#
+# It names one of the line's drugs when its domain is Drug. A HemOnc Component
+# or a standard non-HemOnc concept (an RxNorm ingredient or drug product) is the
+# drug itself. A non-standard non-HemOnc concept (a SNOMED substance such as
+# cisplatin) names the standard drugs it 'Maps to', and none when it maps to
+# none (an RxNorm brand name, a SNOMED substance class). Other HemOnc classes
+# with domain Drug (Regimen, Regimen Class, Component Class, Route, Brand Name)
+# are not one drug. A line that names no drug keeps its id all the same.
+_LINE_IDENTITY_DOMAINS = frozenset({'Drug', 'Procedure'})
+# Locally minted concepts that may still lack source='HealthKey' (an install
+# that has not run `backfill_concept_source --apply`): the same evidence as that
+# command's RULES -- a non-Athena vocabulary, a legacy mint range, or the OHDSI
+# custom range.
+_LOCAL_VOCABULARIES = frozenset({'LOCAL', 'sct', 'FHIR'})
+_LEGACY_LOCAL_ID_RANGES = ((9_000_000, 9_099_999), (392_021_000, 392_022_000))
+
+
+def _is_vocabulary_concept(concept) -> bool:
+    if concept is None or getattr(concept, 'invalid_reason', None):
+        return False
+    if getattr(concept, 'standard_concept', None) == 'C':
+        return False
+    concept_id = getattr(concept, 'concept_id', None) or 0
+    if concept_id >= LOCAL_CONCEPT_MIN_ID or any(lo <= concept_id <= hi for lo, hi in _LEGACY_LOCAL_ID_RANGES):
+        return False
+    vocabulary_id = getattr(concept, 'vocabulary_id', None) or ''
+    return (not vocabulary_id.startswith('HK-') and vocabulary_id not in _LOCAL_VOCABULARIES
+            and getattr(concept, 'source', None) != 'HealthKey')
+
+
+def _line_identity_concept(concept):
+    """The line's own non-HemOnc concept, when it can stand as the line's id."""
+    if (_is_vocabulary_concept(concept)
+            and getattr(concept, 'vocabulary_id', None) != 'HemOnc'
+            and getattr(concept, 'domain_id', None) in _LINE_IDENTITY_DOMAINS):
+        return concept
+    return None
+
+
+def _line_own_drug_kind(concept):
+    """How the line's own concept names one of its drugs: 'self' when it is the
+    drug, 'mapped' when its standard 'Maps to' targets are, None otherwise."""
+    if not _is_vocabulary_concept(concept) or getattr(concept, 'domain_id', None) != 'Drug':
+        return None
+    if getattr(concept, 'vocabulary_id', None) == 'HemOnc':
+        return 'self' if getattr(concept, 'concept_class_id', None) == 'Component' else None
+    return 'self' if getattr(concept, 'standard_concept', None) == 'S' else 'mapped'
+
+
+def _standard_drug_targets(concept_ids):
+    """concept_id -> its valid 'Maps to' targets that are standard, valid Drug concepts.
+
+    One query for every line of the record. A concept with none (an RxNorm brand
+    name, a SNOMED substance class) maps to nothing and names no drug.
+    """
+    targets: dict = {}
+    if not concept_ids:
+        return targets
+    rows = (
+        ConceptRelationship.objects
+        .filter(concept_1_id__in=concept_ids, relationship_id='Maps to',
+                concept_2__standard_concept='S', concept_2__domain_id='Drug')
+        .filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+        .filter(Q(concept_2__invalid_reason__isnull=True) | Q(concept_2__invalid_reason=''))
+        .values_list('concept_1_id', 'concept_2_id')
+    )
+    for source_id, target_id in rows:
+        targets.setdefault(source_id, set()).add(target_id)
+    return targets
+
+
 def _is_asserted_regimen(concept) -> bool:
     """True only for a source-asserted HemOnc *regimen* concept — the one case a
     consumer is told it may trust without re-verifying.
@@ -3122,6 +3208,16 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
                     and getattr(obj, 'concept_class_id', None) == 'Regimen'):
                 concept_id = episode.episode_object_concept_id
                 origin = 'inferred'
+        # Last of all, the source concept itself when it is a drug or a procedure
+        # (#2760). Taken only when nothing above resolved, so a regimen found from
+        # the linked drugs' names still wins over it. Otherwise the source concept
+        # is the writer's statement of what the line is, and linked exposures that
+        # resolve no regimen do not unseat it; on the reverse-sync they are linked
+        # by an open-ended date window and may belong to other care. Never
+        # 'asserted': it is not a validated HemOnc regimen.
+        if not concept_id and _line_identity_concept(src_concept):
+            concept_id = episode.episode_source_concept_id
+            origin = 'inferred'
 
         if concept_id:
             needed_concept_ids.add(concept_id)
@@ -3165,6 +3261,11 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     later_classes = set()
     all_classes = set()
 
+    own_drug_targets = _standard_drug_targets({
+        episode.episode_source_concept_id
+        for episode, *_rest in episode_rows
+        if _line_own_drug_kind(episode.episode_source_concept) == 'mapped'
+    })
     for episode, drugs_in_episode, concept_id, source_value_set, origin in episode_rows:
         lot = episode.episode_number
         if lot is None:
@@ -3178,9 +3279,17 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
         # Component drug concept_ids for this line: HemOnc regimen expansion
         # unioned with the line's exposure drug concepts, leveled to ingredients.
+        # A line whose own concept is a single drug lists that drug too (#2760):
+        # with no exposures recorded it would otherwise offer no component.
+        line_drug_ids = [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id]
+        own_kind = _line_own_drug_kind(episode.episode_source_concept)
+        if own_kind == 'self':
+            line_drug_ids.append(episode.episode_source_concept_id)
+        elif own_kind == 'mapped':
+            line_drug_ids.extend(own_drug_targets.get(episode.episode_source_concept_id, ()))
         components = _expand_component_ids(
             [concept_id] if concept_id else [],
-            [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id],
+            line_drug_ids,
         )
         all_components |= components
         # Therapy-class ("type") concept_ids for this line (ADR 0002).

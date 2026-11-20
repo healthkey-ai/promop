@@ -397,8 +397,25 @@ describe('TherapyLineDialog', () => {
     );
     // The regimen chip should still show the current value even though it's not in the list.
     await waitFor(() => expect(screen.getByText('Rd')).toBeInTheDocument());
-    // The HemOnc concept_id should be shown alongside the name.
+    // The concept_id should be shown alongside the name.
     expect(screen.getByText(/35806112/)).toBeInTheDocument();
+  });
+
+  it('labels a non-HemOnc line concept without claiming HemOnc (#2760)', async () => {
+    // A line can be identified by a SNOMED procedure or an RxNorm drug, not only a HemOnc regimen.
+    mockGet.mockResolvedValue({ data: [] });
+    render(
+      <TherapyLineDialog
+        personId={262}
+        defaultLineNumber={1}
+        diseaseCode="C3242"
+        line={{ episode_id: 99, line: 1, regimen: 'Mastectomy', regimen_concept_id: 4066543, drugs: [] }}
+        onClose={onClose}
+        onAuthored={onAuthored}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText('OMOP 4066543')).toBeInTheDocument());
+    expect(screen.queryByText(/HemOnc 4066543/)).not.toBeInTheDocument();
   });
 
   it('preserves regimen_concept_id on no-op save when editing', async () => {
