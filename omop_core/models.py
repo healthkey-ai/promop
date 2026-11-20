@@ -5978,6 +5978,13 @@ class SourceCodeResolveRun(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # The run's heartbeat: every save that moves it (a progress save, a state
+    # change) stamps it, so a run whose worker died is told from one that is
+    # slow (``close_stale_runs``). Adding the column stamped every existing run
+    # with the migration's time, so those runs, orphaned ones included, count as
+    # silent from the deploy; a null (never written by this code) falls back to
+    # ``created_at``.
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         db_table = 'source_code_resolve_run'

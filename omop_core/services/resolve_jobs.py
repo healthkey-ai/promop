@@ -34,11 +34,13 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
         run.state = SourceCodeResolveRun.FAILED
         run.error_detail = [{'error': 'No person_ids provided'}]
         run.finished_at = timezone.now()
-        run.save(update_fields=['state', 'error_detail', 'finished_at'])
+        run.save(update_fields=['state', 'error_detail', 'finished_at', 'updated_at'])
         return
 
+    # A run closed as stale whose task arrives late is reopened, as a sweep chunk does.
     run.state = SourceCodeResolveRun.RUNNING
-    run.save(update_fields=['state'])
+    run.finished_at = None
+    run.save(update_fields=['state', 'finished_at', 'updated_at'])
 
     total_resolved = 0
     total_created = 0
@@ -84,7 +86,7 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
             run.errors = total_errors
             run.save(update_fields=[
                 'done', 'resolved', 'created', 'provisional', 'reverted', 'skipped',
-                'already_resolved', 'errors',
+                'already_resolved', 'errors', 'updated_at',
             ])
 
         run.state = SourceCodeResolveRun.COMPLETED
@@ -96,7 +98,7 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
         run.error_detail = error_details
         run.code_details = all_code_details
         run.finished_at = timezone.now()
-        run.save(update_fields=['state', 'error_detail', 'code_details', 'finished_at'])
+        run.save(update_fields=['state', 'error_detail', 'code_details', 'finished_at', 'updated_at'])
 
 
 def create_and_dispatch_resolve_run(person_ids: list[int], user=None) -> SourceCodeResolveRun:
