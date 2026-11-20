@@ -472,3 +472,20 @@ def test_an_administrators_reset_says_so_and_other_accounts_keep_promops_link(se
     assert message.subject == "Reset your PROMOP password"
     assert "An administrator has started a password reset for your PROMOP account." in message.body
     assert "https://promop.test/reset-password?uid=" in message.body
+
+
+def test_other_anonymous_requests_do_not_use_up_the_reset_limit(settings):
+    """The reset limit (5 a minute) counts reset requests only: it used to
+    share the general anonymous history, so a few anonymous calls from a
+    shared network refused the first reset with 429."""
+    from django.core.cache import cache
+
+    cache.clear()
+    client = APIClient()
+    for _ in range(6):
+        client.get("/api/v1/phr/signup/policy/")
+
+    assert client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"}).status_code == 200
+    for _ in range(4):
+        client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"})
+    assert client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"}).status_code == 429

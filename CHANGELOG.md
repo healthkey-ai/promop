@@ -313,6 +313,11 @@ All notable changes to PRomop are documented here.
   `/reset-password` page and the email names its org (`FAMILY_AUTH_APP_URLS`,
   `family_auth.installations.app_for`). A reset the account holder asked for
   no longer says an administrator started it.
+- **A reset request was refused after a few unrelated anonymous requests** —
+  the reset limit (5 a minute) had no scope of its own, so it inherited DRF's
+  `anon` history and counted every anonymous request from the address against
+  5: on a shared network the first reset could get 429. It now counts reset
+  requests only (`password_reset`).
 
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only

@@ -21,6 +21,9 @@ from rest_framework.throttling import AnonRateThrottle
 
 
 class PasswordResetThrottle(AnonRateThrottle):
+    # Its own history: under the inherited 'anon' scope it counted every
+    # anonymous request from the address, so a shared network was refused.
+    scope = 'password_reset'
     rate = '5/minute'
 
 from patient_portal.models import Identity
