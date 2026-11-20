@@ -549,6 +549,9 @@ FAMILY_AUTH_SIGNUP_ORGS = _env_list("FAMILY_AUTH_SIGNUP_ORGS")
 # Each installation's origin, "slug=https://…" by sign-up org: an account that
 # signed up there gets its verification link to that installation, not PROMOP.
 FAMILY_AUTH_APP_URLS = _env_list("FAMILY_AUTH_APP_URLS")
+# The installations (sign-up org slugs) whose app serves /reset-password: their
+# accounts' reset links go there. Any other account resets on PROMOP's page.
+FAMILY_AUTH_RESET_APPS = _env_list("FAMILY_AUTH_RESET_APPS")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(

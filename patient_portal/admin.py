@@ -44,7 +44,7 @@ class IdentityAdmin(UserAdmin):
         sent, failed = 0, []
         for identity in queryset:
             try:
-                send_password_reset_email(identity)
+                send_password_reset_email(identity, by_administrator=True)
                 sent += 1
             except PasswordResetEmailError:
                 failed.append(identity.email or str(identity))

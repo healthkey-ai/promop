@@ -374,6 +374,7 @@ def test_a_phr_signup_gets_its_verification_link_to_phr(settings, mailoutbox):
     message = mailoutbox[-1]
     assert message.subject == "Confirm your email address for HealthKey PHR"
     assert "for HealthKey PHR:" in message.body and "PROMOP" not in message.body
+    assert message.body.rstrip().endswith("— HealthKey PHR")
     link = re.search(r"https://\S+", message.body).group(0)
     assert link.startswith("https://phr.test/verify-email?token=")
 
@@ -402,6 +403,7 @@ def test_other_signups_keep_promops_own_link(settings, mailoutbox):
 
     assert "https://promop.test/verify-email?token=" in mailoutbox[-1].body
     assert mailoutbox[-1].subject == "Confirm your email address for PROMOP"
+    assert mailoutbox[-1].body.rstrip().endswith("— The HealthKey team")
 
 
 def test_a_malformed_app_url_stops_the_deploy_and_is_ignored_by_mail(settings, mailoutbox):
@@ -418,3 +420,154 @@ def test_a_malformed_app_url_stops_the_deploy_and_is_ignored_by_mail(settings, m
     _signup(APIClient(), "phr")
     assert "https://promop.test/verify-email?token=" in mailoutbox[-1].body
 
+
+
+# ── Password-reset links go there too ─────────────────────────────────────────
+
+def _verified_phr_patient(settings, mailoutbox):
+    import re
+
+    OrganizationFactory(slug="phr", name="HealthKey PHR", allows_patient_signup=True)
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    _signup(APIClient(), "phr")
+    token = re.search(r"token=(\S+)", mailoutbox[-1].body).group(1)
+    assert APIClient().post(f"{BASE}/verify-email/", {"token": token}, format="json").status_code == 200
+    mailoutbox.clear()
+
+
+def test_a_phr_patient_who_forgot_their_password_resets_it_on_phr(settings, mailoutbox):
+    import re
+
+    from django.core.cache import cache
+
+    _verified_phr_patient(settings, mailoutbox)
+    settings.FAMILY_AUTH_RESET_APPS = ["phr"]  # phr serves /reset-password
+    cache.clear()  # the reset endpoint's rate limit counts every earlier test's requests
+
+    assert APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"}).status_code == 200
+
+    message = mailoutbox[-1]
+    assert message.subject == "Reset your HealthKey PHR password"
+    assert "We received a request to reset the password for your HealthKey PHR account." in message.body
+    assert "PROMOP" not in message.body and "administrator" not in message.body
+    assert message.body.rstrip().endswith("— HealthKey PHR")
+    link = re.search(r"https://\S+", message.body).group(0)
+    assert link.startswith("https://phr.test/reset-password?uid=")
+
+    # phr's page completes it through PROMOP's API, then the new password signs in.
+    uid, token = re.search(r"uid=([^&]+)&token=(\S+)", link).groups()
+    reset = APIClient().post("/api/v1/auth/reset-password/",
+                             {"uid": uid, "token": token, "new_password": "another-long-pass-77"}, format="json")
+    assert reset.status_code == 200, reset.data
+    assert _login(APIClient(), "pat@example.com", "another-long-pass-77").status_code == 200
+
+
+def test_an_administrators_reset_says_so_and_other_accounts_keep_promops_link(settings, mailoutbox):
+    from patient_portal.api.password_reset import send_password_reset_email
+    from patient_portal.models import Identity
+
+    settings.APP_BASE_URL = "https://promop.test/"
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    identity = Identity.objects.create_user(email="staff-made@example.com", password="a-long-enough-pass-42")
+
+    send_password_reset_email(identity, by_administrator=True)
+
+    message = mailoutbox[-1]
+    assert message.subject == "Reset your PROMOP password"
+    assert "An administrator has started a password reset for your PROMOP account." in message.body
+    assert "https://promop.test/reset-password?uid=" in message.body
+    assert message.body.rstrip().endswith("— The HealthKey team")
+
+
+def test_other_anonymous_requests_do_not_use_up_the_reset_limit(settings):
+    """The reset limit (5 a minute) counts reset requests only: it used to
+    share the general anonymous history, so a few anonymous calls from a
+    shared network refused the first reset with 429."""
+    from django.core.cache import cache
+
+    cache.clear()
+    client = APIClient()
+    for _ in range(6):
+        client.get("/api/v1/phr/signup/policy/")
+
+    assert client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"}).status_code == 200
+    for _ in range(4):
+        client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"})
+    assert client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"}).status_code == 429
+
+
+
+def test_an_installation_without_a_reset_page_resets_on_promops(settings, mailoutbox):
+    """phr serves /verify-email but not /reset-password: its patients' reset
+    links stay on PROMOP's page, and the email still names phr."""
+    from django.core.cache import cache
+
+    _verified_phr_patient(settings, mailoutbox)
+    settings.APP_BASE_URL = "https://promop.test"
+    settings.FAMILY_AUTH_RESET_APPS = []
+    cache.clear()
+
+    APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"})
+
+    assert mailoutbox[-1].subject == "Reset your HealthKey PHR password"
+    assert "https://promop.test/reset-password?uid=" in mailoutbox[-1].body
+    assert "phr.test" not in mailoutbox[-1].body
+
+
+@pytest.mark.parametrize("case", ["staff", "org_admin", "analyst", "expired", "inactive_org"])
+def test_who_runs_or_has_left_an_installation_keeps_promops_links(settings, mailoutbox, case):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from omop_core.models import GroupAccess
+    from patient_portal.api.password_reset import send_password_reset_email
+    from patient_portal.models import Identity
+
+    settings.APP_BASE_URL = "https://promop.test"
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    settings.FAMILY_AUTH_RESET_APPS = ["phr"]
+    org = OrganizationFactory(slug="phr", name="HealthKey PHR", is_active=case != "inactive_org")
+    identity = Identity.objects.create_user(email=f"{case}@example.com", password="a-long-enough-pass-42",
+                                            is_staff=case == "staff")
+    GroupAccess.objects.create(
+        identity=identity, org=org, role=case if case in ("org_admin", "analyst") else "patient",
+        expires_at=timezone.now() - timedelta(days=1) if case == "expired" else None,
+    )
+
+    send_password_reset_email(identity, by_administrator=True)
+
+    assert mailoutbox[-1].subject == "Reset your PROMOP password"
+    assert "https://promop.test/reset-password?uid=" in mailoutbox[-1].body
+
+
+def test_a_signed_in_caller_is_rate_limited_too():
+    """The reset views take no authentication: an AnonRateThrottle skips
+    anyone signed in, so a signed-in caller could email resets without end."""
+    from django.core.cache import cache
+
+    from patient_portal.models import Identity
+
+    cache.clear()
+    Identity.objects.create_user(email="signed-in@example.com", password="x-long-pass-123")
+    client = APIClient()
+    # A real session (force_authenticate would bypass the views' authentication classes).
+    assert client.post("/api/v1/auth/login/", {"username": "signed-in@example.com", "password": "x-long-pass-123"},
+                       format="json").status_code == 200
+    cache.clear()
+    statuses = [client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"}).status_code
+                for _ in range(6)]
+
+    assert statuses == [200] * 5 + [429]
+
+
+def test_asking_for_links_does_not_use_up_the_tries_at_a_new_password():
+    from django.core.cache import cache
+
+    cache.clear()
+    client = APIClient()
+    for _ in range(5):
+        client.post("/api/v1/auth/request-reset/", {"email": "someone@example.com"})
+
+    completing = client.post("/api/v1/auth/reset-password/", {"uid": "x", "token": "y", "new_password": "z"})
+    assert completing.status_code == 400  # refused for the bad link, not for the rate

@@ -42,21 +42,13 @@ class ResendVerificationThrottle(UserRateThrottle):
     rate = '3/minute'
 
 
-def _verification_app(identity) -> tuple[str, str]:
-    """Where the account verifies, and what the email calls it: the phr
-    installation it signed up on (family auth), else PROMOP itself."""
-    from family_auth.installations import installation_for
+def make_verification_link(identity, app=None) -> str:
+    """The installation's /verify-email page, else PROMOP's
+    (family_auth.installations.app_for); ``app`` when already looked up."""
+    from family_auth.installations import app_for
 
-    installation = installation_for(identity)
-    if installation is not None:
-        return installation.url, installation.name
-    return settings.APP_BASE_URL, 'PROMOP'
-
-
-def make_verification_link(identity) -> str:
     token = signing.dumps({'id': identity.pk, 'email': identity.email.lower()}, salt=_SALT)
-    base, _ = _verification_app(identity)
-    return f"{base.rstrip('/')}/verify-email?token={token}"
+    return f"{(app or app_for(identity)).url}/verify-email?token={token}"
 
 
 def send_verification_email(identity) -> bool:
@@ -67,8 +59,11 @@ def send_verification_email(identity) -> bool:
     """
     if not identity.email or identity.has_verified_email:
         return False
-    url = make_verification_link(identity)
-    _, app_name = _verification_app(identity)
+    from family_auth.installations import app_for
+
+    app = app_for(identity)
+    url = make_verification_link(identity, app)
+    app_name = app.name
     body = (
         "Hi,\n\n"
         f"Please confirm this is your email address for {app_name}:\n\n"
@@ -77,7 +72,7 @@ def send_verification_email(identity) -> bool:
         "organization that trusts your email domain -- stays switched off.\n\n"
         f"The link expires in 3 days. If you did not create a {app_name} account, ignore "
         "this email; the account cannot use your address without this step.\n\n"
-        "— The HealthKey team"
+        f"— {app.sign_off}"
     )
     if settings.DEBUG:
         logger.info("Verification email preview\nTo: %s\n\n%s", identity.email, body)

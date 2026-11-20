@@ -35,9 +35,19 @@ verification email for that installation: the link is
 `https://phr.example.com/verify-email?token=…` and the email names the org
 ("Confirm your email address for HealthKey PHR"). phr's page completes it with
 `POST /api/v1/family/auth/verify-email/ {token}` (PROMOP's own verify
-endpoint). Everyone else keeps `APP_BASE_URL` and "PROMOP". The base comes only
-from this setting, never from a request; a malformed entry stops the deploy
-(`ensure_signup_orgs`) and is ignored by mail.
+endpoint). Password-reset emails name the org too, and say who asked (the
+account holder through `/api/v1/auth/request-reset/`, or an administrator).
+Their link goes to the installation only if its app serves `/reset-password`:
+list its slug in `FAMILY_AUTH_RESET_APPS`, and the link is
+`https://phr.example.com/reset-password?uid=…&token=…`, completed with
+`POST /api/v1/auth/reset-password/ {uid, token, new_password}`; otherwise
+PROMOP's own reset page completes it (`family_auth.installations.reset_app_for`).
+Both emails sign off as the org. An account belongs to an installation through
+a current grant at an active org; one that runs the org (`org_admin`,
+`analyst`), and staff, keep PROMOP's links and name. Everyone else keeps
+`APP_BASE_URL` and "PROMOP". The base comes only from this setting, never from
+a request; a malformed entry stops the deploy (`ensure_signup_orgs`) and is
+ignored by mail.
 
 ## Tokens
 
@@ -65,7 +75,8 @@ FAMILY_AUTH_ISSUER        https://<this promop> (required)
 FAMILY_AUTH_AUDIENCE      promop-api[,<sibling>…]
 FAMILY_AUTH_THROTTLE_RATE 30/minute per client address (login, refresh, introspect)
 FAMILY_AUTH_SIGNUP_ORGS   slug:Name[,slug:Name…] — each installation's sign-up org
-FAMILY_AUTH_APP_URLS      slug=https://origin[,…] — where that org's sign-ups verify
+FAMILY_AUTH_APP_URLS      slug=https://origin[,…] — where that org's accounts verify (and reset, below)
+FAMILY_AUTH_RESET_APPS    slug[,…] — the installations whose app serves /reset-password
 CORS_ALLOWED_ORIGINS      + every phr installation's origin
 ```
 
