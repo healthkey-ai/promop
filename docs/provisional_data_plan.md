@@ -157,6 +157,22 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
   covers the ones that stay candidates (a provisional row is rewritten, never
   done). A retried chunk can double-count in the run's totals; the rows do not
   change.
+
+  **A run's state.** The run is `running` from its first chunk and `completed` (with
+  `finished_at`) when the chunk that reaches the end of the candidates finishes;
+  a full sweep does not know its total in advance, so `total` is the persons done
+  so far, and a poll showing `running` with `done` equal to `total` is a sweep
+  between or inside chunks, not a finished one. Every progress save and state
+  change stamps `updated_at`, the run's heartbeat. A run whose worker was lost
+  (a deploy restarts the worker pool and a chunk in flight can be lost with it)
+  stops moving and stays `running`: `manage.py sweep_provisional_rows
+  --close-stale [--stale-minutes N] [--dry-run]` closes, as `failed`, every run
+  still pending or running with no heartbeat for N minutes (default 120, well
+  past a chunk's time budget and the broker's redelivery window). It changes run
+  rows only, needs no switch, and covers the bulk resolve too (they share the
+  table). A chunk that does arrive later reopens its run and finishes it. A sweep
+  run from the command that is interrupted or crashes is marked `failed`, since
+  no task is left to retry it.
 - **Trigger.** A `pre_save`/`post_save` pair on `SourceCodeConceptMapping`
   compares what the mapping said before the save with what it says after (does it
   qualify, its destination, its confidence, its table) and queues a sweep of its

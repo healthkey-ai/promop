@@ -51,11 +51,13 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection, transaction
 from django.db.models import Exists, OuterRef, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import (
@@ -405,7 +407,7 @@ def _bump(run, **counts):
 
 
 _RUN_FIELDS = ['done', 'total', 'resolved', 'created', 'provisional', 'reverted',
-               'skipped', 'already_resolved', 'errors', 'error_detail']
+               'skipped', 'already_resolved', 'errors', 'error_detail', 'updated_at']
 
 
 def start_run_record(user=None, total=0):
@@ -417,7 +419,7 @@ def _finish(run, notes=None, state=SourceCodeResolveRun.COMPLETED):
     run.finished_at = timezone.now()
     if notes:
         run.code_details = notes
-    run.save(update_fields=['state', 'finished_at', 'code_details', 'error_detail'])
+    run.save(update_fields=['state', 'finished_at', 'code_details', 'error_detail', 'updated_at'])
 
 
 def fail_run(run_id, message):
@@ -460,8 +462,12 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
             # The pending mark covers queued-but-not-started; a change from here
             # on queues a new sweep.
             _release_pending(_code_key(mapping))
+    # A chunk reaching a run that was closed (as stale, or failed on a lost task)
+    # shows the chain is alive after all, so the run is reopened: its state
+    # follows what is happening, and it finishes below like any other.
     run.state = SourceCodeResolveRun.RUNNING
-    run.save(update_fields=['state'])
+    run.finished_at = None
+    run.save(update_fields=['state', 'finished_at', 'updated_at'])
 
     # A full sweep always refreshes the index. A mapping's sweep rebuilds it at
     # most once a minute, so a burst of saves does not rebuild it for each; when
@@ -555,9 +561,62 @@ def start_sweep(*, mapping=None, user=None, limit=SWEEP_CHUNK):
         transaction.on_commit(enqueue, robust=True)
         return run
     after = 0
-    while after is not None:
-        after = run_sweep(run.id, after=after, mapping_id=mapping_id, limit=limit)
+    try:
+        while after is not None:
+            after = run_sweep(run.id, after=after, mapping_id=mapping_id, limit=limit)
+    except BaseException as exc:
+        # Nothing else will finish this run: there is no task to retry it.
+        fail_run(run.id, f'The sweep stopped: {exc!r}')
+        raise
     return run
+
+
+# ---- runs that stopped -----------------------------------------------------------
+
+STALE_RUN_MINUTES = 120      # no progress for this long: the worker holding it is gone
+
+
+def stale_runs(older_than=None):
+    """Runs still pending or running whose last progress is older than *older_than*.
+
+    A run's heartbeat is ``updated_at`` (a run from before it existed counts
+    from ``created_at``). A chunk saves every few persons and is bounded by its
+    time budget, so a healthy run is never silent for long; the default of two
+    hours is far beyond that, and beyond the broker's redelivery window, so a
+    run this quiet has lost its task (a worker restarted by a deploy, a queue
+    flushed). The table is shared with the bulk resolve, whose runs are
+    reclaimed the same way.
+    """
+    older_than = timedelta(minutes=STALE_RUN_MINUTES) if older_than is None else older_than
+    return (SourceCodeResolveRun.objects
+            .filter(state__in=[SourceCodeResolveRun.PENDING, SourceCodeResolveRun.RUNNING])
+            .annotate(last_progress=Coalesce('updated_at', 'created_at'))
+            .filter(last_progress__lt=timezone.now() - older_than)
+            .order_by('created_at'))
+
+
+def close_stale_runs(older_than=None, *, dry_run=False):
+    """Close each stale run as FAILED; the runs found (closed, unless *dry_run*).
+
+    Only the run row changes, never clinical data. The close is one conditional
+    UPDATE, so a run that saved progress after it was read is left alone, and a
+    chunk that does arrive later reopens its run (see ``run_sweep``).
+    """
+    older_than = timedelta(minutes=STALE_RUN_MINUTES) if older_than is None else older_than
+    found = list(stale_runs(older_than))
+    if dry_run:
+        return found
+    now = timezone.now()
+    closed = []
+    for run in found:
+        note = {'error': 'Closed as stale: no progress since '
+                         f'{run.last_progress.isoformat(timespec="seconds")}; its worker is presumed lost.'}
+        changed = (stale_runs(older_than).filter(pk=run.pk)
+                   .update(state=SourceCodeResolveRun.FAILED, finished_at=now, updated_at=now,
+                           error_detail=(run.error_detail + [note])[:100]))
+        if changed:
+            closed.append(run)
+    return closed
 
 
 # ---- the mapping trigger ---------------------------------------------------------
