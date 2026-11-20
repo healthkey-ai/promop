@@ -4,11 +4,11 @@
  * `patientVisibleFields.json` decides which proposal marks stop a patient
  * confirming their record, so a name no tab renders would be a block no patient
  * can lift. It is generated from the tab sources by
- * `python -m omop_core.services.patient_visible_fields --write`, which also writes
- * the backend's copy; the backend suite checks the full match, and this check
- * runs when only the frontend changes.
+ * `python -m omop_core.services.patient_visible_fields --write` and read by the
+ * server too; the backend suite checks the full match, and this check runs when only
+ * the frontend changes.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import patientVisibleFields from './patientVisibleFields.json';
@@ -32,12 +32,5 @@ describe('patient visible fields', () => {
     expect([...fields]).toEqual([...new Set(fields)].sort());
     expect(fields).toContain('hemoglobin_g_dl');
     expect(fields).not.toContain('concomitant_medications');
-  });
-
-  it('matches the backend copy', () => {
-    const backend = here('..', '..', '..', '..', 'omop_core', 'data', 'patient_visible_fields.json');
-    // The frontend image is built from frontend/ alone, where the backend copy is absent.
-    if (!existsSync(backend)) return;
-    expect(JSON.parse(readFileSync(backend, 'utf8'))).toEqual(patientVisibleFields);
   });
 });

@@ -1607,13 +1607,13 @@ proposed findings is not offered. See [List fields as built](docs/provisional_da
 count}`, nothing stored, the record locked first) while the page shows a scalar field
 marked Provisional that a patient tab renders and the patient can edit:
 `attestation_blockers(record)` in `omop_core/services/provisional_record.py` is the
-overlay's scalar marks (`overlay(record, lists=False)`) in `patient_visible_fields.json`,
-less the fields the write descriptor says have no write path of their own (calculated,
-mirrored, unit pickers). That JSON is generated from the General, Labs, Behavior and
-Wearable tab components (`python -m omop_core.services.patient_visible_fields --write`
-writes both copies, `omop_core/data/` and `frontend/src/components/PatientInfo/`); when a
-tab adds or drops a field, regenerate, or `tests/test_patient_visible_fields.py` and the
-frontend check fail. A field no tab shows (`concomitant_medications`, the diagnosis date),
+overlay's scalar marks (`overlay(record, lists=False)`) in
+`frontend/src/components/PatientInfo/patientVisibleFields.json`, less the fields the write
+descriptor says have no write path of their own (calculated, mirrored, unit pickers). That
+one file, imported by the frontend and read by the server, is generated from the General,
+Labs, Behavior and Wearable tab components
+(`python -m omop_core.services.patient_visible_fields --write`); when a tab adds or drops
+a field, regenerate, or `tests/test_patient_visible_fields.py` and the frontend check fail. A field no tab shows (`concomitant_medications`, the diagnosis date),
 the list fields, the disease and treatment tabs and the controls that bypass `Field` do
 not block: a gap the plan lists, and a block on a field the patient cannot see could never
 be lifted. A block is lifted by entering a value in the field (an edit saves it as

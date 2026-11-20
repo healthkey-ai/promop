@@ -7,12 +7,13 @@ field no tab renders (``concomitant_medications``, the diagnosis date, a lab
 alias) is marked in the record read but never on screen, and blocking on it
 would be a block no patient could lift.
 
-The list is ``patient_visible_fields.json``, a copy in ``omop_core/data`` (read
-here) and one beside the frontend code (imported by ``PatientInfo/provisional.ts``,
-because the frontend image is built from ``frontend/`` alone). It is generated, not
-written: the names of the confidence columns that appear as a quoted string in the
-tab components below. ``tests/test_patient_visible_fields.py`` and a vitest check
-fail when a tab changes and the copies do not follow; regenerate both with::
+The list is ``frontend/src/components/PatientInfo/patientVisibleFields.json``: one
+file, imported by the frontend (``PatientInfo/provisional.ts``, whose image is built
+from ``frontend/`` alone) and read here (every backend image carries ``frontend/``).
+It is generated, not written: the names of the confidence columns that appear as a
+quoted string in the tab components below. ``tests/test_patient_visible_fields.py``
+and a vitest check fail when a tab changes and the file does not follow; regenerate
+it with::
 
     python -m omop_core.services.patient_visible_fields --write
 
@@ -34,8 +35,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TAB_DIR = pathlib.Path('frontend/src/components/PatientInfo/tabs')
 SCANNED_TABS = ('GeneralTab.tsx', 'LabsTab.tsx', 'BehaviorTab.tsx', 'WearableTab.tsx')
-DATA_COPY = pathlib.Path('omop_core/data/patient_visible_fields.json')
-FRONTEND_COPY = pathlib.Path('frontend/src/components/PatientInfo/patientVisibleFields.json')
+LIST_FILE = pathlib.Path('frontend/src/components/PatientInfo/patientVisibleFields.json')
 
 _QUOTED = re.compile(r"""['"]([a-z][a-z0-9_]*)['"]""")
 
@@ -67,19 +67,18 @@ def render(names: list[str]) -> str:
 @functools.lru_cache(maxsize=1)
 def names() -> frozenset[str]:
     """The stored list: what blocks a patient's confirmation."""
-    return frozenset(json.loads((ROOT / DATA_COPY).read_text())['fields'])
+    return frozenset(json.loads((ROOT / LIST_FILE).read_text())['fields'])
 
 
 def write(root: pathlib.Path = ROOT) -> list[str]:
     found = scan(root)
-    for copy in (DATA_COPY, FRONTEND_COPY):
-        (root / copy).write_text(render(found))
+    (root / LIST_FILE).write_text(render(found))
     return found
 
 
 if __name__ == '__main__':
     if '--write' not in sys.argv:
-        sys.exit('Pass --write to regenerate both copies of patient_visible_fields.json.')
+        sys.exit('Pass --write to regenerate patientVisibleFields.json.')
     import os
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'promop.settings')
     import django

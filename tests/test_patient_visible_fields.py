@@ -1,8 +1,7 @@
 """The fields a patient tab renders decide which proposals block an attestation (#2761).
 
-``patient_visible_fields.json`` is generated from the tab components. Two copies exist
-(the backend reads ``omop_core/data``, the frontend imports the one beside its code),
-so they must match each other and what the tabs say today.
+``patientVisibleFields.json`` (beside the frontend code, read here and imported by the
+frontend) is generated from the tab components, so it must match what the tabs say today.
 """
 import json
 
@@ -16,10 +15,8 @@ def test_the_stored_list_matches_what_the_tabs_name_today():
     assert sorted(visible.names()) == visible.scan(), REGENERATE
 
 
-def test_both_copies_are_identical():
-    backend = (visible.ROOT / visible.DATA_COPY).read_text()
-    frontend = (visible.ROOT / visible.FRONTEND_COPY).read_text()
-    assert backend == frontend == visible.render(visible.scan()), REGENERATE
+def test_the_file_is_exactly_what_the_generator_writes():
+    assert (visible.ROOT / visible.LIST_FILE).read_text() == visible.render(visible.scan()), REGENERATE
 
 
 def test_only_scalar_fields_that_can_carry_a_proposal_are_listed():
@@ -38,5 +35,5 @@ def test_fields_the_server_proposes_but_no_patient_tab_shows_are_not_listed():
 
 
 def test_the_file_is_sorted_json():
-    data = json.loads((visible.ROOT / visible.DATA_COPY).read_text())
+    data = json.loads((visible.ROOT / visible.LIST_FILE).read_text())
     assert data['fields'] == sorted(set(data['fields']))
