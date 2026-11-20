@@ -96,11 +96,7 @@ explicit opt-in; none changes behaviour by default.
 | Generate OMOP (`_create_missing_clinical_rows`, `resolve_person_source_codes`) | creates and re-points rows for approved mappings only | also creates a row for a ranked proposal at or above the floor, with its confidence; re-resolve promotes or reverts provisional rows as the proposal moved |
 | `code-mappings/lookup/` (the ETL) | an unresolved entry carries `proposed_target_concept_id` as curator evidence, which the ETL must not write | with `include_provisional: true` in the request, such an entry also carries `provisional: true` and `confidence`; the ETL writes the row with that `confidence` through the bulk endpoints |
 | Bulk OMOP writes (`POST /api/v1/measurements/` etc.) | no `confidence` field | accept `confidence` on a row; refuse it on a row at concept 0 and refuse it from a session user (machine credentials and staff only) |
-| FHIR sync and `upload_fhir_bundle` (`resolve_source_code`) | a proposed mapping returns no concept | a new `accept_proposed=True` argument returns the proposal's concept and confidence; sync passes it when the organization or deployment opts in |
-
-`resolve_source_code_variant` already has a `provisional` keyword that means
-something else (one lookup sighting per batch, #2123). The new argument is
-`accept_proposed`, and the docstring says why the two are different.
+| FHIR sync and `upload_fhir_bundle` (`resolve_source_code`) | a proposed mapping returns no concept | unchanged: a patient chooses to import their FHIR data, so there is no organization opt-in and sync does not write provisional rows; a code with only a proposed mapping is stored at concept 0 and picked up by the sweep like any other unresolved row |
 
 Generate OMOP is the first writer to build, because it is the one HealthTree
 needs: the per-patient inventory (`PatientSourceCode`) is loaded, the
@@ -839,7 +835,6 @@ column name, joined on `person`.
 |---|---|---|
 | `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served, and a record read carries no overlay |
 | `PROVISIONAL_CONFIDENCE_FLOOR` | `70` | least confidence a provisional row is written at |
-| `Organization.accepts_provisional_data` | `False` | FHIR sync for this organization passes `accept_proposed` |
 
 The floor and the auto-approval threshold of #1532 are the same number in
 spirit: a proposal at or above the auto-approval threshold would become real,
@@ -1014,9 +1009,9 @@ lookup contract below remains for a caller that does want to write rows itself.
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
 - JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table.
-- FHIR sync opt-in per organization. The PHR is the patient's source of truth, so
-  this is a data-quality decision about what sync writes into the PHR, not the
-  institution's consent.
+- ~~FHIR sync opt-in per organization~~ dropped (2026-11-20): a patient decides
+  whether to import their FHIR data, and an export never carries provisional data
+  (see "Provisional data is never exported").
 - Patient-facing display policy.
 - #1532 auto-approval reading the same floor.
 
