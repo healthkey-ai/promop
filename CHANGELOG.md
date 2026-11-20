@@ -205,6 +205,11 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **PROlog 0.6.0** (from 0.5.0) — `participation.repeatable`: a repeatable
+  instrument (a regular check-in) starts a new response after a finished one,
+  saying when the last was completed, instead of showing it as completed. No
+  migrations, no dependency changes, no promop code changes. See
+  [PROlog surveys](docs/prolog-surveys.md#what-v060-added).
 - **PROlog 0.5.0** (from 0.4.8) — survey definitions gain partial dates
   (`config.precision`: a month and year, or the year alone, stored as
   `YYYY-MM` or `YYYY`), answers given instead of a date on a date question
