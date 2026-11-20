@@ -33,21 +33,27 @@ the lowest confidence among the rows that decide it):
 The other composite readers are not run, and those columns equal
 ``patient_record``: therapy lines read persisted Episodes, which a proposal must
 not create; staging, cytogenetics, SCT and cancer details read curator-written
-observation keys, not proposal-fed concepts; and the fields of
-``active_malignancies``, ``disease_slugs``, ``genetic_mutations`` and
-``prior_procedures`` are JSON, which has no confidence column. Computed fields
-(BMI, scores) are recomputed from a provisional input only for the inputs in
-``COMPUTED_INPUTS``.
+observation keys, not proposal-fed concepts. Computed fields (BMI, scores) are
+recomputed from a provisional input only for the inputs in ``COMPUTED_INPUTS``.
+
+The list fields (``PROVISIONAL_JSON_FIELDS``: ``disease_slugs``,
+``active_malignancies``, ``prior_procedures``, ``genetic_mutations`` and the
+``genomics_*`` markers) follow a rule of their own, because the record may
+already hold some of the items: real items are never replaced, a provisional item
+is added when no real item says the same, and the provisional column stores only
+the added items (see ``list_proposals`` and ``overlay``).
 """
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 from collections import defaultdict
 
 from django.conf import settings
 from django.db import transaction
 
+from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
 from omop_core.models import (
     Observation, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
 )
@@ -393,6 +399,173 @@ def composite_proposals(person, record, snapshot, blocked=(), taken=()) -> tuple
     return values, confidences
 
 
+# --- List fields (#2534) ------------------------------------------------------------
+#
+# A list field (prior_procedures, genetic_mutations, ...) is not "empty or not":
+# the real record may hold some items and the provisional rows add others. So
+# real items are never replaced; a provisional item is added to the list, and
+# only when no real item says the same thing (``_item_key``). In
+# ``patient_record_provisional`` such a column holds only the *added* items,
+# never a copy of the real ones, so it can never go stale against the record: the
+# reader lays the live items first and the stored ones after
+# (``overlay``), and an item the record has since gained stops being provisional
+# by itself. The one confidence is the lowest among the added items; it is not
+# stored per item, because the record shows one indicator per field and the
+# lowest is never an over-statement. A list a person edited (``blocked``) is
+# never added to.
+_PROCEDURE_IDENTITY = ('concept_id', 'procedure', 'date')
+_VARIANT_IDENTITY = ('gene', 'variant', 'genomic_feature', 'marker_key', 'test_date')
+
+
+def _item_key(field, item) -> str:
+    """What makes two items of list *field* the same item, whoever asserted them."""
+    if isinstance(item, dict):
+        if field == 'prior_procedures':
+            ident = (item.get('concept_id') or item.get('procedure'), item.get('date'))
+        else:
+            ident = tuple(item.get(name) for name in _VARIANT_IDENTITY)
+        return json.dumps(ident, default=str)
+    return str(item).strip().casefold()
+
+
+def _unseen(field, live, stored) -> list:
+    """The *stored* items of list *field* that the *live* list does not already hold."""
+    if not isinstance(stored, list):
+        return []
+    have = {_item_key(field, item) for item in (live if isinstance(live, list) else ())}
+    unseen = []
+    for item in stored:
+        key = _item_key(field, item)
+        if key not in have:
+            have.add(key)
+            unseen.append(item)
+    return unseen
+
+
+def _added_items(field, live, candidates) -> tuple[list, int | None]:
+    """(items to add, the lowest of their confidences) for list *field*.
+
+    *candidates* are ``(item, confidence)`` pairs; an item the record already
+    holds is dropped, and one given by several rows keeps the lowest.
+    """
+    have = {_item_key(field, item) for item in (live if isinstance(live, list) else ())}
+    levels, added = {}, {}
+    for item, level in candidates:
+        key = _item_key(field, item)
+        if key in have:
+            continue
+        added.setdefault(key, item)
+        levels[key] = min(levels.get(key, 100), level)
+    return list(added.values()), (min(levels.values()) if levels else None)
+
+
+def _disease_list_candidates(person, snapshot):
+    """``disease_slugs``: the real reader over provisional conditions, one slug per cancer."""
+    from omop_core.services.patient_record_service import (
+        _cancer_conditions, _condition_slug, _get_disease_data, _primary_cancer_condition,
+    )
+    cancers = _cancer_conditions(snapshot.provisional_conditions)
+    if not cancers:
+        return {}
+    view = dataclasses.replace(snapshot, conditions=snapshot.provisional_conditions,
+                               obs_by_source={}, obs_by_code={})
+    primary = _primary_cancer_condition(person, view, cancers)
+    level = {}
+    for condition in cancers:
+        slug = _condition_slug(condition)
+        level[slug] = min(level.get(slug, 100), condition.confidence)
+    read = _get_disease_data(person, view)
+    return {'disease_slugs': [
+        (slug, level.get(slug, primary.confidence if primary is not None else min(level.values())))
+        for slug in read.get('disease_slugs', ())
+    ]}
+
+
+def _malignancy_candidates(person, snapshot):
+    """``active_malignancies``: the real reader's current-condition rule over provisional conditions."""
+    from django.utils import timezone
+    from omop_core.services.patient_record_service import _condition_is_current, malignancy_rows
+    today = timezone.localdate()
+    current = [c for c in snapshot.provisional_conditions if _condition_is_current(c, today)]
+    named = malignancy_rows(current) if current else None
+    if not named:
+        return {}
+    return {'active_malignancies': [
+        (name, min(row.confidence for row in rows)) for name, rows in sorted(named.items())
+    ]}
+
+
+def _procedure_candidates(person, snapshot):
+    """``prior_procedures``: the real reader's item for each provisional procedure."""
+    from omop_core.services.patient_record_service import procedure_item
+    return {'prior_procedures': [
+        (procedure_item(proc), proc.confidence) for proc in snapshot.provisional_procedures
+    ]}
+
+
+def _genomic_candidates(person, snapshot):
+    """``genetic_mutations`` and the ``genomics_*`` markers from provisional findings.
+
+    The real reader runs over the provisional measurements and observations
+    alone. A finding's confidence is the lowest among its own row and the
+    component rows linked to it (allele fraction, interpretation, ...). A
+    marker the reader *derives* from findings is not offered: a derivation over
+    only the proposed parents says nothing about the others.
+    """
+    from omop_core.services.patient_record_service import _get_genetic_mutations
+    measurements = snapshot.provisional_measurements
+    if not measurements:
+        return {}
+    view = _view(snapshot, measurements, snapshot.provisional_observations)
+    read = _get_genetic_mutations(person, view)
+    level = {row.measurement_id: row.confidence for row in measurements}
+    for row in measurements:
+        parent = row.measurement_event_id
+        if parent in level:
+            level[parent] = min(level[parent], row.confidence)
+    for row in snapshot.provisional_observations:
+        parent = row.observation_event_id
+        if parent in level:
+            level[parent] = min(level[parent], row.confidence)
+    candidates = {}
+    for field in PROVISIONAL_JSON_FIELDS:
+        found = [(item, level[item['id']]) for item in read.get(field, ())
+                 if isinstance(item, dict) and item.get('provenance') != 'derived' and item.get('id') in level]
+        if found:
+            candidates[field] = found
+    return candidates
+
+
+_LIST_READERS = (_disease_list_candidates, _malignancy_candidates, _procedure_candidates,
+                 _genomic_candidates)
+
+
+def list_proposals(person, record, snapshot, blocked=()) -> tuple[dict, dict]:
+    """(values, confidences) of the list fields the provisional rows add to *record*.
+
+    Each reader runs over provisional rows only, in its own savepoint, so one
+    that raises, even on a database error, costs only its own fields. A value is
+    the items to add (see above), never the whole list.
+    """
+    names = _confidence_names()
+    values, confidences = {}, {}
+    for reader in _LIST_READERS:
+        try:
+            with transaction.atomic():
+                candidates = reader(person, snapshot)
+        except Exception:  # noqa: BLE001 -- one reader must not cost the person's other proposals
+            logger.exception('Provisional list reader %s failed for person_id=%s.',
+                             reader.__name__, person.person_id)
+            continue
+        for field, found in candidates.items():
+            if field not in names or field in blocked or field in values:
+                continue
+            added, level = _added_items(field, getattr(record, field, None), found)
+            if added:
+                values[field], confidences[field] = added, level
+    return values, confidences
+
+
 def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name."""
     from omop_core.services.patient_record_service import _is_empty
@@ -423,15 +596,16 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
         if kept:
             confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
     composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept)
-    if not (kept or composite):
+    listed, listed_marks = list_proposals(person, record, snapshot, blocked)
+    if not (kept or composite or listed):
         return {}, {}
     try:
         computed, computed_marks = computed_proposals(record, kept, confidences, blocked)
     except Exception:  # noqa: BLE001 -- a calculation must not cost the person's other proposals
         logger.exception('Provisional calculation failed for person_id=%s.', person.person_id)
         computed, computed_marks = {}, {}
-    return ({**kept, **composite, **computed},
-            {**confidences, **composite_marks, **computed_marks})
+    return ({**kept, **composite, **computed, **listed},
+            {**confidences, **composite_marks, **computed_marks, **listed_marks})
 
 
 def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
@@ -490,6 +664,10 @@ def mirror_user_edit(record, edited_fields) -> None:
             cleared = []
             for field in _cloned_fields():
                 mark = getattr(confidence, field.name, None) if confidence is not None else None
+                if mark is not None and field.name in PROVISIONAL_JSON_FIELDS and field.name not in edited:
+                    # The added items stay until the field is edited; the reader
+                    # drops any the record now holds (``overlay``).
+                    continue
                 # A proposal stays only while the record has no answer of its own:
                 # an edit, or an alias the edit filled in, makes the value approved.
                 if mark is None or field.name in edited or not _is_empty(getattr(record, field.attname)):
@@ -525,7 +703,8 @@ def _settle_computed(record, provisional, confidence, edited) -> list[str]:
     if not waiting:
         return []
     proposals = {f: getattr(provisional, f) for f in names
-                 if f not in COMPUTED_INPUTS and getattr(confidence, f) is not None}
+                 if f not in COMPUTED_INPUTS and f not in PROVISIONAL_JSON_FIELDS
+                 and getattr(confidence, f) is not None}
     marks = {f: getattr(confidence, f) for f in proposals}
     blocked = set(record.user_edited_fields or []) | edited
     values, level = computed_proposals(record, proposals, marks, blocked)
@@ -583,12 +762,26 @@ def overlay(record):
         confidence = person.patient_record_confidence
     except ObjectDoesNotExist:
         return record, {}
-    view, marks = copy.copy(record), {}
+    view, marks, added = copy.copy(record), {}, {}
     for field in PatientRecordConfidence._meta.concrete_fields:
         if field.name == 'person' or field.name in NEVER_OVERLAID:
             continue
         mark = getattr(confidence, field.name)
-        if mark is not None and _is_empty(getattr(record, field.attname, None)):
+        if mark is None:
+            continue
+        live = getattr(record, field.attname, None)
+        if field.name in PROVISIONAL_JSON_FIELDS:
+            # A list: the live items first, then the stored proposals the record
+            # does not already hold. Reading again over the result adds nothing.
+            new = _unseen(field.name, live, getattr(provisional, field.attname))
+            if new:
+                setattr(view, field.attname, [*(live or []), *new])
+                marks[field.name] = mark
+                added[field.name] = new
+        elif _is_empty(live):
             setattr(view, field.attname, getattr(provisional, field.attname))
             marks[field.name] = mark
+    if added:
+        # Which items of each list are proposals; the serializer carries it out.
+        view.provisional_items = added
     return view, marks

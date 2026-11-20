@@ -361,6 +361,11 @@ class PatientListSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         if marks:
             data['provisional_fields'] = marks
+        # Of a list field that holds both approved and proposed items, which ones
+        # are proposed (the field's own confidence is in ``provisional_fields``).
+        proposed_items = getattr(instance, 'provisional_items', None)
+        if proposed_items:
+            data['provisional_items'] = proposed_items
         # A reader without curation access -- a demo-org browse by an
         # analyst or a patient-role grant (#2460) -- is withheld every
         # patient's demographics, as if each had opted in; otherwise only
@@ -716,6 +721,11 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             if concept_ids else {}
         )
         data = super().to_representation(instance)
+        # A record seen through ``overlay`` says which items of a list it holds
+        # are proposals; the views add the field marks (``provisional_fields``).
+        proposed_items = getattr(instance, 'provisional_items', None)
+        if proposed_items:
+            data['provisional_items'] = proposed_items
         return self._apply_demographic_redaction(instance, data)
 
     # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.

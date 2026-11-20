@@ -1925,20 +1925,33 @@ def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) ->
             for condition in current_conditions
         )
 
+    malignancies = malignancy_rows(current_conditions)
+    if malignancies is not None:
+        data['active_malignancies'] = sorted(malignancies)
+
+    return data
+
+
+def malignancy_rows(current_conditions) -> dict | None:
+    """Name -> the conditions that give it, for ``active_malignancies``; None when the
+    malignancy hierarchy is not loaded.
+
+    *current_conditions* are already filtered to the current ones. Shared with the
+    provisional pass, which runs it over provisional conditions and needs the rows
+    to say which proposals decided each name.
+    """
     malignancy_ids = _active_condition_descendant_ids(
         _ACTIVE_CONDITION_ROOT_CODES['active_malignancies']
     )
-    if malignancy_ids is not None:
-        names = {
-            name
-            for condition in current_conditions
-            if condition.condition_concept_id in malignancy_ids
-            for name in [_usable_concept_name(condition.condition_concept)]
-            if name
-        }
-        data['active_malignancies'] = sorted(names)
-
-    return data
+    if malignancy_ids is None:
+        return None
+    named = {}
+    for condition in current_conditions:
+        if condition.condition_concept_id in malignancy_ids:
+            name = _usable_concept_name(condition.condition_concept)
+            if name:
+                named.setdefault(name, []).append(condition)
+    return named
 
 
 def _disease_name_to_slug(name: str) -> str:
@@ -4885,16 +4898,18 @@ def _get_prior_procedures(person: Person, snapshot: OmopSnapshot = None) -> dict
     procedures = snapshot.procedures  # already ordered -procedure_date
 
     if procedures:
-        procedure_list = []
-        for proc in procedures:
-            procedure_list.append({
-                'procedure': proc.procedure_concept.concept_name if proc.procedure_concept else 'Unknown',
-                'date': str(proc.procedure_date) if proc.procedure_date else None,
-                'concept_id': proc.procedure_concept_id,
-            })
-        data['prior_procedures'] = procedure_list
+        data['prior_procedures'] = [procedure_item(proc) for proc in procedures]
 
     return data
+
+
+def procedure_item(proc) -> dict:
+    """One ``prior_procedures`` entry. Shared with the provisional pass."""
+    return {
+        'procedure': proc.procedure_concept.concept_name if proc.procedure_concept else 'Unknown',
+        'date': str(proc.procedure_date) if proc.procedure_date else None,
+        'concept_id': proc.procedure_concept_id,
+    }
 
 
 # ---------------------------------------------------------------------------

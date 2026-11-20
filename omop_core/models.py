@@ -4627,15 +4627,18 @@ def _provisional_columns():
 
 def confidence_field_names():
     """The PatientRecord fields that carry a confidence: every derived field
-    that is a real, non-JSON column. JSON fields join in phase 3."""
-    from omop_core.derived_fields import _OMOP_DERIVED_FIELDS
+    that is a real column, except a JSON one with no reader that can run over
+    provisional rows alone (``PROVISIONAL_JSON_FIELDS`` lists the JSON ones that do)."""
+    from omop_core.derived_fields import _OMOP_DERIVED_FIELDS, PROVISIONAL_JSON_FIELDS
     names = []
     for name in dict.fromkeys(_OMOP_DERIVED_FIELDS):
         try:
             field = PatientRecord._meta.get_field(name)
         except Exception:  # noqa: BLE001 -- a derived name that is not a column
             continue
-        if not isinstance(field, models.JSONField) and getattr(field, 'concrete', False):
+        if not getattr(field, 'concrete', False):
+            continue
+        if not isinstance(field, models.JSONField) or name in PROVISIONAL_JSON_FIELDS:
             names.append(name)
     return names
 

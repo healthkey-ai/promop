@@ -54,7 +54,11 @@ const PATIENT = {
   patient_name: 'Alishia Tawny Howell',
   date_of_birth: '1970-01-01',
   hemoglobin_g_dl: '11.5',                     // a proposal, not approved data (DRF sends Decimal as a string)
-  provisional_fields: { hemoglobin_g_dl: 82 },
+  provisional_fields: { hemoglobin_g_dl: 82, prior_procedures: 72 },
+  // A list holding an approved and a proposed item (#2534): the merged list and
+  // which of its items are proposals are both read-only.
+  prior_procedures: [{ procedure: 'Chest X-ray' }, { procedure: 'PET scan' }],
+  provisional_items: { prior_procedures: [{ procedure: 'PET scan' }] },
   id: 7, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
   derivation_version: 1, user_edited_fields: [],
 };
@@ -109,6 +113,8 @@ describe('PatientDetail provisional values', () => {
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     expect(patchBodies().at(-1)).toEqual({ date_of_birth: '1971-02-03' });
     expect(patchBodies().every((b) => !('hemoglobin_g_dl' in b) && !('provisional_fields' in b))).toBe(true);
+    // A merged list is never written back, and neither is the record of which items are proposals.
+    expect(patchBodies().every((b) => !('prior_procedures' in b) && !('provisional_items' in b))).toBe(true);
   });
 
   it('sends a touched proposal as the user\'s answer and drops its indicator', async () => {
