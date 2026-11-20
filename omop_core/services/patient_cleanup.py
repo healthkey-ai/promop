@@ -35,6 +35,12 @@ def delete_unkeyed_rows(person):
     """
     delete_prolog_data_for_persons([person.person_id])
 
+    # Rows that name the person by a bare id (no foreign key, so no cascade):
+    # who may act for them, and the groups they were placed in.
+    from omop_core.models import PatientGroupMembership, PersonalRepresentative
+    PersonalRepresentative.objects.filter(person_id=person.person_id).delete()
+    PatientGroupMembership.objects.filter(person_id=person.person_id).delete()
+
     episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
     if episode_ids:
         EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()

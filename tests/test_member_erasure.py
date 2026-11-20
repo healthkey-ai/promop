@@ -268,14 +268,50 @@ def test_withdrawal_keeps_exactly_the_account_and_permission_tables(member):
     assert withdraw(member['client'], 'my_record').status_code == 200
 
     pid = person.person_id
-    assert PersonalRepresentative.objects.filter(person_id=pid).count() == 1
-    assert list(PatientGroupMembership.objects.filter(person_id=pid).values_list('source', flat=True)) == ['manual']
+    # Access to a record that is gone goes with it: representatives and every
+    # group membership, placed by hand or by rule.
+    assert not PersonalRepresentative.objects.filter(person_id=pid).exists()
+    assert not PatientGroupMembership.objects.filter(person_id=pid).exists()
     assert PersonLanguageSkill.objects.filter(person=person).count() == 1
     assert PatientInvitation.objects.filter(person=person).count() == 1
     assert PatientConsent.objects.filter(patient_user=user).count() == 1
     assert not PatientMessage.objects.filter(patient_user=user).exists()
     assert not ProvenanceRecord.objects.filter(pk=on_record.pk).exists()
     assert ProvenanceRecord.objects.filter(pk=on_consent.pk).exists()
+
+
+def test_withdrawal_takes_sex_race_ethnicity_and_birth_day_off_the_person_but_keeps_the_year(member):
+    from omop_core.models import Person
+
+    person = member['person']
+    Person.objects.filter(pk=person.pk).update(
+        gender_source_value='F', race_source_value='asian', ethnicity_source_value='hispanic',
+        year_of_birth=1980, month_of_birth=4, day_of_birth=9)
+
+    assert withdraw(member['client'], 'my_record').status_code == 200
+
+    person.refresh_from_db()
+    assert (person.gender_source_value, person.race_source_value, person.ethnicity_source_value) == (None, None, None)
+    assert (person.gender_concept_id, person.race_concept_id, person.ethnicity_concept_id) == (None, None, None)
+    assert (person.month_of_birth, person.day_of_birth, person.birth_datetime) == (None, None, None)
+    assert person.year_of_birth == 1980
+    assert PatientRecord.objects.get(person=person).country == 'GB'
+
+
+def test_closing_an_account_takes_representatives_and_group_memberships(member):
+    from omop_core.models import PatientGroup, PatientGroupMembership, PersonalRepresentative
+
+    pid = member['person'].person_id
+    helper = Identity.objects.create_user(email='mum@example.test')
+    group = PatientGroup.objects.create(organization=member['record'].organization, name='G', slug='g')
+    PersonalRepresentative.objects.create(representative=helper, person_id=pid, relationship='parent')
+    PatientGroupMembership.objects.create(group=group, person_id=pid, source='manual')
+
+    member['client'].delete('/api/v1/patient-records/me/', {'confirm': 'DELETE'}, format='json')
+
+    assert not PersonalRepresentative.objects.filter(person_id=pid).exists()
+    assert not PatientGroupMembership.objects.filter(person_id=pid).exists()
+    assert Identity.objects.filter(pk=helper.pk).exists()  # the representative's own account stays
 
 
 def test_every_table_a_withdrawal_reaches_is_a_decision():

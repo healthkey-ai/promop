@@ -21,7 +21,7 @@ from django.core.files.storage import Storage
 from django.db import transaction
 from django.db.models import PROTECT
 
-from omop_core.models import PatientDocument, PatientGroupMembership, PatientRecord, Person
+from omop_core.models import PatientDocument, PatientRecord, Person
 from omop_core.services.patient_cleanup import (
     delete_omop_clinical_rows, delete_provenance, delete_unkeyed_rows,
 )
@@ -39,8 +39,9 @@ StoredFile = tuple[Storage, str]
 
 # What withdrawing the record's permission leaves: the account, the
 # permission and document history (current and legacy), the invitation, and
-# the person's own row and location (name, year of birth, sex, ethnicity,
-# country, postcode district), which sign-up wrote and membership needs.
+# the person's own row (name, year of birth) and its location's country, which
+# sign-up wrote and giving the permission again needs; ``_scrub_person`` takes
+# the rest of it (sex, race, ethnicity, birth day and month, address) off.
 # Every other table that hangs off the person, or off one of these, is
 # deleted, so a clinical table added later is erased too, not missed
 # (tests/test_member_erasure.py pins the list, so a new one is a decision).
@@ -97,17 +98,38 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
             tables = withdrawal_tables()
             delete_provenance(person, tables)
             delete_unkeyed_rows(person)
-            # A group assigned by rule was chosen from the health answers; one
-            # assigned by hand, like a personal representative, is about access.
-            PatientGroupMembership.objects.filter(person_id=person.person_id, source='rule').delete()
+            # Representatives and group memberships (rule or manual) go with
+            # delete_unkeyed_rows above: access to a record that is gone.
             for model, lookup in tables:
                 model._base_manager.filter(**{lookup: person}).delete()
 
+            _scrub_person(person)
             PatientRecord.objects.create(person=person, **kept)
         record = refresh_patient_record(person)
         _remove_files_on_commit(files, person.person_id)
         _log('record', person.person_id, _actor_id(actor), purpose=purpose)
     return record
+
+
+def _scrub_person(person: Person) -> None:
+    """Take what the permission covered off the person's own row: sex, race
+    and ethnicity (special-category data) and all of the birth date but the
+    year, which age checks on giving a permission again need. Name, country
+    and the account's other sign-up facts stay. The location keeps its
+    country (it gates which permissions are offered) and loses the rest, when
+    no one else shares it."""
+    from omop_core.models import Location
+
+    for name in ('gender', 'race', 'ethnicity'):
+        setattr(person, f'{name}_concept', None)
+        setattr(person, f'{name}_source_value', None)
+        setattr(person, f'{name}_source_concept', None)
+    person.month_of_birth = person.day_of_birth = person.birth_datetime = None
+    person.save()
+    if person.location_id and not Person.objects.filter(location_id=person.location_id).exclude(pk=person.pk).exists():
+        Location.objects.filter(pk=person.location_id).update(
+            address_1=None, address_2=None, city=None, state=None, zip=None, county=None,
+            location_source_value=None, latitude=None, longitude=None)
 
 
 def withdrawal_tables() -> list[tuple[type, str]]:
