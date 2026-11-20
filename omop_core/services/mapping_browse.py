@@ -213,6 +213,24 @@ def apply_notes(queryset, params):
     return queryset.filter(HAS_CURATOR_NOTE) if _with_notes(params) else queryset
 
 
+def _auto_approved(params):
+    value = params.get('auto_approved') or '0'
+    if value not in ('0', '1'):
+        raise ValidationError({'auto_approved': 'Use 1 for codes Suggest approved by itself or 0 for all codes.'})
+    return value == '1'
+
+
+# What a Suggest run stamps on a row it approved on its own (#1532): provenance that
+# begins "suggest" and says it was auto-approved. A row a person later un-approves
+# keeps the stamp, so it stays findable for review. No column of its own.
+AUTO_APPROVED_BY_SUGGEST = Q(origin_system__istartswith='suggest', origin_system__icontains='auto-approved')
+
+
+def apply_auto_approved(queryset, params):
+    """Opt in to only the codes Suggest approved by itself (#1532)."""
+    return queryset.filter(AUTO_APPROVED_BY_SUGGEST) if _auto_approved(params) else queryset
+
+
 def apply_seen(queryset, params):
     """The page opts into Seen > 0; other API clients retain their full catalog."""
     return queryset.filter(occurrence_count__gt=0) if _seen_only(params) else queryset
@@ -243,6 +261,7 @@ def visible_rows(mappings, params, section=None):
     rows = apply_provenance(rows, (params.get('provenance') or '').strip())
     rows = apply_organization(rows, (params.get('organization') or '').strip())
     rows = apply_notes(rows, params)
+    rows = apply_auto_approved(rows, params)
     if section is not None:
         return _apply_seen_for_section(rows, params, section)
     return apply_seen(rows, params)
@@ -401,7 +420,9 @@ def browse_mappings(mappings, params, serialize):
     filtered = apply_organization(filtered, organization)
     with_notes = _with_notes(params)
     filtered = apply_notes(filtered, params)
-    if search or provenance or organization or with_notes:
+    auto_approved = _auto_approved(params)
+    filtered = apply_auto_approved(filtered, params)
+    if search or provenance or organization or with_notes or auto_approved:
         _unmapped_filter = ~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])
         if seen_only:
             _unmapped_filter = _unmapped_filter & Q(occurrence_count__gt=0)

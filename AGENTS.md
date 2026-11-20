@@ -1481,36 +1481,62 @@ Not addressed:
 
 A run can approve a proposal as it writes it, when the ranker's confidence in
 it is high enough. `omop_core/services/suggest_auto_approve.py` holds the rules;
-`suggest_mappings(auto_approve_threshold=, approve_as=)` applies them.
+`suggest_mappings(auto_approve_threshold=, approve_as=, on_auto_approve=)` applies
+them and `suggest_jobs.execute_run` drives them.
 
-- **The threshold is a whole percent, 90 to 100, default 100, and never lower.**
-  `POST /v1/code-mappings/suggest/` takes `auto_approve_threshold`; outside
-  90..100, a fraction or a non-number is a 400 on any account, never a clamp.
-  A proposal qualifies when `_confidence_percent(suggestion_confidence)` (the
-  same rounding to a whole percent a provisional row carries) is at or above it,
-  so 100 approves only a score that rounds to 100%. Below it the row is written
-  as proposed, as before. `Identity.suggest_auto_approve_threshold` is
-  database-checked to the same range.
+- **The threshold is a whole percent, 90 to 100, default 100, or off.**
+  `POST /v1/code-mappings/suggest/` takes `auto_approve_threshold` as a number
+  from 90 to 100 or the word `"off"`; anything else (89, 101, a fraction, a
+  boolean, other text) is a 400 on any account, never a clamp. Off is stricter
+  than any threshold, so it breaks no minimum. Someone who never chose gets 100.
+  `Identity.suggest_auto_approve_threshold` is database-checked to 90..100;
+  `Identity.suggest_auto_approve_off` is the off choice, and the number is kept
+  while it is off.
+- **The score is compared as it is, not rounded.** A proposal qualifies when its
+  `suggestion_confidence` as a percent (read from the float's shortest repr, so
+  0.95 is exactly 95) is at or above the threshold: **100 means a score of
+  exactly 1.0**, 0.895 does not approve at 90 and 0.995 does not approve at 100.
+  A score that is not a finite number from 0 to 1 (NaN, infinity, a bool, a
+  probability outside the range) does not qualify and never fails the run.
+  Below the threshold the row is written as proposed, as before.
 - **Which proposals can qualify.** One a ranker scored: the Anthropic ranker
   scores its qualitative labels 0.85 / 0.55 / 0.25 (`ANTHROPIC_CONFIDENCE_MAP`),
   so on its own it never reaches 90 and nothing is auto-approved; Jev's
   probabilities and "Both" (the higher of the two) can. A UMLS single-concept
   shortcut and a retrieval fallback carry no ranker score and are never
   approved. A declined code, a dry run and a row whose approval is refused (a
-  destination concept another curator has locked, an Athena duplicate) stay
-  proposed.
-- **Sticky, per curator.** A value an approver sends is saved on their identity
-  and is what their next run uses when none is sent, and what the Suggest
-  controls are prefilled with (`reference.suggest_auto_approve`). It is not a
-  deployment setting. The run records the threshold it used and how many it
-  approved on `SuggestRun.selection` (`auto_approve_threshold`,
-  `auto_approved`), and the run payload carries both.
-- **Only an approver gets it.** Approval is staff and org admin
-  (`_can_approve_mappings`); an analyst can run Suggest, the setting is ignored
-  and stores nothing, and the page does not offer it; a doctor or patient still
-  gets 403 on Suggest. A service credential never auto-approves. The queued
-  task re-checks `run.created_by` before approving, because the params outlive
-  the request.
+  destination concept another curator has locked, an Athena duplicate, the
+  approver being the row's proposer under the two-person rule) stay proposed.
+  An unexpected failure of one row's approval is rolled back, leaves that row
+  proposed, is counted (`auto_approve_errors`, `auto_approve_error: true` on its
+  result entry) and the run carries on; the log carries the exception kind, never
+  its message.
+- **Sticky, per curator.** A value an approver sends (a number or off) is saved
+  on their identity and is what their next run uses when none is sent, and what
+  the Suggest controls are prefilled with (`reference.suggest_auto_approve`). It
+  is not a deployment setting. The Suggest bar states the state in a line that is
+  always visible to an approver ("Auto-approves at X% or above and re-points
+  patient data", or "Auto-approval off").
+- **Only an approver gets it, checked for every row.** Approval is staff and org
+  admin (`_can_approve_mappings`); an analyst can run Suggest, the setting is
+  ignored and stores nothing, and the page does not offer it; a doctor or patient
+  still gets 403 on Suggest. A service credential never auto-approves. The queued
+  task validates the threshold again (a tampered or corrupt value approves
+  nothing and is logged without data), re-checks `run.created_by`, and
+  `approve()` re-reads the account and re-checks it for every row, so one that
+  loses the right or is deactivated mid-run approves nothing more.
+- **Only where a worker does the re-point.** An approval queues a re-point of
+  every stored row of the code, which under the inline dispatcher (no
+  `CELERY_BROKER_URL`) would run inside the request, so auto-approval is
+  disabled there. The run payload says so: `auto_approve: {state: 'disabled',
+  reason: 'no_worker'}`, and `reference.suggest_auto_approve.available` is false.
+  The states are `on` (with the threshold), `off`, and `disabled` with a reason
+  (`not_approver`, `no_worker`, `dry_run`, `invalid`).
+- **The run records what it did, as it goes.** `SuggestRun.selection` holds
+  `auto_approve_state`, `auto_approve_threshold`, `auto_approve_reason`,
+  `auto_approved` and `auto_approve_errors`, and the counts are written as each
+  row is approved, so a run that fails, is killed or is redelivered still audits
+  its approvals.
 - **It is a curator's approval, through the same path.** `approve()` calls
   `_upsert_source_code_mapping(..., {'status': 'approved'}, record_decision=False)`,
   so the status, reviewer (the person whose run it is), the re-point of stored
@@ -1523,9 +1549,25 @@ it is high enough. `omop_core/services/suggest_auto_approve.py` holds the rules;
   curator's decision), and `suggestion_outcome` stays blank (it is the
   *curator's* first disposition of a suggestion, so an auto-approval does not
   count toward the accuracy figures).
+- **Finding them.** The Code Mapping list has an "auto-approved (Suggest)" filter
+  (`auto_approved=1` on the browse, group-members and group-action endpoints;
+  `mapping_browse.AUTO_APPROVED_BY_SUGGEST`, which reads the `origin_system`
+  stamp, so there is no column). A row a person later un-approves keeps the stamp
+  and stays findable.
+- **Undoing one.** Only staff and org admins can (an analyst's change of an
+  approved mapping's status is a 400), the same as any approved mapping, and the
+  run's starter is not blocked (the machine proposed it, `proposed_by` is null).
+  *Un-approve* (PATCH `status: "proposed"`) clears the sign-off but does not move
+  rows the approval already re-pointed. *Reject* does the same and also sends
+  provisional rows at that destination back to unresolved. To move the stored
+  rows off a wrong destination, change the mapping's destination as a proposal;
+  under the two-person rule the person who proposes it cannot approve it, so a
+  second approver approves, and that approval re-points the rows off the old
+  concept.
 - **Not covered.** Group Suggest (`group/suggest/`), the dialog's suggest-one
   preview and Concept to Code runs write or preview as before and never
-  auto-approve.
+  auto-approve. An `auto_approved` outcome for the accuracy analytics needs an
+  omop_core column and is not built.
 
 ### Which notes are a curator's
 

@@ -14199,7 +14199,7 @@ def _group_job_rows(data):
     # A search deliberately reaches across tabs for browsing. A group decision
     # never does: Epic and Cerner albumin are two decisions.
     filters = {key: data.get(key) for key in (
-        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'queue_sections')}
+        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'auto_approved', 'queue_sections')}
     filters['search'] = ''
     mappings = without_icd10_athena_duplicates(
         SourceCodeConceptMapping.objects.select_related('organization')
@@ -15051,13 +15051,12 @@ def code_mapping_suggest(request):
             locked_by=request.user, locked_at=timezone.now(),
         )
 
-    # Decided only now, with the batch locked: an approver's value is remembered
-    # as theirs for the next run, and none sent uses what they last set. Another
-    # account's setting is ignored, and a dry run approves nothing.
-    auto_threshold = suggest_auto_approve.run_threshold(
-        request.user, request.data.get('auto_approve_threshold'))
-    if dry_run:
-        auto_threshold = None
+    # Decided only now, with the batch locked: an approver's value (a threshold or
+    # off) is remembered as theirs for the next run, and none sent uses what they
+    # last set. Another account's setting is ignored, a dry run approves nothing,
+    # and so does a deployment with no worker to do the re-point an approval queues.
+    auto_approve = suggest_auto_approve.plan(
+        request.user, request.data.get('auto_approve_threshold'), dry_run=dry_run)
 
     from omop_core.services.suggest_jobs import selection_summary
     params = {
@@ -15070,7 +15069,9 @@ def code_mapping_suggest(request):
         'lexical_limit': lexical_limit,
         'resuggest': replace,
         'ranking_model': ranking_model,
-        'auto_approve_threshold': auto_threshold,
+        'auto_approve_threshold': auto_approve['threshold'],
+        'auto_approve_state': auto_approve['state'],
+        'auto_approve_reason': auto_approve['reason'],
         '_locked_mapping_ids': batch_ids,  # for lock release on completion
     }
     run = SuggestRun.objects.create(
@@ -15104,9 +15105,16 @@ def _serialize_suggest_run(run, *, include_activity=False):
         'landed_in': run.landed_in or {},
         'model_version': run.model_version,
         'ranking_model': run.ranking_model or 'anthropic',
-        # What the run was set to approve at, and how many it did (#1532).
+        # What the run does about auto-approval, and how many it approved so far (#1532):
+        # state 'on' (with the threshold), 'off', or 'disabled' with a reason.
+        'auto_approve': {
+            'state': (run.selection or {}).get('auto_approve_state', 'off'),
+            'threshold': (run.selection or {}).get('auto_approve_threshold'),
+            'reason': (run.selection or {}).get('auto_approve_reason', ''),
+        },
         'auto_approve_threshold': (run.selection or {}).get('auto_approve_threshold'),
         'auto_approved': (run.selection or {}).get('auto_approved', 0),
+        'auto_approve_errors': (run.selection or {}).get('auto_approve_errors', 0),
         'error': run.error,
         'created_at': run.created_at,
         'finished_at': run.finished_at,
@@ -15845,13 +15853,9 @@ def _code_mapping_reference_payload(user=None):
         'separate_approver': mapping_approval.enabled(),
         'suggest_max_per_run': get_suggest_dispatcher().max_codes,
         # The Suggest auto-approval control (#1532): offered only to an account
-        # that may approve, prefilled with what it last set (100 until it sets one).
-        'suggest_auto_approve': {
-            'allowed': suggest_auto_approve.eligible(user),
-            'threshold': suggest_auto_approve.saved_threshold(user),
-            'min': suggest_auto_approve.MIN_THRESHOLD,
-            'max': suggest_auto_approve.MAX_THRESHOLD,
-        },
+        # that may approve, prefilled with what it last set (100 until it sets one,
+        # or off), and whether this deployment has a worker for it to run on.
+        'suggest_auto_approve': suggest_auto_approve.reference_for(user),
     }
 
 

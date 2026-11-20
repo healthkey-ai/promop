@@ -98,6 +98,13 @@ class Identity(AbstractBaseUser, PermissionsMixin):
             "(omop_core.services.suggest_auto_approve)."
         ),
     )
+    suggest_auto_approve_off = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            "The curator turned Suggest auto-approval off (#1532). Stricter than any threshold, so "
+            "it breaks no minimum; the threshold above is kept and returns when they turn it on."
+        ),
+    )
 
     objects = IdentityManager()
 

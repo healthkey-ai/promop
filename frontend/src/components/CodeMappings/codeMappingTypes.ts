@@ -169,7 +169,17 @@ export interface Reference {
    * The Suggest auto-approval control (#1532): offered only when `allowed` (an account that
    * may approve), prefilled with the curator's last choice (100 until they set one).
    */
-  suggest_auto_approve?: { allowed: boolean; threshold: number; min: number; max: number };
+  suggest_auto_approve?: {
+    allowed: boolean;
+    /** False under the inline dispatcher (no worker queue): runs there approve nothing. */
+    available: boolean;
+    unavailable_reason: string;
+    threshold: number;
+    /** The curator turned it off; `threshold` is kept for when they turn it on. */
+    off: boolean;
+    min: number;
+    max: number;
+  };
 }
 
 export interface WearableSourceSystem {
@@ -468,6 +478,10 @@ export type SuggestRunProgress = {
   auto_approve_threshold?: number | null;
   /** How many proposals the run approved as it wrote them. */
   auto_approved?: number;
+  /** Approvals that failed unexpectedly and were left proposed. */
+  auto_approve_errors?: number;
+  /** What the run did about auto-approval: on (with a threshold), off, or disabled with a reason. */
+  auto_approve?: { state: "on" | "off" | "disabled"; threshold: number | null; reason: string };
 };
 
 /**

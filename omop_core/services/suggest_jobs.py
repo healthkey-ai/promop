@@ -21,6 +21,7 @@ has to be somewhere both the runner and every poller can see.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Protocol
@@ -30,6 +31,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from omop_core.models import SourceCodeConceptMapping, SuggestRun
+
+logger = logging.getLogger(__name__)
 
 # What a run may attempt when it is genuinely queued: bounded by
 # CELERY_TASK_TIME_LIMIT (900s default) against ~3.5s per code, with wide margin.
@@ -74,12 +77,48 @@ def selection_summary(params):
         'strategies': params['strategies'],
         'resuggest': params['resuggest'],
         'dry_run': params['dry_run'],
-        # None: this run approves nothing (the starter may not approve, or the
-        # run is a dry run). A number: the confidence at or above which a
-        # proposal is approved as it is written (#1532).
+        # What the run does about auto-approval (#1532): 'on' with the confidence at or
+        # above which a proposal is approved as it is written, 'off' (the curator's
+        # choice) or 'disabled' with the reason (not an approver, no worker queue, dry
+        # run). The counts are kept up to date while the run works.
+        'auto_approve_state': params.get('auto_approve_state') or (
+            'on' if params.get('auto_approve_threshold') is not None else 'off'),
         'auto_approve_threshold': params.get('auto_approve_threshold'),
+        'auto_approve_reason': params.get('auto_approve_reason') or '',
+        'auto_approved': 0,
+        'auto_approve_errors': 0,
         'model_version': SUGGESTION_MODEL_VERSION,
     }
+
+
+def _run_auto_approval(run, params):
+    """``(threshold, approver, state, reason)`` for a run about to work, from what it holds now.
+
+    The params outlive the request that made them, and a worker reads them later, so
+    nothing is trusted: the threshold is validated again (a tampered or corrupt value
+    means no auto-approval, logged without any data), the starter must still be a person
+    who may approve, and the deployment must still have a worker to do the re-point.
+    """
+    from omop_core.services import suggest_auto_approve
+
+    raw = params.get('auto_approve_threshold')
+    if raw is None:
+        state = params.get('auto_approve_state') or 'off'
+        return None, None, state, params.get('auto_approve_reason') or ''
+    try:
+        threshold = suggest_auto_approve.parse_threshold(raw)
+    except ValueError:
+        logger.warning('Suggest run %s carries an invalid auto-approval threshold; approving nothing.', run.pk)
+        return None, None, 'disabled', 'invalid'
+    if not isinstance(threshold, int):
+        return None, None, 'off', ''
+    if params.get('dry_run'):
+        return None, None, 'disabled', suggest_auto_approve.REASON_DRY_RUN
+    if run.created_by is None or not suggest_auto_approve.eligible(run.created_by):
+        return None, None, 'disabled', suggest_auto_approve.REASON_NOT_APPROVER
+    if not suggest_auto_approve.available():
+        return None, None, 'disabled', suggest_auto_approve.REASON_NO_WORKER
+    return threshold, run.created_by, 'on', ''
 
 
 class SuggestDispatcher(Protocol):
@@ -262,10 +301,20 @@ def execute_run(run_id: str, params: dict) -> None:
     if run is None:
         return
 
+    threshold, approver, approve_state, approve_reason = _run_auto_approval(run, params)
+    selection = selection_summary(params)
+    selection.update(auto_approve_state=approve_state, auto_approve_threshold=threshold,
+                     auto_approve_reason=approve_reason)
     SuggestRun.objects.filter(pk=run.pk).update(
         state=SuggestRun.RUNNING, model_version=SUGGESTION_MODEL_VERSION,
-        selection=selection_summary(params),
+        selection=selection,
     )
+
+    def on_auto_approve(outcome):
+        # Written as each row is approved, not at the end, so a run that fails, is
+        # killed or is redelivered still says what it approved.
+        selection['auto_approved' if outcome == 'approved' else 'auto_approve_errors'] += 1
+        SuggestRun.objects.filter(pk=run.pk).update(selection=selection)
 
     events = list(run.activity or [])
 
@@ -297,18 +346,6 @@ def execute_run(run_id: str, params: dict) -> None:
             **{field: min(done, counted['total']) if counted['total'] else done}
         )
 
-    # The starter is re-checked here, not trusted from the request: the params
-    # outlive it in a queue, and an account that lost the right since, or a
-    # machine, must not approve anything.
-    threshold = params.get('auto_approve_threshold')
-    approver = None
-    if threshold is not None and not params['dry_run']:
-        from omop_core.services import suggest_auto_approve
-        if run.created_by is not None and suggest_auto_approve.eligible(run.created_by):
-            approver = run.created_by
-        else:
-            threshold = None
-
     try:
         results = suggest_mappings(
             params.get('tables') or None,
@@ -322,8 +359,9 @@ def execute_run(run_id: str, params: dict) -> None:
             progress=progress,
             activity=activity,
             ranking_model=params.get('ranking_model', 'anthropic'),
-            auto_approve_threshold=threshold if approver is not None else None,
+            auto_approve_threshold=threshold,
             approve_as=approver,
+            on_auto_approve=on_auto_approve,
         )
     except Exception as exc:                      # noqa: BLE001 - record, never crash the worker
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
@@ -371,12 +409,9 @@ def execute_run(run_id: str, params: dict) -> None:
         remaining = 0
 
     activity({'stage': 'completed', 'note': f'Finished processing {len(results)} code(s).'})
-    # How many it approved, beside the threshold it used, so a past run explains itself.
-    selection = dict(SuggestRun.objects.filter(pk=run.pk).values_list('selection', flat=True).first() or {})
-    selection['auto_approved'] = sum(1 for r in results if r.get('auto_approved'))
-    selection['auto_approve_threshold'] = threshold if approver is not None else None
+    # `selection` already holds the threshold used and the approvals so far, kept up to
+    # date as each row was approved, so a failed or killed run says the same.
     SuggestRun.objects.filter(pk=run.pk).update(
-        selection=selection,
         state=SuggestRun.SUCCESS,
         total=len(results),
         remaining=remaining,

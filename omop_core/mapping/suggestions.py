@@ -2057,7 +2057,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      strategies=None, lexical_limit=CANDIDATE_LIMIT,
                      resuggest=False, progress=None, activity=None,
                      ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None,
-                     skip_fallback=False, auto_approve_threshold=None, approve_as=None):
+                     skip_fallback=False, auto_approve_threshold=None, approve_as=None,
+                     on_auto_approve=None):
     """Propose destinations for the unanswered queue rows on one tab.
 
     The candidate set is :func:`suggestable_mappings` -- rows already on the
@@ -2097,11 +2098,15 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
 
     *auto_approve_threshold* (a whole percent, with *approve_as*, the person the run
     belongs to) approves a proposal as it is written when a ranker's confidence in
-    it rounds to the threshold or more (#1532, ``suggest_auto_approve``). Off when
-    either is ``None`` and for a dry run, so every existing caller is unchanged. The
-    result entry of a row it approved carries ``auto_approved: True``. A row the
-    approval is refused for (a locked destination concept, an Athena duplicate)
-    stays proposed.
+    it, as it is and not rounded, is at or above the threshold (#1532,
+    ``suggest_auto_approve``). Off when either is ``None`` and for a dry run, so every
+    existing caller is unchanged. The result entry of a row it approved carries
+    ``auto_approved: True``; one whose approval failed unexpectedly carries
+    ``auto_approve_error: True`` and the run carries on. A row the approval is refused
+    for (a locked destination concept, an Athena duplicate, the approver being its
+    proposer) stays proposed. *on_auto_approve*, when given, is called with
+    ``'approved'`` or ``'error'`` right after each such attempt, so a caller can keep
+    count while the run is still going.
 
     *progress*, when given, is called as ``progress(stage, done, total)`` with
     *stage* ``'retrieving'`` then ``'writing'``.  Retrieval is two thirds of the
@@ -2490,10 +2495,15 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             if (auto_approve_threshold is not None and approve_as is not None
                     and concept is not None and not athena_duplicate):
                 from omop_core.services import suggest_auto_approve
-                if (suggest_auto_approve.qualifies(mapping, auto_approve_threshold, concept=concept)
-                        and suggest_auto_approve.approve(
-                            mapping, approve_as, auto_approve_threshold, note_written=note_written)):
-                    entry['auto_approved'] = True
+                if suggest_auto_approve.qualifies(mapping, auto_approve_threshold, concept=concept):
+                    outcome = suggest_auto_approve.approve(
+                        mapping, approve_as, auto_approve_threshold, note_written=note_written)
+                    if outcome == 'approved':
+                        entry['auto_approved'] = True
+                    elif outcome == 'error':
+                        entry['auto_approve_error'] = True
+                    if outcome in ('approved', 'error') and on_auto_approve is not None:
+                        on_auto_approve(outcome)
         entry['updated'] = True
         results.append(entry)
         emit('result', **entry, dry_run=False)

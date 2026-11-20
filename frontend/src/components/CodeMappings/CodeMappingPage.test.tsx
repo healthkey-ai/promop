@@ -268,24 +268,33 @@ describe("CodeMappingPage", () => {
   });
 
   describe("Suggest auto-approval (#1532)", () => {
-    const approverReference = {
+    const control = (overrides: Record<string, unknown> = {}) => ({
       ...reference,
-      suggest_auto_approve: { allowed: true, threshold: 95, min: 90, max: 100 },
+      suggest_auto_approve: {
+        allowed: true, available: true, unavailable_reason: "", threshold: 95, off: false, min: 90, max: 100,
+        ...overrides,
+      },
+    });
+    const approverReference = control();
+    const prefilled = async (referenceData: object = approverReference) => {
+      renderPage([proposedRow], referenceData);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      await waitFor(() => expect(threshold).toHaveValue(95));
+      return threshold;
     };
 
     it("offers no threshold to an account that may not approve", async () => {
-      renderPage([proposedRow], { ...reference, suggest_auto_approve: { allowed: false, threshold: 100, min: 90, max: 100 } });
+      renderPage([proposedRow], control({ allowed: false, threshold: 100 }));
       await screen.findByLabelText("Number of suggestions");
       expect(screen.queryByLabelText("Auto-approve confidence")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("auto-approve-warning")).not.toBeInTheDocument();
     });
 
     it("prefills the curator's last choice and sends the one chosen with the run", async () => {
       mockPost.mockResolvedValue({ data: suggestRun({
         total: 3, destinations: 3, auto_approved: 2, auto_approve_threshold: 92,
       }) });
-      renderPage([proposedRow], approverReference);
-      const threshold = await screen.findByLabelText("Auto-approve confidence");
-      await waitFor(() => expect(threshold).toHaveValue(95));
+      const threshold = await prefilled();
 
       fireEvent.change(threshold, { target: { value: "92" } });
       fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
@@ -298,10 +307,67 @@ describe("CodeMappingPage", () => {
       expect(await screen.findAllByText(/2 of them approved automatically \(confidence 92% or more\)/)).toHaveLength(2);
     });
 
+    it("states, always and not only in a tooltip, what the run is about to do", async () => {
+      const threshold = await prefilled();
+      const warning = screen.getByTestId("auto-approve-warning");
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above and re-points patient data.");
+
+      fireEvent.change(threshold, { target: { value: "92" } });
+      expect(warning).toHaveTextContent("Auto-approves at 92% or above and re-points patient data.");
+      fireEvent.change(threshold, { target: { value: "89" } });
+      expect(warning).toHaveTextContent("Choose an auto-approval confidence between 90 and 100, or turn it off.");
+    });
+
+    it("can be turned off, and says so, sending off with the run", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ total: 1, destinations: 1 }) });
+      const threshold = await prefilled();
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto-approval off" }));
+
+      expect(threshold).toBeDisabled();
+      expect(screen.getByTestId("auto-approve-warning")).toHaveTextContent("Auto-approval off");
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        "/v1/code-mappings/suggest/", expect.objectContaining({ auto_approve_threshold: "off" })));
+    });
+
+    it("starts off when the curator last turned it off, and an out-of-range number does not block an off run", async () => {
+      renderPage([proposedRow], control({ off: true }));
+      const checkbox = await screen.findByRole("checkbox", { name: "Auto-approval off" });
+      await waitFor(() => expect(checkbox).toBeChecked());
+      expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled();
+      expect(screen.getByLabelText("Auto-approve confidence")).toBeDisabled();
+    });
+
+    it("says when this deployment cannot auto-approve", async () => {
+      await prefilled(control({ available: false, unavailable_reason: "this deployment has no worker queue." }));
+      expect(screen.getByTestId("auto-approve-warning"))
+        .toHaveTextContent("Auto-approval is unavailable here: this deployment has no worker queue.");
+    });
+
+    it("says on a finished run when it could not auto-approve for want of a worker", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({
+        total: 2, destinations: 2,
+        auto_approve: { state: "disabled", threshold: null, reason: "no_worker" },
+      }) });
+      await prefilled();
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+      expect((await screen.findAllByText(/Auto-approval did not run: this deployment has no worker queue/)).length).toBeGreaterThan(0);
+    });
+
+    it("keeps what the curator typed through a reload of the list", async () => {
+      const threshold = await prefilled();
+      fireEvent.change(threshold, { target: { value: "93" } });
+
+      fireEvent.change(screen.getByLabelText("Search mappings"), { target: { value: "protein" } });
+
+      await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+        "/v1/code-mappings/", { params: expect.objectContaining({ search: "protein" }) }));
+      expect(screen.getByLabelText("Auto-approve confidence")).toHaveValue(93);
+    });
+
     it("will not start a run below the minimum", async () => {
-      renderPage([proposedRow], approverReference);
-      const threshold = await screen.findByLabelText("Auto-approve confidence");
-      await waitFor(() => expect(threshold).toHaveValue(95));
+      const threshold = await prefilled();
 
       fireEvent.change(threshold, { target: { value: "89" } });
 
@@ -2679,6 +2745,29 @@ describe("server mapping pages", () => {
     fireEvent.click(filter);
     await waitFor(() => expect(screen.queryByText("MACHINE CODE")).not.toBeInTheDocument());
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1", page_0: 1 }) });
+  });
+
+  it("filters the list to what Suggest approved by itself, off by default", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      const auto = { ...proposedRow, source_code: "AUTO CODE", origin_system: "suggest v0.4 auto-approved 100%" };
+      const other = { ...proposedRow, mapping_id: 9902, source_code: "OTHER CODE" };
+      const results = config?.params?.auto_approved === "1" ? [auto] : [auto, other];
+      return Promise.resolve({ data: browseData({
+        results, total: results.length,
+        pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: results.length } },
+      }) });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("OTHER CODE");
+    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes Suggest approved by itself" });
+    expect(filter).not.toBeChecked();
+    expect(mockGet).not.toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ auto_approved: "1" }) });
+
+    fireEvent.click(filter);
+
+    await waitFor(() => expect(screen.queryByText("OTHER CODE")).not.toBeInTheDocument());
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ auto_approved: "1", page_0: 1 }) });
   });
 
   it("shows and filters hospital organization on vendor tabs", async () => {
