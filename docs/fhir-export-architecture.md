@@ -27,6 +27,10 @@ function. It queries the OMOP tables for one `Person` and returns a Python dicti
 representing a FHIR Bundle. HTTP response formatting and file writing live outside the
 service.
 
+Provisional rows (those with a `confidence`, written from a proposed mapping) are never
+exported: `build_fhir_bundle` filters them out and has no option to include them.
+Approving a value makes it real and it then exports normally.
+
 ## Mapping
 
 | OMOP source | FHIR resource |

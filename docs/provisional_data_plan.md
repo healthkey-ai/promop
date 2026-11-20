@@ -489,8 +489,8 @@ are not. What the code does, where the plan left a choice:
   the provenance lookups (`_lookup_measurement`, `_lookup_observation`,
   `_lookup_condition`, `_lookup_drug_exposure`, `_lookup_procedure`,
   `_lookup_sct`), so a guess is never the "selected" source of an approved
-  value; the outbound FHIR export (`build_fhir_bundle`), unless
-  `include_provisional=True`; the patient list's freshness date
+  value; the outbound FHIR export (`build_fhir_bundle`), always (see "Provisional
+  data is never exported"); the patient list's freshness date
   (`annotate_context`); and the diagnosis context reader (`condition_contexts`),
   matching `medication_contexts`. `_lookup_genomics` reads the snapshot, which
   is real-only already.
@@ -954,8 +954,7 @@ reads `measurement`, `observation`, `condition_occurrence`, `drug_exposure` or
 existing `is_erroneous=False` filters (61 call sites) are the inventory to
 review. Each either keeps provisional rows deliberately (the patient page, the
 OMOP tab) or adds `confidence IS NULL` (anything aggregate or outbound, and
-FHIR export, which excludes them unless `include_provisional=true` and then
-marks each with a `provisional-confidence` extension). The review is a checklist
+FHIR export, which always excludes them). The review is a checklist
 in the PR for phase 1, not a change at every site.
 
 **Mapping pages.** The Code to Concept list shows, per proposed row, how many
@@ -1007,7 +1006,7 @@ lookup contract below remains for a caller that does want to write rows itself.
 
 - `code-mappings/lookup/` `include_provisional` and the response fields.
 - ETL repository change to write `confidence` and to re-send after approval.
-- Lab results API and FHIR export handling.
+- Lab results API handling. (FHIR export is settled: provisional data is never exported.)
 - Mapping-page counts and #2263.
 
 ### Phase 3: wider reach
@@ -1015,9 +1014,23 @@ lookup contract below remains for a caller that does want to write rows itself.
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
 - JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table.
-- FHIR sync opt-in per organization.
+- FHIR sync opt-in per organization. The PHR is the patient's source of truth, so
+  this is a data-quality decision about what sync writes into the PHR, not the
+  institution's consent.
 - Patient-facing display policy.
 - #1532 auto-approval reading the same floor.
+
+### Provisional data is never exported
+
+The PHR is the patient's source of truth, and provisional values are unconfirmed
+proposals, so nothing that leaves the PHR carries them: the FHIR export
+(`build_fhir_bundle`, which backs the patient-records export, the signed PHR record
+export and the CLI command) filters `confidence IS NULL` and has no option to include
+provisional rows, and any future write-back or upload to an institution must do the
+same. Nobody is blocked from sharing: a patient who approves a value, by entering it
+themselves or through an approved mapping, makes it real, and it then exports like any
+other row. Saving a provisional value *in place* in the PHR is not an export and is
+unaffected.
 
 ### Gaps before HealthTree can run with provisional data on (2026-11-17)
 

@@ -97,7 +97,7 @@ def _tables(bundle):
     return [e['resource']['resourceType'] for e in bundle['entry']]
 
 
-def test_fhir_export_leaves_provisional_rows_out_unless_asked(person):
+def test_fhir_export_never_includes_provisional_rows(person):
     with suppress_patient_record_refresh():
         MeasurementFactory(person=person, value_as_number=1)
         MeasurementFactory(person=person, value_as_number=2, confidence=80)
@@ -107,11 +107,11 @@ def test_fhir_export_leaves_provisional_rows_out_unless_asked(person):
         ConditionOccurrenceFactory(person=person, confidence=80)
         DrugExposureFactory(person=person)
         DrugExposureFactory(person=person, confidence=80)
-    default = _tables(build_fhir_bundle(person))
-    everything = _tables(build_fhir_bundle(person, include_provisional=True))
-    # Patient + four real rows; the opt-in adds the four provisional ones.
-    assert len(default) == 5
-    assert len(everything) == 9
+    # Patient + the four real rows; the four provisional ones never export.
+    assert len(_tables(build_fhir_bundle(person))) == 5
+    # There is no switch to include them.
+    with pytest.raises(TypeError):
+        build_fhir_bundle(person, include_provisional=True)
 
 
 def test_patient_list_freshness_ignores_provisional_results():

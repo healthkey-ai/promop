@@ -342,7 +342,7 @@ def _build_encounter(visit: VisitOccurrence, patient_ref: str) -> dict[str, Any]
 # Main export function
 # ---------------------------------------------------------------------------
 
-def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict[str, Any]:
+def build_fhir_bundle(person: Person) -> dict[str, Any]:
     """
     Build a FHIR R4 Bundle of type "searchset" from a patient's OMOP data.
 
@@ -351,19 +351,20 @@ def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict
     to its corresponding FHIR resource.
 
     Rows written from a proposed, not yet approved, mapping carry a
-    ``confidence`` and are left out: an export must not present a guess as the
-    patient's record. ``include_provisional=True`` adds them.
+    ``confidence`` and are always left out: provisional data is never exported,
+    and there is no switch to include it. It lives in the PHR, which is the
+    patient's source of truth; a patient who approves a value makes it real and
+    it then exports like any other row.
 
     Args:
         person: An OMOP Person model instance.
-        include_provisional: also export provisional rows.
 
     Returns:
         A JSON-serializable dict representing a FHIR R4 Bundle.
     """
     entries: list[dict[str, Any]] = []
     # One kwargs dict for the five clinical tables; visits carry no confidence.
-    real = {} if include_provisional else {"confidence__isnull": True}
+    real = {"confidence__isnull": True}
 
     # Patient resource
     patient_resource = _build_patient(person)
