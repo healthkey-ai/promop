@@ -622,3 +622,71 @@ def test_the_worker_sends_nothing_to_an_account_that_closed_or_lost_its_password
     send_password_reset_task.run(999_999_999, False)
 
     assert mailoutbox == []
+
+
+# Requests run in autocommit, so on_commit runs the hand-off inside the
+# request itself: these tests run that way (transaction=True), as production does.
+
+@pytest.mark.django_db(transaction=True)
+def test_in_a_request_the_email_is_queued_and_not_sent(settings, mailoutbox):
+    from unittest import mock
+
+    from django.core.cache import cache
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    cache.clear()
+    settings.CELERY_BROKER_URL = "redis://broker.test:6379/0"
+    identity = Identity.objects.create_user(email="live@example.com", password="a-long-enough-pass-42")
+
+    with mock.patch.object(send_password_reset_task, "delay") as delay:
+        assert APIClient().post("/api/v1/auth/request-reset/", {"email": "live@example.com"}).status_code == 200
+
+    delay.assert_called_once_with(identity.pk, False)
+    assert mailoutbox == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_broker_that_is_down_fails_nobody_and_the_email_still_goes(settings, mailoutbox):
+    """The broker refusing the task must not answer differently for an
+    address with an account (a 500 would tell them apart), and the email
+    must not be lost: it is sent inline instead."""
+    from unittest import mock
+
+    from django.core.cache import cache
+    from kombu.exceptions import OperationalError
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    cache.clear()
+    settings.CELERY_BROKER_URL = "redis://broker.test:6379/0"
+    Identity.objects.create_user(email="down@example.com", password="a-long-enough-pass-42")
+    client = APIClient(raise_request_exception=False)
+
+    with mock.patch.object(send_password_reset_task, "delay", side_effect=OperationalError("broker down")):
+        known = client.post("/api/v1/auth/request-reset/", {"email": "down@example.com"})
+        unknown = client.post("/api/v1/auth/request-reset/", {"email": "nobody@example.com"})
+
+    assert (known.status_code, known.data) == (unknown.status_code, unknown.data) == (200, unknown.data)
+    assert [m.to for m in mailoutbox] == [["down@example.com"]]
+
+
+def test_the_worker_tries_a_failing_mail_provider_again(mailoutbox):
+    from unittest import mock
+
+    from celery.exceptions import Retry
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    identity = Identity.objects.create_user(email="retry@example.com", password="a-long-enough-pass-42")
+
+    with mock.patch("patient_portal.api.password_reset.send_mail", side_effect=OSError("provider down")), \
+            mock.patch.object(send_password_reset_task, "retry", side_effect=Retry()) as retry:
+        with pytest.raises(Retry):
+            send_password_reset_task.run(identity.pk, False)
+
+    assert retry.call_args.kwargs["countdown"] == 60
+    assert send_password_reset_task.max_retries == 3

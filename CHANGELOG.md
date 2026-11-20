@@ -311,9 +311,10 @@ All notable changes to PRomop are documented here.
 - **A reset request's response time no longer says whether the account
   exists** — only an existing account waited for the mail provider, so the
   time to answer told an address with an account from one without. The email
-  is now sent once the request commits, on a Celery worker
-  (`patient_portal.send_password_reset`, given only the account's id) when
-  there is a broker; a deployment without one still sends inline.
+  is now handed to a Celery worker (`patient_portal.send_password_reset`,
+  given only the account's id) when there is a broker, which retries a failing
+  mail provider; when the broker cannot take it, or there is none, it is sent
+  inline, and the request never fails over it.
 
 - **Password-reset emails name the app the account belongs to** — like the
   verification email, a reset email names the installation's org and signs off
