@@ -979,7 +979,7 @@ What follows from it:
   `''` is saved as before and only `null` ("Mark not assessed") rejects. Another control
   that sends `''` on purpose belongs in that set.
 - **Where it is kept.** `ProposalRejection` (one row per person and field, migration
-  `0363`): the field, the provisional rows that fed it when it was rejected, as
+  `0364`): the field, the provisional rows that fed it when it was rejected, as
   `(table, source_value, concept_id)` triples, and who (`rejected_by`, the Identity id as
   text, so a doctor or a representative rejecting for a patient leaves a trace) and when
   (`rejected_at`). `user_edited_fields` cannot hold it: derivation drops an entry whose value
@@ -1142,7 +1142,7 @@ without a click:
 | Computed fields use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) | done (#2666, #2672); JSON-input fields, FLC pair, age left |
 | Proposals are stored with a confidence on the mapping, kept on approval, recomputed by Calc | [#2668](https://github.com/healthkey-ai/promop/issues/2668) | done (#2670) |
 | Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
-| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0363`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
+| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0364`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
 | The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display; gaps: disease tab and bypassing controls do not block; a patient lifts a block by entering a value or by rejecting the proposal (#2671); see "Confirming a record that shows proposals" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |

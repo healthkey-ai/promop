@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0362_backfill_suggestion_fallback"),
+        ("omop_core", "0363_source_code_resolve_run_updated_at"),
     ]
 
     operations = [
