@@ -2762,6 +2762,25 @@ def _asserted_line_name(episode):
     return value
 
 
+# Domains of a concept that can identify a therapy line on its own: a single drug
+# (an RxNorm ingredient, a HemOnc component) or a procedure (surgery, a
+# transplant; the regimen catalog uses SNOMED procedures as therapy ids). A
+# Measurement is a test, not a treatment.
+_LINE_IDENTITY_DOMAINS = frozenset({'Drug', 'Procedure'})
+
+
+def _line_identity_concept(concept):
+    """The episode's own concept, when it can stand as the line's id (#2760).
+
+    Nothing else resolves a non-HemOnc concept, so a line the writer stored with
+    one would otherwise derive no id at all.
+    """
+    if (concept is not None and getattr(concept, 'domain_id', None) in _LINE_IDENTITY_DOMAINS
+            and not getattr(concept, 'invalid_reason', None)):
+        return concept
+    return None
+
+
 def _is_asserted_regimen(concept) -> bool:
     """True only for a source-asserted HemOnc *regimen* concept — the one case a
     consumer is told it may trust without re-verifying.
@@ -3122,6 +3141,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
                     and getattr(obj, 'concept_class_id', None) == 'Regimen'):
                 concept_id = episode.episode_object_concept_id
                 origin = 'inferred'
+        # Last of all, the source concept itself when it is a drug or a procedure
+        # (#2760). Taken only when nothing above resolved, so a regimen found from
+        # the drug names still wins over a generic drug source. Never 'asserted':
+        # it is not a validated HemOnc regimen.
+        if not concept_id and _line_identity_concept(src_concept):
+            concept_id = episode.episode_source_concept_id
+            origin = 'inferred'
 
         if concept_id:
             needed_concept_ids.add(concept_id)
@@ -3178,9 +3204,15 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
         # Component drug concept_ids for this line: HemOnc regimen expansion
         # unioned with the line's exposure drug concepts, leveled to ingredients.
+        # A line whose own concept is a single drug lists that drug too (#2760):
+        # with no exposures recorded it would otherwise offer no component.
+        line_drug_ids = [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id]
+        own = _line_identity_concept(episode.episode_source_concept)
+        if own is not None and own.domain_id == 'Drug':
+            line_drug_ids.append(own.concept_id)
         components = _expand_component_ids(
             [concept_id] if concept_id else [],
-            [de.drug_concept_id for de in drugs_in_episode if de.drug_concept_id],
+            line_drug_ids,
         )
         all_components |= components
         # Therapy-class ("type") concept_ids for this line (ADR 0002).
