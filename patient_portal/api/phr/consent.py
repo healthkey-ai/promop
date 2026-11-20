@@ -19,6 +19,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from rest_framework.response import Response
 
+from omop_core.models import PatientRecord
 from patient_portal import consent as svc
 from patient_portal.models import ConsentEvent, ConsentPurpose, DocumentAcceptance, LegalDocument
 
@@ -123,6 +124,12 @@ class ConsentView(PhrView):
             return Response({'detail': e.messages[0]}, status=409)
         except ValidationError as e:
             return Response({'detail': e.messages[0]}, status=400)
+        erased = [p.key for p, item in pairs
+                  if item.get('decision') == ConsentEvent.WITHDRAWN and p.erases_record_on_withdrawal]
+        if erased:
+            # The deletion log: who and when, no content (patient_portal.erasure).
+            request._request.audit_detail = {'erasure': 'record', 'person_id': person.person_id, 'purpose': erased[0]}
+            record = PatientRecord.objects.filter(person=person).first()
         return Response(self.build(person, record, language))
 
 

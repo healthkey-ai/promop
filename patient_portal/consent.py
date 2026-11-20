@@ -333,6 +333,11 @@ def record_consent(
             key=purpose.key, version=version, language=text.language, decision=decision,
             frequency=frequency, recorded_at=when,
         )
+        # The record depends on this permission: its health answers go now,
+        # with the withdrawal, or neither is kept.
+        if decision == ConsentEvent.WITHDRAWN and purpose.erases_record_on_withdrawal:
+            from patient_portal.erasure import erase_record
+            erase_record(person)
     return event
 
 

@@ -71,7 +71,6 @@ from omop_core.services.patient_record_service import (
 from omop_core.services.vocab_snapshot import TABLE_COLUMNS
 from omop_core.services.derivation_jobs import get_dispatcher
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows
-from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, get_gender_concept
@@ -1901,21 +1900,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         person_id = patient_person.person_id
         identity = request.user
+        identity_id = identity.pk
 
+        from patient_portal.erasure import close_account
         with transaction.atomic():
-            # Delete EpisodeEvent rows — bare integer FK, not covered by CASCADE
-            episode_ids = list(
-                Episode.objects.filter(person=patient_person)
-                .values_list('episode_id', flat=True)
-            )
-            if episode_ids:
-                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-
-            # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
-            patient_person.delete()
-
-            # Delete the Identity (auth credential)
-            identity.delete()
+            # Survey responses, clinical rows, the person (cascading to the
+            # record and the rest), and the sign-in.
+            close_account(patient_person, identity)
+        # The deletion log: the row has no user once the identity is gone, so
+        # it names who was deleted, and holds no content.
+        request._request.audit_detail = {'erasure': 'account', 'person_id': person_id, 'identity_id': identity_id}
 
         # Log out the current session AFTER the transaction succeeds. If the
         # transaction rolled back, the identity would still exist and we must
@@ -1928,7 +1922,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         logger.info(
             'patient_account_deleted person_id=%s identity_id=%s',
-            person_id, identity.pk,
+            person_id, identity_id,
         )
 
         return Response({'detail': 'Account and all associated data have been permanently deleted.'})
@@ -1994,20 +1988,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if pu and not GroupAccess.objects.filter(identity=pu.identity).exists():
             linked_identity = pu.identity
 
+        from patient_portal.erasure import close_account
         with transaction.atomic():
-            # EpisodeEvent has a bare integer FK not covered by CASCADE.
-            episode_ids = list(
-                Episode.objects.filter(person=person).values_list('episode_id', flat=True)
-            )
-            if episode_ids:
-                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-            # A survey response protects its participant, so PROlog's rows go
-            # first or person.delete() raises ProtectedError.
-            delete_prolog_data_for_persons([person.person_id])
-            # Person delete cascades to OMOP rows, PatientRecord(s), PatientUser.
-            person.delete()
-            if linked_identity is not None:
-                linked_identity.delete()
+            close_account(person, linked_identity)
+        request._request.audit_detail = {'erasure': 'account', 'person_id': person_id}
 
         logger.info(
             'admin_patient_deleted person_id=%s by_identity_id=%s is_staff=%s',

@@ -8,6 +8,15 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Withdrawing the permission a record depends on deletes the health
+  answers** — a consent purpose marked `erases_record_on_withdrawal` (consent
+  file or admin) deletes, when withdrawn, the member's questionnaire responses,
+  every clinical row, journal entries and documents, and rebuilds the record
+  from what is left; the account, membership, sign-up facts and permission
+  history stay. Each erasure, and each account closed, is logged in the audit
+  trail with the person's id and no content. See
+  `docs/member_erasure_architecture.md`.
+
 - **Questionnaire answers can write the patient's own record** — a deployment
   supplies record mappings (`PROLOG_RECORD_MAPPING_DIRS`, JSON, one per survey
   and its reviewed versions) naming which answers fill which `PatientRecord`
@@ -330,6 +339,11 @@ All notable changes to PRomop are documented here.
   completing a reset now each have their own limit (`password_reset`,
   `password_reset_confirm`), and both count a signed-in caller too: the views
   take no authentication, as an anonymous rate limit skips anyone signed in.
+- **A member who had answered a questionnaire could not close their
+  account** — `DELETE /api/v1/patient-records/me/` failed with a server error,
+  because a survey response protects its participant. Closing an account now
+  takes the admin delete's path (`patient_portal.erasure.close_account`), which
+  removes the responses first.
 
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only
