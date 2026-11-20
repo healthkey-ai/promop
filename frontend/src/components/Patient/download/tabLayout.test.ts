@@ -23,6 +23,18 @@ describe('tab layout', () => {
     expect(history.fields).toContainEqual(['Pre-existing Conditions', 'preexisting_conditions']);
   });
 
+  // A `no_*` field is true when the patient does not have the thing, and its
+  // boolean control shows true as "Yes". A label naming the thing itself
+  // ("Mental Health Disorders") makes every answer read and save as its
+  // opposite (#2755).
+  it('labels every no_* field by what true means', () => {
+    const misread = Object.entries(extractAll() as Record<string, { fields: [string, string][] }[]>)
+      .flatMap(([tab, sections]) => sections.flatMap((section) => section.fields
+        .filter(([label, name]) => name.startsWith('no_') && !/^(No|Not)\b/.test(label))
+        .map(([label, name]) => `${tab}: ${name} is labelled "${label}"`)));
+    expect(misread).toEqual([]);
+  });
+
   it('is current: run `node scripts/tab-layout.mjs` after changing a tab', () => {
     expect(readFileSync(OUTPUT, 'utf8')).toBe(render(extractAll()));
   });
