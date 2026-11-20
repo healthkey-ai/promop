@@ -166,11 +166,19 @@ def test_hemonc_component_line_also_lists_its_drug(vocab):
     assert TAMOXIFEN_HEMONC in record.first_line_component_ids  # its drug was missing
 
 
-def test_a_hemonc_drug_class_is_not_one_of_the_lines_drugs(vocab):
-    record = _write_line(PersonFactory(), G_CSF_CLASS, name='G-CSF')
+@pytest.mark.parametrize('concept_id, concept_class, standard', [
+    (G_CSF_CLASS, 'Component Class', 'C'),
+    (35_900_001, 'Brand Name', None),     # non-standard and not a classification
+])
+def test_a_hemonc_concept_other_than_a_component_is_not_one_of_the_lines_drugs(
+        vocab, concept_id, concept_class, standard):
+    if concept_id != G_CSF_CLASS:
+        _concept(concept_id, 'Brandname', 'HemOnc', 'Drug', concept_class, standard_concept=standard)
 
-    assert record.first_line_therapy_id == G_CSF_CLASS          # the HemOnc branch, as before
-    assert G_CSF_CLASS not in (record.first_line_component_ids or [])
+    record = _write_line(PersonFactory(), concept_id, name='supportive')
+
+    assert record.first_line_therapy_id == concept_id           # the HemOnc branch, as before
+    assert concept_id not in (record.first_line_component_ids or [])
 
 
 def _episode_with_exposures(person, source, *drugs):
