@@ -29,6 +29,7 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
   const [newDisplay, setNewDisplay] = useState("");
   const [saving, setSaving] = useState(false);
   const [reordering, setReordering] = useState(false);
+  const [removingCodeId, setRemovingCodeId] = useState<number | null>(null);
   const [error, setError] = useState("");
 
   const fetchChoices = useCallback(async () => {
@@ -68,13 +69,28 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
     }
   };
 
-  const handleDeleteChoice = async (choiceId: number) => {
-    if (!window.confirm("Delete this choice?")) return;
+  const handleDeleteChoice = async (choice: Choice) => {
+    if (!choice.id || !window.confirm(`Delete the entire choice "${choice.display}" and all of its codes?`)) return;
+    setError("");
     try {
-      await api.delete(`/v1/field-choices/${choiceId}/`);
+      await api.delete(`/v1/field-choices/${choice.id}/`);
       await fetchChoices();
     } catch {
       setError("Failed to delete choice.");
+    }
+  };
+
+  const handleRemoveCode = async (choiceId: number, codeId: number) => {
+    if (removingCodeId !== null) return;
+    setRemovingCodeId(codeId);
+    setError("");
+    try {
+      await api.delete(`/v1/field-choices/${choiceId}/codes/`, { params: { code_id: codeId } });
+      await fetchChoices();
+    } catch {
+      setError("Failed to remove code.");
+    } finally {
+      setRemovingCodeId(null);
     }
   };
 
@@ -170,23 +186,35 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
                       <ChevronDown size={12} />
                     </button>
                   </div>
-                  <div className="flex-1">
+                  <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium">{choice.display}</div>
                     <div className="mt-1 flex flex-wrap gap-1">
                       {choice.codes.map((c) => (
                         <span
                           key={`${c.vocabulary_id}-${c.code}`}
-                          className={`rounded px-1.5 py-0.5 text-[10px] ${
+                          className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] ${
                             c.is_primary
                               ? "bg-blue-100 text-blue-700"
                               : "bg-gray-100 text-gray-600"
                           }`}
                         >
                           {c.vocabulary_id}:{c.code}
+                          <button
+                            type="button"
+                            onClick={() => choice.id && c.id !== undefined && handleRemoveCode(choice.id, c.id)}
+                            disabled={removingCodeId !== null || c.id === undefined}
+                            aria-label={`Remove code ${c.vocabulary_id}:${c.code} from ${choice.display}`}
+                            title="Remove code, keeping this choice"
+                            className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 hover:bg-white/60 disabled:opacity-50"
+                          >
+                            <X size={10} /> {removingCodeId === c.id ? "Removing..." : "Remove code"}
+                          </button>
                         </span>
                       ))}
                       <button
                         onClick={() => choice.id && handleAddCode(choice.id)}
+                        disabled={removingCodeId !== null}
+                        aria-label={`Add code to ${choice.display}`}
                         className="rounded px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-100 hover:text-gray-600"
                       >
                         <Plus size={10} className="inline" /> code
@@ -194,11 +222,13 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
                     </div>
                   </div>
                   <button
-                    onClick={() => choice.id && handleDeleteChoice(choice.id)}
-                    className="rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500"
+                    onClick={() => handleDeleteChoice(choice)}
+                    disabled={removingCodeId !== null}
+                    aria-label={`Delete choice ${choice.display}`}
+                    className="inline-flex shrink-0 items-center gap-1 rounded p-1 text-xs text-gray-500 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
                     title="Delete choice"
                   >
-                    <Trash2 size={12} />
+                    <Trash2 size={12} /> Delete choice
                   </button>
                 </div>
               ))}

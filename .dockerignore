@@ -23,3 +23,6 @@ staticfiles/
 docs/*
 !docs/ht-code-concept-mapping.md
 !docs/ht-fhir-code-concept-mapping.md
+# google-github-actions/auth writes its credentials file into the workspace,
+# which is the build context; COPY . . would bake it into the image and cache.
+gha-creds-*.json

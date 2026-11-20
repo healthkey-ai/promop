@@ -15,6 +15,7 @@ mapping they can already make correctly.
 ``vocabulary_id`` values use OHDSI spellings where one exists, so a mapping
 recorded today lines up with the concepts a later vocabulary load brings in.
 """
+import re
 
 # OMOP domain -> the clinical table its facts land in. Picking the domain
 # settles the destination table; the curator never chooses it separately.
@@ -37,6 +38,8 @@ DOMAIN_CHOICES = (
 # (vocabulary_id, display label). Ordered so the systems a curator meets most
 # often sit at the top of each domain's list rather than alphabetically.
 _CONDITION_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('SNOMED', 'SNOMED CT — OMOP standard; FHIR problem lists'),
     ('ICD10CM', 'ICD-10-CM — US claims and EHR billing'),
     ('ICD10', 'ICD-10 — WHO international'),
@@ -52,6 +55,7 @@ _CONDITION_SYSTEMS = (
     ('HPO', 'HPO — human phenotype ontology'),
     ('MedDRA', 'MedDRA — adverse events, regulatory and trial data'),
     ('NCIt', 'NCIt — NCI thesaurus; oncology fallback'),
+    ('MeSH', 'MeSH — diseases and biomedical terminology'),
     ('ICPC', 'ICPC-2 — European primary care'),
     ('CIEL', 'CIEL — interface terminology'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
@@ -60,6 +64,10 @@ _CONDITION_SYSTEMS = (
 )
 
 _PROCEDURE_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('NCIt', 'NCIt — oncology procedures'),
+    ('MeSH', 'MeSH — biomedical procedures'),
     ('SNOMED', 'SNOMED CT procedures — OMOP standard'),
     ('CPT4', 'CPT-4 — US professional services'),
     ('HCPCS', 'HCPCS Level II — US supplies and services'),
@@ -74,7 +82,11 @@ _PROCEDURE_SYSTEMS = (
 )
 
 _DRUG_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('RxNorm', 'RxNorm — OMOP standard for drugs'),
+    ('NCIt', 'NCIt — oncology drugs, investigational agents and regimens'),
+    ('MeSH', 'MeSH — substances, drug aliases and investigational agents'),
     ('RxNorm Extension', 'RxNorm Extension — OMOP, non-US drugs'),
     ('NDC', 'NDC — US package level; very common in dispensing data'),
     ('ATC', 'ATC — WHO classification, common outside the US'),
@@ -96,27 +108,40 @@ _DRUG_SYSTEMS = (
 )
 
 _MEASUREMENT_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
+    ('NCIt', 'NCIt — oncology measurements and biomarkers'),
+    ('MeSH', 'MeSH — biomedical measurements and findings'),
     ('LOINC', 'LOINC — OMOP standard for labs and measurements'),
     ('SNOMED', 'SNOMED CT — findings and qualitative results'),
     ('CIEL', 'CIEL — interface terminology'),
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
+    ('CDISC-BC', 'CDISC BC — CDISC Biomedical Concepts (NCIt codes)'),
+    ('HealthConnect', 'Health Connect — Android Health Connect record types'),
     ('CPT4', 'CPT-4 — billed lab panels'),
     ('UCUM', 'UCUM — units of measure'),
     ('Nebraska Lexicon', 'Nebraska Lexicon — interface terminology'),
 )
 
 _OBSERVATION_SYSTEMS = (
+    ('EPIC', 'Epic — hospital-local codes'),
+    ('CERNER', 'Cerner — hospital-local codes'),
     ('SNOMED', 'SNOMED CT — OMOP standard for observations'),
     ('LOINC', 'LOINC — survey and assessment items'),
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
+    ('CDISC-BC', 'CDISC BC — CDISC Biomedical Concepts (NCIt codes)'),
+    ('HealthConnect', 'Health Connect — Android Health Connect record types'),
     ('ICD10CM', 'ICD-10-CM — Z-codes and social history'),
-    ('ICD10', 'ICD-10 — Z-code equivalents (merged with ICD-10-CM)'),
+    ('ICD10', 'ICD-10 — WHO Z-code equivalents'),
     ('HCPCS', 'HCPCS — assessments and screenings'),
     ('NCIt', 'NCIt — NCI thesaurus'),
+    ('MeSH', 'MeSH — biomedical terminology'),
     ('PPI', 'PPI — participant-provided information (surveys)'),
 )
 
@@ -160,17 +185,24 @@ def domain_for_table(omop_table):
 # Non-standard vocabularies (the ones curators actually need to map) come first,
 # then uncoded, then standard vocabularies last (they self-resolve).
 SOURCE_TAB_ORDER = [
-    'ICD10', 'ICD9CM', 'CPT4', 'HCPCS',
+    # Wearable metrics (includes Apple, Garmin, HL7-PHR and HealthConnect) come
+    # first. The page opens on the first tab with proposed rows, so this is also
+    # where a curator lands while the Wearables tab has any.
+    'OpenWearables',
+    'EPIC', 'CERNER',  # Hospital-local codes are the largest curation queues
+    'ICD10CM',
+    'ICD9CM', 'CPT4', 'HCPCS',
     'RxNorm', 'NDC',
     'Read', 'MeSH', 'OPCS4', 'Nebraska Lexicon',
     'MedDRA', 'ICDO3', 'dm+d',
-    'OpenWearables',  # Wearable device metrics (includes Apple + Garmin)
     '',  # Uncoded / free text
     'LOINC', 'SNOMED',  # Standard — last
 ]
 
 SOURCE_TAB_LABELS = {
-    'ICD10': 'ICD-10',
+    'EPIC': 'Epic',
+    'CERNER': 'Cerner',
+    'ICD10CM': 'ICD-10-CM',
     'ICD9CM': 'ICD-9-CM',
     'ICD10PCS': 'ICD-10-PCS',
     'ICD9Proc': 'ICD-9-Proc',
@@ -179,19 +211,185 @@ SOURCE_TAB_LABELS = {
     # Others use vocabulary_id as-is.
 }
 
-# Wearable device vocabularies that are consolidated under the single
-# "Wearables" tab (OpenWearables) on the Code Mapping page.
-WEARABLE_SOURCE_VOCABULARIES = {'OpenWearables', 'Apple', 'Garmin'}
+# Wearable vocabularies that are consolidated under the single "Wearables"
+# tab (OpenWearables) on the Code Mapping page. HL7-PHR holds the HL7 PHR
+# code values, Apple the HealthKit identifiers and HealthConnect the Android
+# Health Connect record types the HL7 PHR table maps those codes from.
+# CDISC-BC holds CDISC Biomedical Concepts as source codes (the code is the
+# BC id, an NCIt C-code): each maps to one OMOP concept like any other code,
+# so a wearable code reaches a BC by sharing its destination.
+CDISC_BC_VOCABULARY = 'CDISC-BC'
+WEARABLE_SOURCE_VOCABULARIES = {
+    'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect', CDISC_BC_VOCABULARY,
+}
 
-# ICD-10-CM codes are merged into the ICD-10 tab — curators think of them as
-# one vocabulary.  Same pattern as wearable consolidation above.
-ICD10CM_MERGE = {'ICD10CM': 'ICD10'}
+# The metric categories a wearable mapping may carry, in the order the Edit
+# Mapping dialog offers them: those of the wearable mapping proposal, plus the
+# five (Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing)
+# the HL7 PHR metrics about to join it need. A mapping's ``category`` is blank
+# or one of these; the seeds assign one to every metric they create.
+WEARABLE_METRIC_CATEGORIES = (
+    'Activity',
+    'Fitness',
+    'Heart & Cardiovascular',
+    'Blood & Respiratory',
+    'Body Composition',
+    'Sleep',
+    'Mobility & Gait',
+    'Nutrition',
+    'Symptoms',
+    'Reproductive Health',
+    'Mental Wellbeing',
+    'Self-care',
+    'Hearing',
+    'Medication & Device Use',
+    'Safety',
+    'Self-reported',
+    'Stress & Autonomic',
+    'Environmental',
+    'Location',
+    'Garmin-specific',
+)
+
+# How the source produces a wearable metric's value, in the order the dialog
+# offers them. It describes the *source* metric, not the destination concept:
+# one LOINC concept can be fed by a direct sensor reading from one source and
+# an algorithmic estimate from another. A mapping's ``measure_class`` is blank
+# or one of these.
+WEARABLE_MEASURE_CLASSES = (
+    'Direct measurement',
+    'Aggregate over interval',
+    'Algorithmic estimate',
+    'Vendor score',
+    'Environmental context',
+    'User-entered or device log',
+)
+
+
+# A wearable mapping's ``metric_key``: the vendor-neutral name of one metric
+# (``steps``, ``resting_hr``), shared by every source code that reports it --
+# the HealthKit identifier, the Garmin key, the OpenWearables code, the HL7 PHR
+# code. Not a fixed list, so it is held to a shape: lowercase snake case.
+METRIC_KEY_PATTERN = re.compile(r'[a-z][a-z0-9_]*')
+METRIC_KEY_MAX_LENGTH = 64
+
+
+def clean_metric_key(value):
+    """*value* as a mapping's metric key: '' or lowercase snake case.
+
+    Raises ValueError, describing the shape, for anything else.
+    """
+    key = str(value or '').strip()
+    if key and (len(key) > METRIC_KEY_MAX_LENGTH or not METRIC_KEY_PATTERN.fullmatch(key)):
+        raise ValueError(
+            'A metric key is lowercase snake case: a letter, then letters, digits '
+            f'or underscores, at most {METRIC_KEY_MAX_LENGTH} characters (e.g. resting_hr).'
+        )
+    return key
+
+
+def _clean_choice(value, allowed, label):
+    cleaned = str(value or '').strip()
+    if cleaned and cleaned not in allowed:
+        raise ValueError(
+            f"Unknown {label} {cleaned!r}. Expected one of: {', '.join(allowed)}."
+        )
+    return cleaned
+
+
+def clean_wearable_category(value):
+    """*value* as a mapping's category: '' or one of the allowed list.
+
+    Raises ValueError, naming the allowed values, for anything else.
+    """
+    return _clean_choice(value, WEARABLE_METRIC_CATEGORIES, 'category')
+
+
+def clean_wearable_measure_class(value):
+    """*value* as a mapping's measure class, on ``clean_wearable_category``'s rule."""
+    return _clean_choice(value, WEARABLE_MEASURE_CLASSES, 'measure class')
 
 # FHIR OID URIs that are aliases for OMOP vocabulary_ids.  Rows arriving
 # via crossmap imports sometimes carry the OID instead of the OMOP spelling.
 # The tab logic merges these into the canonical vocabulary.
 VOCABULARY_OID_ALIASES = {
     'urn:oid:2.16.840.1.113883.6.96': 'SNOMED',
+}
+
+
+# Exact standard FHIR system identifiers. Vendor-local systems are recognised
+# separately below: their tenant segment remains part of the SCCM resolver key
+# because opaque codes can mean different things at different hospitals. The
+# browse layer rolls those exact identities into two practical vendor tabs.
+FHIR_SYSTEM_VOCABULARIES = {
+    'http://loinc.org': 'LOINC',
+    'http://snomed.info/sct': 'SNOMED',
+    'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
+    'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
+    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
+    'http://hl7.org/fhir/sid/cvx': 'CVX',
+}
+
+
+def hospital_vendor(system):
+    """Return EPIC/CERNER for a vendor-local system or vendor tab id."""
+    normalized = (system or '').strip().casefold().rstrip('/')
+    if normalized == 'epic' or normalized.startswith('urn:oid:1.2.840.114350.') \
+            or normalized.startswith(('http://open.epic.com/', 'https://open.epic.com/')):
+        return 'EPIC'
+    if normalized == 'cerner' or (
+        normalized.startswith(('http://fhir.cerner.com/', 'https://fhir.cerner.com/'))
+        and '/codeset/' in normalized
+    ):
+        return 'CERNER'
+    return ''
+
+
+def fhir_source_vocabulary(system):
+    """Return the resolver identity for a FHIR ``Coding.system`` URI.
+
+    Epic embeds a hospital id in ``urn:oid:1.2.840.114350.*`` and Cerner embeds
+    an instance id before ``codeSet``. Their opaque codes are only stable
+    inside that exact system, so retain the URI as the resolver key. The tab
+    layer separately rolls those keys up by :func:`hospital_vendor`.
+    """
+    identity = (system or '').strip().rstrip('/')
+    normalized = identity.casefold()
+    if not normalized:
+        return ''
+    standard = FHIR_SYSTEM_VOCABULARIES.get(normalized)
+    if standard:
+        return standard
+    if hospital_vendor(identity):
+        return identity
+    return ''
+
+
+def canonical_source_vocabulary(vocabulary_id):
+    """Normalize equivalent identifiers, without merging distinct vocabularies."""
+    vocabulary_id = (vocabulary_id or '').strip()
+    return VOCABULARY_OID_ALIASES.get(vocabulary_id, vocabulary_id)
+
+# OMOP vocabulary_id → UMLS root_source (SAB), for the UMLS bridge in Suggest
+# and for naming source codes from UMLS atoms. ICD10CM must precede ICD10:
+# Suggest's reverse map (SAB → vocabulary) keeps the first vocabulary it sees
+# for a shared SAB. MedDRA and CPT4 are licensed and absent from Athena on our
+# deployments, so UMLS is the only place their names come from.
+VOCAB_TO_UMLS_ROOT = {
+    'SNOMED': 'SNOMEDCT_US',
+    'ICD10CM': 'ICD10CM',
+    'ICD10PCS': 'ICD10PCS',
+    'LOINC': 'LNC',
+    'RxNorm': 'RXNORM',
+    'CPT4': 'CPT',
+    'HCPCS': 'HCPCS',
+    'NDC': 'NDC',
+    'CVX': 'CVX',
+    'ICD9CM': 'ICD9CM',
+    'MeSH': 'MSH',
+    'NDFRT': 'MED-RT',
+    'MedDRA': 'MDR',
+    'NCIt': 'NCI',
 }
 
 # Standard vocabularies — their concepts are already standard, so they appear

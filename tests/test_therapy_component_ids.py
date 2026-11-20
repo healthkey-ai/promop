@@ -137,7 +137,7 @@ def test_episode_path_populates_per_line_and_aggregate_component_ids():
         'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
         'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
         'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
-        'field': ConceptFactory(concept_name='Episode event field'),
+        'field': ConceptFactory(concept_id=1147094, concept_name='drug_exposure.drug_exposure_id'),
     }
     comp_a = Concept.objects.get(concept_id=COMPONENT_A_ID)
     drug1 = DrugExposureFactory(
@@ -264,7 +264,7 @@ def test_episode_path_records_asserted_provenance_and_release_id():
         'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
         'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
         'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
-        'field': ConceptFactory(concept_name='Episode event field'),
+        'field': ConceptFactory(concept_id=1147094, concept_name='drug_exposure.drug_exposure_id'),
     }
     drug1 = DrugExposureFactory(
         person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),
@@ -300,7 +300,7 @@ def test_episode_without_source_concept_is_inferred(monkeypatch):
         'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
         'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
         'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
-        'field': ConceptFactory(concept_name='Episode event field'),
+        'field': ConceptFactory(concept_id=1147094, concept_name='drug_exposure.drug_exposure_id'),
     }
     drug = DrugExposureFactory(
         person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),
@@ -340,7 +340,7 @@ def test_episode_recovers_regimen_from_object_concept_when_name_unaliased(monkey
         'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
         'object': regimen1,      # the derived regimen lives in the object slot
         'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
-        'field': ConceptFactory(concept_name='Episode event field'),
+        'field': ConceptFactory(concept_id=1147094, concept_name='drug_exposure.drug_exposure_id'),
     }
     drug = DrugExposureFactory(
         person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),

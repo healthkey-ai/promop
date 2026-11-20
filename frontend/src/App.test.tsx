@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import App from "./App";
@@ -11,7 +11,7 @@ vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/components/Patient/PatientList", () => ({ default: () => <div>PROVIDER_LIST</div> }));
 vi.mock("@/components/Patient/PatientHome", () => ({ default: () => <div>PATIENT_HOME</div> }));
 vi.mock("@/components/Patient/PatientDetail", () => ({
-  default: (props: { user?: { id?: number } | null }) => (
+  PatientDetailRoute: (props: { user?: { id?: number } | null }) => (
     <div>{`PATIENT_DETAIL:${props.user?.id ?? "none"}`}</div>
   ),
 }));
@@ -25,9 +25,13 @@ vi.mock("@/components/Auth/Login", () => ({ Login: () => <div>LOGIN</div> }));
 vi.mock("@/components/Auth/AcceptInvite", () => ({ default: () => <div>ACCEPT_INVITE</div> }));
 vi.mock("@/components/Auth/AcceptPatientInvite", () => ({ default: () => <div>ACCEPT_PATIENT_INVITE</div> }));
 vi.mock("@/components/Auth/ResetPassword", () => ({ default: () => <div>RESET_PASSWORD</div> }));
+vi.mock("@/components/Auth/VerifyEmail", () => ({ default: () => <div>VERIFY_EMAIL</div> }));
+vi.mock("@/components/Auth/VerifyEmailBanner", () => ({ default: () => <div>VERIFY_BANNER</div> }));
 vi.mock("@/components/Auth/ChangePassword", () => ({ default: () => <div>CHANGE_PASSWORD</div> }));
 vi.mock("@/components/Auth/OrgLogin", () => ({ default: () => <div>ORG_LOGIN</div> }));
 vi.mock("@/components/Auth/OrgSignup", () => ({ default: () => <div>ORG_SIGNUP</div> }));
+vi.mock("@/components/MappingVotes/PublicVotePage", () => ({ default: () => <div>PUBLIC_VOTE</div> }));
+vi.mock("@/components/MappingVotes/ConfirmVotesPage", () => ({ default: () => <div>CONFIRM_VOTES</div> }));
 
 const baseAuth = { loading: false, refresh: vi.fn(), logout: vi.fn(), login: vi.fn() };
 
@@ -100,6 +104,63 @@ describe("App role-gated routing", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
     renderAt("/code-mappings");
     expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+  });
+
+  // Roles are additive (#2416). An analyst curates mappings and sees no
+  // patient data: its home is the Code Mapping page, and every patient page
+  // sends it back there. A doctor keeps the patient pages and reads every
+  // mapping page; the pages hide their write controls from it.
+  const grant = (role: string) => ({ org_slug: 'acme', org_name: 'Acme', role, expires_at: null });
+  const analyst = { id: 3, org_accesses: [grant('analyst')] };
+  const doctor = { id: 4, org_accesses: [grant('doctor')] };
+
+  it("allows an analyst on the code mapping page", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it.each(["/", "/patient/42"])("sends an analyst to code mapping from %s", (path) => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
+    renderAt(path);
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+    expect(screen.queryByText("PROVIDER_LIST")).not.toBeInTheDocument();
+  });
+
+  it("lets an analyst open field mappings", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
+    renderAt("/field-mappings");
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it("lets a doctor keep field mappings and the patient list", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: doctor });
+    renderAt("/field-mappings");
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+    cleanup();
+    renderAt("/");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+
+  it("lets a doctor without the analyst grant open code mapping", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: doctor });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it("sends a patient-only account home from code mapping", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 6, org_accesses: [grant('patient')] } });
+    renderAt("/code-mappings");
+    expect(screen.queryByText("CODE_MAPPINGS")).not.toBeInTheDocument();
+  });
+
+  it("lets a doctor who also holds the analyst grant map codes and see patients", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 5, org_accesses: [grant('doctor'), grant('analyst')] } });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+    cleanup();
+    renderAt("/");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
   });
 });
 
@@ -219,8 +280,36 @@ describe("App force-password-change gate (TI.1.1#09)", () => {
   });
 });
 
-describe('administrative upload routes', () => {
-  for (const [path, marker] of [['/upload-fhir', 'UPLOAD_FHIR'], ['/upload-csv', 'UPLOAD_CSV']]) {
+describe("unverified email banner", () => {
+  it("prompts a signed-in user whose address is not confirmed, without blocking the page", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, email_verified: false },
+    });
+    renderAt("/");
+    expect(screen.getByText("VERIFY_BANNER")).toBeInTheDocument();
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+
+  it.each([{ email_verified: true }, {}])("stays out of the way otherwise: %j", (flags) => {
+    // `{}` is a backend that predates the field: no banner rather than a false alarm.
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 1, is_patient: true, person_id: 5, ...flags },
+    });
+    renderAt("/");
+    expect(screen.queryByText("VERIFY_BANNER")).not.toBeInTheDocument();
+  });
+
+  it("serves the verification page to a logged-out visitor", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/verify-email");
+    expect(screen.getByText("VERIFY_EMAIL")).toBeInTheDocument();
+  });
+});
+
+describe('organization administration routes', () => {
+  for (const [path, marker] of [['/org-admin', 'ORG_ADMIN'], ['/upload-fhir', 'UPLOAD_FHIR'], ['/upload-csv', 'UPLOAD_CSV']]) {
     it.each([{ is_staff: true }, { is_org_admin: true }])(`allows admins at ${path}: %j`, role => {
       mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, ...role } });
       renderAt(path);
@@ -259,5 +348,50 @@ describe("retired OAuth callback", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
     renderAt("/auth/callback?code=old-code&state=old-state");
     expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+});
+
+describe("the public voting pages", () => {
+  // A stranger with a link: nothing may read the session, which would send
+  // them to the login page.
+  it.each([
+    ["/vote#some-share-token", "PUBLIC_VOTE"],
+    ["/vote/confirm#some-confirm-token", "CONFIRM_VOTES"],
+    ["/vote", "PUBLIC_VOTE"],
+    ["/vote/confirm", "CONFIRM_VOTES"],
+  ])("renders %s without asking who is signed in", (path, marker) => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, loading: true, currentUser: null });
+    renderAt(path);
+    expect(screen.getByText(marker)).toBeInTheDocument();
+    expect(mockUseAuth).not.toHaveBeenCalled();
+    expect(screen.queryByText("LOGIN")).not.toBeInTheDocument();
+  });
+
+  it("renders them the same for someone who is signed in, without the app around them", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true, email_verified: false } });
+    renderAt("/vote#some-share-token");
+    expect(screen.getByText("PUBLIC_VOTE")).toBeInTheDocument();
+    expect(screen.queryByText("VERIFY_BANNER")).not.toBeInTheDocument();
+    expect(mockUseAuth).not.toHaveBeenCalled();
+  });
+
+  // A token belongs in the fragment. One in the path is an old or mistyped
+  // link: it gets the neutral page, and is never read.
+  it.each(["/vote/some-share-token", "/vote/confirm/some-confirm-token", "/vote/a/b/c"])(
+    "shows a neutral page at %s instead of redirecting into the app", (path) => {
+      mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+      renderAt(path);
+      expect(screen.getByRole("heading", { name: "This link is not available" })).toBeInTheDocument();
+      expect(screen.queryByText("PUBLIC_VOTE")).not.toBeInTheDocument();
+      expect(screen.queryByText("CONFIRM_VOTES")).not.toBeInTheDocument();
+      expect(screen.queryByText("LOGIN")).not.toBeInTheDocument();
+      expect(mockUseAuth).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not capture paths that merely begin with the same letters", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });
+    renderAt("/voters");
+    expect(screen.getByText("LOGIN")).toBeInTheDocument();
   });
 });

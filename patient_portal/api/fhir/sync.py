@@ -33,6 +33,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.authorization import can_write_patient
+from omop_core.services.provisional import is_real_row
+from omop_core.services.provenance_attribution import classify, with_attribution, OWN
 from django.db.models import Q
 from django.db.models.functions import Upper
 
@@ -44,6 +46,7 @@ from omop_core.mapping.code_resolution import (
     resolve_source_code,
 )
 from omop_core.services.pk import next_pk_batch
+from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.permissions import (
     ScopedTokenPermission, get_request_org, is_service_token, is_machine_request,
@@ -56,16 +59,6 @@ logger = logging.getLogger(__name__)
 
 EHR_TYPE_CONCEPT_ID = 32817        # "EHR"
 NO_MATCHING_CONCEPT_ID = 0         # OMOP "No matching concept"
-
-# FHIR CodeableConcept system URI → OMOP vocabulary_id.
-_SYSTEM_VOCAB = {
-    'http://loinc.org': 'LOINC',
-    'http://snomed.info/sct': 'SNOMED',
-    'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
-    'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
-    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
-    'http://hl7.org/fhir/sid/cvx': 'CVX',
-}
 
 _FALLBACK_CONCEPTS = {
     NO_MATCHING_CONCEPT_ID: ('No matching concept', 'Metadata', 'Undefined'),
@@ -126,8 +119,51 @@ def _codings(codeable):
     return (codeable or {}).get('coding', []) or []
 
 
+def _coding_codes(codeable_or_list, limit=100):
+    """The codes of a CodeableConcept (or a list of them), comma-joined, or None."""
+    items = codeable_or_list if isinstance(codeable_or_list, list) else [codeable_or_list]
+    codes = []
+    for item in items:
+        for coding in _codings(item):
+            code = coding.get('code')
+            if isinstance(code, str) and code and code not in codes:
+                codes.append(code)
+    return ','.join(codes)[:limit] or None
+
+
+def _abatement_date(cond):
+    """A Condition's end: abatementDateTime, abatementPeriod.end or abatementDate."""
+    return (_parse_date(cond.get('abatementDateTime')) or _parse_date(cond.get('abatementDate'))
+            or _parse_date((cond.get('abatementPeriod') or {}).get('end')))
+
+
 def _source_text(codeable):
-    """Human-readable fallback for a CodeableConcept (text or first display/code)."""
+    """Human-readable text for a CodeableConcept: its text, else any coding's
+    display, else the first code.
+
+    A display on a later coding beats a bare first code: a medication coded
+    RxNorm-first with no display but an NDC coding that has one is named, not
+    stored as "2762" (#2168).
+    """
+    if not codeable:
+        return ''
+    if codeable.get('text'):
+        return codeable['text']
+    codings = _codings(codeable)
+    for coding in codings:
+        if coding.get('display'):
+            return coding['display']
+    for coding in codings:
+        if coding.get('code'):
+            return coding['code']
+    return ''
+
+
+def _legacy_source_text(codeable):
+    """What ``_source_text`` returned before #2168: the first coding's display
+    or code, even when a later coding had a display. Rows stored under it are
+    matched under it too, so a re-sync renames them instead of adding a named
+    copy beside each one."""
     if not codeable:
         return ''
     if codeable.get('text'):
@@ -138,6 +174,14 @@ def _source_text(codeable):
         if coding.get('code'):
             return coding['code']
     return ''
+
+
+def _with_legacy_source_value(row, codeable, length=50):
+    """Mark the source value a row would have had before #2168, when it differs."""
+    legacy = _legacy_source_text(codeable)[:length]
+    if legacy != _source_text(codeable)[:length]:
+        row._legacy_source_value = legacy
+    return row
 
 
 def _norm_num(value):
@@ -213,6 +257,39 @@ def _is_daily_rollup(obs):
         if ext.get('url') == AGGREGATION_EXT_URL and ext.get('valueCode') == 'daily':
             return True
     return False
+
+
+def _is_real_row(row, concept_field):
+    """A stored row holds an approved fact: no proposal score, a mapped concept.
+
+    The shared predicate (#2543) applied to the sync paths, so a proposal never
+    outlives the approved fact it duplicates (#2581).
+    """
+    return is_real_row(getattr(row, 'confidence', None), getattr(row, concept_field))
+
+
+def _preferred_keep(rows, concept_field, organization=None):
+    """Keep the first approved row; fall back to the first row if none is.
+
+    ``rows`` are ordered by pk. When the caller names a hospital, only its own
+    rows are candidates; otherwise the first row's hospital defines the group.
+    Another hospital's row is a separate fact, so it is neither chosen as the
+    survivor nor collapsed. A later real row of the same hospital is the
+    survivor when an earlier provisional one matches the same event.
+    """
+    if organization is not None:
+        own = [row for row in rows
+               if classify(row.attribution, organization.pk) == OWN]
+        group = own or [row for row in rows if row.attribution == rows[0].attribution]
+    else:
+        group = [row for row in rows if row.attribution == rows[0].attribution]
+    return next((row for row in group if _is_real_row(row, concept_field)), group[0])
+
+
+def _same_attribution_extras(rows, keep):
+    """Rows of the same hospital as *keep*; another hospital's row is a separate
+    fact, not a duplicate. Earlier rows are included when *keep* is a later one."""
+    return [row for row in rows if row != keep and row.attribution == keep.attribution]
 
 
 class FhirSyncRequestSerializer(serializers.Serializer):
@@ -297,6 +374,9 @@ class FhirSyncView(APIView):
         if isinstance(resolution, Response):
             return resolution
         person, org = resolution
+        # Resolution/enqueueing of hospital-local source codes needs the same
+        # organization that owns the clinical rows and their provenance.
+        self._mapping_organization = org
 
         ehr_type = _ensure_concept(EHR_TYPE_CONCEPT_ID)
         no_match = _ensure_concept(NO_MATCHING_CONCEPT_ID)
@@ -306,7 +386,7 @@ class FhirSyncView(APIView):
         skipped = defaultdict(int)
         observations, conditions, medications = [], [], []
         allergies, immunizations, procedures, diagnostic_reports = [], [], [], []
-        document_references = []
+        document_references, imaging_studies = [], []
         for entry in bundle.get('entry', []) or []:
             res = (entry or {}).get('resource', {}) or {}
             rtype = res.get('resourceType')
@@ -330,6 +410,8 @@ class FhirSyncView(APIView):
                 diagnostic_reports.append(res)
             elif rtype == 'DocumentReference':
                 document_references.append(res)
+            elif rtype == 'ImagingStudy':
+                imaging_studies.append(res)
             else:
                 self._count_skipped(skipped, rtype or 'Unknown',
                                     'unsupported_resource_type')
@@ -361,6 +443,8 @@ class FhirSyncView(APIView):
                 skipped),
             'document_ids': self._ingest_document_references(
                 person, document_references, source_user_id, org, skipped),
+            'imaging_study_ids': self._ingest_imaging(
+                person, bundle, diagnostic_reports, imaging_studies, source_user_id, org),
         }
         result['skipped'] = self._skipped_summary(skipped)
 
@@ -382,6 +466,10 @@ class FhirSyncView(APIView):
         # First-cut display reads the OMOP tables directly; PatientRecord
         # derivation is part of the deferred oncology enrichment (fhir_importers
         # #10) and should run out-of-band, not inside this request.
+        # Rows written for a code that has a proposal become provisional without
+        # waiting for a sweep (#2662); a no-op with the switch off.
+        from omop_core.services.provisional_sweep import queue_person_resolve
+        queue_person_resolve(person.person_id)
         return Response(result, status=status.HTTP_201_CREATED)
 
     # ------------------------------------------------------------------ #
@@ -417,7 +505,7 @@ class FhirSyncView(APIView):
                 if not code:
                     continue
                 all_codes.add(code)
-                vocab = _SYSTEM_VOCAB.get(coding.get('system', ''))
+                vocab = fhir_source_vocabulary(coding.get('system', ''))
                 if vocab:
                     by_vocab[vocab].add(code)
 
@@ -435,6 +523,12 @@ class FhirSyncView(APIView):
 
         cache: dict = {}
         for vocab, codes in by_vocab.items():
+            # Hospital-local identifiers are not globally meaningful concepts.
+            # Only an organization-scoped approved mapping may place one in
+            # this cache; otherwise _lookup must send it through the resolver
+            # so it reaches that hospital's review queue.
+            if hospital_vendor(vocab):
+                continue
             for c in Concept.objects.filter(vocabulary_id=vocab, concept_code__in=list(codes)):
                 cache[(vocab, c.concept_code)] = c
         if all_codes:
@@ -462,14 +556,33 @@ class FhirSyncView(APIView):
             ).filter(
                 status='approved', _code_upper__in=list(wanted),
             ).select_related('target_concept')
+            organization = getattr(self, '_mapping_organization', None)
+            if organization is None:
+                approved = approved.filter(organization__isnull=True)
+            else:
+                approved = approved.filter(
+                    Q(organization=organization) | Q(organization__isnull=True)
+                )
             # value.upper() -> the inbound spellings, so the loop below is
             # O(mappings) rather than O(mappings x distinct values).
             by_upper = defaultdict(list)
             for value in (all_codes | all_source_texts):
                 by_upper[value.upper()].append(value)
 
+            # Global rows load first, then an exact organization override can
+            # replace their cache entry. Shared hospital vendor namespaces do
+            # not admit a global fallback when organization context exists.
+            approved = sorted(
+                approved,
+                key=lambda mapping: mapping.organization_id is not None,
+            )
             for mapping in approved:
                 vocab = mapping.source_vocabulary_id or '*'
+                if hospital_vendor(vocab):
+                    if organization is not None and mapping.organization_id != organization.id:
+                        continue
+                    if organization is None and mapping.organization_id is not None:
+                        continue
                 # Keyed by the *inbound* spelling, since that is what _lookup
                 # has in hand, not by however the curator typed it. A mapping
                 # with no source code system is written under every vocabulary
@@ -499,16 +612,20 @@ class FhirSyncView(APIView):
         into `cache`, so a code repeated across a bundle costs one mint, not
         one per occurrence.
         """
+        has_hospital_code = False
         for coding in _codings(codeable):
             code = coding.get('code')
             if not code:
                 continue
-            vocab = _SYSTEM_VOCAB.get(coding.get('system', ''))
-            concept = (cache.get((vocab, code)) if vocab else None) or cache.get(('*', code))
+            vocab = fhir_source_vocabulary(coding.get('system', ''))
+            has_hospital_code = has_hospital_code or bool(hospital_vendor(vocab))
+            concept = cache.get((vocab, code)) if vocab else None
+            if concept is None and not hospital_vendor(vocab):
+                concept = cache.get(('*', code))
             if concept:
                 return concept
         text = _source_text(codeable)
-        if text and cache.get(('*', text)):
+        if text and not has_hospital_code and cache.get(('*', text)):
             return cache[('*', text)]
         if omop_table is None:
             return None
@@ -519,7 +636,7 @@ class FhirSyncView(APIView):
         for coding in _codings(codeable):
             if coding.get('code'):
                 source_code = coding['code']
-                source_vocab = _SYSTEM_VOCAB.get(coding.get('system', '')) or ''
+                source_vocab = fhir_source_vocabulary(coding.get('system', ''))
                 break
         if not source_code:
             return None
@@ -538,6 +655,7 @@ class FhirSyncView(APIView):
             source_text=text or source_code,
             omop_table=omop_table,
             source_system='fhir-sync',
+            organization=getattr(self, '_mapping_organization', None),
         )
         cache[mint_key] = concept
         if concept is not None:
@@ -561,6 +679,44 @@ class FhirSyncView(APIView):
                 person, rollups, ehr_type, cache, source_user_id, org, skipped)
         return ids
 
+    def _axis_variant_concept(self, codeable, unit, cache):
+        """The concept an approved LOINC axis variant gives this unit, or None.
+
+        One hospital code reported in mg/dL and mmol/L is two LOINC tests, so
+        the code alone does not settle the concept (see
+        omop_core/mapping/axis_variants). Cached per code and unit, like
+        _lookup's answers.
+        """
+        if not unit:
+            return None
+        from omop_core.mapping.axis_variants import variant_for
+        from omop_core.mapping.code_resolution import _mapping_scope
+        from omop_core.models import SourceCodeConceptMapping
+
+        # One query per sync while no code has variants, which is the usual
+        # deployment: a per-code probe would add a query for every lab code.
+        if ('axis-variant-any',) not in cache:
+            cache[('axis-variant-any',)] = SourceCodeConceptMapping.objects.filter(
+                axis_variant_count__gt=0).exists()
+        if not cache[('axis-variant-any',)]:
+            return None
+
+        organization = getattr(self, '_mapping_organization', None)
+        for coding in _codings(codeable):
+            code = coding.get('code')
+            if not code:
+                continue
+            vocab = fhir_source_vocabulary(coding.get('system', ''))
+            key = ('axis-variant', vocab, code, unit)
+            if key not in cache:
+                mapping = (_mapping_scope(vocab, code, organization)
+                           .filter(axis_variant_count__gt=0).first())
+                variant = variant_for(mapping, unit)
+                cache[key] = variant.target_concept if variant is not None else None
+            if cache[key] is not None:
+                return cache[key]
+        return None
+
     def _parse_obs(self, obs, cache):
         """Pull the fields one Observation maps onto a Measurement."""
         effective = obs.get('effectiveDateTime') or (obs.get('effectivePeriod') or {}).get('start')
@@ -568,12 +724,16 @@ class FhirSyncView(APIView):
         interpretation = _first_codeable(obs.get('interpretation'))
         interpretation_concept = self._lookup(interpretation, cache)
         qty = obs.get('valueQuantity') or {}
+        concept = self._axis_variant_concept(
+            obs.get('code'), qty.get('code') or qty.get('unit'), cache) or concept
         return {
             'date': _parse_date(effective),
             'dt': _parse_datetime(effective),
             'cid': concept.concept_id if concept else 0,
             'vcid': interpretation_concept.concept_id if interpretation_concept else None,
             'sv': _source_text(obs.get('code'))[:50],
+            # The value rows stored before #2168 carry; matched as the same result.
+            'legacy_sv': _legacy_source_text(obs.get('code'))[:50],
             'value': qty.get('value'),
             'unit': (qty.get('unit') or qty.get('code') or '')[:50],
             'vstr': (obs.get('valueString') or _source_text(obs.get('valueCodeableConcept')) or '')[:60],
@@ -610,7 +770,8 @@ class FhirSyncView(APIView):
                 keys.append(('cid', date_value, datetime_value, concept_id, _norm_num(value)))
             return keys
         seen = set()
-        for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
+        for d, dt, cid, sv, v in Measurement.objects.filter(person=person,
+                measurement_event_id__isnull=True, meas_event_field_concept_id__isnull=True).values_list(
                 'measurement_date', 'measurement_datetime', 'measurement_concept_id',
                 'measurement_source_value', 'value_as_number'):
             seen.update(identities(d, dt, cid, sv, v))
@@ -621,7 +782,9 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Observation', 'missing_effective_date')
                 continue
             keys = identities(o['date'], o['dt'], o['cid'], o['sv'], o['value'])
-            if any(key in seen for key in keys):
+            legacy_keys = (identities(o['date'], o['dt'], o['cid'], o['legacy_sv'], o['value'])
+                           if o['legacy_sv'] != o['sv'] else [])
+            if any(key in seen for key in keys + legacy_keys):
                 continue
             seen.update(keys)
             rows.append(Measurement(
@@ -640,6 +803,21 @@ class FhirSyncView(APIView):
                 range_high=o['range_high'],
             ))
         return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
+
+    def _may_promote_confidence(self, incoming=None):
+        """Whether this caller may clear a provisional row's confidence (#2434).
+
+        The shared authorization rule, not the endpoint: a patient presenting a
+        delegated OAuth token may reach the EHR sync view and still may not
+        approve a proposed mapping. Patient self-service never promotes, and an
+        incoming proposal does not promote the row it matches.
+        """
+        if self.self_service_only:
+            return False
+        if incoming is not None and getattr(incoming, 'confidence', None) is not None:
+            return False
+        from patient_portal.api.serializers import may_write_confidence
+        return may_write_confidence(getattr(self, 'request', None))
 
     def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         """Replace any prior row for (person, concept, date) with the new daily
@@ -667,13 +845,18 @@ class FhirSyncView(APIView):
                 # curator moved its concept; concept finds it when the producer
                 # changed its display text. Matching only one way loses a row
                 # to a duplicate in the other case.
-                match = Q(measurement_source_value=sv_key)
+                match = Q(measurement_source_value__in={sv_key, o['legacy_sv']})
                 if cid:
                     match |= Q(measurement_concept_id=cid)
                 existing_qs = Measurement.objects.filter(
                     match, person=person, measurement_date=obs_date,
+                    measurement_event_id__isnull=True, meas_event_field_concept_id__isnull=True,
+                    is_erroneous=False,
                 )
-                existing = list(existing_qs.order_by('measurement_id'))
+                existing = list(with_attribution(existing_qs).order_by('measurement_id'))
+                if org is not None:
+                    existing = [row for row in existing
+                                if classify(row.attribution, org.pk) == OWN]
                 if not existing:
                     # Nothing stored yet, but a row for this same concept and
                     # day may already be staged from an earlier entry in this
@@ -700,7 +883,8 @@ class FhirSyncView(APIView):
                     ))
                     continue
 
-                keep, extras = existing[0], existing[1:]
+                keep = _preferred_keep(existing, 'measurement_concept_id', org)
+                extras = _same_attribution_extras(existing, keep)
                 if extras:  # collapse historical stacked rows for this concept/day
                     extra_ids = [m.measurement_id for m in extras]
                     ProvenanceRecord.objects.filter(
@@ -713,6 +897,12 @@ class FhirSyncView(APIView):
                 # -- and writing 0 over a good concept would lose curation that
                 # already happened.
                 next_cid = cid or keep.measurement_concept_id
+                # Only a resolved incoming concept from a non-patient sync
+                # confirms the proposal; an unresolved code must not turn it
+                # into an approved fact, and patient self-service may not clear
+                # confidence (#2434, #2581).
+                promoted = (keep.confidence is not None and cid != 0
+                            and self._may_promote_confidence())
                 changed = (
                     keep.measurement_concept_id != next_cid
                     or _norm_num(keep.value_as_number) != _norm_num(o['value'])
@@ -724,9 +914,13 @@ class FhirSyncView(APIView):
                     or keep.range_low != o['range_low']
                     or keep.range_high != o['range_high']
                 )
-                if changed:
+                if changed or promoted:
                     # Concept updated in place, so approving a mapping upgrades
                     # the stored row instead of stranding a duplicate beside it.
+                    # The sync is a real EHR write: a proposal it rewrites is no
+                    # longer a proposal (#2581).
+                    if promoted:
+                        keep.confidence = None
                     keep.measurement_concept_id = next_cid
                     keep.value_as_number = o['value']
                     keep.measurement_datetime = o['dt']
@@ -737,12 +931,19 @@ class FhirSyncView(APIView):
                     keep.range_low = o['range_low']
                     keep.range_high = o['range_high']
                     keep._skip_patient_record_refresh = True
-                    keep.save(update_fields=['measurement_concept_id',
-                                             'value_as_number', 'measurement_datetime',
-                                             'value_as_string', 'value_as_concept',
-                                             'unit_source_value', 'value_source_value',
-                                             'range_low', 'range_high'])
-                if changed or extras:
+                    fields = ['measurement_concept_id',
+                              'value_as_number', 'measurement_datetime',
+                              'value_as_string', 'value_as_concept',
+                              'unit_source_value', 'value_source_value',
+                              'range_low', 'range_high']
+                    if promoted:
+                        fields.append('confidence')
+                    keep.save(update_fields=fields)
+                if promoted:
+                    from omop_core.models import PatientRecord
+                    PatientRecord.objects.filter(person=person).update(
+                        derivation_version=0)
+                if changed or promoted or extras:
                     touched.append(keep.measurement_id)
             inserted = self._bulk_insert(
                 Measurement, 'measurement_id', new_rows, source_user_id, person, org)
@@ -757,16 +958,22 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Condition', 'missing_onset_date')
                 continue
             concept = self._lookup(cond.get('code'), cache, 'condition')
-            rows.append(ConditionOccurrence(
+            rows.append(_with_legacy_source_value(ConditionOccurrence(
                 person=person,
                 condition_concept=concept or no_match,
                 condition_start_date=start,
+                condition_end_date=_abatement_date(cond),
                 condition_type_concept=ehr_type,
                 condition_source_value=_source_text(cond.get('code'))[:50],
-            ))
+                condition_category=_coding_codes(cond.get('category'), 100),
+                condition_verification_status=_coding_codes(cond.get('verificationStatus'), 40),
+                condition_clinical_status=_coding_codes(cond.get('clinicalStatus'), 40),
+            ), cond.get('code')))
         return self._upsert_clinical(
             ConditionOccurrence, 'condition_occurrence_id', 'condition_concept_id',
-            'condition_start_date', 'condition_source_value', person, rows, source_user_id, org)
+            'condition_start_date', 'condition_source_value', person, rows, source_user_id, org,
+            refresh_fields=('condition_end_date', 'condition_category',
+                            'condition_verification_status', 'condition_clinical_status'))
 
     def _ingest_medications(self, person, medications, ehr_type, no_match, cache, source_user_id, org, skipped):
         rows = []
@@ -784,14 +991,14 @@ class FhirSyncView(APIView):
                 continue
             codeable = med.get('medicationCodeableConcept')
             concept = self._lookup(codeable, cache, 'drug_exposure')
-            rows.append(DrugExposure(
+            rows.append(_with_legacy_source_value(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
                 drug_exposure_start_date=start,
                 drug_exposure_end_date=_parse_date((med.get('effectivePeriod') or {}).get('end')),
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(codeable)[:50],
-            ))
+            ), codeable))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
             'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
@@ -805,14 +1012,14 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Procedure', 'missing_performed_date')
                 continue
             concept = self._lookup(proc.get('code'), cache, 'procedure')
-            rows.append(ProcedureOccurrence(
+            rows.append(_with_legacy_source_value(ProcedureOccurrence(
                 person=person,
                 procedure_concept=concept or no_match,
                 procedure_date=date,
                 procedure_datetime=_parse_datetime(proc.get('performedDateTime')),
                 procedure_type_concept=ehr_type,
                 procedure_source_value=_source_text(proc.get('code'))[:50],
-            ))
+            ), proc.get('code')))
         return self._upsert_clinical(
             ProcedureOccurrence, 'procedure_occurrence_id', 'procedure_concept_id',
             'procedure_date', 'procedure_source_value', person, rows, source_user_id, org)
@@ -826,14 +1033,14 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Immunization', 'missing_occurrence_date')
                 continue
             concept = self._lookup(imm.get('vaccineCode'), cache, 'drug_exposure')
-            rows.append(DrugExposure(
+            rows.append(_with_legacy_source_value(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
                 drug_exposure_start_date=date,
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(imm.get('vaccineCode'))[:50],
                 route_source_value='VACCINE',
-            ))
+            ), imm.get('vaccineCode')))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
             'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
@@ -867,7 +1074,7 @@ class FhirSyncView(APIView):
                                     'missing_effective_date')
                 continue
             concept = self._lookup(item['code'], cache, 'observation')
-            rows.append(Observation(
+            rows.append(_with_legacy_source_value(Observation(
                 person=person,
                 observation_concept=concept or no_match,
                 observation_date=date,
@@ -877,10 +1084,24 @@ class FhirSyncView(APIView):
                 observation_source_value=_source_text(item['code'])[:50],
                 qualifier_source_value=item.get('qualifier'),
                 value_source_value=item.get('value_source'),
-            ))
+            ), item['code']))
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',
             'observation_date', 'observation_source_value', person, rows, source_user_id, org)
+
+    def _ingest_imaging(self, person, bundle, reports, studies, source_user_id, org):
+        """Radiology reports and ImagingStudy resources as structured studies (#1731)."""
+        from omop_core.services.imaging import import_imaging, index_resources
+
+        def record(row):
+            ProvenanceRecord.objects.update_or_create(
+                content_type=ContentType.objects.get_for_model(row), object_id=row.pk,
+                source=self.provenance_source, source_user_id=source_user_id or '',
+                defaults={'target_patient_id': str(person.person_id), 'organization': org},
+            )
+
+        return import_imaging(person, reports, studies, index_resources(bundle.get('entry') or []),
+                              record_provenance=record)
 
     def _document_doc_type(self, doc):
         doc_type = doc.get('type') if isinstance(doc.get('type'), dict) else None
@@ -983,39 +1204,97 @@ class FhirSyncView(APIView):
         return ids
 
     def _upsert_clinical(self, model, pk_field, cid_field, date_field, sv_field,
-                         person, rows, source_user_id, org):
+                         person, rows, source_user_id, org, refresh_fields=()):
         """Idempotent upsert for clinical rows, keyed by (source_value, date) —
         the stable identity of a clinical event, independent of how its code
         resolves. If a row already exists for that key, its concept is updated in
         place when it changed (so a vocabulary load upgrading 'No matching
         concept' to a real concept doesn't strand a duplicate) and any stacked
-        duplicates are collapsed onto the earliest row; otherwise the row is
-        inserted. `rows` is a list of unsaved model instances (person already
-        set). Returns touched + inserted pk ids."""
+        duplicates are collapsed onto the first approved row (null confidence and
+        a mapped concept), or onto the earliest when none is; a provisional row
+        it rewrites is promoted, because the sync is a real EHR write (#2581).
+        Otherwise the row is inserted. `rows` is a list of unsaved model
+        instances (person already set). `refresh_fields` are further columns a
+        re-sync fills on a matched row, but only with a value the source gave
+        (never blanking a stored one). Returns touched + inserted pk ids."""
         if not rows:
             return []
-        desired = {(getattr(r, sv_field), getattr(r, date_field)): r for r in rows}  # last wins
+        from omop_core.services.cancer_details import EVENT_FIELDS
+        event_fields = EVENT_FIELDS.get(model, ())
+        desired = {(getattr(r, sv_field), getattr(r, date_field)) + tuple(getattr(r, field) for field in event_fields): r
+                   for r in rows}  # last wins within the same diagnosis
         ct = ContentType.objects.get_for_model(model)
         touched, new_rows = [], []
         with suppress_patient_record_refresh():
-            for (sv, date), inst in desired.items():
-                existing = list(model.objects.filter(**{
-                    'person': person, sv_field: sv, date_field: date}).order_by(pk_field))
+            for key, inst in desired.items():
+                sv, date = key[:2]
+                scope = dict(zip(event_fields, key[2:]))
+                def own(rows):
+                    # A named hospital never rewrites another hospital's row; a
+                    # foreign-only match is a separate fact and inserts here.
+                    if org is None:
+                        return rows
+                    return [row for row in rows
+                            if classify(row.attribution, org.pk) == OWN]
+
+                existing = own(list(with_attribution(model.objects.filter(**{
+                    'person': person, sv_field: sv, date_field: date, **scope,
+                    'is_erroneous': False})).order_by(pk_field)))
+                legacy = getattr(inst, '_legacy_source_value', None)
+                renamed = False
+                if not existing and legacy:
+                    # Stored before #2168 under the bare code: the same event.
+                    # Attribution is filtered before this decision, so a foreign
+                    # row under the current spelling cannot hide our own legacy
+                    # row and force a duplicate.
+                    existing = own(list(with_attribution(model.objects.filter(**{
+                        'person': person, sv_field: legacy, date_field: date, **scope,
+                        'is_erroneous': False})).order_by(pk_field)))
+                    renamed = bool(existing)
                 if not existing:
                     new_rows.append(inst)
                     continue
-                keep, extras = existing[0], existing[1:]
+                keep = _preferred_keep(existing, cid_field, org)
+                extras = _same_attribution_extras(existing, keep)
                 if extras:  # collapse historical stacked rows for this event
                     extra_ids = [getattr(m, pk_field) for m in extras]
                     ProvenanceRecord.objects.filter(
                         content_type=ct, object_id__in=extra_ids).delete()
                     model.objects.filter(**{f'{pk_field}__in': extra_ids}).delete()
-                if getattr(keep, cid_field) != getattr(inst, cid_field):
-                    setattr(keep, cid_field, getattr(inst, cid_field))
+                changed = []
+                if renamed:
+                    setattr(keep, sv_field, sv)
+                    changed.append(sv_field)
+                incoming_cid = getattr(inst, cid_field, None)
+                # Never trade a resolved concept for "no matching concept": an
+                # unresolved re-sync must not demote a curated or approved row
+                # (the rollup already works this way).
+                next_cid = incoming_cid or getattr(keep, cid_field)
+                if getattr(keep, cid_field) != next_cid:
+                    setattr(keep, cid_field, next_cid)
+                    changed.append(cid_field)
+                for field in refresh_fields:
+                    value = getattr(inst, field)
+                    if value is not None and getattr(keep, field) != value:
+                        setattr(keep, field, value)
+                        changed.append(field)
+                if (getattr(keep, 'confidence', None) is not None
+                        and incoming_cid not in (None, 0)
+                        and self._may_promote_confidence(inst)):
+                    # The sync resolved a concept, so the row it rewrites is a
+                    # real fact, not a proposal (#2581). An unresolved code or
+                    # a patient self-service write keeps it provisional.
+                    keep.confidence = None
+                    changed.append('confidence')
+                promoted = 'confidence' in changed
+                if changed:
                     keep._skip_patient_record_refresh = True
-                    keep.save(update_fields=[cid_field])
-                    touched.append(getattr(keep, pk_field))
-                elif extras:
+                    keep.save(update_fields=changed)
+                if promoted:
+                    from omop_core.models import PatientRecord
+                    PatientRecord.objects.filter(person=person).update(
+                        derivation_version=0)
+                if changed or extras:
                     touched.append(getattr(keep, pk_field))
             inserted = self._bulk_insert(model, pk_field, new_rows, source_user_id, person, org)
         return touched + inserted

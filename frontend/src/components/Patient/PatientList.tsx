@@ -1,13 +1,16 @@
 import PageTitle from '@/components/Branding/PageTitle';
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
+import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
+import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
-import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
+import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
+import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
+import { blobErrorMessage, filenameFromDisposition, saveBlob } from '@/utils/download';
 
 interface Patient {
   person_id: number;
@@ -17,11 +20,10 @@ interface Patient {
   organization_slug?: string | null;
   disease: string;
   stage: string;
-  genomics_summary?: string;
+  unmapped_source_code_count?: number;
   therapy_lines_count?: number | null;
   updated_at: string;
   treatment_summary?: { name: string; line: number; start_date: string | null; end_date: string | null } | null;
-  disease_status?: string | null;
   subtype_biomarkers?: string;
   ecog_performance_status?: number | null;
   ecog_assessment_date?: string | null;
@@ -37,6 +39,8 @@ const ALL_FILTER_VALUE = "all";
 interface FilterOptions {
   orgs: Array<{ value: string; label: string }>;
   diseases: string[];
+  disease_categories?: Array<{ value: string; label: string }>;
+  diseases_by_category?: Record<string, string[]>;
   stages: string[];
   clinical_statuses?: string[];
 }
@@ -78,12 +82,18 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const navigate = useNavigate();
   const preferenceKey = `promop-patient-list:${currentUser?.id ?? 'session'}`;
   const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
-  const view = preferences.view;
-  const savedView = preferences.views[view];
-  const reviewFilters = savedView?.filters ?? REVIEW_FILTER_DEFAULTS;
-  const ordering = savedView?.ordering ?? '-updated';
-  const extraColumns: readonly string[] = VIEW_COLUMNS[view];
-  const show = (column: string) => extraColumns.includes(column);
+  const reviewFilters = preferences.filters;
+  // A reader who cannot open a patient -- an analyst browsing a public demo
+  // org's sample patients (#1392, #2416) -- gets the rows de-identified by
+  // the server and no way into the detail page, which would be 404 (#2460):
+  // no Name column, no row link, no name or age sort. Upload and the mapping
+  // hub are that same curator's; a demo-org analyst gets Code Mapping.
+  const canOpen = canOpenPatients(currentUser);
+  const canCurate = canOpen;
+  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
+  // A saved name or age sort means nothing to a reader whose names and ages
+  // the server withholds, and no heading would show it: back to the default.
+  const ordering = !canOpen && /^-?(name|age)$/.test(preferences.ordering) ? DEFAULT_ORDERING : preferences.ordering;
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Storage may be disabled. */ }
   }, [preferenceKey, preferences]);
@@ -95,13 +105,47 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     diseases: [],
     stages: ["I", "II", "III", "IV"],
   });
+  // Columns follow the roles (#2470): the outreach columns are an org
+  // admin's, and Organization appears once the list spans several real
+  // organizations (the Unassigned entry is not one).
+  //
+  // Depend on the boolean, not on filterOptions.orgs: every response stores a
+  // new filter_options object, so the array is a new reference each time, and a
+  // dependency on it rebuilt the columns, the active filters and fetchPatients
+  // on every response -- an endless refetch that kept the spinner on.
+  const multiOrg = filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1;
+  const extraColumns = useMemo(
+    () => columnsFor({ outreach: canAdministerOrganizations, multiOrg }),
+    [canAdministerOrganizations, multiOrg],
+  );
+  const show = (column: ExtraColumn) => extraColumns.includes(column);
+  // A filter whose control the reader does not see is not applied: a record
+  // saved under the old Foundation preset could otherwise narrow a doctor's
+  // list by a contact or location filter nothing on screen shows.
+  //
+  // Depend on the two booleans, not on extraColumns: a new column set that
+  // leaves these unchanged must not rebuild fetchPatients and refetch the list.
+  const showContact = extraColumns.includes('contact');
+  const showLocation = extraColumns.includes('location');
+  const activeFilters: ReviewFilters = useMemo(() => ({
+    ...reviewFilters,
+    ...(showContact ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
+    ...(showLocation ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
+  }), [reviewFilters, showContact, showLocation]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
+  const [resolveRun, setResolveRun] = useState<ResolveRunStatus | null>(null);
+  const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
+  const [search, setSearch] = useState("");
+  const [diseaseCategoryFilter, setDiseaseCategoryFilter] = useState(ALL_FILTER_VALUE);
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
@@ -115,10 +159,12 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           page,
           page_size: pageSize,
           org: orgFilter,
+          search,
+          disease_category: diseaseCategoryFilter,
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
-          ...reviewFilters,
+          ...activeFilters,
           ordering,
         },
       });
@@ -137,7 +183,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, activeFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -152,15 +198,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
 
   const changeReviewFilter = (name: keyof ReviewFilters, value: string) => {
     resetToFirstPage();
-    setPreferences((previous) => ({ ...previous, views: { ...previous.views,
-      [view]: { filters: { ...reviewFilters, [name]: value }, ordering },
-    } }));
+    setPreferences((previous) => ({ ...previous, filters: { ...previous.filters, [name]: value } }));
   };
   const changeOrdering = (value: string) => {
     resetToFirstPage();
-    setPreferences((previous) => ({ ...previous, views: { ...previous.views,
-      [view]: { filters: reviewFilters, ordering: value },
-    } }));
+    setPreferences((previous) => ({ ...previous, ordering: value }));
   };
 
   const stageOptions = useMemo(
@@ -194,7 +236,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -211,6 +253,63 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setError(getErrorMessage(err, "Failed to delete patients"));
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleResolveConfirm = async () => {
+    if (!selectAllMode && selectedIds.size === 0) return;
+    try {
+      const body = selectAllMode
+        ? { select_all: true }
+        : { person_ids: Array.from(selectedIds) };
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters }
+        : undefined;
+      const res = await api.post<{ run_id: string; total: number }>(
+        "/v1/patient-records/bulk-resolve-source-codes/",
+        body,
+        { params }
+      );
+      const runId = res.data.run_id;
+      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, created: 0, provisional: 0, reverted: 0, skipped: 0, already_resolved: 0, errors: 0, code_details: [] });
+
+      resolvePollRef.current = setInterval(async () => {
+        try {
+          const status = await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`);
+          setResolveRun(status.data);
+          if (status.data.state === "completed" || status.data.state === "failed") {
+            if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+            resolvePollRef.current = null;
+          }
+        } catch {
+          if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+          resolvePollRef.current = null;
+        }
+      }, 2000);
+    } catch (err) {
+      setError(getErrorMessage(err, "Failed to start bulk resolve"));
+      setResolveDialogOpen(false);
+    }
+  };
+
+  const handleDownloadCsv = async () => {
+    try {
+      setDownloading(true);
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters, ordering }
+        : { person_ids: Array.from(selectedIds).join(",") };
+      const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
+      saveBlob(response.data, filenameFromDisposition(response.headers?.["content-disposition"], "patients.csv"));
+      setError(null);
+    } catch (err) {
+      // With responseType "blob" the error body arrives as a Blob too.
+      const fallback = "Failed to download patients";
+      const data = (err as { response?: { data?: unknown } })?.response?.data;
+      setError(data instanceof Blob
+        ? (await blobErrorMessage(err)) ?? fallback
+        : getErrorMessage(err, fallback));
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -237,7 +336,37 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const plainHeader = (key: string, label: string) => (
+    <th key={key} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{label}</th>
+  );
+  // The column headings are the sort: a first click takes the column's
+  // natural direction (newest, most, A to Z), a second reverses it.
+  const sortHeader = (key: string, label: string, descendingFirst: boolean, className = '') => {
+    const active = ordering.replace(/^-/, '') === key;
+    const descending = ordering.startsWith('-');
+    const next = active ? (descending ? key : `-${key}`) : (descendingFirst ? `-${key}` : key);
+    return (
+      <th key={key} aria-sort={active ? (descending ? 'descending' : 'ascending') : 'none'}
+          className={`whitespace-nowrap px-4 py-3 font-medium text-muted-foreground ${className}`}>
+        <button type="button" onClick={() => changeOrdering(next)} className="hover:text-foreground">
+          {label}{active ? (descending ? ' ↓' : ' ↑') : ''}
+        </button>
+      </th>
+    );
+  };
+  const extraHeader = (column: ExtraColumn) => {
+    switch (column) {
+      case 'treatment': return plainHeader('treatment', 'Latest Recorded Line');
+      case 'ecog': return sortHeader('ecog', 'ECOG', false);
+      case 'gaps': return sortHeader('gaps', 'Key Data Gaps', true);
+      case 'freshness': return sortHeader('freshness', 'Latest Clinical Result', true);
+      case 'location': return plainHeader('location', 'Location');
+      case 'contact': return plainHeader('contact', 'Contact Info');
+      case 'organization': return sortHeader('organization', 'Organization', false);
+    }
+  };
+  const openPatient = (personId: number) =>
+    canOpen ? () => navigate(`/patient/${personId}`) : undefined;
 
   const handleLogout = () => {
     void logout();
@@ -249,34 +378,61 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <PageTitle className="text-2xl font-bold text-foreground">Patients</PageTitle>
         <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
-            <button
-              onClick={() => setDeleteDialogOpen(true)}
-              className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-            >
-              <Trash2 size={16} />
-              Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
-            </button>
-          )}
-          {canManageMappings && (
             <>
               <button
-                onClick={() => navigate("/mappings")}
-                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                onClick={() => setDeleteDialogOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
               >
-                <Globe size={16} />
-                Mappings
+                <Trash2 size={16} />
+                Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
               </button>
+              {canAdministerOrganizations && (
+                <button
+                  onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
+                  className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+                >
+                  <RefreshCw size={16} />
+                  Generate OMOP ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
+                </button>
+              )}
               <button
-                onClick={() => navigate("/upload")}
-                className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+                onClick={() => void handleDownloadCsv()}
+                disabled={downloading}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
-                <Upload size={16} />
-                Upload
+                <Download size={16} />
+                {downloading ? "Downloading…" : `Download CSV (${selectAllMode ? `All ${patientCount}` : selectedIds.size})`}
               </button>
             </>
           )}
+          {canCurate ? (
+            <button
+              onClick={() => navigate("/mappings")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <Globe size={16} />
+              Mappings
+            </button>
+          ) : canViewMappings(currentUser) && (
+            <button
+              onClick={() => navigate("/code-mappings")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <Globe size={16} />
+              Code Mapping
+            </button>
+          )}
+          {canCurate && (
+            <button
+              onClick={() => navigate("/upload")}
+              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+            >
+              <Upload size={16} />
+              Upload
+            </button>
+          )}
           <div className="ml-auto flex gap-2">
-            {canManageMappings && (
+            {canAdministerOrganizations && (
               <button
                 onClick={() => navigate("/org-admin")}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
@@ -310,31 +466,24 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         </div>
       )}
 
-      <div className="mb-4 flex flex-wrap items-end gap-4">
-        <label className="text-sm font-medium">Audience view
-          <select aria-label="Audience view" value={view} onChange={(event) => {
-            resetToFirstPage();
-            setPreferences((previous) => ({ ...previous, view: event.target.value as PatientView }));
-          }} className="ml-2 rounded-md border border-input bg-background p-2">
-            <option value="doctor">Doctor</option><option value="foundation">Foundation</option><option value="analyst">Analyst</option>
-          </select>
-        </label>
-        <label className="text-sm font-medium">Sort by
-          <select aria-label="Sort by" value={ordering} onChange={(event) => changeOrdering(event.target.value)} className="ml-2 rounded-md border border-input bg-background p-2">
-            <option value="-updated">Last updated</option><option value="-freshness">Newest clinical result</option>
-            <option value="freshness">Oldest clinical result</option><option value="-gaps">Most key data gaps</option>
-            <option value="gaps">Fewest key data gaps</option><option value="ecog">ECOG: low to high</option>
-            <option value="-ecog">ECOG: high to low</option><option value="-lines">Most therapy lines</option>
-            <option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option>
-            <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
-            <option value="organization">Organization</option>
-          </select>
-        </label>
-        <span className="text-xs text-muted-foreground">View and clinical filters are saved in this browser.</span>
-      </div>
+      <p className="mb-4 text-xs text-muted-foreground">Click a column heading to sort. Sort and clinical filters are saved in this browser.</p>
 
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+            {canOpen ? 'Name or email' : 'Patient ID'}
+            <input
+              type="search"
+              defaultValue={search}
+              placeholder={canOpen ? 'Search, then press Enter' : 'Search by ID, then press Enter'}
+              onBlur={(event) => {
+                const value = event.target.value.trim();
+                if (value !== search) { resetToFirstPage(); setSearch(value); }
+              }}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+            />
+          </label>
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
             Org
             <select
@@ -345,10 +494,30 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               }}
               className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
             >
-              <option value={ALL_FILTER_VALUE}>All</option>
+              <option value={ALL_FILTER_VALUE}>{currentUser?.is_staff ? 'All (including unassigned)' : 'All accessible'}</option>
               {filterOptions.orgs.map((org) => (
                 <option key={org.value} value={org.value}>
                   {org.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+            Disease Category
+            <select
+              value={diseaseCategoryFilter}
+              onChange={(e) => {
+                resetToFirstPage();
+                setDiseaseCategoryFilter(e.target.value);
+                setDiseaseFilter(ALL_FILTER_VALUE);
+              }}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+            >
+              <option value={ALL_FILTER_VALUE}>All</option>
+              {(filterOptions.disease_categories ?? []).map((cat) => (
+                <option key={cat.value} value={cat.value}>
+                  {cat.label}
                 </option>
               ))}
             </select>
@@ -362,14 +531,16 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 resetToFirstPage();
                 setDiseaseFilter(e.target.value);
               }}
-              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+              disabled={diseaseCategoryFilter === ALL_FILTER_VALUE}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground disabled:opacity-50"
             >
               <option value={ALL_FILTER_VALUE}>All</option>
-              {filterOptions.diseases.map((disease) => (
-                <option key={disease} value={disease}>
-                  {disease}
-                </option>
-              ))}
+              {diseaseCategoryFilter !== ALL_FILTER_VALUE &&
+                (filterOptions.diseases_by_category?.[diseaseCategoryFilter] ?? []).map((disease) => (
+                  <option key={disease} value={disease}>
+                    {disease}
+                  </option>
+                ))}
             </select>
           </label>
 
@@ -420,7 +591,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             ['ecog', 'ECOG', [['all', 'All'], ...['0', '1', '2', '3', '4', '5'].map((value) => [value, value]), ['unknown', 'Not recorded']]],
             ['data_gap', 'Key data gaps', [['all', 'All'], ['any', 'Any key gap'], ['none', 'No key gaps'], ['stage', 'Missing stage'], ['ecog', 'Missing ECOG'], ['genomics', 'Missing genomics']]],
             ['freshness', 'Latest clinical result', [['all', 'All'], ['30d', 'Within 30 days'], ['90d', 'Within 90 days'], ['older', 'Older than 90 days'], ['unknown', 'Not recorded']]],
-            ['contact', 'Contact information', [['all', 'All'], ['available', 'Recorded'], ['missing', 'Not recorded']]],
+            ...(show('contact') ? [['contact', 'Contact information', [['all', 'All'], ['available', 'Recorded'], ['missing', 'Not recorded']]]] : []),
           ] as [keyof ReviewFilters, string, string[][]][]).map(([name, label, options]) => (
             <label key={name} className="flex flex-col gap-1 text-sm">{label}
               <select value={reviewFilters[name]} onChange={(event) => changeReviewFilter(name, event.target.value)} className="rounded-md border border-input bg-background p-2">
@@ -428,9 +599,10 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </select>
             </label>
           ))}
-          {([['treatment', 'Treatment history'], ['biomarker', 'Subtype / biomarker'], ['location', 'City / region / country']] as [keyof ReviewFilters, string][]).map(([name, label]) => (
+          {([['treatment', 'Treatment history'], ['biomarker', 'Subtype / biomarker'],
+             ...(show('location') ? [['location', 'City / region / country']] : [])] as [keyof ReviewFilters, string][]).map(([name, label]) => (
             <label key={name} className="flex flex-col gap-1 text-sm">{label}
-              <input type="search" defaultValue={reviewFilters[name]} key={`${view}-${name}-${reviewFilters[name]}`} placeholder="Search, then press Enter" onBlur={(event) => {
+              <input type="search" defaultValue={reviewFilters[name]} key={`${name}-${reviewFilters[name]}`} placeholder="Search, then press Enter" onBlur={(event) => {
                 if (event.target.value !== reviewFilters[name]) changeReviewFilter(name, event.target.value);
               }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="rounded-md border border-input bg-background p-2" />
             </label>
@@ -439,7 +611,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <p className="mt-3 text-xs text-muted-foreground">Key gaps track stage, ECOG, and genomic data. A recorded negative result counts as data. Clinical freshness uses result dates, not record update times.</p>
         <button type="button" className="mt-2 text-sm underline" onClick={() => {
           resetToFirstPage();
-          setPreferences((previous) => ({ ...previous, views: { ...previous.views, [view]: { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: '-updated' } } }));
+          setPreferences((previous) => ({ ...previous, filters: { ...REVIEW_FILTER_DEFAULTS } }));
         }}>Clear clinical filters</button>
       </details>
 
@@ -453,6 +625,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         </div>
       )}
 
+      {!canOpen && (
+        <p role="status" className="mb-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+          Read-only sample list: patient names and other demographics are withheld, and records cannot be opened.
+        </p>
+      )}
       <div className="overflow-x-auto rounded-lg border border-border bg-background shadow-sm">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-border bg-muted/50">
@@ -466,31 +643,29 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 />
               </th>
               <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
-              <th className="w-36 px-4 py-3 font-medium text-muted-foreground">Name</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Genomics</th>
-              <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
-              {extraColumns.map((column) => <th key={column} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{{
-                treatment: 'Latest Recorded Line', status: 'Disease Status', ecog: 'ECOG', gaps: 'Key Data Gaps',
-                freshness: 'Latest Clinical Result', location: 'Location', contact: 'Contact Info', organization: 'Organization',
-              }[column]}</th>)}
-              <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
+              {canOpen && sortHeader('name', 'Name', false, 'w-36')}
+              {canOpen ? sortHeader('age', 'Age', true) : plainHeader('age', 'Age')}
+              {sortHeader('disease', 'Disease', false)}
+              {sortHeader('stage', 'Stage', false)}
+              {sortHeader('lines', 'Num Lines', true, 'text-center')}
+              {extraColumns.map(extraHeader)}
+              {sortHeader('updated', 'Last Updated', true)}
+              {sortHeader('unmapped_source_codes', 'Unmapped Source Codes', false, 'text-right')}
             </tr>
           </thead>
           <tbody>
             {patients.length === 0 ? (
               <tr>
-                <td colSpan={9 + extraColumns.length} className="py-12 text-center text-muted-foreground">
+                <td colSpan={(canOpen ? 9 : 8) + extraColumns.length} className="py-12 text-center text-muted-foreground">
                   {error
                     ? "Unable to load patients."
                     : patientCount === 0 &&
                   orgFilter === ALL_FILTER_VALUE &&
+                  !search &&
                   diseaseFilter === ALL_FILTER_VALUE &&
                   stageFilter === ALL_FILTER_VALUE &&
                   dateFilter === ALL_FILTER_VALUE &&
-                  Object.entries(reviewFilters).every(([key, value]) => value === REVIEW_FILTER_DEFAULTS[key as keyof ReviewFilters])
+                  Object.entries(activeFilters).every(([key, value]) => value === REVIEW_FILTER_DEFAULTS[key as keyof ReviewFilters])
                     ? "No patients found. Upload a CSV or FHIR file to get started."
                     : "No patients match the selected filters."}
                 </td>
@@ -499,7 +674,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               patients.map((patient) => (
                 <tr
                   key={patient.person_id}
-                  className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer"
+                  className={`border-b border-border last:border-0 ${canOpen ? 'hover:bg-muted/30 cursor-pointer' : 'cursor-default'}`}
+                  aria-disabled={canOpen ? undefined : true}
                 >
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     <input
@@ -509,46 +685,43 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                       className="h-4 w-4 rounded border-input"
                     />
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.person_id}
                   </td>
-                  <td className="px-4 py-3 font-medium" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  {canOpen && <td className="px-4 py-3 font-medium" onClick={openPatient(patient.person_id)}>
                     <span className="block w-28 truncate" title={patient.patient_name || undefined}>{patient.demographics_redacted ? 'Withheld' : patient.patient_name || 'Not recorded'}</span>
-                  </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  </td>}
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.demographics_redacted ? 'Withheld' : patient.age ?? 'Not recorded'}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.disease || "Not recorded"}
                     {patient.subtype_biomarkers && <span className="mt-1 block max-w-56 truncate text-xs text-muted-foreground" title={patient.subtype_biomarkers}>{patient.subtype_biomarkers}</span>}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.stage || "N/A"}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
-                    <span className="block max-w-72 truncate" title={patient.genomics_summary || undefined}>
-                      {patient.genomics_summary || "No genomic data"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-center tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3 text-center tabular-nums" onClick={openPatient(patient.person_id)}>
                     {patient.therapy_lines_count ?? "N/A"}
                   </td>
-                  {show('treatment') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  {show('treatment') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.treatment_summary ? <><span className="block max-w-56 truncate" title={patient.treatment_summary.name}>{patient.treatment_summary.name}</span>
                       <span className="block text-xs text-muted-foreground">Line {patient.treatment_summary.line} · Start: {formatDate(patient.treatment_summary.start_date)}</span>
                       <span className="block text-xs text-muted-foreground">End: {formatDate(patient.treatment_summary.end_date)}</span></> : 'Not recorded'}
                   </td>}
-                  {show('status') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.disease_status || 'Not recorded'}</td>}
-                  {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.ecog_performance_status ?? 'Not recorded'}
+                  {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={openPatient(patient.person_id)}>{patient.ecog_performance_status ?? 'Not recorded'}
                     {patient.ecog_performance_status != null && <span className="block whitespace-nowrap text-xs text-muted-foreground">Assessed: {formatDate(patient.ecog_assessment_date)}</span>}
                   </td>}
-                  {show('organization') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.organization_name || 'Not recorded'}</td>}
-                  {show('location') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.demographics_redacted ? 'Withheld' : patient.location_summary || 'Not recorded'}</td>}
-                  {show('contact') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.contact_available ? 'Recorded' : 'Not recorded'}</td>}
-                  {show('gaps') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.data_gaps?.length ? patient.data_gaps.join(', ') : patient.data_gaps ? 'No key gaps' : 'Not assessed'}</td>}
-                  {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{formatDate(patient.latest_result_date)}</td>}
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  {show('organization') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.organization_name || 'Not recorded'}</td>}
+                  {show('location') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.demographics_redacted ? 'Withheld' : patient.location_summary || 'Not recorded'}</td>}
+                  {show('contact') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.contact_available ? 'Recorded' : 'Not recorded'}</td>}
+                  {show('gaps') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.data_gaps?.length ? patient.data_gaps.join(', ') : patient.data_gaps ? 'No key gaps' : 'Not assessed'}</td>}
+                  {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={openPatient(patient.person_id)}>{formatDate(patient.latest_result_date)}</td>}
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {formatDate(patient.updated_at)}
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums${patient.unmapped_source_code_count === 0 ? ' text-red-600 dark:text-red-400' : ''}`} onClick={openPatient(patient.person_id)}>
+                    {patient.unmapped_source_code_count ?? 'Not available'}
                   </td>
                 </tr>
               ))
@@ -604,6 +777,78 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 {deleting ? "Deleting..." : "Delete"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {resolveDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">
+            <h2 className="text-lg font-semibold">Generate OMOP</h2>
+            {!resolveRun ? (
+              <>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Re-resolve source codes for {selectAllMode ? `all ${patientCount}` : selectedIds.size} selected patient{(selectAllMode ? patientCount : selectedIds.size) !== 1 ? "s" : ""}?
+                  This will update unmapped clinical rows to approved OMOP concepts.
+                </p>
+                <div className="mt-6 flex justify-end gap-3">
+                  <button
+                    onClick={() => setResolveDialogOpen(false)}
+                    className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleResolveConfirm}
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Generate OMOP
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center gap-2 text-sm">
+                    {(resolveRun.state === "pending" || resolveRun.state === "running") && (
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                    )}
+                    <span className="capitalize">{resolveRun.state}</span>
+                    <span className="text-muted-foreground">
+                      &mdash; {resolveRun.done}/{resolveRun.total} patients
+                    </span>
+                  </div>
+                  {resolveRun.total > 0 && (
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.round((resolveRun.done / resolveRun.total) * 100)}%` }}
+                      />
+                    </div>
+                  )}
+                  {(resolveRun.state === "completed" || resolveRun.state === "failed") && (
+                    <p className="text-sm text-muted-foreground">
+                      Resolved {resolveRun.resolved} source code(s).
+                      {resolveRun.created > 0 && ` ${resolveRun.created} clinical row(s) created.`}
+                      {resolveRun.provisional > 0 && ` ${resolveRun.provisional} provisional from proposed mappings.`}
+                      {resolveRun.reverted > 0 && ` ${resolveRun.reverted} provisional reverted.`}
+                      {resolveRun.skipped > 0 && ` ${resolveRun.skipped} skipped.`}
+                      {resolveRun.already_resolved > 0 && ` ${resolveRun.already_resolved} already resolved.`}
+                      {resolveRun.errors > 0 && ` ${resolveRun.errors} error(s).`}
+                    </p>
+                  )}
+                </div>
+                <div className="mt-6 flex justify-end">
+                  <button
+                    onClick={() => { setResolveDialogOpen(false); setResolveRun(null); }}
+                    disabled={resolveRun.state === "pending" || resolveRun.state === "running"}
+                    className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+                  >
+                    {resolveRun.state === "completed" || resolveRun.state === "failed" ? "Close" : "Running..."}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

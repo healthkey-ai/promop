@@ -16,7 +16,7 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def setup():
-    actor = Identity.objects.create_user(email='trusted-admin@example.test')
+    actor = Identity.objects.create_user(email='trusted-admin@example.test', email_verified_at=timezone.now())
     source, target = OrganizationFactory(), OrganizationFactory()
     record = PatientRecordFactory(organization=target)
     client = APIClient()
@@ -105,7 +105,8 @@ def test_trust_fix_does_not_grant_out_of_scope_patient_writes(setup, restriction
         grant.save()
 
     assert not can_write_patient(actor, record.person_id)
-    assert can_access_patient(actor, record.person_id) == (restriction == 'analyst')
+    # An analyst grant at the patient's own org reads nothing either (#2416).
+    assert not can_access_patient(actor, record.person_id)
     descriptor = client.get('/api/v1/patient-records/writable-fields/',
                             {'person_id': record.person_id})
     assert descriptor.status_code == 200

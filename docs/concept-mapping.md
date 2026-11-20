@@ -35,14 +35,18 @@ standard_concept char(1)    'S' = standard OMOP concept; NULL = non-standard sou
 
 ### Indexes on `concept`
 
-Two indexes make concept lookups fast:
+Three indexes make concept lookups fast:
 
 ```sql
--- Primary path: exact vocabulary + code match (covers LOINC, SNOMED, RxNorm lookups)
-CREATE INDEX ix_concept_vocab_code ON concept (vocabulary_id, concept_code);
+-- Exact vocabulary + code match (LOINC, SNOMED, RxNorm lookups); also the uniqueness rule
+CREATE UNIQUE INDEX uq_concept_vocabulary_code ON concept (vocabulary_id, concept_code);
 
--- Fallback path: name-based search
-CREATE INDEX ix_concept_name_trgm ON concept USING gin (concept_name gin_trgm_ops);
+-- Name search. On UPPER(...) because Django compiles `icontains` to UPPER(col) LIKE UPPER(...)
+CREATE INDEX ix_concept_name_upper_trgm ON concept USING gin (upper(concept_name) gin_trgm_ops);
+
+-- Case-insensitive code search (#1466). Without it the code branch of concepts/search is
+-- unindexable, and the planner then drops the trigram index for the whole OR
+CREATE INDEX ix_concept_code_upper ON concept (upper(concept_code));
 ```
 
 ### Concept search API
@@ -52,13 +56,13 @@ The supported API for searching and browsing OMOP concepts is documented in
 
 | Endpoint | Use |
 |---|---|
-| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive substring search on `concept_name`, with optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
+| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive search on `concept_name`, exact `concept_code` or `concept_id`, best match first. Returns active, standard (or locally minted) concepts unless `include_retired` / `include_non_standard` is passed. Optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
 | `GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test` | Filtered concept browsing without a text query |
 | `GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0` | Batch translation from `(vocabulary_id, concept_code)` to OMOP `concept_id` |
 
 Search and browse responses are paginated, default to 25 results, cap `page_size` at 100, and
 return the same concept fields listed above. The search endpoint requires `q` to be at least
-two characters; the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
+three characters (a trigram); the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
 `concept_class_id` so production deployments do not accidentally page across the full Athena
 concept table.
 
@@ -250,12 +254,18 @@ requires a restart).
 ## PatientRecord Derivation from Measurements
 
 After FHIR ingest stores lab values as `Measurement` rows, `refresh_patient_record()` derives
-the PatientRecord lab fields in three lookup tiers:
+the PatientRecord lab fields in three lookup tiers. The LOINC code → field routing of tiers 1
+and 2 is resolved once per refresh by `resolve_lab_code_fields` from the curation tables: the
+approved, concept-resolved `FieldConceptMapping` of each lab field names its canonical code and
+approved global `SourceCodeConceptMapping` LOINC aliases add further codes. `_LOINC_LAB_FIELDS`
+is the checked-in inventory those rows are seeded from (migrations 0240, 0285, 0327) and
+decides a field's codes only while the field has no such mapping, such as on a fresh install
+before Athena is loaded.
 
 | Tier | Mechanism | Example |
 |---|---|---|
-| 1 | `Measurement.measurement_concept.concept_code` in `_LOINC_LAB_FIELDS` | LOINC code on the Concept row |
-| 2 | `Measurement.measurement_source_value` in `_LOINC_LAB_FIELDS` | LOINC code stored as source value at ingest time |
+| 1 | `Measurement.measurement_concept.concept_code` in the resolved routing | LOINC code on the Concept row |
+| 2 | `Measurement.measurement_source_value` in the resolved routing | LOINC code stored as source value at ingest time |
 | 3 | `Measurement.measurement_source_value` in `_SOURCE_VALUE_LAB_FIELDS` | Display name stored as source value (legacy path) |
 
 The most-recent measurement per LOINC code wins. This means PatientRecord always reflects
@@ -316,12 +326,12 @@ name-based matching, which is functional but loses semantic precision.
 unzip athena_download.zip -d /tmp/athena_vocab
 
 # Run the loader (uses PostgreSQL COPY for fast bulk insert)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies \
     --path /tmp/athena_vocab
 
 # Verify
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py shell -c "
 from omop_core.models import Concept
 print('LOINC:', Concept.objects.filter(vocabulary_id='LOINC').count())
@@ -419,7 +429,8 @@ The plain-list endpoint without `browse=1` preserves its JSON array response,
 but returns at most 100 codes. Use `?page=2` or follow the response's `Link`
 header (`rel="next"` / `rel="prev"`) to traverse results. `X-Total-Count`,
 `X-Page`, and `X-Page-Size` report the filtered count and page metadata.
-Source, search, and status filters apply before pagination. The page size is
-fixed; `page_size` cannot request an unbounded response.
+Source, search, and status filters apply before pagination. `limit` sets the
+page size, 1 to 1000; a warehouse reading the whole table uses the cursor read
+described in `code-mapping-api.md` instead of pages.
 The four pagination headers are exposed to configured CORS origins so browser
 clients can read navigation and totals across origins.

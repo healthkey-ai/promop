@@ -83,6 +83,8 @@ class TestApplyICD10CMMappings:
         assert proposed_icd10.reviewer is not None
         assert proposed_icd10.reviewer.name == 'system'
         assert 'auto-approved from ICD10CM' in proposed_icd10.origin_system
+        # bulk_update skips auto_now; a warehouse's updated_since delta must still see this.
+        assert proposed_icd10.updated_at == proposed_icd10.reviewed_at
 
     def test_skips_already_approved_icd10_rows(self, approved_icd10cm, target_concept):
         SourceCodeConceptMapping.objects.create(

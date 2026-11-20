@@ -152,7 +152,9 @@ class TestTheRecipeActuallyWorks:
         refresh_patient_record(patient)
 
         pr = PatientRecord.objects.get(person=patient)
-        assert pr.therapy_lines_count == 0
+        # Removing a line retracts its evidence; it does not assert no history.
+        assert pr.therapy_lines_count is None
+        assert pr.prior_therapy is None
         assert pr.first_line_therapy is None
 
     def test_episode_without_episode_events_does_not_project_a_line(self, patient, concepts):
@@ -164,7 +166,8 @@ class TestTheRecipeActuallyWorks:
         refresh_patient_record(patient)
 
         pr = PatientRecord.objects.get(person=patient)
-        assert pr.therapy_lines_count == 0
+        assert pr.therapy_lines_count is None
+        assert pr.prior_therapy is None
         assert pr.first_line_therapy is None
 
     def test_removing_the_drugs_too_clears_the_projection(self, patient, concepts):
@@ -179,5 +182,6 @@ class TestTheRecipeActuallyWorks:
         refresh_patient_record(patient)
 
         pr = PatientRecord.objects.get(person=patient)
-        assert pr.therapy_lines_count == 0
+        assert pr.therapy_lines_count is None
+        assert pr.prior_therapy is None
         assert pr.first_line_therapy is None

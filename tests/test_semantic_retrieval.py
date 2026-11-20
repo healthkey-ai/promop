@@ -56,7 +56,7 @@ def test_cosine_retrieval_finds_concepts_without_lexical_hits(encoder):
     assert [hit['concept_id'] for hit in hits] == [good.pk]
     assert hits[0]['semantic_score'] == 1.0
     assert hits[0]['vector_distance'] == 0.0
-    assert hits[0]['retrieval'] == 'semantic'
+    assert hits[0]['retrieval'] == 'vectors'
     assert 'vector_score' not in hits[0]
     encoder.encode.assert_called_once_with('heart attack')
 
@@ -131,20 +131,20 @@ def test_missing_embedding_table_does_not_poison_transaction(encoder):
 @pytest.mark.parametrize('lexical_hits', [[], [candidate(1, 'lexical', lexical_score=0.6)]])
 def test_umls_miss_runs_both_retrievers_and_ranks_once(monkeypatch, lexical_hits):
     lexical = Mock(return_value=lexical_hits)
-    semantic = Mock(return_value=[candidate(2, 'semantic', semantic_score=0.9)])
-    ranker = Mock(side_effect=lambda source, candidates, **kw: (candidates[-1], 'chosen'))
+    semantic = Mock(return_value=[candidate(2, 'vectors', semantic_score=0.9)])
+    ranker = Mock(side_effect=lambda source, candidates, desc='', **kw: (candidates[-1], 'chosen'))
     monkeypatch.setattr(suggest, 'umls_candidates', Mock(return_value=([], None)))
     monkeypatch.setattr(suggest, 'lexical_candidates', lexical)
     monkeypatch.setattr(suggest, 'semantic_candidates', semantic)
     monkeypatch.setattr(suggest, 'rank_candidates', ranker)
     result = suggest.suggest_one_mapping('LOCAL-123', 'Local', 'condition',
                                         source_description='informal description',
-                                        strategies=['umls', 'lexical', 'semantic'])
+                                        strategies=['umls', 'lexical', 'vectors'])
     lexical.assert_called_once()
     semantic.assert_called_once()
     ranker.assert_called_once()
     assert result['suggested']['concept_id'] == 2
-    assert result['strategy_used'] == 'semantic'
+    assert result['strategy_used'] == 'vectors'
     assert result['candidates_considered'] == len(lexical_hits) + 1
     assert result['vector_reranked'] is False
 
@@ -153,7 +153,7 @@ def test_single_umls_hit_continues_and_reports_each_stage(monkeypatch):
     hit = candidate(1, 'umls', umls_score=1.0)
     monkeypatch.setattr(suggest, 'umls_candidates', Mock(return_value=([hit], 'C123')))
     lexical = Mock(return_value=[candidate(2, "lexical")])
-    semantic = Mock(return_value=[candidate(3, "semantic", semantic_score=0.8, vector_distance=0.2)])
+    semantic = Mock(return_value=[candidate(3, "vectors", semantic_score=0.8, vector_distance=0.2)])
     monkeypatch.setattr(suggest, 'lexical_candidates', lexical)
     monkeypatch.setattr(suggest, 'semantic_candidates', semantic)
     events = []
@@ -164,34 +164,32 @@ def test_single_umls_hit_continues_and_reports_each_stage(monkeypatch):
         elif strategy == 'lexical':
             semantic.assert_not_called()
         events.append((strategy, hits))
-    hits, cui, definitive = pool(strategies=['umls', 'lexical', 'semantic'], on_candidates=received)
+    hits, cui, definitive = pool(strategies=['umls', 'lexical', 'vectors'], on_candidates=received)
     assert [c['concept_id'] for c in hits] == [1, 2, 3]
     assert cui == 'C123'
     assert definitive
-    assert [stage for stage, _ in events] == ['umls', 'lexical', 'semantic']
+    assert [stage for stage, _ in events] == ['umls', 'lexical', 'vectors']
     assert events[-1][1][0]['vector_distance'] == 0.2
     lexical.assert_called_once()
     semantic.assert_called_once()
 
 
-def test_deduplicates_and_does_not_rerank_semantic_candidates(monkeypatch):
+def test_deduplicates_vector_candidates(monkeypatch):
     monkeypatch.setattr(suggest, 'umls_candidates', Mock(return_value=(
         [candidate(1, 'umls'), candidate(2, 'umls')], 'C123')))
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(return_value=[candidate(3, 'lexical')]))
     monkeypatch.setattr(suggest, 'semantic_candidates', Mock(return_value=[
-        candidate(1, 'semantic', semantic_score=0.8),
-        candidate(3, 'semantic', semantic_score=0.7),
-        candidate(4, 'semantic', semantic_score=0.6),
+        candidate(1, 'vectors', semantic_score=0.8),
+        candidate(3, 'vectors', semantic_score=0.7),
+        candidate(4, 'vectors', semantic_score=0.6),
     ]))
-    rerank = Mock(side_effect=lambda text, hits: (hits, False))
-    monkeypatch.setattr(suggest, 'vector_rerank', rerank)
     hits, _, definitive = pool()
     assert [hit['concept_id'] for hit in hits] == [1, 2, 3, 4]
-    assert [hit['retrieval'] for hit in hits] == ['umls', 'umls', 'lexical', 'semantic']
+    assert [hit['retrieval'] for hit in hits] == ['umls', 'umls', 'lexical', 'vectors']
+    # Deduplication enriches UMLS/lexical hits with semantic scores from vector retrieval.
     assert hits[0]['semantic_score'] == 0.8
     assert hits[2]['semantic_score'] == 0.7
     assert not definitive
-    assert [[c['concept_id'] for c in call.args[1]] for call in rerank.call_args_list] == [[1, 2], [3]]
 
 
 def test_disabled_semantic_does_no_work(monkeypatch):
@@ -204,7 +202,7 @@ def test_disabled_semantic_does_no_work(monkeypatch):
 
 def test_default_pipeline_sends_full_pool_to_llm_without_vector_reranking(monkeypatch):
     lexical_hit = candidate(1, 'lexical', lexical_score=0.5)
-    semantic_hit = candidate(2, 'semantic', semantic_score=0.9)
+    semantic_hit = candidate(2, 'vectors', semantic_score=0.9)
     monkeypatch.setattr(suggest, 'umls_candidates', Mock(return_value=([], None)))
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(return_value=[lexical_hit]))
     monkeypatch.setattr(suggest, 'semantic_candidates', Mock(return_value=[semantic_hit]))
@@ -215,12 +213,12 @@ def test_default_pipeline_sends_full_pool_to_llm_without_vector_reranking(monkey
     result = suggest.suggest_one_mapping('LOCAL-123', 'Local', 'condition')
     reranker.assert_not_called()
     assert [c['concept_id'] for c in ranker.call_args.args[1]] == [1, 2]
-    assert result['strategy_used'] == 'semantic'
+    assert result['strategy_used'] == 'vectors'
 
 
 def test_icd_semantic_can_retrieve_other_domains(encoder):
     good = embedded(domain=DomainFactory(domain_id='Observation'))
-    hits, _, _ = pool(['semantic'], source_vocabulary_id='ICD10CM')
+    hits, _, _ = pool(['vectors'], source_vocabulary_id='ICD10CM')
     assert [hit['concept_id'] for hit in hits] == [good.pk]
 
 
@@ -232,9 +230,9 @@ def test_semantic_provenance_is_saved_on_proposed_mapping(encoder, settings):
         source_code_description='heart attack', omop_table='condition',
         status='proposed', occurrence_count=12,
     )
-    suggest.suggest_mappings('condition', strategies=['semantic'])
+    suggest.suggest_mappings('condition', strategies=['vectors'])
     mapping.refresh_from_db()
     assert mapping.target_concept_id == good.pk
-    assert mapping.suggest_strategy == 'semantic'
+    assert mapping.suggest_strategy == 'vectors'
     assert mapping.status == 'proposed'
     assert mapping.suggestion_model_version == suggest.SUGGESTION_MODEL_VERSION

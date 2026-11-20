@@ -24,7 +24,7 @@ def run(path, **options):
     return json.loads(out.getvalue())
 
 
-def mapping(vocabulary='ICD10', code='C90.00', count=3, **kwargs):
+def mapping(vocabulary='ICD10CM', code='C90.00', count=3, **kwargs):
     return SourceCodeConceptMapping.objects.create(source_vocabulary_id=vocabulary,
         source_code=code, occurrence_count=count, **kwargs)
 
@@ -42,17 +42,17 @@ def test_occurrences_replace_counts_and_reload_is_idempotent(tmp_path):
     assert before == after
     untouched.refresh_from_db()
     assert untouched.occurrence_count == 12
-    assert report['alias_matches'] == 1
+    assert report['exact_matches'] == 1
     assert run(path)['changed_mappings'] == 0
 
 
 def test_vocabulary_disambiguates_same_code_and_exact_match_wins(tmp_path):
-    icd = mapping()
+    loinc = mapping('LOINC')
     cm = mapping('ICD10CM')
     other = mapping('SNOMED')
-    path = snapshot(tmp_path, [('C90.00', 'ICD10', '', 10, 1), ('C90.00', 'ICD10CM', '', 20, 1)])
+    path = snapshot(tmp_path, [('C90.00', 'LOINC', '', 10, 1), ('C90.00', 'ICD10CM', '', 20, 1)])
     assert run(path)['exact_matches'] == 2
-    for row, expected in [(icd, 10), (cm, 20), (other, 3)]:
+    for row, expected in [(loinc, 10), (cm, 20), (other, 3)]:
         row.refresh_from_db()
         assert row.occurrence_count == expected
 
@@ -91,7 +91,7 @@ def test_dry_run_reports_without_writing(tmp_path):
 @pytest.mark.parametrize('bad', ['-1', '1.5', '', 'NaN', '2147483648'])
 def test_invalid_late_row_rolls_back_entire_input(tmp_path, bad):
     row = mapping()
-    path = snapshot(tmp_path, [('C90.00', 'ICD10', '', 42, 1), ('BAD', 'ICD10', '', bad, 1)])
+    path = snapshot(tmp_path, [('C90.00', 'ICD10CM', '', 42, 1), ('BAD', 'ICD10CM', '', bad, 1)])
     with pytest.raises(CommandError, match='line 3'):
         run(path)
     row.refresh_from_db()
@@ -100,7 +100,7 @@ def test_invalid_late_row_rolls_back_entire_input(tmp_path, bad):
 
 def test_duplicate_identity_rejected_before_any_write(tmp_path):
     row = mapping()
-    path = snapshot(tmp_path, [('C90.00', 'ICD10', '', 42, 1), ('C90.00', 'ICD10', '', 84, 1)])
+    path = snapshot(tmp_path, [('C90.00', 'ICD10CM', '', 42, 1), ('C90.00', 'ICD10CM', '', 84, 1)])
     with pytest.raises(CommandError, match='Duplicate'):
         run(path)
     row.refresh_from_db()
@@ -118,7 +118,7 @@ def test_required_header_validation(tmp_path):
     ('CPT4', 'urn:oid:2.16.840.1.113883.6.12'),
     ('LOINC', 'http://loinc.org'),
     ('RxNorm', '2.16.840.1.113883.6.88'),
-    ('ICD10', 'urn:oid:2.16.840.1.113883.6.90'),
+    ('ICD10CM', 'urn:oid:2.16.840.1.113883.6.90'),
     ('NDC', 'http://hl7.org/fhir/sid/ndc'),
 ])
 def test_exact_standard_fhir_aliases(tmp_path, vocabulary, alias):
@@ -141,8 +141,8 @@ def test_equivalent_fhir_alias_frequencies_are_combined(tmp_path):
     assert run(path)['changed_mappings'] == 0
 
 
-def test_icd10_fallback_combines_equivalent_icd10cm_identifiers(tmp_path):
-    row = mapping('ICD10', 'C90.00')
+def test_equivalent_icd10cm_identifiers_are_combined(tmp_path):
+    row = mapping('ICD10CM', 'C90.00')
     path = snapshot(tmp_path, [('C90.00', 'ICD10CM', '', 42, 1),
                                ('C90.00', 'urn:oid:2.16.840.1.113883.6.90', '', 84, 1)])
     assert run(path)['matched_mappings'] == 1
@@ -152,7 +152,7 @@ def test_icd10_fallback_combines_equivalent_icd10cm_identifiers(tmp_path):
 
 def test_whitespace_variants_are_combined_within_snapshot_not_across_reloads(tmp_path):
     row = mapping()
-    path = snapshot(tmp_path, [('C90.00', 'ICD10', '', 42, 1), (' C90.00 ', 'ICD10', '', 8, 1)])
+    path = snapshot(tmp_path, [('C90.00', 'ICD10CM', '', 42, 1), (' C90.00 ', 'ICD10CM', '', 8, 1)])
     run(path)
     row.refresh_from_db()
     assert row.occurrence_count == 50

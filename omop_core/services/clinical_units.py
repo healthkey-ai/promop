@@ -1,7 +1,7 @@
 """Organization-selectable clinical unit policy for derived compatibility fields."""
 
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,25 @@ def wbc_to_canonical(
     return None
 
 
+# Absolute cell counts that share one unit rule: the LOINC code each
+# PatientRecord field is derived from, and the legacy cells/µL alias columns
+# that mirror a canonical thousands/µL field (#640, #1567, #2282).
+BLOOD_COUNT_LOINC = {
+    '751-8': 'anc_thousand_per_ul',
+    '777-3': 'platelet_count_thousand_per_ul',
+    '731-0': 'alc_thousand_per_ul',
+    '742-7': 'amc_thousand_per_ul',
+}
+BLOOD_COUNT_FIELDS = frozenset(BLOOD_COUNT_LOINC.values())
+LEGACY_COUNT_ALIASES = {
+    'absolute_neutrophile_count': 'anc_thousand_per_ul',
+    'platelet_count': 'platelet_count_thousand_per_ul',
+    'absolute_lymphocyte_count': 'alc_thousand_per_ul',
+}
+
+
 def blood_count_to_canonical(value, source_unit):
-    """ANC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
+    """ANC/ALC/AMC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
 
     Keep Decimal precision until the destination field applies its declared
     precision. Uppercase G/L is a legacy giga-count spelling; lowercase g/L
@@ -70,14 +87,29 @@ def blood_count_to_canonical(value, source_unit):
     return number * Decimal(factors[unit])
 
 
+def count_in_cells_per_ul(value):
+    """Convert a canonical count in thousands/µL to legacy cells/µL."""
+    return Decimal(str(value)) * 1000 if value is not None else None
+
+
+def count_unit(text, ucum_code):
+    """The source unit text when promop can read it, else the UCUM unit code.
+
+    The ETL sends lab spellings (x10E3/uL, K/cu mm) as received and names the
+    unit they mean in unit_concept (#2248). Text promop reads wins, so a row
+    whose unit_concept promop rewrote on conversion reads as before.
+    """
+    from omop_core.services.canonical_units import is_known_unit
+    stripped = (text or '').strip()
+    if stripped and (is_known_unit(stripped) or blood_count_to_canonical(1, stripped) is not None):
+        return text
+    return ucum_code or text or None
+
+
 def measurement_count_unit(row):
-    """Prefer explicit source units; use a UCUM concept only when text is absent."""
-    if row.unit_source_value and row.unit_source_value.strip():
-        return row.unit_source_value
-    unit = row.unit_concept
-    if unit is not None and unit.vocabulary_id == 'UCUM':
-        return unit.concept_code
-    return None
+    """``count_unit`` for a measurement row."""
+    unit = row.unit_concept if row.unit_concept_id else None
+    return count_unit(row.unit_source_value, unit.concept_code if unit and unit.vocabulary_id == 'UCUM' else None)
 
 
 def blood_count_projection(field, row):
@@ -89,9 +121,14 @@ def blood_count_projection(field, row):
     if field == 'anc_thousand_per_ul':
         return {
             field: value,
-            'absolute_neutrophile_count': value,
-            'absolute_neutrophile_count_units': '10*3/uL' if value is not None else None,
+            'absolute_neutrophile_count': count_in_cells_per_ul(value),
+            'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None,
         }
+    if field == 'alc_thousand_per_ul':
+        # The legacy ALC column carries cells/µL and has no units column (#1567).
+        return {field: value, 'absolute_lymphocyte_count': count_in_cells_per_ul(value)}
+    if field == 'amc_thousand_per_ul':
+        return {field: value}
     # The legacy platelet column is integer-valued. Reporting cells/uL retains
     # fractional thousands and matches the downstream compatibility contract.
     cells = value * 1000 if value is not None else None
@@ -107,22 +144,25 @@ def blood_count_projection(field, row):
 FLC_CANONICAL_UNIT = 'mg/L'
 
 _FLC_FACTOR_TO_MG_L = {
-    'mg/l': 1.0,
-    'mg/dl': 10.0,       # 1 mg/dL = 10 mg/L
-    'mg/100ml': 10.0,
-    'ug/ml': 1.0,        # 1 ug/mL = 1 mg/L
-    'mcg/ml': 1.0,
-    'g/l': 1000.0,
+    'mg/l': Decimal('1'),
+    'mg/dl': Decimal('10'),       # 1 mg/dL = 10 mg/L
+    'mg/100ml': Decimal('10'),
+    'ug/ml': Decimal('1'),        # 1 ug/mL = 1 mg/L
+    'mcg/ml': Decimal('1'),
+    'g/l': Decimal('1000'),
 }
 
 
 def flc_to_canonical(
     value: Decimal | float | None, source_unit: str | None,
-) -> float | None:
+) -> Decimal | None:
     """Convert a free light chain result to mg/L, None if the unit is unknown.
 
     None means "cannot be established", not "zero". Labs report these in mg/L
-    and mg/dL, so guessing is a 10x error half the time.
+    and mg/dL, so guessing is a 10x error half the time. Decimal arithmetic is
+    deliberate: the IMWG window is inclusive at 0.26/1.65, and a binary-float
+    conversion such as 10.23 mg/dL -> 102.30000000000001 would move an exact
+    boundary result outside that window.
     """
     if value is None:
         return None
@@ -133,4 +173,57 @@ def flc_to_canonical(
     factor = _FLC_FACTOR_TO_MG_L.get(normalized)
     if factor is None:
         return None
-    return float(value) * factor
+    return Decimal(str(value)) * factor
+
+
+# Serum creatinine (#2438). The divisor is 88.42, the factor the installed
+# exact_matching CKD-EPI calculator uses; the result is quantised half-up to
+# the two decimals of PatientRecord.serum_creatinine_mg_dl, so the value the
+# derivation reads is the value stored.
+CREATININE_UMOL_L_PER_MG_DL = Decimal('88.42')
+_CREATININE_DIVISORS = {'mg/dL': Decimal('1'), 'umol/L': CREATININE_UMOL_L_PER_MG_DL}
+_CREATININE_QUANTUM = Decimal('0.01')
+
+
+def creatinine_unit(text, concept_code):
+    """The unit a creatinine result is in, 'mg/dL' or 'umol/L', or None.
+
+    The snapshot holds the value in the unit of its text (#2249), so a text
+    promop knows is the unit, and one it knows but cannot convert (mg/L,
+    mmol/L) leaves the result unknown rather than deferring to the concept.
+    Only text promop cannot read at all defers to the unit concept, where the
+    ETL puts the UCUM unit it meant (#2248). With no unit at all the result is
+    mg/dL, the unit every canonical value has been recorded in.
+    """
+    from omop_core.services.canonical_units import is_known_unit, unit_code
+    text = (text or '').strip()
+    if text and (is_known_unit(text) or not concept_code):
+        unit = unit_code(text)
+    elif concept_code:
+        unit = unit_code(concept_code)
+    else:
+        unit = 'mg/dL'
+    return unit if unit in _CREATININE_DIVISORS else None
+
+
+def creatinine_to_mg_dl(value, text, concept_code):
+    """A creatinine result in mg/dL, or None when its unit cannot be read."""
+    unit = creatinine_unit(text, concept_code)
+    if value is None or unit is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite():
+        return None
+    return (number / _CREATININE_DIVISORS[unit]).quantize(_CREATININE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def measurement_creatinine_mg_dl(row):
+    """``creatinine_to_mg_dl`` for a measurement row."""
+    # Only a UCUM concept names a unit (as measurement_count_unit and #2249's
+    # reading); concept 0 "No matching concept" and other vocabularies do not.
+    concept = row.unit_concept if row.unit_concept_id else None
+    return creatinine_to_mg_dl(row.value_as_number, row.unit_source_value,
+                               concept.concept_code if concept and concept.vocabulary_id == 'UCUM' else None)

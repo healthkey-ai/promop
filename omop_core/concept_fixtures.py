@@ -13,7 +13,7 @@ fixture that only test code imports. Deployments load the real vocabulary; see
 CHANGELOG 1.2.
 
 Locally-minted ``HK-Wearable`` concepts — the one thing Athena cannot supply —
-are installed by migration 0143, which runs on every deploy. They are duplicated
+are installed by migrations 0143 and 0343, which run on every deploy. They are duplicated
 here so a test database has them too.
 """
 from datetime import date
@@ -114,6 +114,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Qualifier Value',     concept_class_name='Qualifier Value',      concept_class_concept_id=0),
     dict(concept_class_id='Field',               concept_class_name='Field',                concept_class_concept_id=0),
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
+    dict(concept_class_id='Disease Episode',     concept_class_name='Disease Episode',      concept_class_concept_id=0),
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
@@ -207,6 +208,11 @@ _CONCEPTS = [
     _c(32865, 'Patient self-report', 'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976938'),
     _c(32869, 'Pharmacy claim',    'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976942'),
     _c(32531, 'Treatment Regimen', 'Episode',       'Episode',       'Treatment',    'S', 'OMOP4822256'),
+    # The cancer a line of therapy treats: Treatment Regimens hang off it via
+    # episode_parent_id (#1739). Tests key on the id; the concept_code is not
+    # verified against Athena (deployments load the real row, 'Episode' is in
+    # VOCAB_SCOPE).
+    _c(32528, 'Disease First Occurrence', 'Episode', 'Episode',   'Disease Episode', 'S', 'OMOP4822253'),
 
     # CDM metadata concept used in DrugExposure FK lookups
     _c(1147094, 'drug_exposure.drug_exposure_id', 'Metadata', 'CDM', 'Field', 'S', 'CDM150'),
@@ -257,7 +263,8 @@ _CONCEPTS = [
     _c(36305408, 'Response to cancer treatment',   'Observation',  'LOINC', 'Clinical Observation', 'S', '88040-1'),
 
     # ------------------------------------------------------------------
-    # CBC — enables CBC fields in PatientRecord via _LOINC_LAB_FIELDS
+    # CBC — enables CBC fields in PatientRecord via the lab routing (FieldConceptMapping,
+    # seeded from _LOINC_LAB_FIELDS)
     # ------------------------------------------------------------------
     _c(3023314, 'Hematocrit [Volume Fraction] of Blood by Automated count', 'Measurement', 'LOINC', 'Lab Test', 'S', '4544-3'),
     _c(3000905, 'Leukocytes [#/volume] in Blood by Automated count',        'Measurement', 'LOINC', 'Lab Test', 'S', '6690-2'),
@@ -335,8 +342,12 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     _c(9001002, 'Protein [electrophoresis] in Serum',             'Measurement', 'LOINC', 'Lab Test', 'S', '51435-6'),  # M-spike serum
     _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
-    _c(9001004, 'Kappa free light chains [Mass/volume] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '33944-8'),
-    _c(9001005, 'Lambda free light chains [Mass/volume] in Serum','Measurement', 'LOINC', 'Lab Test', 'S', '33945-5'),
+    # Kappa and lambda FLC are the real LOINC codes 36916-5 and 33944-0 (loaded
+    # from Athena); the invented 33944-8 / 33945-5 concepts were retired by
+    # migration 0328. Never seed a concept under a code that is not in its
+    # vocabulary: an invented code in the LOINC range cannot be told from a
+    # typo of a real one, and a HealthKey-minted concept is the way to say
+    # something LOINC does not.
     # 26098-4 is 'XR Ankle - left Views' in LOINC, 11118-7 is the marrow code.
     _c(9001006, 'Plasma cells/100 cells in Bone marrow by Manual count', 'Measurement', 'LOINC', 'Lab Test', 'S', '11118-7'),
     # 9001019 is skipped, a test uses it to stand in for a retired mint.
@@ -382,7 +393,7 @@ _CONCEPTS = [
     _c(3024171,  'Respiratory rate',                                           'Measurement', 'LOINC', 'Clinical Observation', 'S', '9279-1',   date(1996, 9, 6)),
     _c(1002368,  'Sleep duration',                                             'Observation', 'LOINC', 'Clinical Observation', 'S', '93832-4',  date(2019, 12, 13)),
     _c(1002246,  'Oxygen consumption (VO2)/Body weight [Volume Rate Content]', 'Measurement', 'LOINC', 'Clinical Observation', 'S', '94122-9',  date(2019, 12, 13)),
-    _c(3031111,  'Walking distance 24 hour Calculated',                        'Measurement', 'LOINC', 'Clinical Observation', 'S', '41953-1',  date(2005, 7, 27)),
+    _c(648874,   'Distance walking or running',                                'Measurement', 'LOINC', 'Clinical Observation', 'S', '112427-0', date(2026, 2, 24)),
     _c(3032289,  'Walking speed 24 hour mean Calculated',                      'Measurement', 'LOINC', 'Clinical Observation', 'S', '41957-2',  date(2005, 7, 27)),
     _c(1761351,  'Flights climbed [#] Reporting Period',                       'Observation', 'LOINC', 'Clinical Observation', 'S', '100304-5', date(2022, 8, 8)),
     _c(1001786,  'Calories burned in unspecified time --during activity',      'Measurement', 'LOINC', 'Clinical Observation', 'S', '93819-1',  date(2019, 12, 13)),
@@ -429,6 +440,12 @@ _CONCEPTS = [
     # standard-deviation form, and filing RMSSD under it is the same defect
     # class as the pre-#413 walking_speed → BMI mapping. See #438.
     _hk(4, 'R-R interval RMSSD (heart rate variability)', 'Measurement', 'Clinical Observation', 'HK-WEAR-HRV-RMSSD'),
+    # Vendor scores OpenWearables reports, with no LOINC or SNOMED equivalent
+    # and not comparable across vendors (#2595). Only the OpenWearables seed
+    # names them; no runtime metric does. Duplicated in migration 0343, which
+    # is what installs them on a deployment.
+    _hk(5, 'Workout effort score (vendor-specific)',        'Observation', 'Clinical Observation', 'HK-WEAR-OW-WORKOUT-EFFORT'),
+    _hk(6, 'Cardiovascular age estimate (vendor-specific)', 'Measurement', 'Clinical Observation', 'HK-WEAR-OW-CARDIO-AGE'),
 
     # Clinical assertions with no Athena code (#785). Duplicated from migration
     # 0180 so a test database has them; omop_core/tests.py asserts the two do

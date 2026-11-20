@@ -6,7 +6,9 @@ concept assignments and which still need one.
 """
 from __future__ import annotations
 
-from omop_core.models import CustomPatientField, PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
+from omop_core.models import (
+    UNPLACED_TAB, CustomPatientField, PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula,
+)
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
@@ -17,9 +19,9 @@ from omop_core.services.mappings import (
     SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
+    LAB_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
-    _LOINC_LAB_FIELDS,
 )
 from omop_core.services.provenance_registry import get_registry
 from omop_core.services.formula_evaluator import validate_formula
@@ -109,11 +111,11 @@ _COMPUTED_FIELDS = frozenset({
     # the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
-    'bmi', 'disease_slug',
+    'bmi', 'disease_slug', 'disease_slugs',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
-    'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
-    'no_hepatitis_c_status', 'no_other_active_malignancies',
+    'no_active_infection_status',
+    'no_other_active_malignancies',
     'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
     'no_mental_health_disorder_status',
     'no_tobacco_use_status', 'no_substance_use_status',
@@ -165,6 +167,7 @@ def _get_explanation(field_name: str, category: str) -> str | None:
         explanations = {
             'bmi': 'Calculated from weight and height',
             'disease_slug': 'URL-safe slug derived from disease name',
+            'disease_slugs': 'Every cancer on the record, as disease slugs',
             'meets_crab': 'Derived from CRAB criteria fields',
             'meets_slim': 'Derived from SLiM criteria fields',
             'involved_uninvolved_ratio': 'Calculated from kappa and lambda FLC values',
@@ -181,12 +184,10 @@ for aliases in _LAB_FIELD_ALIASES.values():
     _ALL_ALIASES.update(aliases)
 
 # Fields that are editable via the LOINC lab write-through: either in
-# LAB_FIELD_TO_LOINC (the write map) or as a target in _LOINC_LAB_FIELDS
-# (the derivation map, which names fields the extractor can populate via a
-# known LOINC code — those 18 recovered attributions from #596/#607).
-_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | frozenset(
-    field_name for field_name, _cast in _LOINC_LAB_FIELDS.values()
-)
+# LAB_FIELD_TO_LOINC (the write map) or in LAB_FIELDS (the lab fields the
+# extractor derives, routed through the curation tables — those 18 recovered
+# attributions from #596/#607). A field inventory, not a code route.
+_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | LAB_FIELDS
 
 
 def _get_field_type_label(field) -> str:
@@ -219,10 +220,11 @@ _TAB_GENERAL = frozenset({
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
     'disease', 'stage', 'histologic_type',
     'ecog_performance_status', 'ecog_assessment_date', 'karnofsky_performance_score',
+    'disease_management', 'disease_status', 'care_setting',
     'preexisting_conditions', 'peripheral_neuropathy_grade',
     'no_other_active_malignancies', 'no_active_infection_status',
-    'hiv_status', 'no_hiv_status', 'hepatitis_b_status', 'no_hepatitis_b_status',
-    'hepatitis_c_status', 'no_hepatitis_c_status',
+    'hiv_status', 'hepatitis_b_status',
+    'hepatitis_c_status',
     'weight', 'height', 'bmi', 'systolic_blood_pressure', 'diastolic_blood_pressure',
     'heartrate', 'languages_skills', 'facility_name',
     'english_speak', 'english_read', 'english_write', 'english_understand',
@@ -247,6 +249,7 @@ _TAB_DISEASE = frozenset({
     # Lymphoma
     'tumor_grade', 'gelf_criteria_status', 'flipi_score', 'flipi_risk_category',
     'flipi_score_options', 'bulky_disease', 'b_symptoms',
+    'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
     'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
     'bone_marrow_involvement', 'number_of_nodal_sites',
     'clonal_bone_marrow_b_lymphocytes',
@@ -270,7 +273,7 @@ _TAB_DISEASE = frozenset({
     # beta2_microglobulin moved to _TAB_LABS with the section that renders it
     # (#955). _TAB_DISEASE is tested first, so leaving it here would make the
     # Labs entry dead and put the field on a tab that no longer shows it.
-    'ldh_level', 'disease_slug',
+    'ldh_level', 'disease_slug', 'disease_slugs',
     # Reclassified from "other"
     'tumor_size', 'lymph_node_status', 'metastasis_status',
     'biopsy_grade', 'biopsy_grade_depr', 'plasma_cell_leukemia',
@@ -327,6 +330,7 @@ _TAB_BLOOD = frozenset({
 })
 
 _TAB_LABS = frozenset({
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
     # Moved from _TAB_BLOOD with the sections that render them (#955).
     'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
@@ -349,6 +353,7 @@ _TAB_LABS = frozenset({
 })
 
 _TAB_BEHAVIOR = frozenset({
+    'able_to_swallow_tablets_capsules',
     'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
     'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
     'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
@@ -376,11 +381,14 @@ _TAB_BEHAVIOR = frozenset({
 
 
 def _classify_tab(field_name: str) -> str:
-    """Return the clinical-tab label for a PatientRecord field.
+    """Return the tab the code places a built-in PatientRecord field on.
 
-    Internal fields are excluded from the API entirely (no tab).
-    Wearable _30d fields are computed — they go to 'other' and render
-    in the Computed section at the bottom of each tab.
+    Internal fields are excluded from the API entirely (no tab). A field no
+    list names is unplaced (``omop``): it keeps its mapping and derivation,
+    but no tab renders a control for it, so its facts show only as raw rows
+    on the patient's OMOP tab (#2328); ``blood_type``, ``red_blood_cell_count``
+    and ``pod24`` are such fields. A curator's ``FieldConceptMapping.tab``
+    overrides this; see :func:`resolve_tab`.
     """
     if field_name == 'genetic_mutations' or field_name.startswith('genomics_'):
         return 'genomics'
@@ -402,7 +410,23 @@ def _classify_tab(field_name: str) -> str:
     )
     if any(kw in field_name for kw in therapy_keywords):
         return 'treatment'
-    return 'other'
+    return UNPLACED_TAB
+
+
+def resolve_tab(field_name: str, mapping=None, custom=None) -> str:
+    """The tab a field renders on: the curator's placement first, then code.
+
+    A placed field renders last on its tab, on its own row; placement is one
+    value, not a layout. ``mapping`` is the field's ``FieldConceptMapping``
+    (its ``tab`` wins when set), ``custom`` its ``CustomPatientField`` (whose
+    own ``tab`` is what its dialog chose). A built-in field with neither falls
+    back to :func:`_classify_tab`.
+    """
+    if mapping is not None and mapping.tab:
+        return mapping.tab
+    if custom is not None:
+        return custom.tab or UNPLACED_TAB
+    return _classify_tab(field_name)
 
 
 def _classify_field(field_name: str) -> str:
@@ -512,6 +536,46 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
     return None
 
 
+# Concept-search text for genomics markers whose catalog label is not how the
+# vocabularies name them. Checked against staging's Athena load (#1705):
+# FAM46C is TENT5C in current HGNC, "del(11q)" and "1q21 gain / amplification"
+# match nothing, and an unspecified pair is searched by its first gene.
+_GENOMICS_SUGGEST_QUERIES = {
+    'fam46c': 'TENT5C gene',
+    'gain1q': '1q21',
+    'hyperdiploidy': 'hyperdiploid',
+    'complex_karyotype_excl_t1114': 'complex karyotype',
+    'del11q': '11q deletion',
+    'del13q': '13q deletion',
+    'atm_atr': 'ATM gene',
+    'notch1_notch2': 'NOTCH1 gene',
+}
+
+
+def _suggest_query(name: str) -> str:
+    """Return the concept-search text the mapper's Suggest button seeds.
+
+    The concept search matches the whole text or every word of it, so the
+    field's own prefix ("genomics", "genetic mutations"), which no concept
+    name contains, would rule out every concept. Search by what follows it: the gene ("BRCA1 gene") or the
+    catalog label ("t(4;14)"), unless the label is overridden above.
+    """
+    from omop_core.services.genomics_catalog import patient_fields
+
+    if name.startswith('genetic_mutations.'):
+        return name.split('.', 1)[1].replace('_', ' ')
+    if name.startswith('genomics_'):
+        marker = patient_fields().get(name)
+        if marker is None:
+            return name.removeprefix('genomics_').replace('_', ' ')
+        if marker['key'] in _GENOMICS_SUGGEST_QUERIES:
+            return _GENOMICS_SUGGEST_QUERIES[marker['key']]
+        if marker['kind'] == 'gene':
+            return f"{marker['gene']} gene"
+        return marker['label']
+    return name.replace('_', ' ')
+
+
 def get_all_field_descriptors() -> list[dict]:
     """Return a descriptor dict for every concrete PatientRecord field.
 
@@ -557,6 +621,15 @@ def get_all_field_descriptors() -> list[dict]:
     # 3c. Load field formulas.
     formulas_by_field = {f.field_name: f for f in FieldFormula.objects.all()}
 
+    # 3d. Load disease scope: the diseases whose extension each field is in.
+    # A field with none is part of the base record (#2331).
+    from omop_core.services import disease_profiles
+    scoped = disease_profiles.memberships()
+
+    def scope(field_name):
+        diseases = scoped.get(field_name, [])
+        return {'scope': disease_profiles.scope_of(diseases), 'diseases': list(diseases)}
+
     # 4. Build descriptors (excluding internal fields).
     result = []
     for f in concrete_fields:
@@ -599,6 +672,7 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewer': mapping.reviewer.username if mapping.reviewer else None,
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
+                'tab': mapping.tab,
             }
 
         formula = formulas_by_field.get(name)
@@ -620,10 +694,12 @@ def get_all_field_descriptors() -> list[dict]:
             'field_name': name,
             'field_type': _get_field_type_label(f),
             'category': category,
-            'tab': _classify_tab(name),
+            'tab': resolve_tab(name, mapping=mappings_by_field.get(name)),
+            **scope(name),
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': suggestion,
+            'suggest_query': _suggest_query(name),
             'unit_options': FIELD_COMMON_UNITS.get(name, STANDARD_UNIT_CHOICES),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
@@ -656,7 +732,8 @@ def get_all_field_descriptors() -> list[dict]:
             'field_name': custom.field_name,
             'field_type': custom.field_type,
             'category': 'computed' if custom.mode == 'computed' else 'needs-concept-set',
-            'tab': custom.tab,
+            'tab': resolve_tab(custom.field_name, mapping=mapping, custom=custom),
+            **scope(custom.field_name),
             'provenance': None,
             'mapping': {
                 'id': mapping.id,
@@ -671,8 +748,10 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewer': mapping.reviewer.username if mapping.reviewer else None,
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
+                'tab': mapping.tab,
             },
             'suggestion': None,
+            'suggest_query': _suggest_query(custom.field_name),
             'unit_options': STANDARD_UNIT_CHOICES,
             'mappable': True,
             'locked_table': None,
@@ -690,7 +769,7 @@ def get_all_field_descriptors() -> list[dict]:
         mapping = mappings_by_field.get(name)
         result.append({
             'field_name': name, 'field_type': attribute['value_kind'],
-            'category': 'editable', 'tab': 'genomics', 'provenance': None,
+            'category': 'editable', 'tab': 'genomics', **scope(name), 'provenance': None,
             'mapping': {
                 'id': mapping.id, 'concept_id': mapping.concept_id,
                 'concept_name': mapping.concept.concept_name if mapping.concept else '',
@@ -701,7 +780,8 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
             } if mapping else None,
-            'suggestion': None, 'unit_options': STANDARD_UNIT_CHOICES,
+            'suggestion': None, 'suggest_query': _suggest_query(name),
+            'unit_options': STANDARD_UNIT_CHOICES,
             'mappable': True, 'locked_table': None, 'choices': [], 'formula': None,
             'explanation': 'Linked attribute of each Genomics finding; not a patient-level scalar.',
             'derivation_error': None,

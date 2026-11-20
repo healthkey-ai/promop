@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from patient_portal.models import Identity, PatientUser
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -431,6 +432,7 @@ class AutoProvisionTest(TestCase):
 
         user = Identity.objects.create_user(
             email='newpatient@example.com',
+            email_verified_at=timezone.now(),
         )
         _ensure_person(user)
 
@@ -624,7 +626,9 @@ class LabResultsMutationAuthorizationTest(TestCase):
             scope=scope,
         )
 
-    def test_read_only_analyst_can_get_but_cannot_patch_or_delete_measurement(self):
+    def test_analyst_reaches_no_measurement(self):
+        """An analyst grant reads no patient data (#2416): the measurement is
+        not found on any verb, as for a stranger."""
         self.client.force_authenticate(user=self.analyst)
 
         get_resp = self.client.get('/api/lab-results/measurements/510/')
@@ -635,18 +639,20 @@ class LabResultsMutationAuthorizationTest(TestCase):
         )
         delete_resp = self.client.delete('/api/lab-results/measurements/510/')
 
-        self.assertEqual(get_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(patch_resp.status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(delete_resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(get_resp.status_code, status.HTTP_404_NOT_FOUND)
+        # A write is refused by the permission class (403) or, past it, by the
+        # same not-found lookup; either way nothing is read or written.
+        self.assertIn(patch_resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
+        self.assertIn(delete_resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
         self.measurement.refresh_from_db()
         self.assertEqual(self.measurement.value_as_number, Decimal('13.5'))
 
-    def test_read_only_analyst_cannot_delete_visit(self):
+    def test_analyst_cannot_delete_visit(self):
         self.client.force_authenticate(user=self.analyst)
 
         resp = self.client.delete('/api/lab-results/visits/510/')
 
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertIn(resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
         self.assertTrue(VisitOccurrence.objects.filter(visit_occurrence_id=510).exists())
         self.assertTrue(Measurement.objects.filter(measurement_id=510).exists())
 

@@ -15,6 +15,8 @@ Coverage is openly reported: every projection field is classified, including
 computed values, aliases and values authored through a dedicated resource.
 """
 
+from django.db.models import Q
+
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
     Observation, PatientRecord, ProcedureOccurrence,
@@ -25,6 +27,7 @@ from omop_core.services.mappings import (
     DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
 )
 from omop_core.services.patient_record_service import (
+    DERIVED_LANGUAGE_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
 )
@@ -365,7 +368,7 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes(choice_options=None):
+def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mappings=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
@@ -381,15 +384,24 @@ def _curated_writes(choice_options=None):
     """
     from omop_core.models import FieldConceptMapping
     from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
+    from omop_core.services.clinical_input_contract import CLINICAL_INPUT_FIELDS
 
     entries = {}
-    rows = list(
+    # Genomics recipes ride along in the same read: they are writable whatever
+    # their status, so they are collected into *genomics_recipes* when given.
+    fetched = list(
         FieldConceptMapping.objects
-        .filter(status='approved')
+        .filter(Q(status='approved') | Q(field_name__startswith='genomics_')
+                | Q(field_name__in=CLINICAL_INPUT_FIELDS))
         .exclude(wrong_breast_field_mappings())
-        .exclude(omop_table='')
+        .exclude(Q(omop_table='') & ~Q(field_name__in=CLINICAL_INPUT_FIELDS))
         .select_related('concept')
     )
+    if genomics_recipes is not None:
+        genomics_recipes.update({r.field_name: r for r in fetched if r.field_name.startswith('genomics_')})
+    if clinical_mappings is not None:
+        clinical_mappings.update({r.field_name: r for r in fetched if r.field_name in CLINICAL_INPUT_FIELDS})
+    rows = [r for r in fetched if r.status == 'approved']
     # One read per distinct answer vocabulary, not one per field that uses it.
     # Four eligibility fields sharing a set is one query, the same shape the
     # LOINC and UCUM lookups already have.
@@ -439,6 +451,7 @@ def _curated_writes(choice_options=None):
                 'omop_table': target,
                 'endpoint': _MAPPING_ENDPOINTS[target],
                 'concept_id': concept_id,
+                'concept_code': row.concept.concept_code,
                 'type_concept_id': type_concept_id,
                 'source_value': source_value,
             },
@@ -460,6 +473,37 @@ def _curated_writes(choice_options=None):
             from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
             entry = cytogenetic_descriptor(mapping_approved=True)
         entries[row.field_name] = entry
+
+    # Attach value_concept_map for concept-valued fields so the projection
+    # engine can write value_as_concept_id from the choice's coded answer.
+    concept_fields = [
+        fn for fn, e in entries.items()
+        if e.get('value_kind') == 'concept' and e.get('projection')
+    ]
+    if concept_fields:
+        from omop_core.models import FieldChoiceCode
+        codes = list(
+            FieldChoiceCode.objects
+            .filter(choice__field_name__in=concept_fields, is_primary=True)
+            .values_list('choice__field_name', 'choice__display',
+                         'vocabulary_id', 'code')
+        )
+        if codes:
+            # Resolve (vocabulary_id, code) pairs → concept_id.  Group by
+            # vocabulary so the existing helper works.
+            by_vocab: dict[str, set[str]] = {}
+            for _, _, vid, code in codes:
+                by_vocab.setdefault(vid, set()).add(code)
+            resolved: dict[tuple[str, str], int] = {}
+            for vid, code_set in by_vocab.items():
+                for code, cid in _resolve_concept_ids(code_set, vid).items():
+                    resolved[(vid, code)] = cid
+            for fn, display, vid, code in codes:
+                pk = resolved.get((vid, code))
+                if pk is not None:
+                    proj = entries[fn].get('projection')
+                    if proj is not None:
+                        proj.setdefault('value_concept_map', {})[display] = pk
     return entries
 
 
@@ -508,6 +552,8 @@ def get_serializer_read_only_fields():
             read_only.add(field.name)
     # KIND_COMPUTED: derived from other fields (BMI, tnbc_status, etc.)
     read_only |= set(_COMPUTED_INPUTS)
+    # The language summary and eight capabilities belong to PersonLanguageSkill.
+    read_only |= DERIVED_LANGUAGE_FIELDS
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
@@ -553,17 +599,31 @@ def build_writable_field_descriptor():
         ]
         for field_name, choices in _field_choice_options().items()
     }
-    curated = _curated_writes(choice_options)
+    from omop_core.services.genomics import mapping_is_usable
+    genomics_recipes = {}
+    clinical_mappings = {}
+    curated = _curated_writes(choice_options, genomics_recipes, clinical_mappings)
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
+        if field in DERIVED_LANGUAGE_FIELDS:
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': ['PersonLanguageSkill'],
+                'reason': 'Derived from PersonLanguageSkill; write via the language-skills API.',
+            }
+            continue
         if field.startswith('genomics_'):
-            mapping = curated.get(field, {})
-            writable = (mapping.get('writable', False) and mapping.get('value_kind') == 'json'
-                        and mapping.get('projection', {}).get('omop_table') == 'measurement')
+            # The recipe decides whether a finding can be stored; approval only
+            # decides whether its concept flows forward. So review status is
+            # not consulted here, unlike curated (approved-only) projections.
+            mapping = genomics_recipes.get(field)
+            writable = (mapping_is_usable(mapping, parent=True)
+                        and mapping.value_kind == 'json' and mapping.multiple)
             descriptor[field] = {
                 'kind': KIND_EDITABLE, 'writable': bool(writable), 'target': 'patient_record',
-                'reason': 'Priority findings write through approved Genomics mappings.',
+                'reason': 'Priority findings write through their Genomics field recipes.',
             }
             continue
         if field == 'cytogenetic_markers':
@@ -916,4 +976,9 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
+    from omop_core.services.clinical_input_contract import NEW_INPUT_FIELDS, descriptors
+    for field, entry in descriptors(mappings=clinical_mappings).items():
+        row = clinical_mappings.get(field)
+        if field in NEW_INPUT_FIELDS or (row is not None and row.concept_id == 0):
+            descriptor[field] = entry
     return descriptor

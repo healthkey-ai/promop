@@ -6,7 +6,7 @@
  * writable and the rest are refused for three different reasons, so this is the
  * tab where "render what the server says" has to mean more than one thing.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -18,6 +18,15 @@ vi.mock('@/api/axios', () => ({
 
 vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
+}));
+
+vi.mock('@/hooks/useDiseaseCategories', () => ({
+  useCategoryObjects: () => ({ categories: [], loading: false }),
+  useAllDiseaseMappings: () => ({
+    categoryForDisease: () => null,
+    diseasesByCategory: {},
+    loading: false,
+  }),
 }));
 
 const measurement = (code: string) => ({
@@ -66,6 +75,10 @@ const DESCRIPTORS: Record<string, unknown> = {
     kind: 'unmapped', writable: false, group: 'needs-concept-set',
     reason: 'No concept set assigned yet.',
   },
+  // Written directly to PatientRecord until a concept is curated.
+  disease_management: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  disease_status: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  care_setting: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
 };
 
 beforeEach(() => {
@@ -77,6 +90,7 @@ beforeEach(() => {
 function renderTab(
   formData: Record<string, unknown> = {},
   onChange: (field: string, value: unknown) => void = vi.fn(),
+  showCoordinates = true,
 ) {
   return render(
     <GeneralTab
@@ -85,6 +99,7 @@ function renderTab(
       editedName="Alishia Howell"
       onNameChange={vi.fn()}
       onZipcodeChange={vi.fn()}
+      showCoordinates={showCoordinates}
     />,
   );
 }
@@ -128,6 +143,39 @@ describe('GeneralTab', () => {
     expect(screen.queryByTestId('reason-gender')).not.toBeInTheDocument();
   });
 
+  it('shows how the cancer is managed, how it is today and where care happens, as editable choices', async () => {
+    renderTab({ disease_management: 'Maintenance treatment', disease_status: 'In remission', care_setting: 'Local clinic' });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    expect(screen.getByText('Disease Management')).toBeInTheDocument();
+    expect(screen.getByText('Maintenance treatment')).toBeInTheDocument();
+    expect(screen.getByText('In remission')).toBeInTheDocument();
+    expect(screen.getByText('Local clinic')).toBeInTheDocument();
+    for (const name of ['disease_management', 'disease_status', 'care_setting']) {
+      expect(screen.queryByTestId(`reason-${name}`)).not.toBeInTheDocument();
+    }
+  });
+
+  it('offers the patient-facing choices for how the cancer is managed, and reports the one picked', async () => {
+    const onChange = vi.fn();
+    renderTab({}, onChange);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const box = screen.getByText('Disease Management').closest('div')!.parentElement!;
+    const trigger = within(box).getByRole('combobox');
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: 'mouse' });
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole('listbox');
+    const offered = within(listbox).getAllByRole('option').map((o) => o.textContent?.trim()).filter((t) => t && !t.startsWith('—'));
+    expect(offered).toEqual([
+      'Watch and wait, never treated', 'Receiving first treatment', 'Monitored after first treatment',
+      'Receiving treatment after relapse', 'Monitored after relapse', 'Maintenance treatment',
+      'No regular follow-up or treatment', 'Other', 'Not sure',
+    ]);
+    fireEvent.click(within(listbox).getByRole('option', { name: 'Maintenance treatment' }));
+    expect(onChange).toHaveBeenCalledWith('disease_management', 'Maintenance treatment');
+  });
+
   it('renders date of birth as an editable calendar control', async () => {
     const onChange = vi.fn();
     renderTab({ date_of_birth: '1970-01-01' }, onChange);
@@ -161,6 +209,17 @@ describe('GeneralTab', () => {
     expect(screen.queryByLabelText('Stage')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Histologic Type')).not.toBeInTheDocument();
     expect(screen.getByTestId('reason-hiv_status')).toBeInTheDocument();
+  });
+
+  it('shows viral status with positive labels only', async () => {
+    renderTab({ hiv_status: false, hepatitis_b_status: true, hepatitis_c_status: null });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    for (const label of ['HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive']) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    for (const label of ['No HIV', 'No Hepatitis B', 'No Hepatitis C']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
   });
 
   it('leaves the age display alone', async () => {
@@ -282,4 +341,34 @@ it('allows correcting the death date', async () => {
   renderTab({ death_date: '2025-02-01' });
   await waitFor(() => expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toBeEnabled());
   expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toHaveValue('2025-02-01');
+});
+
+
+describe('GeneralTab — coordinates', () => {
+  // Distinct person ids: the descriptor cache is keyed by patient, and reusing
+  // one leaks an empty descriptor into the tests above.
+  const COORDS = {
+    city: { kind: 'profile', writable: true, target: 'person', payload_field: 'city' },
+    latitude: { kind: 'profile', writable: true, target: 'person', payload_field: 'latitude', value_kind: 'number' },
+    longitude: { kind: 'profile', writable: true, target: 'person', payload_field: 'longitude', value_kind: 'number' },
+  };
+  beforeEach(() => {
+    __resetWritableFieldsCache();
+    mockGet.mockResolvedValue({ data: COORDS });
+  });
+
+  it('offers the coordinate inputs by default', async () => {
+    renderTab({ city: 'Boston', person_id: 991 });
+    expect(await screen.findByText(/^latitude$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^longitude$/i)).toBeInTheDocument();
+  });
+
+  it('hides precise coordinates when the host withholds them', async () => {
+    // A federated host that does not send latitude/longitude must not offer a
+    // field whose save it would refuse.
+    renderTab({ city: 'Boston', person_id: 992 }, vi.fn(), false);
+    expect(await screen.findByText(/^city$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^latitude$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^longitude$/i)).not.toBeInTheDocument();
+  });
 });

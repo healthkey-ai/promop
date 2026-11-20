@@ -28,9 +28,12 @@ def _may_break_glass(request, person_id: int) -> bool:
     if getattr(user, 'is_superuser', False):
         return True
     from django.db.models import Q
+    from omop_core.services.access import CURATION_ROLES
     now = timezone.now()
-    org_ids = GroupAccess.objects.filter(identity=user).exclude(
-        role='patient',
+    # Only the roles that read patients may break the glass (#2416): an
+    # analyst grant would otherwise open a patient's audit trail.
+    org_ids = GroupAccess.objects.filter(identity=user).filter(
+        role__in=CURATION_ROLES,
     ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now)
     ).exclude(org_id__isnull=True).values_list('org_id', flat=True)

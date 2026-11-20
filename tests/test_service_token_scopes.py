@@ -7,6 +7,7 @@ from django.test import override_settings
 from django.utils import timezone
 
 from patient_portal.api.permissions import (
+    EtlDeletePermission,
     EtlPatientCrudPermission,
     EtlWritePermission,
     SERVICE_TOKEN,
@@ -67,7 +68,39 @@ def test_etl_capability_is_non_destructive(permission_class, method, scope):
         assert permission_class().has_permission(request, None) is expected
 
 
-@pytest.mark.parametrize('permission_class', PERMISSIONS)
+@pytest.mark.parametrize('permission_class,allowed_methods', (
+    (EtlPatientCrudPermission, ('DELETE',)),
+    (EtlDeletePermission, METHODS),
+    (EtlWritePermission, ()),
+) + tuple((p, ()) for p in PERMISSIONS))
+@pytest.mark.parametrize('method', METHODS)
+def test_etl_delete_capability_reaches_only_delete_classes(
+    permission_class, allowed_methods, method,
+):
+    # EtlDeletePermission is method-blind because it guards only the POST bulk delete.
+    request = SimpleNamespace(
+        auth=SERVICE_TOKEN, method=method,
+        user=SimpleNamespace(is_authenticated=True, is_staff=False),
+    )
+    with override_settings(SERVICE_AUTH_SCOPES='system/etl.delete'):
+        assert permission_class().has_permission(request, None) is (
+            method in allowed_methods
+        )
+
+
+def test_oauth_token_cannot_use_etl_delete_capability():
+    token = SimpleNamespace(
+        scope='system/etl.delete', expires=timezone.now() + timedelta(hours=1),
+    )
+    for permission_class in (EtlPatientCrudPermission, EtlDeletePermission):
+        request = SimpleNamespace(
+            auth=token, method='DELETE',
+            user=SimpleNamespace(is_authenticated=True, is_staff=False),
+        )
+        assert permission_class().has_permission(request, None) is False
+
+
+@pytest.mark.parametrize('permission_class', PERMISSIONS + (EtlDeletePermission,))
 @pytest.mark.parametrize('method', METHODS)
 def test_etl_capability_is_rejected_by_ordinary_permissions(permission_class, method):
     request = SimpleNamespace(

@@ -5,7 +5,7 @@
 
 **PRomop** is an open-source longitudinal patient health record built on the [OMOP CDM v5.4](https://ohdsi.github.io/CommonDataModel/) with FHIR R4 ingestion. Its central feature is `PatientRecord` — a wide denormalized projection (300+ columns) derived automatically from OMOP tables that gives analytics, trial matching, and clinical decision support a single shared substrate, eliminating the repeated re-derivation of patient state across applications.
 
-Deployed across approximately 17,500 real oncology patients, with trial matching against 6,000 actively recruiting trials. Benchmarks show a [~37× speedup](https://arxiv.org/abs/2607.13947) for eligibility screening compared to querying raw OMOP tables directly.
+Deployed across approximately 17,500 real oncology patients, with trial matching against 19,000 actively recruiting trials. Benchmarks show a [~37× speedup](https://arxiv.org/abs/2607.13947) for eligibility screening compared to querying raw OMOP tables directly.
 
 See [paper.md](paper.md) for the full research description.
 
@@ -83,18 +83,20 @@ LOINC destination concepts to exist. Do not use the retired
 `seed_omop_concepts` development fixture in a deployed environment.
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate omop_core 0200 --noinput
 ```
 
 ### 4. Load the full Athena vocabulary
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive
 ```
 
-`--gdrive` defaults to the shared PRomop vocabulary folder. See
+`--lfs` defaults to the public `healthkey-ai/omop-vocabularies` Git LFS
+repository and `--gdrive` to the shared PRomop vocabulary folder; given
+together, LFS is tried first and Drive is the fallback. See
 [docs/vocabularies.md](docs/vocabularies.md) for the required Athena selection
 scope and other load options, including `--archive` for a downloaded Athena
 zip, `--path` for an extracted Athena directory, and `--bucket` for
@@ -102,9 +104,11 @@ GCS-backed deployments.
 
 #### Render deployment requirement
 
-Set `ATHENA_VOCABULARY_GDRIVE_URL` to the folder containing the **full** Athena
-export before deploying. The production startup script fails closed when it is
-missing, migrates the schema through `0200`, loads that export, and then runs
+Set `ATHENA_VOCABULARY_LFS_URL` to the Git LFS repository publishing the
+**full** Athena export (`render.yaml` sets the public one), and optionally
+`ATHENA_VOCABULARY_GDRIVE_URL` to the Drive folder used as the fallback, before
+deploying. The production startup script fails closed when neither is set,
+migrates the schema through `0200`, loads that export, and then runs
 the remaining migrations. This ordering is required; it prevents migration
 `0201` from creating null-target HK-Labs-to-LOINC mappings.
 
@@ -114,14 +118,14 @@ Only after the vocabulary load succeeds, apply the migrations that seed and
 validate mappings against those concepts:
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 ```
 
 ### 6. Create a superuser
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py setup_admin
 ```
 
@@ -167,7 +171,7 @@ invisible to it. Run both.
 
 ```bash
 # Backend — Django runner (omop_core + patient_portal)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Backend — pytest (the tests/ package)
@@ -217,10 +221,12 @@ See **[docs/reproducing-benchmark-results.md](docs/reproducing-benchmark-results
 
 ## Deployment (Render)
 
-`start.sh` runs `migrate` and `setup_admin` on every deploy. Push to `main` to trigger a Render deploy.
+`start.sh` runs `scripts/prepare-deployment.sh`, which migrates and runs `setup_admin`, on every deploy. Push to `main` to trigger a Render deploy.
 
-- Backend: `https://promop.onrender.com`
+- Backend: `https://promop.onrender.com` (this is just our public example which you can sign up to as demo user, but you cannot deploy to it)
 - Admin credentials: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render
+
+To deploy your own instance on Google Cloud, see the [Terraform example](docs/terraform/README.md).
 
 ---
 

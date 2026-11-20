@@ -58,7 +58,7 @@ vocabularies.
 | `respiratory_rate` | 9279-1 | LOINC | 3024171 | measurement | `/min` | mean | `HKQuantityTypeIdentifierRespiratoryRate` | `respiration_rate.respiration_rate`; fallback `session.avg_respiration_rate` |
 | `sleep_duration` | 93832-4 | LOINC | 1002368 | **observation** | `h` | sum | `HKCategoryTypeIdentifierSleepAnalysis` (asleep spans only) | `sleep_level` timestamp spans; fallback `sleep_data.total_timer_time` ÷ 3600 |
 | `vo2_max` | 94122-9 | LOINC | 1002246 | measurement | `mL/kg/min` | mean | `HKQuantityTypeIdentifierVO2Max` | `session.enhanced_max_oxygen_consumption` → `vo2_max` |
-| `distance` | 41953-1 | LOINC | 3031111 | measurement | `km` | sum | `HKQuantityTypeIdentifierDistanceWalkingRunning` | `monitoring.distance` ÷ 1000; `session.total_distance` ÷ 1000 |
+| `distance` | 112427-0 | LOINC | 648874 | measurement | `km` | sum | `HKQuantityTypeIdentifierDistanceWalkingRunning` | `monitoring.distance` ÷ 1000; `session.total_distance` ÷ 1000 |
 | `walking_speed` | 41957-2 | LOINC | 3032289 | measurement | `km/hr` | mean | `HKQuantityTypeIdentifierWalkingSpeed` | *(no source — see Gap A)* |
 | `walking_step_length` | HK-WEAR-STEP-LENGTH | **HK-Wearable** | 2029606350 | measurement | `cm` | mean | `HKQuantityTypeIdentifierWalkingStepLength` | *(no source)* |
 | `walking_double_support_pct` | HK-WEAR-DBL-SUPPORT | **HK-Wearable** | 2029606351 | measurement | `%` | mean | `HKQuantityTypeIdentifierWalkingDoubleSupportPercentage` | *(no source)* |
@@ -106,17 +106,33 @@ domain routed it to.
 ## Local concept minting rules
 
 Where a metric has no LOINC, the local mint **must** follow the project's quarantine convention
-(`omop_core/models.py:566`) — and all five wearable mints do:
+(`omop_core/models.py:566`) — and all seven wearable mints do:
 
-- `vocabulary_id='HK-Wearable'` (declared in `concept_fixtures._VOCABULARIES`, and by migration 0143 for real deployments)
+- `vocabulary_id='HK-Wearable'` (declared in `concept_fixtures._VOCABULARIES`, and by migrations 0143 and 0343 for real deployments)
 - `source='HealthKey'`
 - an `HK-*`-shaped `concept_code`
 - `concept_id >= 2,000,000,000` — OHDSI reserves that range for locally-authored concepts, and
   Athena never allocates there
 
-The four ids are allocated contiguously from `_HK_WEARABLE_ID_BASE = 2_029_606_350`
+The ids are allocated contiguously from `_HK_WEARABLE_ID_BASE = 2_029_606_350`
 (`omop_core/concept_fixtures.py`), continuing the existing `HK-Labs` block. New wearable mints should
 continue upward from there.
+
+| concept_id | Code | Domain | Minted by | Used by |
+|---|---|---|---|---|
+| 2029606350 | HK-WEAR-STEP-LENGTH | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606351 | HK-WEAR-DBL-SUPPORT | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606352 | HK-WEAR-WALK-HR | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606353 | HK-WEAR-BASAL-ENERGY | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606354 | HK-WEAR-HRV-RMSSD | Measurement | 0143 | runtime registry, OpenWearables seed |
+| 2029606355 | HK-WEAR-OW-WORKOUT-EFFORT | Observation | 0343 | OpenWearables seed only |
+| 2029606356 | HK-WEAR-OW-CARDIO-AGE | Measurement | 0343 | OpenWearables seed only |
+
+The last two are vendor scores (an estimated workout effort and a cardiovascular age) that are not
+comparable across vendors, so they get a local concept rather than a generic LOINC or SNOMED one.
+No runtime metric uses them. 0343 matches on `(vocabulary_id, concept_code)`, not on the id as
+0143 does: a HealthKey-minted id is not guaranteed to agree across instances, so it keeps a concept
+that is already present at whatever id it has and only fills in a missing `source`.
 
 **Never mint a real LOINC code under `vocabulary_id='LOINC'`.** Doing so creates a duplicate
 `(vocabulary_id, concept_code)` pair, and `concept_by_vocab` resolves duplicates arbitrarily
@@ -156,6 +172,286 @@ It deliberately does **not** match `body_mass` (29463-7) or `spo2` (59408-5) by 
 were always correct, and both are also written by the vitals and FHIR ingestion paths, so matching
 them would delete non-wearable clinical data. Rows for those two metrics are removed only when
 they sit on a retired mint, which is unambiguous.
+
+---
+
+## OpenWearables: proposed code mappings
+
+OpenWearables metrics do not go through the registry above. Each OpenWearables series type is a
+source code on the Code Mapping page (source vocabulary `OpenWearables`, shown on the Wearables
+tab), and `manage.py seed_openwearables_mappings` creates one **proposed**
+`SourceCodeConceptMapping` per metric (`OPENWEARABLES_METRICS`, 94 of them). A curator approves
+or changes each one; nothing here approves a mapping.
+
+The targets follow the wearable mapping proposal ("wearable_metrics_mapping v4"), which was
+reconciled with the HL7 PHR code list on 15 Nov 2026. Where the two disagreed, the HL7 PHR code is
+the one seeded (#2595):
+
+| OpenWearables code | Target | Was |
+|---|---|---|
+| `lean_body_mass` | LOINC 91557-9 Lean body weight | LOINC 88334-8 (Calculated) |
+| `forced_vital_capacity` | LOINC 19870-5 Forced vital capacity | LOINC 19868-9 (by Spirometry) |
+| `peak_expiratory_flow_rate` | LOINC 33452-4 Maximum expiratory gas flow | LOINC 19935-6 (by Peak flow meter) |
+| `flights_climbed` | LOINC 100304-5 | none |
+| `walking_step_length` | HK-WEAR-STEP-LENGTH | none |
+| `walking_double_support_percentage` | HK-WEAR-DBL-SUPPORT | none |
+| `walking_heart_rate_average` | HK-WEAR-WALK-HR | none |
+| `heart_rate_variability_rmssd` | HK-WEAR-HRV-RMSSD | none |
+| `air_temperature` | SNOMED 250825003 Ambient temperature | none |
+| `blood_alcohol_content` | SNOMED 54791000237107 Ethanol mass concentration in blood | none |
+
+The three gait rows and `flights_climbed` now name the same concept as the Apple HealthKit code
+for the same quantity, and the RMSSD row the same as Garmin's, so one metric is one concept
+whichever source sent it.
+
+A metric the proposal has no verified code for is seeded with no destination and waits on the
+Wearables tab for Suggest or a curator. `average_met` is one of them on purpose: SNOMED 16821004
+"Metabolic requirement" may not mean an average MET over an interval, and it stays unmapped until
+an expert has reviewed it.
+
+### Re-running the seed
+
+The command is `get_or_create` on the source code, so a plain re-run creates what is missing and
+changes nothing else. A target that changes in `OPENWEARABLES_METRICS` therefore never reaches an
+instance that was seeded earlier unless it is asked for:
+
+```bash
+python manage.py seed_openwearables_mappings --dry-run
+python manage.py seed_openwearables_mappings
+python manage.py seed_openwearables_mappings --update-seeded --dry-run
+python manage.py seed_openwearables_mappings --update-seeded
+```
+
+`--update-seeded` re-points an existing row to the seed's target only while nothing but the seed
+has set its destination or curated it:
+
+- `status` is `proposed` (never an approved or rejected row),
+- `origin` is `import` and `origin_system` is `open-wearables-seed`, and the row carries no
+  Suggest candidate or score (Suggest stamps its own `origin_system` when it proposes a
+  destination, which takes the row out),
+- no curator has saved it: `decision_surface` is blank, `updated_by` is empty, and it has no
+  curator note, LOINC axes or SNOMED attributes, and no destination unit other than one the
+  seed assigns. The note, axes and attributes matter on an instance loaded by
+  `copy_reference_data`, which clears `updated_by`.
+
+A row Suggest tried and declined has no destination and is still the seed's; filling it drops the
+note that run left. A target a curator has locked on the Concept to Code tab is not written to: a row the seed would create at a locked concept is created without a destination, and `--update-seeded` points it there once the concept is unlocked.
+
+A target is used only when its concept is loaded, not retired, and in the domain the seed files
+the metric under; otherwise it is reported (`Concept not found`, `Concept is retired`,
+`Concept is in domain …`) and the row is created or left without it.
+
+It never clears a destination. The run lists each row it does not bring into line:
+`[LEFT ALONE]` where the seed names a target and the row keeps another destination, with the
+reason, and `[KEPT]` where the seed names no target and the row has one.
+
+### Units
+
+Each metric's unit is seeded twice over, from the proposal's "Unit" and "UCUM Unit" columns
+(`UCUM_BY_UNIT` in the seed: `bpm` → `/min`, `mmHg` → `mm[Hg]`, `°C` → `Cel`, `count` → `1`, …):
+
+- as the row's **source unit** (`source_unit_evidence`, one entry with the UCUM code and the
+  display unit), which is what the list's Units column shows. It carries no count, so the
+  approval unit check does not treat it as a sighting, and no source, so a rebuild from patient
+  data keeps it;
+- as the mapping's **destination unit** (`destination_unit_concept`, a standard UCUM concept),
+  set whether or not the metric has a destination concept yet. A unit whose UCUM concept is not
+  loaded is left unset and listed at the end of the run by display unit and code (`U ([IU])`,
+  `score ({score})` and `μS (uS)` on a standard Athena load).
+
+The three temperature *deviation* metrics (`skin_temperature_deviation`,
+`skin_temperature_trend_deviation`, `garmin_skin_temperature`) get a source unit and no
+destination unit: the temperature conversion is for absolute readings, and applied to a
+difference in °F it would be wrong.
+
+`--update-seeded` also fills what is blank on a row that exists:
+
+- a missing source unit, on any row, whatever its status (`[SOURCE UNIT]`). It is a sighting, so
+  `updated_at` is not stamped;
+- a missing destination unit (`[UNIT]`), on a proposed row no curator has saved. This does not
+  need the row to be the seed's: a row whose destination Suggest proposed gets its unit too. It
+  leaves alone a row that is approved or rejected, a row a curator has saved (including one
+  with only LOINC axes or SNOMED attributes entered), a row whose destination a curator has
+  locked, and any unit that is already set.
+
+A run without the flag says how many rows it would fill.
+
+A destination unit does nothing while the mapping is proposed. Once it is approved, for a
+Measurement row whose unit is one promop converts between (`m`, `cm`, `kg`, `g`, `mg`, `L`,
+`mL`, `min`, `h`, `Cel`, `mg/dL`), the bulk measurement write converts incoming values to it
+(see AGENTS.md, "Write-time conversion of stored rows"), and the lookup API reports a source
+unit it does not recognise as the same unit (`bpm` against `/min`, `mmHg` against `mm[Hg]`) as
+`incompatible`. Both look a mapping up by source code alone, so an approved `weight` row would
+also apply to another producer's rows whose source value is "weight". Check both before
+approving a seeded row for a source that is about to send data.
+
+The Apple and Garmin seed (`seed_wearable_device_mappings`) records the source unit its
+adapters report in (`km`, `km/hr`, `bpm`, …), filling it on rows seeded before units were
+recorded. It sets no destination unit: those rows are approved, and the proposal's metres and
+m/s differ from the kilometres and km/h the adapters store.
+
+### Category, measure class and metric key
+
+Three more things the proposal says about each metric are seeded onto its mapping. All three
+describe the **source** metric, not the destination concept: the same LOINC concept can be fed
+by a direct sensor reading from one source and an algorithmic estimate from another.
+
+- **Category** (`category`, the proposal's "Category" column): Activity, Heart & Cardiovascular,
+  Sleep and so on. It is the first column of the Wearables tab. The allowed list
+  (`WEARABLE_METRIC_CATEGORIES`) holds twenty values: the fifteen the proposal uses today and
+  five (Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing) for HL7 PHR metrics
+  that are about to join it.
+- **Measure class** (`measure_class`, the "Measure Class" column): how the source produces the
+  value. One of Direct measurement, Aggregate over interval, Algorithmic estimate, Vendor score,
+  Environmental context, User-entered or device log. The list shows it as a second line under
+  the category.
+- **Metric key** (`metric_key`, the "Internal Metric Key" column): the vendor-neutral name of
+  the metric, in lowercase snake case, shared by every source code that reports it.
+  `resting_hr` is `HKQuantityTypeIdentifierRestingHeartRate` for Apple, `resting_hr` for Garmin
+  and `resting_heart_rate` for OpenWearables. It is the Wearables tab's second column, and what
+  ties the vocabularies together: OpenWearables does not cover every metric, and the HL7 PHR
+  table maps from HealthKit and Health Connect directly. For the Apple and Garmin seeds it is
+  the last element of each metric's tuple, which already held this key. An OpenWearables metric
+  the proposal gives no key is keyed by its own code.
+
+The values live beside each metric list (`OPENWEARABLES_CATEGORIES`,
+`OPENWEARABLES_MEASURE_CLASSES`, `OPENWEARABLES_METRIC_KEYS`, and the `HL7_PHR_*`, `APPLE_*` and
+`GARMIN_*` equivalents; `PHR_SOURCE_CATEGORIES` and `PHR_SOURCE_MEASURE_CLASSES` by metric key),
+not inside the metric tuples. A new row gets all three.
+`--update-seeded` fills whichever is blank on a row that exists, whatever its status, reports
+each as `[CATEGORY]`, `[MEASURE CLASS]` or `[METRIC KEY]`, counts them at the end of the summary
+line, and never changes one that is set. A plain re-run fills nothing and says how many rows
+`--update-seeded` would fill. `seed_wearable_device_mappings` fills blanks on every run, as it
+does for the source unit. A curator can change any of the three in the Edit Mapping dialog; a
+mapping that is already approved (every Apple and Garmin row) takes an org admin or staff to
+change, as for any other field.
+
+A blank means "not yet described", not "none": a curator who clears a category, measure class
+or metric key gets it back from the next fill, which for the device seed is every vocabulary
+load (`load_athena_vocabularies` runs it). A value a curator changed is never replaced.
+
+**After deploying the columns.** Nothing runs `seed_openwearables_mappings` or
+`seed_hl7_phr_mappings` automatically, so on an instance seeded earlier those rows show a blank
+Category and Metric until both commands are run with `--update-seeded`:
+
+```bash
+python manage.py seed_openwearables_mappings --update-seeded --dry-run
+python manage.py seed_openwearables_mappings --update-seeded
+python manage.py seed_hl7_phr_mappings --update-seeded
+python manage.py seed_wearable_device_mappings   # or wait for the next vocabulary load
+```
+
+### Downloading the tab
+
+The Wearables tab has "Download all wearable mappings", as a CSV or as a Word document with one
+table per category: every mapping on the tab, proposed and approved, without rejected rows,
+ordered so that the codes of one metric sit together. Anyone who can read the Code Mapping page
+can download it. The endpoint, the columns and what the file leaves out are in
+[code-mapping-api.md](code-mapping-api.md#downloading-the-wearables-tab).
+
+## HL7 PHR: HL7 PHR, HealthKit and Health Connect codes
+
+The HL7 PHR Code Mapping table gives each PHR code value the Apple HealthKit type and the
+Android Health Connect record it is mapped from. The spec's authors map from those two, not
+from OpenWearables, so the mapping table carries all three. `manage.py seed_hl7_phr_mappings`
+creates one **proposed** mapping per code, in three source vocabularies, all on the Wearables
+tab (`WEARABLE_SOURCE_VOCABULARIES`):
+
+| Source vocabulary | Source code | Example | Rows |
+|---|---|---|---|
+| `HL7-PHR` | the HL7 PHR code value | `stepCount` | 122 |
+| `Apple` | the HealthKit identifier | `HKQuantityTypeIdentifierHeartRate` | 60 |
+| `HealthConnect` | the Health Connect record type | `HeartRateRecord` | 35 |
+
+Every row has status `proposed`, provenance (`origin_system`) `HL7 PHR` — the table is where
+the code's association with a metric comes from — and no reviewer. The command never approves.
+
+### What is seeded
+
+Two lists in the command module:
+
+- `HL7_PHR_METRICS`, 17 HL7 PHR codes for metrics no device vocabulary carried: total energy
+  burned, six dietary nutrients, steps cadence, R-R interval, three heart rhythm events, basal
+  body temperature, hip circumference, bone mass, sleep arousal index and snore index.
+- `PHR_SOURCE_METRICS`, one row per **wearable metric** of the mapping proposal, with its HL7
+  PHR code, HealthKit identifier and Health Connect record. It is a literal copy of the
+  proposal's sheet, not a runtime read of it.
+
+**Scope: wearable metrics only.** `PHR_SOURCE_METRICS` leaves out the proposal's Nutrition,
+Symptoms, Reproductive Health, Self-care, Mental Wellbeing and Hearing rows, and `food` and
+`medication_adherence`. The six dietary codes of `HL7_PHR_METRICS` stay; they get no HealthKit
+or Health Connect row.
+
+A code is seeded only where the proposal names a single code for the metric:
+
+- A HealthKit identifier `seed_wearable_device_mappings` already seeds is skipped. Those 17
+  rows are approved, are what the Apple adapter resolves through, and are never read or written
+  by this command. The 60 `Apple` rows it adds are proposed, so `resolve_wearable_mappings`
+  does not see them.
+- An HL7 cell that is a note (`sleepAHI (related)`), a pair (`cyclingCadence / stepsCadence`)
+  or a FHIR profile is not a code value and seeds nothing.
+- One HL7 code is one mapping. The HL7 table has a single glucose code, `bloodGlucose`, which
+  the proposal lists against both `blood_glucose` and `cgm_glucose`; it is seeded for
+  `blood_glucose`.
+- A code is seeded as the HL7 table spells it: `exerciiseRepetitions` (sic), and
+  `HKElectrocardiogramType`, which is a HealthKit class name rather than a type identifier.
+
+### Destination, table and unit
+
+- **Destination**: the proposal's target for the metric, when it names one that is loaded on
+  the instance, not retired, in the metric's domain and a standard concept
+  (`require_standard_target`; a local `HK-Wearable` concept is accepted, as it is the proposal's
+  answer for a metric with no LOINC). Otherwise the row has no destination and waits for Suggest
+  or a curator; the run reports why (`Concept not found`, `Concept is not standard`, …). Average
+  MET (`met`) stays unmapped: the proposal's SNOMED 16821004 is marked unverified, as for the
+  OpenWearables code.
+- **Table**: from the proposal's Domain.
+- **Unit**: the proposal's unit, as source unit and as destination unit, by the rules under
+  [Units](#units). A metric whose key is in `NO_DESTINATION_UNIT` gets no destination unit
+  whichever vocabulary its code is in. The unit is the metric's in the proposal, not what each
+  platform reports in (Health Connect's `HeightRecord` is in metres), so check it against the
+  source before approving a row.
+- **Category, measure class, metric key**: the proposal's, so the HealthKit, Health Connect,
+  HL7 PHR, OpenWearables and Garmin codes for one metric carry one key. Where the proposal has
+  no Internal Metric Key (its OpenWearables-only rows) the key is the one
+  `OPENWEARABLES_METRIC_KEYS` gives the metric's OpenWearables code.
+
+The metrics the proposal added from the HL7 table last have no domain, unit or measure class
+there. The seed assigns them by the nearest metric the proposal does describe:
+
+| Kind of metric | Domain | Unit | Measure class |
+|---|---|---|---|
+| speed | Measurement | m/s | Direct measurement |
+| distance, elevation gained | Measurement | m | Aggregate over interval |
+| cadence | Measurement | rpm (`/min`) | Direct measurement |
+| accumulated time (move time, stand time) | Observation | min | Aggregate over interval |
+| temperature | Measurement | °C (`Cel`) | Direct measurement |
+| other numeric quantity (pace, minute volume, AHI, …) | Measurement | none | by its nearest metric |
+| event, episode or category | Observation | none | Aggregate over interval |
+| workout log record (event, lap, session) | Observation | none | User-entered or device log |
+
+No unit is guessed beyond those: a blank unit seeds no source unit and no destination unit.
+
+### Running it
+
+It is the OpenWearables command run once per vocabulary, in one transaction, so everything
+above about re-running, `--dry-run`, `--update-seeded`, units, category, measure class and
+metric key applies, with `HL7 PHR` as the provenance that marks a row as this seed's. A plain
+run creates what is missing and changes no row that exists. The report has a line per
+vocabulary and a total:
+
+```
+DRY RUN [HL7-PHR]: would have 122 created, 0 already existed, 79 without target concept (of 122 total).
+DRY RUN [Apple]: would have 60 created, 0 already existed, 42 without target concept (of 60 total).
+DRY RUN [HealthConnect]: would have 35 created, 0 already existed, 16 without target concept (of 35 total).
+DRY RUN total: would have 217 created, 0 already existed, 137 without target concept (of 217 total).
+```
+
+(The "without target concept" counts are those of an instance with every proposal target
+loaded; a missing or non-standard concept adds to them.)
+
+Nothing ingests under these codes yet: the rows record the agreed destination so a source that
+starts sending HealthKit, Health Connect or HL7 PHR codes finds a curated mapping waiting.
 
 ---
 
@@ -365,7 +661,9 @@ full set, so it cannot pass vacuously.
 ### Gap F — daily-total units are dimensionally loose (#443)
 
 `distance` is stored as `km` and `steps` as `/d`, but both values are daily totals. `distance`
-should arguably be `km/d` to match. This affects nothing today because every consumer reads
+should arguably be `km/d` to match. The wearable mapping proposal lists 112427-0 in metres
+("normalise km to m at ingest"), and the OpenWearables seed describes its distances in `m`; the
+Apple and Garmin write path still stores kilometres. This affects nothing today because every consumer reads
 `WEARABLE_CONCEPT_CODE` and knows the semantics, but it will confuse any external OMOP consumer.
 
 ### Gap G — HRV conflated SDNN with RMSSD — **fixed** (#438)
@@ -465,3 +763,35 @@ it was caught.
    to `read_only_fields` by hand.
 8. `frontend/src/types/patient.ts` + `WearableTab.tsx` — expose it.
 9. Tests at every layer, per CLAUDE.md.
+
+---
+
+## CDISC Biomedical Concepts
+
+A CDISC Biomedical Concept (BC, identified by its NCIt code) is mapped the way
+every other code is: as a **source code with one OMOP concept as its
+destination**. BC rows are `SourceCodeConceptMapping` rows in the `CDISC-BC`
+vocabulary (the code is the BC id), shown on the Wearables tab in the group of
+the wearable metric they match, so they are proposed, voted on, approved and
+copied like any other row there. `BiomedicalConcept` is the catalog behind
+them: the 1,588 BCs of the CDISC Library package of 2026-11-02, shipped by
+migration `0354`. Migration `0355` seeds 21 proposed BC rows.
+
+A wearable code has no BC of its own. It **reaches the BC that shares its OMOP
+destination**, so several codes (the HealthKit, Garmin and OpenWearables
+identifiers of one metric) reach one BC, and nothing is stored about the pair.
+A BC is broader than a LOINC concept and has one destination, so it is reached
+only by the codes on that concept: the Heart Rate BC points at general heart
+rate, and resting heart rate does not reach it. A metric with no BC (steps,
+sleep, exercise time, RMSSD) has none rather than a near miss. The OMOP/LOINC
+mapping stays the full one; the BC view is a partial complement.
+
+The Wearables download takes `destination=cdisc-bc` (the "Map codes to" menu
+beside it) for a view-only CSV or Word file of the wearable codes that reach a
+BC, a line per BC. `services/biomedical_concepts.biomedical_concept_mappings`
+gives the same answer for one code mapping.
+
+A vote share's public page offers the same two downloads
+(`POST /api/v1/public/mapping-votes/export/`, the link's token in the body),
+with the provenance and source-unit columns left empty: the public page shows
+neither.

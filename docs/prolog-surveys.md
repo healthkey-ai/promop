@@ -97,6 +97,15 @@ the survey-to-OMOP work is issue #903. One existing constraint applies when it i
 built: patient-originated rows are typed 32865 "Patient self-report", never 32883
 "Survey" — that mislabelling caused #441.
 
+A deployment can now write some answers into the patient's own record through a
+**record mapping**: data it supplies (`PROLOG_RECORD_MAPPING_DIRS`), reviewed
+like a definition, naming which answers of which survey versions fill which
+`PatientRecord` fields and lines of therapy. promop applies it when a response is
+submitted, as the patient, through the same save path as their own edit, so the
+rows are 32865 with PATIENT_SELF provenance. PROlog itself still writes nothing
+clinical, and with no mapping nothing changes. See
+[survey-record-mapping_architecture.md](survey-record-mapping_architecture.md).
+
 ## Serving surveys
 
 No survey is offered until a deployment mounts one. Both directories are empty by
@@ -110,6 +119,7 @@ investigating. Neither is the container's health check.
 PROLOG_DEFINITION_DIRS=/data/surveys   # *.json instruments, loaded as drafts
 PROLOG_THEME_DIRS=/data/themes         # one directory per theme, each with theme.json
 PROLOG_LEGAL_DIRS=/data/legal          # privacy.md — served at /s/<slug>/privacy
+PROLOG_MACHINE_LANGUAGES=es,pt         # languages served as disclosed machine translations (else unset)
 ```
 
 Each is read by the app as a **Django setting**, and `promop/settings.py` is
@@ -167,6 +177,34 @@ The app accepts a range of Django and DRF versions rather than pinning against
 this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
+
+### What v0.6.0 added
+
+One definition setting, no migration:
+
+- **`participation.repeatable`** — an instrument answered again and again (a
+  regular check-in). When the response the browser holds is already
+  submitted, the runner starts a new one and says when the last was
+  completed, instead of showing it as completed. Scheduling the next one stays
+  with the host (`PHR_OUTCOME_SURVEYS`, a deployment's reminders).
+
+### What v0.5.0 added
+
+Definition capabilities, no migration (0.4.9's section interstitial opt-out
+comes with it):
+
+- **Partial dates** — `config.precision` on a `date` question lists the
+  precisions it accepts (`day`, `month`, `year`; default `day`). Answers are
+  stored as `YYYY-MM-DD`, `YYYY-MM` or `YYYY`; a partial date is a period,
+  within `min_date`/`max_date` when the period meets them. The runner shows
+  separate day, month and year fields when a part may be left out. Anything
+  reading date answers (exports, a mapping into the record) must expect the
+  shorter forms.
+- **Answers instead of a date** — a `date` question's `options` ("not sure",
+  "still receiving") are answers given in place of a date, stored as
+  `{"option": key}`, and testable with `eq`, `neq` and `in`.
+- **`any` groups** — a `visible_if` list may hold `{"any": [...]}`, true when
+  one of its conditions is, for a follow-up that either of two answers opens.
 
 ### What v0.4.0 added
 

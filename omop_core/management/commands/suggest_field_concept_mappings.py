@@ -43,6 +43,7 @@ from django.core.management.base import BaseCommand
 from django.db import connection, transaction
 
 from omop_core.models import Concept, FieldConceptMapping
+from omop_core.services.field_mapping_provenance import suggestion_provenance
 
 # Domains a clinical fact can live in here. The write path handles measurement
 # and observation; anything else cannot be acted on even once approved.
@@ -67,7 +68,7 @@ _NOISE = {
 def _search_text(field_name: str) -> str:
     """Turn a column name into something worth searching a vocabulary for.
 
-    ``no_hepatitis_b_status`` searches for "hepatitis b": the ``no_`` prefix is a
+    ``no_tobacco_use_status`` searches for "tobacco use": the ``no_`` prefix is a
     negation the projection applies, not part of the concept, and ``status`` is
     shape rather than meaning.
     """
@@ -280,7 +281,7 @@ class Command(BaseCommand):
                 'value_kind': choice.get('value_kind', ''),
                 'source_value': '',
                 'status': 'proposed',
-                'provenance': 'system_generated',
+                'provenance': suggestion_provenance('reviewed'),
                 'notes': note,
             },
         )
@@ -359,7 +360,7 @@ class Command(BaseCommand):
                 # write-into-a-void. The reviewer sets it.
                 'source_value': '',
                 'status': 'proposed',
-                'provenance': 'system_generated',
+                'provenance': suggestion_provenance('lexical'),
                 'notes': note,
             },
         )

@@ -10,21 +10,21 @@ The `generate_fhir_bundle` command supports multiple disease types via `--diseas
 
 ```bash
 # Multiple myeloma (default count: 200)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease mm \
     --count 100 \
     --output /tmp/mm_bundle.json
 
 # Follicular lymphoma
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease fl \
     --count 100 \
     --output /tmp/fl_bundle.json
 
 # Breast cancer
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease breast-cancer \
     --count 100 \
@@ -60,7 +60,7 @@ Pass `--seed` to reproduce the same patient set across runs.
 The `import_fhir_bundle` command loads a generated bundle into the database, bypassing the HTTP layer and Render's 30-second request timeout.
 
 ```bash
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py import_fhir_bundle /tmp/mm_bundle.json \
     --org my-org \
     --batch-size 5
@@ -89,12 +89,12 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
 
 ```bash
 # 1. Generate 50 MM patients
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py generate_fhir_bundle \
     --disease mm --count 50 --output /tmp/mm_bundle.json
 
 # 2. Import into local dev DB
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py import_fhir_bundle /tmp/mm_bundle.json \
     --org demo-org --batch-size 10 -v 2
 ```

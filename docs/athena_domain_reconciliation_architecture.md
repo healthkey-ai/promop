@@ -1,0 +1,119 @@
+# Live Athena destination-domain reconciliation
+
+`reconcile_athena_domains` checks the official current Athena domain of standard
+destination concepts referenced by one stored source-code vocabulary. Athena is
+the authority for the concept domain. This command updates only
+`concept.domain_id`; it does not replace destinations or alter names, concept
+classes, standard flags, validity, mapping metadata, curator decisions or patient
+facts.
+
+## Scope and lookup
+
+The required argument is an exact `SourceCodeConceptMapping.source_vocabulary_id`,
+for example `ICD10` or `ICD10CM`. It selects both current target concepts and
+`MappingDestinationCandidate` choices across all statuses. Each distinct local
+standard destination is checked once, regardless of how many source codes point
+to it. Other source vocabularies are outside the selection. A concept is shared
+vocabulary metadata, so correcting it benefits every reference to that concept.
+
+The command visits the Athena concept-detail page by OMOP concept ID and reads
+the detail response delivered by the website. It uses the existing browser
+transport, with no local vocabulary export, bulk download, direct API fallback,
+or bundled data snapshot. Browser sessions close before synchronous database
+operations. All lookups are fresh on each run.
+
+Corrections require matching concept ID, vocabulary and code, an external local
+concept, and a current standard Athena concept with a known local Domain entry.
+Locally authored concepts and reserved local IDs are protected. Missing evidence,
+identity differences, a no-longer-standard/active Athena concept, and missing
+Domain reference rows are reported without inventing a correction. No lookup
+failure is reported as a successful match.
+
+## Running it
+
+Ordinary Render and Docker application builds intentionally omit Playwright and
+Chromium. These browser-only operator commands are not part of serving web or
+worker traffic. Run them from a purpose-built environment with the optional
+dependency:
+
+```sh
+pip install -r requirements.txt -r requirements-athena-scrape.txt
+export PLAYWRIGHT_BROWSERS_PATH=0
+python scripts/install_athena_browser.py --require-package
+```
+
+Use `--with-deps` in a disposable Linux job that also needs Chromium's system
+libraries. The focused CI job installs the optional requirements and verifies a
+real browser launch when optional browser packaging changes. Existing
+dashboard-managed Render services must synchronize the Blueprint build commands;
+a repository change alone does not replace a dashboard override. Until they are
+synchronized, a stale Render build command safely skips browser setup when the
+optional Playwright package is absent.
+
+Audit only (the default):
+
+```sh
+python manage.py reconcile_athena_domains ICD10 --report /tmp/icd10-domains.csv
+```
+
+Apply verified domain corrections:
+
+```sh
+python manage.py reconcile_athena_domains ICD10 --apply --report /tmp/icd10-domains-applied.csv
+```
+
+Repeat separately for `ICD10CM` when both stored source vocabularies should be
+checked. No implicit alias expands the requested scope. `--database` selects a
+configured Django database alias; running on the HealthTree deployment checks
+that instance's own destinations. No direct operator access from HealthKey is
+needed.
+
+`--delay` defaults to one second between navigations. `--timeout` defaults to 30
+seconds per response, and `--batch-size` defaults to 25 (maximum 100).
+`--browser-executable` and `--browser-storage-state` support the same optional
+browser configuration as destination recovery. An unknown source vocabulary
+fails clearly. A known vocabulary with no standard destinations reports zero.
+
+## Writes, reports and reruns
+
+Each correction locks and rereads the concept after the web lookup. Concurrent
+changes to its identity, provenance, standard status or domain are preserved and
+reported for rechecking. A concurrent change that already set the Athena domain
+is a no-op. The SQL update names only `domain_id`.
+
+A domain Athena reports is written only if the application can route it — the
+five domains in `DOMAIN_TO_TABLE`. A destination Athena has moved to `Device`,
+`Meas Value` or `Spec Anatomic Site` is reported as `unsupported_domain` and
+left alone: writing it would drop the concept out of every per-domain Suggest
+index and make new mappings from it fail validation. This check runs before the
+local `Domain` table is consulted, so such a destination is never reported as a
+missing Domain row instead. `unsupported_domain` counts as unresolved, so a run
+that previously exited zero while writing an unroutable domain now exits
+nonzero — wrappers treating exit zero as "clean" will see the difference.
+
+A CSV receipt includes the source vocabulary, concept ID/vocabulary/code, local
+and Athena domains, outcome, reason, `stale_mappings`, Athena page URL and check
+timestamp. `stale_mappings` lists the `SourceCodeConceptMapping` primary keys
+whose own `domain_id` contradicts the corrected concept domain: a mapping stores
+its domain and `omop_table` separately, and `clean()` compares those two to each
+other rather than to the destination, so a correction here leaves the mapping
+routing facts to the old table. The command does not rewrite them — which rows
+to re-curate, and what to do with facts already written, is a curation decision.
+A list longer than `STALE_MAPPING_LIMIT` ends with `+N more` rather than being
+silently cut. The same list appears in the default (non-`--report`) output.
+`--report -` writes CSV to stdout and progress to stderr. Without `--report`,
+results and counts are printed. Partial lookup failures produce a nonzero exit
+status after the report is written; successful corrections in an apply run stay
+committed and reruns safely check them again.
+
+## Relationship to the staging conflict workbook
+
+The 22 September workbook's 77 source-code conflicts compared destination
+metadata for the same concept IDs: 55 domain differences and one standard/
+validity discrepancy across 56 distinct concepts. It was a pre-reconciliation
+snapshot. PR #1543's migration 0253 handles its separately verified recovery
+payload. This command is not restricted to that payload or the workbook; it
+checks whichever standard destinations exist on the selected instance.
+
+This change deliberately adds no reference-data archive and no network-dependent
+startup migration. It is an explicit management command against the live website.

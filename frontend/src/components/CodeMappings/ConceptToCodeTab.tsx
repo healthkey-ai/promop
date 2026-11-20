@@ -1,0 +1,1557 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as Dialog from '@radix-ui/react-dialog';
+import api from '@/api/axios';
+import { fetchDiseaseCategories } from '@/api/mappingHub';
+import { destinationError } from './destinationSearch';
+import { BarChart3, ChevronDown, ChevronRight, Lock, StickyNote, Unlock } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/shadcn/popover';
+import AxisVariantWalkPanel from './AxisVariantWalkPanel';
+import EditMappingDialog from './EditMappingDialog';
+import { CuratorNoteMark } from './CuratorNoteMark';
+import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
+import WearableMappingsDownload from './WearableMappingsDownload';
+import WearableVoteShare from './WearableVoteShare';
+import { useWearableSourceSystems } from './wearableSourceSystems';
+import type { AxisVariant, LoincAxesPayload } from './loincAxes';
+import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
+
+type Concept = {
+  concept_id: number; concept_name: string; concept_code: string;
+  vocabulary_id: string; domain_id: string;
+  concept_class_id?: string; standard_concept?: string | null;
+  /** What the list files the concept under: its wearable metric category under
+   * Wearables, else its LOINC class or concept class. Blank when it has none (#2690). */
+  category?: string;
+  fields: { field_name: string; status: string; omop_table: string }[];
+  sccm_counts: { approved: number; proposed: number; rejected: number };
+  /** Curator priority (1 = map first), or null when unranked (#1914). */
+  priority?: number | null;
+  /** Its source codes are mapped; it holds no priority and sorts last (#2388). */
+  done?: boolean;
+  /** Who has claimed the concept, and whether that is the viewer (#2390). */
+  lock?: { username: string; locked_at?: string; mine: boolean } | null;
+  /** The curators' shared note about the concept, when one is written (#2411). */
+  note?: ConceptNote | null;
+};
+type ConceptNote = { text: string; updated_by?: string; updated_at?: string };
+const NOTE_MAX_LENGTH = 4000;
+/** Another curator holds the concept: review only. */
+const lockedByOther = (concept: Concept) => Boolean(concept.lock && !concept.lock.mine);
+type Source = {
+  mapping_id: number | null; source_code: string; source_code_description: string;
+  source_vocabulary_id: string; occurrence_count: number; status: string;
+  origin_system: string; updated_at: string; destination_concept_id: number | null;
+  destination_concept_name: string; destination_standard_concept: string | null;
+  evidence?: string[]; verdict?: string; note?: string;
+  /** The mapping's note when a curator wrote it, else blank (#2423). */
+  curator_note?: string;
+  /** How many LOINC axis sets this code's units imply, when the server reports it. */
+  axis_variant_count?: number;
+  /** The variants themselves, each with its own (suggested) destination (#2012). */
+  axis_variants?: AxisVariant[];
+  /** Normalised description for grouping codes with the same label. */
+  source_label_norm?: string | null;
+  /** Distinct units this code has been observed in (from source_unit_evidence). */
+  units?: string[];
+  /** FHIR basedOn display labels (e.g. order names like "Complete blood count"). */
+  based_on?: string[];
+  /** The ranker's confidence (0-1) in this source → concept pairing. */
+  confidence?: number | null;
+  /** Saved in the full editor since the preview: no longer a bulk-review row. */
+  edited?: boolean;
+  /** The ranker answered "no suitable concept" for this source (#2034). */
+  declined?: boolean;
+};
+type ConfidenceOrder = '' | '-confidence' | 'confidence';
+type Page<T> = { results: T[]; page: number; page_size: number; total: number };
+type ConceptOrder = 'category' | 'priority';
+/** The concept list. `grouped` says the list is shown under one header per
+ * category: `categories` then holds every category of the whole filtered list
+ * with its size, in order, and `results` is empty until a category is asked for
+ * by name (`view=categories`, then `category=`). A list too long to group, and
+ * one asked for in priority order, has no categories and its rows are the page
+ * (#2690, #2699). */
+type ConceptPage = Page<Concept> & {
+  prioritized?: number; order?: ConceptOrder; grouped?: boolean; group_limit?: number;
+  categories?: { category: string; count: number }[] | null;
+};
+const categoryLabel = (category: string) => category || 'Uncategorized';
+/** What `category=` sends for the concepts that have no category. */
+const NO_CATEGORY = '__none__';
+type Run = {
+  run_id: string; state: string; error: string; done: number; total: number; destinations: number;
+  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string; auto_propose_threshold?: number | null };
+  activity: { concept: { concept_id: number }; candidates: Source[] }[];
+};
+/** How many concepts a page may show: more per page lets a curator drag a
+ * concept from what would be a later page into the priority order. */
+const PAGE_SIZES = [50, 100, 250, 500];
+/** Not an OMOP domain: the concepts a wearable source code is mapped to, so the
+ * HealthKit, Health Connect, OpenWearables, Garmin and HL7 PHR codes of one
+ * metric can be reviewed against the one concept they should share (#2656). */
+const WEARABLES_DOMAIN = 'wearables';
+const domains = [
+  ['', 'All domains'], [WEARABLES_DOMAIN, 'Wearables'], ['measurement', 'Measurement'], ['observation', 'Observation'],
+  ['condition', 'Condition'], ['drug_exposure', 'Drug'], ['procedure', 'Procedure'],
+];
+/** What the tab remembers per account in this browser, as the patient list's
+ * filters are: the chosen domain (#2656), the list's order, and the categories
+ * the categories a curator has opened under each domain; every other category
+ * starts folded (#2690). */
+type Preferences = { domain: string; order: ConceptOrder; expanded: Record<string, string[]> };
+const domainPreferenceKey = (userId?: number | string | null) => `promop-concept-to-code:${userId ?? 'session'}`;
+/** Each part is read on its own, and one of the wrong shape is ignored. */
+function loadPreferences(key: string): Preferences {
+  const preferences: Preferences = { domain: '', order: 'category', expanded: {} };
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || '{}');
+    if (!saved || typeof saved !== 'object') return preferences;
+    const isDomain = (value: unknown) => domains.some(([domain]) => domain === value);
+    if (isDomain(saved.domain)) preferences.domain = saved.domain;
+    if (saved.order === 'priority') preferences.order = 'priority';
+    // An older `collapsed` list is not read: it said what was shut, not what is open.
+    if (saved.expanded && typeof saved.expanded === 'object' && !Array.isArray(saved.expanded)) {
+      for (const [domain, names] of Object.entries(saved.expanded)) {
+        if (isDomain(domain) && Array.isArray(names) && names.every(name => typeof name === 'string')) {
+          preferences.expanded[domain] = names;
+        }
+      }
+    }
+  } catch { /* Not JSON: nothing is remembered. */ }
+  return preferences;
+}
+/** Only what differs from a fresh tab is written, beside the domain. */
+function savePreferences(key: string, { domain, order, expanded }: Preferences) {
+  const opened = Object.fromEntries(Object.entries(expanded).filter(([, names]) => names.length));
+  try {
+    localStorage.setItem(key, JSON.stringify({
+      domain, ...(order === 'category' ? {} : { order }), ...(Object.keys(opened).length ? { expanded: opened } : {}),
+    }));
+  } catch { /* Storage may be disabled. */ }
+}
+/** Open categories ask for their rows independently; no more than this many requests are in flight. */
+const MAX_CATEGORY_REQUESTS = 6;
+/** "Expand all" opens every category, one request each, so it is offered only for a short list. */
+const EXPAND_ALL_LIMIT = 12;
+const DEBOUNCE_MS = 250;
+
+/** Runs at most `max` tasks at once, the rest waiting in order. A task whose
+ * signal is aborted before its turn is rejected without running. */
+function createLimiter(max: number) {
+  let active = 0;
+  const waiting: (() => void)[] = [];
+  const drain = () => {
+    while (active < max && waiting.length) { active += 1; waiting.shift()!(); }
+  };
+  return function run<T>(signal: AbortSignal, task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      waiting.push(() => {
+        const finish = () => { active -= 1; drain(); };
+        if (signal.aborted) { finish(); reject(new DOMException('Aborted', 'AbortError')); return; }
+        task().then(resolve, reject).finally(finish);
+      });
+      drain();
+    });
+  };
+}
+type Limiter = ReturnType<typeof createLimiter>;
+/** Category, Priority, Standard concept, Patient fields and the three counts. */
+const CONCEPT_COLUMNS = 7;
+const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
+const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
+const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
+const percent = (value: number) => `${Math.round(value * 100)}%`;
+// Unscored rows sort last in either direction, as the server orders them.
+const byConfidence = (order: ConfidenceOrder) => (a: Source, b: Source) => {
+  const left = a.confidence ?? null;
+  const right = b.confidence ?? null;
+  if (left === right) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return order === 'confidence' ? left - right : right - left;
+};
+
+function Pagination({ data, change, disabled = false, label = 'Result pages' }: {
+  data: Page<unknown>; change: (page: number) => void; disabled?: boolean; label?: string;
+}) {
+  if (data.total <= data.page_size) return null;
+  return <nav aria-label={label} className="flex items-center justify-end gap-3 py-3 text-sm">
+    <button className={button} disabled={disabled || data.page === 1} onClick={() => change(data.page - 1)}>Previous</button>
+    <span>Page {data.page} of {Math.ceil(data.total / data.page_size)}</span>
+    <button className={button} disabled={disabled || data.page * data.page_size >= data.total} onClick={() => change(data.page + 1)}>Next</button>
+  </nav>;
+}
+
+type SourceMode = 'linked' | 'candidates';
+/** A stored mapping's status; Mapped Codes shows one group per status (#2010). */
+type Status = 'approved' | 'proposed' | 'rejected';
+const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
+type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
+
+/** Download and Share under the Wearables domain. They ask for the source code
+ *  systems here, so no other domain pays for the request. */
+function WearableControls({ canApprove }: { canApprove: boolean }) {
+  const systems = useWearableSourceSystems();
+  return <>
+    <WearableMappingsDownload systems={systems} />
+    {canApprove && <WearableVoteShare systems={systems} />}
+  </>;
+}
+
+export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange, initialConceptId, onInitialConceptHandled, userId }: {
+  canApprove: boolean;
+  /** A doctor reads the tab (#2416): no priority, Done, Lock, notes or mapping. */
+  canWrite: boolean;
+  onWritingChange?: (value: boolean) => void;
+  /** Open this concept's source codes on arrival, ready to suggest more. */
+  initialConceptId?: number;
+  /** Called once the linked concept is opened or reported, so it is not reopened. */
+  onInitialConceptHandled?: () => void;
+  /** Whose domain, order and opened categories to restore and save. */
+  userId?: number | string | null;
+}) {
+  const [diseases, setDiseases] = useState<[string, string][]>([['', 'All diseases']]);
+  const preferenceKey = domainPreferenceKey(userId);
+  const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
+  // The account can arrive after the first render: read its own choices then,
+  // rather than keep (and later save over them) the ones read before it was known.
+  const [loadedKey, setLoadedKey] = useState(preferenceKey);
+  if (loadedKey !== preferenceKey) {
+    setLoadedKey(preferenceKey);
+    setPreferences(loadPreferences(preferenceKey));
+  }
+  const { domain, order } = preferences;
+  // Saved when the curator changes one, never on load.
+  const remember = (change: Partial<Preferences>) => {
+    const next = { ...preferences, ...change };
+    setPreferences(next);
+    savePreferences(preferenceKey, next);
+  };
+  const [disease, setDisease] = useState('');
+  const [scope, setScope] = useState('fields');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [rankedOnly, setRankedOnly] = useState(false);
+  const [data, setData] = useState<ConceptPage | null>(null);
+  const [moving, setMoving] = useState(false);
+  const [moveStatus, setMoveStatus] = useState('');
+  const [dragged, setDragged] = useState<Concept | null>(null);
+  const [dropTarget, setDropTarget] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Concept | null>(null);
+  const selectedTrigger = useRef<HTMLButtonElement | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [writing, setWriting] = useState(false);
+  // The Edit Mapping dialog sits inside this one; Escape must not close both.
+  const [editing, setEditing] = useState(false);
+  // Cache suggestion state per concept so it survives dialog close/reopen.
+  // The cache lives for the lifetime of the tab, which is the natural scope.
+  // useState (not useRef) so the identity is stable and accessible during render.
+  const [suggestCache] = useState(() => new Map<number, { run: Run | null; previousCandidates: Source[] }>());
+  // The opened categories fetch their own rows: a shared limit on requests in
+  // flight, and each one's way to patch a row it holds (a saved note, #2699).
+  const [limiter] = useState(() => createLimiter(MAX_CATEGORY_REQUESTS));
+  const [rowPatchers] = useState(() => new Set<(change: (concept: Concept) => Concept) => void>());
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const cats = await fetchDiseaseCategories();
+        if (active) {
+          setDiseases([['', 'All diseases'], ...cats.map(c => [c.value, c.label] as [string, string])]);
+        }
+      } catch { /* keep the default "All diseases" entry */ }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true); setError('');
+      try {
+        const response = await api.get<ConceptPage>('/v1/concept-to-code/', {
+          // Category order is the server's default, so only the other choice is
+          // sent. In it the list asks for the category headers alone: the rows
+          // of a category are fetched when it is opened (#2699). A list too
+          // long to group comes back with its page of rows instead.
+          params: { domain, scope, search, page, page_size: pageSize, ...(disease ? { disease } : {}),
+            ...(rankedOnly ? { prioritized: '1' } : {}), ...(order === 'priority' ? { order } : { view: 'categories' }) },
+          signal: controller.signal,
+        });
+        if (active) setData(response.data);
+      } catch {
+        if (active) setError('Could not load concepts. Change the search or refresh to retry.');
+      } finally { if (active) setLoading(false); }
+    }, DEBOUNCE_MS);
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [domain, disease, scope, search, page, pageSize, rankedOnly, order, revision]);
+
+  // One concept per move: the server renumbers the global list, so a move
+  // from a filtered or later page needs nothing else from it (#1914).
+  const move = async (concept: Concept, position: number | null) => {
+    if (moving || position === (concept.priority ?? null)) return;
+    setMoving(true); setError('');
+    try {
+      const { data: placed } = await api.post<{ position: number | null }>('/v1/concept-to-code/priority/', {
+        concept_id: concept.concept_id, position,
+      });
+      setMoveStatus(placed.position === null
+        ? `Removed ${concept.concept_name} from the priority list.`
+        : `Moved ${concept.concept_name} to priority ${placed.position}.`);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(`Could not change the priority of ${concept.concept_name}. ${destinationError(failure)}`);
+    } finally { setMoving(false); }
+  };
+  // Lock claims the concept for this curator; others review but cannot map it (#2390).
+  const toggleLock = async (concept: Concept) => {
+    if (moving) return;
+    const locking = !concept.lock;
+    setMoving(true); setError('');
+    try {
+      const { data } = locking
+        ? await api.post<{ lock: Concept['lock'] }>(`/v1/concept-to-code/${concept.concept_id}/lock/`)
+        : await api.delete<{ lock: Concept['lock'] }>(`/v1/concept-to-code/${concept.concept_id}/lock/`);
+      setMoveStatus(locking ? `Locked ${concept.concept_name} for you.` : `Unlocked ${concept.concept_name}.`);
+      setSelected(previous => previous?.concept_id === concept.concept_id ? { ...previous, lock: data.lock } : previous);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(`Could not ${locking ? 'lock' : 'unlock'} ${concept.concept_name}. ${destinationError(failure)}`);
+    } finally { setMoving(false); }
+  };
+  // A saved note changes only its own row, at once. The reload that follows
+  // replaces any list request that began before the save and would bring the
+  // old note back (#2411).
+  const noteSaved = (concept: Concept, note: ConceptNote | null) => {
+    const withNote = (row: Concept) => row.concept_id === concept.concept_id ? { ...row, note } : row;
+    setData(previous => previous && { ...previous, results: previous.results.map(withNote) });
+    rowPatchers.forEach(patch => patch(withNote));
+    setRevision(value => value + 1);
+    setMoveStatus(note ? `Saved the note for ${concept.concept_name}.` : `Cleared the note for ${concept.concept_name}.`);
+  };
+  // Done means its source codes are mapped: the concept loses its priority,
+  // shows "Done" in the Priority column and sorts last (#2388).
+  const markDone = async (concept: Concept, done: boolean) => {
+    if (moving) return;
+    setMoving(true); setError('');
+    try {
+      await api.post('/v1/concept-to-code/done/', { concept_id: concept.concept_id, done });
+      setMoveStatus(done ? `Marked ${concept.concept_name} as Done.` : `Returned ${concept.concept_name} to the queue.`);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(`Could not ${done ? 'mark' : 'un-mark'} ${concept.concept_name} as Done. ${destinationError(failure)}`);
+    } finally { setMoving(false); }
+  };
+  // Dropping onto a ranked concept takes its position; onto an unranked one,
+  // the end of the priority list.
+  const dropOn = (target: Concept) => {
+    const source = dragged;
+    setDragged(null); setDropTarget(null);
+    if (!source || source.concept_id === target.concept_id) return;
+    void move(source, target.priority ?? (data?.prioritized ?? 0) + 1);
+  };
+  const lastPosition = data?.prioritized ?? 0;
+
+  // The list sits under a header per category only when the server grouped it
+  // and sent the categories' sizes; an older or longer response is a plain list.
+  // Folded, a category holds no rows: opening one asks the server for them (#2699).
+  const groups = data?.grouped === true && Array.isArray(data.categories) ? data.categories : null;
+  const listCategories = (groups ?? []).map(entry => entry.category);
+  const tooManyToExpand = listCategories.length > EXPAND_ALL_LIMIT;
+  // A category is folded until the curator opens it; what they opened is
+  // remembered per domain, so a category never seen starts folded.
+  const expanded = new Set(preferences.expanded[domain] ?? []);
+  const setExpanded = (names: Iterable<string>) => remember({ expanded: { ...preferences.expanded, [domain]: [...new Set(names)] } });
+  const toggleCategory = (category: string) => setExpanded(
+    expanded.has(category) ? [...expanded].filter(name => name !== category) : [...expanded, category]);
+  const allFolded = Boolean(groups?.every(group => !expanded.has(group.category)));
+  // The whole filtered list is too long to sort and count by category.
+  const tooLongToGroup = Boolean(data && data.grouped === false && order === 'category'
+    && data.group_limit !== undefined && data.total > data.group_limit);
+
+  // One concept's row, the same under a category header and in a plain list.
+  const conceptRow = (concept: Concept) => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
+    draggable={canWrite && !writing && !moving && !concept.done}
+    onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
+    onDragEnd={() => { setDragged(null); setDropTarget(null); }}
+    onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
+    onDragLeave={() => setDropTarget(previous => previous === concept.concept_id ? null : previous)}
+    onDrop={event => { event.preventDefault(); dropOn(concept); }}
+    className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''} ${
+      concept.done ? 'italic text-slate-500' : ''} ${
+      dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
+    <td className="p-3 align-top text-xs text-slate-600">{concept.category
+      || <span className="text-slate-400" title="No category">—</span>}</td>
+    <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
+      disabled={!canWrite || writing || moving} onMove={position => void move(concept, position)}
+      onDone={done => void markDone(concept, done)} /></td>
+    <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
+      aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
+      onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
+      {canWrite ? <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
+        : concept.note && <span className="ml-2 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1 py-0.5 align-middle text-amber-700"
+          title={concept.note.text} aria-label={`Note for ${concept.concept_name}: ${concept.note.text}`}>
+          <StickyNote size={12} aria-hidden="true" className="fill-amber-200" /></span>}
+      {(canWrite || concept.lock) && <LockBadge concept={concept} disabled={!canWrite || writing || moving} onToggle={() => void toggleLock(concept)} />}
+      <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
+    <td className="p-3 text-xs text-slate-600">{concept.fields.length
+      ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
+    {(['approved', 'proposed', 'rejected'] as const).map(status => <td key={status} className="p-3 text-right tabular-nums">{concept.sccm_counts[status]}</td>)}
+  </tr>;
+
+  useEffect(() => {
+    if (!initialConceptId) return;
+    let active = true;
+    (async () => {
+      try {
+        // By id, not the list's text search: that matches the digits in names
+        // and codes too, and the concept could sort past its first page.
+        const { data: found } = await api.get<{ concept: Omit<Concept, 'fields' | 'sccm_counts'> }>(
+          `/v1/concept-to-code/${initialConceptId}/`);
+        if (!active) return;
+        // The dialog shows neither; the list row carries them.
+        setSelected({ ...found.concept, fields: [], sccm_counts: { approved: 0, proposed: 0, rejected: 0 } });
+      } catch (failure) {
+        if (!active) return;
+        const notFound = (failure as { response?: { status?: number } })?.response?.status === 404;
+        setError(notFound
+          ? `Concept ${initialConceptId} is not a current standard concept in a clinical domain, so it has no source codes to review.`
+          : `Could not open concept ${initialConceptId}. Reload the page to retry.`);
+      }
+      if (active) onInitialConceptHandled?.();
+    })();
+    return () => { active = false; };
+    // The callback is a notification; a new identity must not reopen the concept.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialConceptId]);
+
+  return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing && !editing) setSelected(null); }}>
+    <section aria-label="Concept to source code" className="space-y-5">
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 className="text-lg font-semibold text-slate-950">Source-code coverage</h2>
+        <p className="mt-1 text-sm text-slate-600">Choose a standard concept, then review the source codes that should map to it.</p>
+        {/* How well the ranker's confidence predicts curator decisions, per surface (#2383). */}
+        <a href="/code-mappings/accuracy/analytics"
+          className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-slate-700 underline hover:text-slate-950">
+          <BarChart3 size={16} aria-hidden="true" />Mapping accuracy analytics
+        </a>
+      </div>
+      {/* The walk that keeps unit counts and axis variants current after new
+          patients are loaded, and what it found of the other axes (#2050, #2051). */}
+      <AxisVariantWalkPanel canApprove={canApprove} />
+    </div>
+    <div className="flex flex-wrap gap-3">
+      <input className={`${input} min-w-64 flex-1`} aria-label="Search standard concepts" placeholder="Concept name, code, OMOP ID or patient field"
+        value={search} disabled={writing} onChange={event => { setSearch(event.target.value); setPage(1); }} />
+      {/* Wearables is its own scope: the server lists every concept a wearable
+          code maps to, patient field or not, so this choice does not apply. */}
+      <select aria-label="Concept scope" className={input} disabled={writing || domain === WEARABLES_DOMAIN} value={scope}
+        title={domain === WEARABLES_DOMAIN ? 'Wearables lists every concept a wearable code is mapped to' : undefined}
+        onChange={event => { setScope(event.target.value); setPage(1); }}>
+        <option value="fields">Patient field concepts</option><option value="all">All standard concepts</option>
+      </select>
+      <select aria-label="Concept domain" className={input} disabled={writing} value={domain}
+        onChange={event => { remember({ domain: event.target.value }); setPage(1); }}>
+        {domains.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+      <select aria-label="Disease category" className={input} disabled={writing} value={disease}
+        onChange={event => { setDisease(event.target.value); setPage(1); }}>
+        {diseases.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+      <select aria-label="Concepts per page" className={input} disabled={writing} value={pageSize}
+        onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}>
+        {PAGE_SIZES.map(size => <option key={size} value={size}>{size} per page</option>)}
+      </select>
+      <label className="flex items-center gap-2 text-sm text-slate-700">
+        <input type="checkbox" checked={rankedOnly} disabled={writing}
+          onChange={event => { setRankedOnly(event.target.checked); setPage(1); }} />
+        Ranked only{data?.prioritized ? ` (${data.prioritized})` : ''}
+      </label>
+      <select aria-label="Concept order" className={input} disabled={writing} value={order}
+        onChange={event => { remember({ order: event.target.value === 'priority' ? 'priority' : 'category' }); setPage(1); }}>
+        <option value="category">Category, then priority</option><option value="priority">Priority</option>
+      </select>
+      {groups && <div role="group" aria-label="Categories" className="flex items-center gap-2">
+        <button type="button" className={button} disabled={tooManyToExpand || listCategories.every(name => expanded.has(name))}
+          title={tooManyToExpand ? `Expand all is offered for ${EXPAND_ALL_LIMIT} categories or fewer: this list has ${listCategories.length}. Open the categories you need.` : undefined}
+          onClick={() => setExpanded([...expanded, ...listCategories])}>Expand all</button>
+        <button type="button" className={button} disabled={!listCategories.some(name => expanded.has(name))}
+          onClick={() => setExpanded([...expanded].filter(name => !listCategories.includes(name)))}>Collapse all</button>
+      </div>}
+      {/* The whole Wearables tab as a file, and the public vote: the same
+          controls as the Source Code to Concept direction's Wearables tab. */}
+      {domain === WEARABLES_DOMAIN && <div role="group" aria-label="Wearable mappings" className="flex flex-wrap items-center gap-2">
+        <WearableControls canApprove={canApprove} />
+      </div>}
+    </div>
+    <p className="text-xs text-slate-500">{order === 'category'
+      ? 'Concepts are listed by category and, inside a category, ranked ones first. Priority is one list across every category, and ranked concepts are mapped first.'
+      : 'Ranked concepts are mapped first and come first on every page.'} Drag a row, or type
+      its priority (1 is first; clear it to unrank). Click a Priority cell for Done once a concept's codes are mapped; Done
+      concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.
+      {groups && ' Categories start folded; dragging reorders the rows of the categories you have opened.'}</p>
+    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts{tooManyToExpand ? '.' : ', or Expand all.'}</p>}
+    {tooLongToGroup && data && <p className="text-xs text-slate-500">This list has {data.total.toLocaleString()} concepts, too
+      many to group by category (the limit is {data.group_limit?.toLocaleString()}), so it is in priority order. Choose a
+      domain or a disease, or search, to narrow it.</p>}
+    {moveStatus && <p role="status" aria-live="polite" className="text-sm text-slate-700">{moveStatus}</p>}
+    {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
+    {loading && <p role="status" className="text-sm text-slate-500">Loading concepts…</p>}
+    <div className="overflow-x-auto rounded border border-slate-200 bg-white">
+      <table aria-label="Standard concept coverage" className="w-full text-left text-sm">
+        <thead className="bg-slate-100 text-xs text-slate-600"><tr>
+          <th scope="col" className="p-3">Category</th>
+          <th scope="col" className="p-3">Priority</th>
+          <th scope="col" className="p-3">Standard concept</th><th scope="col" className="p-3">Patient fields</th>
+          <th scope="col" className="p-3 text-right">Approved</th><th scope="col" className="p-3 text-right">Proposed</th><th scope="col" className="p-3 text-right">Rejected</th>
+        </tr></thead>
+        {groups ? groups.map(entry => <CategoryGroup key={entry.category} category={entry.category} total={entry.count}
+          open={expanded.has(entry.category)} onToggle={() => toggleCategory(entry.category)}
+          query={{ domain, scope, search, disease, rankedOnly, pageSize, revision }} limiter={limiter}
+          patchers={rowPatchers} renderRow={conceptRow} />) : <tbody>{data?.results.map(conceptRow)}</tbody>}
+      </table>
+      {data && !data.results.length && !groups?.length && <p className="p-5 text-sm text-slate-500">No matching standard concepts. Try another search or All standard concepts.</p>}
+    </div>
+    <p className="text-xs text-slate-500">Coverage counts every mapped source code, whatever its Seen count; a concept's Mapped Codes lists the same ones.</p>
+    {data && !groups && <Pagination data={data} disabled={loading || writing} change={setPage} />}
+    </section>
+    {selected && <Dialog.Portal>
+      <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
+      <Dialog.Content aria-modal="true" className="fixed inset-0 z-50 m-auto h-fit max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-7xl overflow-y-auto rounded-lg bg-white p-5 shadow-xl"
+        onEscapeKeyDown={event => { if (writing || editing) event.preventDefault(); }}
+        onInteractOutside={event => { if (writing || editing) event.preventDefault(); }}
+        onCloseAutoFocus={event => { event.preventDefault(); selectedTrigger.current?.focus(); }}>
+        <div className="mb-4 flex items-start justify-between gap-4 border-b border-slate-200 pb-3">
+          <div>
+            <Dialog.Title className="text-lg font-semibold">Source codes for {selected.concept_name}</Dialog.Title>
+            <Dialog.Description className="text-sm text-slate-600">Standard {selected.vocabulary_id}:{selected.concept_code} · OMOP {selected.concept_id} · {selected.domain_id}</Dialog.Description>
+            {lockedByOther(selected) && <p role="status" className="mt-1 inline-flex items-center gap-1 text-sm text-amber-800">
+              <Lock size={14} aria-hidden="true" />Locked by {selected.lock?.username}: you can review these source codes but not map them.</p>}
+          </div>
+          <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
+        </div>
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} currentUserId={userId} readOnly={!canWrite || lockedByOther(selected)}
+          seenOnlyByDefault={domain !== WEARABLES_DOMAIN}
+          onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
+          onEditingChange={setEditing} suggestCache={suggestCache} />
+      </Dialog.Content>
+    </Dialog.Portal>}
+  </Dialog.Root>;
+}
+
+type CategoryQuery = {
+  domain: string; scope: string; search: string; disease: string; rankedOnly: boolean; pageSize: number; revision: number;
+};
+
+/** One category of the grouped list: its header always, its rows only while it
+ * is open. Folding unmounts the rows, which discards them and their page. */
+function CategoryGroup({ category, total, open, onToggle, query, limiter, patchers, renderRow }: {
+  category: string; total: number; open: boolean; onToggle: () => void; query: CategoryQuery; limiter: Limiter;
+  patchers: Set<(change: (concept: Concept) => Concept) => void>; renderRow: (concept: Concept) => React.ReactNode;
+}) {
+  return <tbody data-testid={`concept-group-${category || 'none'}`}>
+    <tr className="border-t border-slate-200 bg-slate-50">
+      <th scope="rowgroup" colSpan={CONCEPT_COLUMNS} className="px-3 py-2 text-left font-normal">
+        <button type="button" aria-expanded={open} onClick={onToggle}
+          className="inline-flex items-center gap-2 rounded text-sm font-semibold text-slate-900 hover:underline">
+          {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+          {/* The spaces are for the button's name: the gap is only visual. */}
+          <span className={category ? '' : 'italic text-slate-600'}>{categoryLabel(category)}</span>{' '}
+          <span className="font-normal tabular-nums text-slate-500">
+            {total.toLocaleString()} {total === 1 ? 'concept' : 'concepts'}
+          </span>
+        </button>
+      </th>
+    </tr>
+    {open && <CategoryRows category={category} query={query} limiter={limiter} patchers={patchers} renderRow={renderRow} />}
+  </tbody>;
+}
+
+/** The concepts of one opened category, paged within it by the list's page size.
+ * Each opened category has its own page, and asks again when a filter, the page
+ * size or a write (`revision`) changes. Its pagination is drawn only when the
+ * category holds more than one page. */
+function CategoryRows({ category, query, limiter, patchers, renderRow }: {
+  category: string; query: CategoryQuery; limiter: Limiter;
+  patchers: Set<(change: (concept: Concept) => Concept) => void>; renderRow: (concept: Concept) => React.ReactNode;
+}) {
+  const { domain, scope, search, disease, rankedOnly, pageSize, revision } = query;
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<ConceptPage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  // A different filter or page size starts the category over at its first page.
+  const filterKey = JSON.stringify([domain, scope, search, disease, rankedOnly, pageSize]);
+  const [pagedFor, setPagedFor] = useState(filterKey);
+  if (pagedFor !== filterKey) { setPagedFor(filterKey); setPage(1); }
+  // Opening answers at once; a filter typed after that waits, as the list does.
+  const delay = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      delay.current = DEBOUNCE_MS;
+      setLoading(true); setFailed(false);
+      try {
+        const response = await limiter(controller.signal, () => api.get<ConceptPage>('/v1/concept-to-code/', {
+          params: { domain, scope, search, page, page_size: pageSize, category: category || NO_CATEGORY,
+            ...(disease ? { disease } : {}), ...(rankedOnly ? { prioritized: '1' } : {}) },
+          signal: controller.signal,
+        }));
+        if (active) setData(response.data);
+      } catch {
+        if (active) setFailed(true);
+      } finally { if (active) setLoading(false); }
+    }, delay.current);
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [category, domain, scope, search, disease, rankedOnly, pageSize, page, revision, limiter]);
+
+  // A note saved elsewhere on the page shows here at once, before the reload.
+  useEffect(() => {
+    const patch = (change: (concept: Concept) => Concept) =>
+      setData(previous => previous && { ...previous, results: previous.results.map(change) });
+    patchers.add(patch);
+    return () => { patchers.delete(patch); };
+  }, [patchers]);
+
+  return <>
+    {failed && <tr><td colSpan={CONCEPT_COLUMNS} role="alert" className="px-3 py-2 text-sm text-rose-700">
+      Could not load the concepts of {categoryLabel(category)}. Close and open the category to retry.</td></tr>}
+    {loading && !data && !failed && <tr><td colSpan={CONCEPT_COLUMNS} className="px-3 py-2 text-sm text-slate-500">
+      Loading {categoryLabel(category)} concepts…</td></tr>}
+    {data?.results.map(renderRow)}
+    {data && data.total > data.page_size && <tr><td colSpan={CONCEPT_COLUMNS}>
+      <Pagination data={data} disabled={loading} change={setPage} label={`Pages of ${categoryLabel(category)}`} />
+    </td></tr>}
+  </>;
+}
+
+/** The concept's note: an outlined icon while there is none, a filled one
+ * showing the text on hover once there is. Clicking opens a small popup to
+ * write, change or clear it. Another curator's lock does not stop an edit: a
+ * note is commentary, not a mapping write (#2411). */
+function NoteBadge({ concept, onSaved }: { concept: Concept; onSaved: (note: ConceptNote | null) => void }) {
+  const note = concept.note ?? null;
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState('');
+  // Each opening starts from the stored note; a save in flight keeps the popup up.
+  const change = (next: boolean) => {
+    if (saving) return;
+    if (next) { setDraft(note?.text ?? ''); setFailure(''); }
+    setOpen(next);
+  };
+  const unchanged = draft.trim() === (note?.text ?? '');
+  // The shortcut comes here too, so the guard is here and not only on the button.
+  const save = async () => {
+    if (saving || unchanged) return;
+    setSaving(true); setFailure('');
+    try {
+      const { data } = await api.put<{ note: ConceptNote | null }>(
+        `/v1/concept-to-code/${concept.concept_id}/note/`, { note: draft });
+      setOpen(false);
+      onSaved(data.note ?? null);
+    } catch (error) {
+      const data = (error as { response?: { data?: { note?: string; detail?: string } } })?.response?.data;
+      setFailure(`Could not save the note. ${data?.note || data?.detail || 'Try again.'}`);
+    } finally { setSaving(false); }
+  };
+  // A copied note has no author here; it still has a date.
+  const saved = note?.updated_at ? new Date(note.updated_at).toLocaleDateString() : '';
+  const byline = note && (note.updated_by ? `Last saved by ${[note.updated_by, saved].filter(Boolean).join(', ')}`
+    : saved && `Last saved ${saved}`);
+  // The popup is drawn outside the table, but React still sends its events up
+  // to the row, which is a drag source and a drop target for priority.
+  const keepFromRow = (event: React.DragEvent) => event.stopPropagation();
+  return <Popover open={open} onOpenChange={change}>
+    <PopoverTrigger asChild>
+      <button type="button" data-has-note={note ? 'true' : 'false'}
+        className={`ml-2 inline-flex items-center rounded border px-1 py-0.5 align-middle not-italic hover:bg-slate-100 ${
+          note ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-300 text-slate-500'}`}
+        title={note ? note.text : 'Add a note about this concept'}
+        aria-label={`${note ? 'Edit the note' : 'Add a note'} for ${concept.concept_name}`}>
+        <StickyNote size={12} aria-hidden="true" className={note ? 'fill-amber-200' : ''} />
+      </button>
+    </PopoverTrigger>
+    <PopoverContent align="start" aria-label={`Note for ${concept.concept_name}`} className="w-80 bg-white p-3 not-italic text-slate-900"
+      onDragStart={keepFromRow} onDragOver={keepFromRow} onDragLeave={keepFromRow} onDrop={keepFromRow} onDragEnd={keepFromRow}>
+      <form onSubmit={event => { event.preventDefault(); void save(); }}>
+        <label htmlFor={`concept-note-${concept.concept_id}`} className="mb-1 block text-xs font-medium text-slate-700">
+          Note for {concept.concept_name}</label>
+        <textarea id={`concept-note-${concept.concept_id}`} rows={4} maxLength={NOTE_MAX_LENGTH} value={draft} disabled={saving}
+          className="w-full rounded border border-slate-300 px-2 py-1 text-sm" placeholder="What should curators know about this concept?"
+          onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void save(); } }} />
+        {byline && <p className="mt-1 text-xs text-slate-500">{byline}</p>}
+        {failure && <p role="alert" className="mt-1 text-xs text-rose-700">{failure}</p>}
+        <div className="mt-2 flex items-center justify-end gap-2">
+          <button type="button" className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 disabled:opacity-40"
+            disabled={saving} onClick={() => change(false)}>Cancel</button>
+          <button type="submit" className="rounded bg-slate-900 px-2 py-1 text-xs text-white hover:bg-slate-700 disabled:opacity-40"
+            disabled={saving || unchanged}>{saving ? 'Saving…' : draft.trim() || !note ? 'Save' : 'Clear note'}</button>
+        </div>
+      </form>
+    </PopoverContent>
+  </Popover>;
+}
+
+/** The concept's lock: a lock icon with the holder's name when someone holds
+ * it, Unlock for the holder, Lock for anyone else while it is free (#2390). */
+function LockBadge({ concept, disabled, onToggle }: { concept: Concept; disabled: boolean; onToggle: () => void }) {
+  const lock = concept.lock;
+  const small = 'ml-2 inline-flex items-center gap-1 rounded border border-slate-300 px-1.5 py-0.5 text-xs not-italic hover:bg-slate-100 disabled:opacity-40';
+  if (!lock) {
+    return <button type="button" className={`${small} text-slate-600`} disabled={disabled} title="Lock this concept so only you map it"
+      aria-label={`Lock ${concept.concept_name}`} onClick={onToggle}><Lock size={12} aria-hidden="true" />Lock</button>;
+  }
+  if (lock.mine) {
+    return <button type="button" className={`${small} text-emerald-800`} disabled={disabled} title="Unlock this concept"
+      aria-label={`Unlock ${concept.concept_name}`} onClick={onToggle}><Unlock size={12} aria-hidden="true" />{lock.username}</button>;
+  }
+  return <span className="ml-2 inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-xs not-italic text-amber-800"
+    title={`Locked by ${lock.username}: review only`} aria-label={`Locked by ${lock.username}`}>
+    <Lock size={12} aria-hidden="true" />{lock.username}</span>;
+}
+
+/** Drag handle, priority number and one-step moves for one concept row; a
+ * click on the cell itself offers Done, and a Done concept shows that word
+ * in place of a number (#2388). */
+function PriorityCell({ concept, lastPosition, disabled, onMove, onDone }: {
+  concept: Concept; lastPosition: number; disabled: boolean; onMove: (position: number | null) => void;
+  onDone: (done: boolean) => void;
+}) {
+  const current = concept.priority ?? null;
+  const [draft, setDraft] = useState(current === null ? '' : String(current));
+  const [shown, setShown] = useState(current);
+  const [menuOpen, setMenuOpen] = useState(false);
+  // A reload renumbers rows; show the server's number unless one is being typed.
+  if (shown !== current) { setShown(current); setDraft(current === null ? '' : String(current)); }
+  // The number input and the arrows keep their own behaviour; the cell
+  // around them opens the menu.
+  const openMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('input, button')) return;
+    setMenuOpen(open => !open);
+  };
+  // Escape, or focus leaving the cell, closes the menu; it takes focus on open.
+  const cellProps = {
+    onClick: openMenu,
+    onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => { if (event.key === 'Escape') setMenuOpen(false); },
+    onBlur: (event: React.FocusEvent<HTMLDivElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMenuOpen(false);
+    },
+  };
+  const menu = menuOpen && <div role="menu" aria-label={`Options for ${concept.concept_name}`}
+    className="absolute left-0 top-full z-10 mt-1 rounded border border-slate-300 bg-white py-1 text-sm shadow">
+    <button type="button" role="menuitem" autoFocus className="block w-full px-3 py-1 text-left not-italic hover:bg-slate-100"
+      disabled={disabled} onClick={() => { setMenuOpen(false); onDone(!concept.done); }}>
+      {concept.done ? 'Not done' : 'Done'}
+    </button>
+  </div>;
+  if (concept.done) {
+    return <div className="relative flex items-center gap-1 whitespace-nowrap" {...cellProps}>
+      <button type="button" className="italic text-slate-500 underline-offset-2 hover:underline"
+        aria-haspopup="menu" aria-expanded={menuOpen} aria-label={`${concept.concept_name} is Done; options`}
+        disabled={disabled} onClick={event => { event.stopPropagation(); setMenuOpen(open => !open); }}>Done</button>
+      {menu}
+    </div>;
+  }
+  const commit = () => {
+    const text = draft.trim();
+    if (!text) { if (current !== null) onMove(null); return; }
+    const value = Number(text);
+    if (!Number.isInteger(value) || value < 1) { setDraft(current === null ? '' : String(current)); return; }
+    onMove(value);
+  };
+  const small = 'rounded border border-slate-300 px-1.5 text-xs hover:bg-slate-100 disabled:opacity-30';
+  return <div className="relative flex items-center gap-1 whitespace-nowrap" {...cellProps}>
+    <span aria-hidden="true" title="Drag to reorder" className={`select-none text-slate-400 ${disabled ? '' : 'cursor-grab'}`}>⠿</span>
+    <input type="number" min={1} inputMode="numeric" aria-label={`Priority for ${concept.concept_name}`}
+      className="w-14 rounded border border-slate-300 px-1.5 py-1 text-sm tabular-nums" placeholder="—" value={draft} disabled={disabled}
+      onChange={event => setDraft(event.target.value)} onBlur={commit}
+      onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commit(); } }} />
+    <button type="button" className={small} aria-label={`Move ${concept.concept_name} up`} title="Move up"
+      disabled={disabled || current === 1} onClick={() => onMove(current === null ? lastPosition + 1 : current - 1)}>↑</button>
+    <button type="button" className={small} aria-label={`Move ${concept.concept_name} down`} title="Move down"
+      disabled={disabled || current === null || current >= lastPosition} onClick={() => current !== null && onMove(current + 1)}>↓</button>
+    <button type="button" className={small} aria-label={`Options for ${concept.concept_name}`} aria-haspopup="menu" aria-expanded={menuOpen}
+      title="Mark Done" disabled={disabled} onClick={event => { event.stopPropagation(); setMenuOpen(open => !open); }}>⋯</button>
+    {menu}
+  </div>;
+}
+
+const loadFailed = 'Could not load source codes.';
+const statusLabel: Record<Status, string> = { approved: 'Approved mappings', proposed: 'Proposed mappings', rejected: 'Rejected mappings' };
+
+type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
+/** How many sources Suggest could find, by the same retrieval as a run.
+ * ``approximate`` is set when the exact count ran out of time: ``earlier`` is
+ * the last exact count for these settings, ``sample`` a scaled-up sample. */
+type Estimate = {
+  total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean;
+  approximate?: 'earlier' | 'sample' | null; timed_out: boolean;
+  /** Sources this estimate skips because a ranker already declined them (#2034). */
+  declined_skipped?: number;
+};
+
+/** "12 a ranker already declined are skipped." when earlier runs declined some of the pool. */
+function skippedText(estimate: Estimate) {
+  const skipped = estimate.declined_skipped ?? 0;
+  return skipped > 0 ? ` ${skipped.toLocaleString()} a ranker already declined ${skipped === 1 ? 'is' : 'are'} skipped.` : '';
+}
+
+function estimateText(estimate: Estimate, limit: number) {
+  if (estimate.total === null) return 'Could not estimate how many source codes Suggest could find: the search took too long.';
+  const sampled = estimate.approximate === 'sample';
+  if (estimate.total === 0) {
+    return (sampled
+      ? 'A sample found no candidate source codes; the full count took too long, so there may be a few.'
+      : 'Suggest source codes would find no candidate source codes with these settings.') + skippedText(estimate);
+  }
+  const plus = estimate.capped ? '+' : '';
+  const evidence = [estimate.lexical ? `${estimate.lexical.toLocaleString()}${plus} by name` : '',
+    estimate.umls ? `${estimate.umls.toLocaleString()}${plus} by UMLS` : ''].filter(Boolean).join(', ');
+  const runs = Number.isInteger(limit) && limit > 0 ? Math.ceil(estimate.total / limit) : null;
+  return `${sampled ? 'Roughly' : 'About'} ${estimate.total.toLocaleString()}${plus} candidate source codes${evidence ? ` (${evidence})` : ''}`
+    + (runs ? ` · about ${runs.toLocaleString()}${plus} ${runs === 1 && !plus ? 'run' : 'runs'} of ${limit}` : '') + '.'
+    + skippedText(estimate)
+    + (sampled ? ' Estimated from a sample: the full count took too long.' : '')
+    + (estimate.approximate === 'earlier' ? ' From an earlier count: this one took too long, so codes handled since may still be counted.' : '')
+    + (estimate.partial ? ` Vocabulary codes never seen were not ${sampled ? '' : 'all '}counted${sampled ? '' : ' in time'}.` : '');
+}
+type RankingModel = 'anthropic' | 'jev' | 'both';
+
+/** A suggested source with no mapping row yet, shaped for the New Mapping form. */
+function newMappingRow(source: Source, concept: Concept): CodeMappingRow {
+  return {
+    mapping_id: null, domain_id: concept.domain_id,
+    source_vocabulary_id: source.source_vocabulary_id, source_code: source.source_code,
+    source_code_description: source.source_code_description,
+    destination_concept_id: null, destination_concept_name: '', destination_concept_code: '',
+    destination_vocabulary_id: '', destination_concept_class_id: '',
+    destination_omop_table: DOMAIN_TO_TABLE[concept.domain_id] ?? '',
+    status: 'proposed', notes: '', origin: '', origin_system: '', suggest_strategy: '', umls_cui: '',
+    created_by: '', occurrence_count: source.occurrence_count, destination_count: 0, has_mapping: false,
+  };
+}
+
+/** One status group of a concept's stored mappings, fetched while it is open. */
+function useSourceGroup(conceptId: number, status: Status, enabled: boolean, query: {
+  search: string; withNotes: boolean; order: ConfidenceOrder; revision: number;
+}) {
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<SourcePage | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const { search, withNotes, order, revision } = query;
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true); setFailed(false);
+      try {
+        const response = await api.get<SourcePage>(`/v1/concept-to-code/${conceptId}/`, {
+          // No Seen filter: a concept's mapped codes are all listed, so the
+          // groups' counts are the concept list's (#2686).
+          params: { mode: 'linked', status, search, page, ...(withNotes ? { with_notes: '1' } : {}), ...(order ? { order } : {}) },
+          signal: controller.signal,
+        });
+        if (current) setData(response.data);
+      } catch {
+        if (current) setFailed(true);
+      } finally { if (current) setLoading(false); }
+    }, 250);
+    return () => { current = false; controller.abort(); window.clearTimeout(timer); };
+  }, [conceptId, status, enabled, search, withNotes, order, page, revision]);
+  // Stale rows must not stay selectable while a changed query loads, and a
+  // folded group's failure must not outlive the group.
+  const reset = useCallback(() => { setData(null); setPage(1); setFailed(false); }, []);
+  return { data, setData, page, setPage, loading, failed, reset };
+}
+
+function SourceCoverage({ concept, canApprove, currentUserId, readOnly = false, seenOnlyByDefault = true, onSaved, onWriting, onEditingChange, suggestCache }: {
+  concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
+  /** The signed-in account, for the dialog's two-person rule (#2726). */
+  currentUserId?: number | string | null;
+  /** Whether Suggested Codes starts on Seen > 0. Off under the Wearables
+   * domain: a platform's own codes have no sightings on an instance that
+   * holds no wearable data, and they are the codes to map (#2686). */
+  seenOnlyByDefault?: boolean;
+  /** Another curator holds the concept (#2390): every write control is off. */
+  readOnly?: boolean;
+  onEditingChange?: (value: boolean) => void;
+  suggestCache: Map<number, { run: Run | null; previousCandidates: Source[] }>;
+}) {
+  const cached = suggestCache.get(concept.concept_id);
+  // Suggested Codes is the view a curator comes for, so it opens first (#2010).
+  const [mode, setMode] = useState<SourceMode>('candidates');
+  const [search, setSearch] = useState('');
+  const [seenOnly, setSeenOnly] = useState(seenOnlyByDefault);
+  // Only the source codes a curator has left a note on (#2423).
+  const [withNotes, setWithNotes] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const [error, setError] = useState('');
+  // Approved mappings are done and rejected ones are decided; both start folded
+  // so the proposals waiting for review are what the curator sees first.
+  const [open, setOpen] = useState<Record<Status, boolean>>({ approved: false, proposed: true, rejected: false });
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [run, setRun] = useState<Run | null>(cached?.run ?? null);
+  // Candidates from previous finished runs, keyed by source key for dedup.
+  // A new run's results overlay these; approvals and patches apply to both.
+  const [previousCandidates, setPreviousCandidates] = useState<Source[]>(cached?.previousCandidates ?? []);
+  // All candidates ever seen across runs, for building exclude_keys.
+  // Updated synchronously in start() and the polling callback so it is
+  // always current — an effect would lag behind the click that reads it,
+  // and an inline run (no polling) would never trigger the polling path
+  // at all, leaving exclude_keys empty on the second Suggest (#2274).
+  const seenRef = useRef<Map<string, Source>>(
+    new Map((cached?.previousCandidates ?? []).map(row => [sourceKey(row), row])),
+  );
+  // Rows saved or approved while a run is still streaming, by source key. The
+  // poll replaces the run wholesale, so edits live beside it and are laid over
+  // its candidates on every render (#2028).
+  const [patched, setPatched] = useState<Record<string, Partial<Source>>>({});
+  const [starting, setStarting] = useState(false);
+  const [ranker, setRanker] = useState('jev');
+  const [limit, setLimit] = useState(25);
+  // Auto-propose candidates above this confidence threshold (#2269).
+  const [autoPropose, setAutoPropose] = useState(true);
+  const [proposeThreshold, setProposeThreshold] = useState(80);
+  // Retry the sources a ranker declined in earlier runs, instead of skipping them (#2034).
+  const [retryDeclined, setRetryDeclined] = useState(false);
+  const [strategies, setStrategies] = useState({ umls: true, lexical: true });
+  // Which candidate groups (by normalised label) are expanded to show individual codes.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [writing, setWriting] = useState(false);
+  const [progress, setProgress] = useState('');
+  const [order, setOrder] = useState<ConfidenceOrder>('');
+  const [threshold, setThreshold] = useState(80);
+  const groupQuery = { search, withNotes, order, revision };
+  const approvedGroup = useSourceGroup(concept.concept_id, 'approved', mode === 'linked' && open.approved, groupQuery);
+  const proposedGroup = useSourceGroup(concept.concept_id, 'proposed', mode === 'linked' && open.proposed, groupQuery);
+  const rejectedGroup = useSourceGroup(concept.concept_id, 'rejected', mode === 'linked' && open.rejected, groupQuery);
+  const groups = { approved: approvedGroup, proposed: proposedGroup, rejected: rejectedGroup };
+  // A folded group's effect never runs again, so only the groups being shown
+  // may contribute loading, failure or counts.
+  const shownGroups = STATUSES.filter(status => mode === 'linked' && open[status]);
+  const resetView = () => { setSelected(new Set()); STATUSES.forEach(status => groups[status].reset()); };
+  const [edit, setEdit] = useState<EditTarget | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [reference, setReference] = useState<Reference | null>(null);
+  const [dialogStrategies, setDialogStrategies] = useState({ umls: true, lexical: true, vectors: true });
+  const [dialogRanking, setDialogRanking] = useState<RankingModel>('jev');
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
+  const destination = useMemo<ConceptResult>(() => ({
+    concept_id: concept.concept_id, concept_name: concept.concept_name, concept_code: concept.concept_code,
+    vocabulary_id: concept.vocabulary_id, domain_id: concept.domain_id,
+    concept_class_id: concept.concept_class_id ?? '', standard_concept: concept.standard_concept ?? 'S',
+  }), [concept]);
+  const writingRef = useRef(false);
+  const active = useRef(true);
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+
+  // Keep refs to current state so the unmount cleanup captures the latest values.
+  const runRef = useRef(run);
+  const prevCandRef = useRef(previousCandidates);
+  useEffect(() => { runRef.current = run; }, [run]);
+  useEffect(() => { prevCandRef.current = previousCandidates; }, [previousCandidates]);
+  // Save suggestion state to the parent's cache on unmount so it survives
+  // dialog close/reopen (#2253).
+  useEffect(() => {
+    return () => {
+      if (runRef.current || prevCandRef.current.length) {
+        suggestCache.set(concept.concept_id, {
+          run: runRef.current, previousCandidates: prevCandRef.current,
+        });
+      }
+    };
+  }, [concept.concept_id, suggestCache]);
+
+  const running = starting || run?.state === 'queued' || run?.state === 'running';
+  const finishedRun = run && !running ? run.run_id : null;
+
+  // Re-estimated after every write: a proposed source leaves the pool, so the
+  // next run reaches codes the last one did not show.
+  const strategyKey = (['umls', 'lexical'] as const).filter(key => strategies[key]).join(',');
+  useEffect(() => {
+    let current = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setEstimate(null);
+      if (!strategyKey) return;
+      try {
+        const response = await api.get<Estimate>(`/v1/concept-to-code/${concept.concept_id}/estimate/`, {
+          params: { strategies: strategyKey, include_zero_seen: seenOnly ? '0' : '1', include_declined: retryDeclined ? '1' : '0' },
+          signal: controller.signal,
+        });
+        if (current) setEstimate(response.data);
+      } catch { /* The estimate is a guide; Suggest works without it. */ }
+    }, 250);
+    return () => { current = false; controller.abort(); window.clearTimeout(timer); };
+    // A finished run recorded declines, which the estimate now skips.
+  }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision, finishedRun]);
+
+  // Poll a queued/running run until it finishes.  When a terminal state is
+  // detected, absorb candidates into seenRef and previousCandidates so the
+  // next run's exclude_keys skips them.  This happens here (inside the
+  // async polling callback, not in a synchronous effect body) so the lint
+  // rule set-state-in-effect is satisfied, and it handles Celery runs.
+  // Inline runs skip polling entirely; their candidates are absorbed in
+  // start() before the next POST fires — see the comment there (#2274).
+  useEffect(() => {
+    if (!run || !['queued', 'running'].includes(run.state)) return;
+    let current = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const { data: next } = await api.get<Run>(`/v1/concept-to-code/suggest-runs/${run.run_id}/`);
+        if (current) {
+          setRun(next);
+          if (next.state === 'success' || next.state === 'failure') {
+            const finished = (next.activity.find(e => e.concept.concept_id === concept.concept_id)?.candidates ?? [])
+              .filter((item: Source) => !item.declined);
+            for (const item of finished) seenRef.current.set(sourceKey(item), item);
+            if (finished.length) {
+              setPreviousCandidates([...seenRef.current.values()]);
+            }
+            // Auto-proposed mappings land in the Existing Mappings groups; bump
+            // revision so those groups reload once the run finishes (#2269).
+            if (next.destinations) setRevision(v => v + 1);
+          }
+        }
+      } catch {
+        if (current) { setError('Could not read search progress. Run the search again to retry.'); setRun(previous => previous ? { ...previous, state: 'failure' } : null); }
+      }
+    }, 1500);
+    return () => { current = false; window.clearTimeout(timer); };
+  }, [run, concept.concept_id]);
+
+  const changeMode = (next: typeof mode) => { setMode(next); setSearch(''); resetView(); setError(''); };
+  const toggleGroup = (status: Status) => {
+    setOpen(previous => ({ ...previous, [status]: !previous[status] }));
+    // Folding drops the rows, so reopening fetches them fresh instead of
+    // showing what was there before later writes.
+    groups[status].reset();
+    setSelected(new Set());
+  };
+  const start = async () => {
+    // Absorb the outgoing run's candidates into seenRef so exclude_keys
+    // always reflects every candidate the frontend has shown, regardless of
+    // whether the run completed via polling (Celery) or inline (the POST
+    // already returned state='success').  seenRef is a plain Map mutated
+    // synchronously, so it is current when we build excludeKeys below —
+    // unlike previousCandidates state, which would lag behind by one render
+    // and produce an empty exclude_keys on the second inline click (#2274).
+    if (run?.activity.length) {
+      const raw = run.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+      const finished = raw
+        .map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } as Source : item; })
+        .filter(item => !item.declined);
+      for (const item of finished) seenRef.current.set(sourceKey(item), item);
+      if (finished.length) setPreviousCandidates([...seenRef.current.values()]);
+    }
+    // Build exclude_keys from the ref (always current) so the backend skips
+    // every source the frontend has already shown (#2262).
+    const excludeKeys = [...seenRef.current.values()].map(
+      row => [row.source_vocabulary_id, row.source_code] as [string, string],
+    );
+    setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setMode('candidates');
+    try {
+      const threshold = autoPropose && ranker !== 'none' ? proposeThreshold / 100 : null;
+      const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
+        concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
+        limit, include_zero_seen: !seenOnly, ranking_model: ranker, include_declined: retryDeclined,
+        exclude_keys: excludeKeys, auto_propose_threshold: threshold,
+      });
+      if (active.current) setRun(next);
+    } catch (failure) { if (active.current) setError(destinationError(failure)); }
+    finally { if (active.current) setStarting(false); }
+  };
+  const currentRunCandidates = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+  // Merge previous runs' candidates with the current run's. The current run's
+  // rows win on duplicate source keys so edits and re-rankings are current.
+  const currentKeys = new Set(currentRunCandidates.map(sourceKey));
+  const merged = [...previousCandidates.filter(row => !currentKeys.has(sourceKey(row))), ...currentRunCandidates];
+  const candidates = Object.keys(patched).length
+    ? merged.map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } : item; })
+    : merged;
+  // A ranked run scores every source it considers a possible match; one it left
+  // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
+  // Only hide unscored rows from the *current* run; accumulated candidates from
+  // earlier runs stay visible regardless of the current run's ranking model.
+  const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
+  const isFromCurrentRun = (row: Source) => currentKeys.has(sourceKey(row));
+  const scored = ranked ? candidates.filter(row => row.confidence != null || (!isFromCurrentRun(row) && !row.declined)) : candidates;
+  const unscored = ranked ? candidates.filter(row => row.confidence == null && isFromCurrentRun(row)) : [];
+  // A decline is the ranker's answer; a candidate it could not rank (the
+  // ranker was unavailable) is hidden too, but nothing was decided (#2034).
+  const declinedHidden = unscored.filter(row => row.declined).length;
+  const unrankedHidden = unscored.length - declinedHidden;
+  const candidateRows = scored.filter(row => (!seenOnly || row.occurrence_count > 0) && (!withNotes || !!row.curator_note));
+  const sortedCandidates = order ? [...candidateRows].sort(byConfidence(order)) : candidateRows;
+
+  // Group candidates by normalised description so identical-label codes can be
+  // approved in one click. Rows with null norm are each their own group.
+  // No useMemo: the candidate list is bounded (max 100) and the grouping is a
+  // single linear scan, so recomputing on every render is cheaper than
+  // maintaining stable dependency references through the derivation chain.
+  type CandidateGroup = {
+    key: string; description: string; members: Source[];
+    maxConfidence: number | null; minConfidence: number | null;
+    totalSeen: number; hasVariants: boolean;
+  };
+  const candidateGroups: CandidateGroup[] = (() => {
+    const map = new Map<string, Source[]>();
+    const ungrouped: Source[] = [];
+    for (const row of sortedCandidates) {
+      const norm = row.source_label_norm;
+      if (!norm) { ungrouped.push(row); continue; }
+      const existing = map.get(norm);
+      if (existing) existing.push(row);
+      else map.set(norm, [row]);
+    }
+    const result: CandidateGroup[] = [];
+    for (const [norm, members] of map) {
+      const confidences = members.map(m => m.confidence).filter((c): c is number => c != null);
+      result.push({
+        key: norm, description: members[0].source_code_description,
+        members, totalSeen: members.reduce((sum, m) => sum + m.occurrence_count, 0),
+        maxConfidence: confidences.length ? Math.max(...confidences) : null,
+        minConfidence: confidences.length ? Math.min(...confidences) : null,
+        hasVariants: members.some(m => (m.axis_variant_count ?? 0) >= 2),
+      });
+    }
+    for (const row of ungrouped) {
+      const c = row.confidence ?? null;
+      result.push({
+        key: sourceKey(row), description: row.source_code_description,
+        members: [row], totalSeen: row.occurrence_count,
+        maxConfidence: c, minConfidence: c,
+        hasVariants: (row.axis_variant_count ?? 0) >= 2,
+      });
+    }
+    return result;
+  })();
+
+  const linkedRows = STATUSES.flatMap(status => open[status] ? groups[status].data?.results ?? [] : []);
+  const rows = mode === 'candidates' ? sortedCandidates : linkedRows;
+  const editable = rows.filter(row => !row.edited && (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
+  const pending = editable.filter(row => selected.has(sourceKey(row)));
+  // Every open group answers with the counts of all three, under the same filters.
+  const statusCounts = shownGroups.map(status => groups[status].data?.status_counts).find(Boolean) ?? null;
+  const zeroSeen = shownGroups.map(status => groups[status].data?.zero_seen).find(value => value !== undefined);
+  const loading = shownGroups.some(status => groups[status].loading);
+  const loadError = shownGroups.some(status => groups[status].failed);
+  const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
+  // Compare the percentage the column shows: 0.55 * 100 is 55.00000000000001.
+  const confident = validThreshold
+    ? editable.filter(row => row.confidence != null && Math.round(row.confidence * 100) > threshold)
+    : [];
+  const selectConfident = () => setSelected(new Set(confident.map(sourceKey)));
+  const changeOrder = () => {
+    setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
+    resetView();
+  };
+  // What a write changed on a row, laid over its copies wherever the dialog
+  // shows it. Only the fields the write touched, so a running search's later
+  // updates to the same candidate (its verdict, note, other variants) still
+  // show; a full server row from the batch approve replaces the stored copy.
+  const patchRow = (row: Source, updated: Partial<Source>, { replace = false } = {}) => {
+    if (!active.current) return;
+    const key = sourceKey(row);
+    STATUSES.forEach(status => groups[status].setData(previous => previous
+      ? { ...previous, results: previous.results.map(item => sourceKey(item) === key
+        ? (replace ? updated as Source : { ...item, ...updated }) : item) } : null));
+    setPatched(previous => ({ ...previous, [key]: { ...previous[key], ...updated } }));
+    // Keep accumulated candidates in sync so the snapshot is current when
+    // start() fires and patched is cleared.
+    setPreviousCandidates(previous => previous.map(item => sourceKey(item) === key
+      ? (replace ? updated as Source : { ...item, ...updated }) : item));
+    // ... and the copy the next run's carried-over candidates are rebuilt from.
+    const seen = seenRef.current.get(key);
+    if (seen) seenRef.current.set(key, replace ? updated as Source : { ...seen, ...updated });
+  };
+
+  // One click approves: a suggested source with no mapping yet is proposed from
+  // its saved preview first, then approved on the revision that returned (#2010).
+  const approve = async () => {
+    if (writingRef.current || !pending.length || !canApprove) return;
+    const batch = [...pending];
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
+    const failures: string[] = [];
+    let saved = 0;
+    // Rows written, approved or only proposed: each changes the counts and the estimate.
+    let written = 0;
+    try {
+      for (const [index, row] of batch.entries()) {
+        if (!active.current) break;
+        setProgress(`Reviewing ${index + 1} of ${batch.length}…`);
+        try {
+          let current = row;
+          if (current.mapping_id === null) {
+            ({ data: current } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
+              run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
+            }));
+            written += 1;
+            patchRow(row, current, { replace: true });
+          }
+          const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
+            status: 'approved', expected_updated_at: current.updated_at, run_id: run?.run_id,
+          });
+          saved += 1; written += 1;
+          patchRow(row, updated, { replace: true });
+        } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
+      }
+      if (active.current) {
+        setProgress(`Approved ${saved} of ${batch.length} selected mappings.`);
+        setSelected(new Set());
+        if (failures.length) setError(failures.join(' '));
+        if (written) { onSaved(); setRevision(value => value + 1); }
+      }
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
+  };
+
+  // Batch reject: create a mapping row if needed (same as approve), then reject.
+  const reject = async () => {
+    if (writingRef.current || !pending.length || !canApprove) return;
+    const batch = [...pending];
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
+    const failures: string[] = [];
+    let saved = 0;
+    let written = 0;
+    try {
+      for (const [index, row] of batch.entries()) {
+        if (!active.current) break;
+        setProgress(`Rejecting ${index + 1} of ${batch.length}…`);
+        try {
+          let current = row;
+          if (current.mapping_id === null) {
+            ({ data: current } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
+              run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
+            }));
+            written += 1;
+            patchRow(row, current, { replace: true });
+          }
+          const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
+            status: 'rejected', expected_updated_at: current.updated_at, run_id: run?.run_id,
+          });
+          saved += 1; written += 1;
+          patchRow(row, updated, { replace: true });
+        } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
+      }
+      if (active.current) {
+        setProgress(`Rejected ${saved} of ${batch.length} selected mappings.`);
+        setSelected(new Set());
+        if (failures.length) setError(failures.join(' '));
+        if (written) { onSaved(); setRevision(value => value + 1); }
+      }
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
+  };
+
+  // Approve one axis variant from the row: its stored rows in those units are
+  // re-pointed, and the row shows the server's view of every variant (#2012).
+  const approveVariant = async (row: Source, variant: AxisVariant) => {
+    if (writingRef.current || opening || row.mapping_id === null || !variant.target_concept) return;
+    // A write like any other here: one at a time, and the dialog cannot close under it.
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
+    try {
+      const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${row.mapping_id}/axis-variants/`, {
+        axis_key: variant.axis_key, target_concept_id: variant.target_concept.concept_id, approve: true,
+      });
+      patchRow(row, { axis_variants: data.variants });
+      setProgress(`Approved the ${variant.units?.join(', ') || variant.axis_key} variant of ${row.source_code}.`);
+    } catch (failure) {
+      if (active.current) setError(`Could not approve the variant of ${row.source_code}. ${destinationError(failure)}`);
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
+  };
+
+  const openEditor = async (row: Source) => {
+    if (writingRef.current || opening || readOnly) return;
+    setOpening(true); setError('');
+    try {
+      let current = reference;
+      if (!current) {
+        const { data: loaded } = await api.get<Reference>('/v1/code-mappings/reference/');
+        current = { ...emptyReference, ...(loaded || {}) };
+        if (active.current) setReference(current);
+      }
+      const target: EditTarget = row.mapping_id === null
+        ? { mode: 'new', row: newMappingRow(row, concept), source: row }
+        : { mode: 'edit', row: (await api.get<CodeMappingRow>(`/v1/code-mappings/${row.mapping_id}/`)).data, source: row };
+      if (!active.current) return;
+      if (ranker !== 'none') setDialogRanking(ranker as RankingModel);
+      setEdit(target); onEditingChange?.(true);
+    } catch {
+      if (active.current) setError(`Could not open ${row.source_code} for editing. Click it again to retry.`);
+    } finally { if (active.current) setOpening(false); }
+  };
+  const closeEditor = () => { setEdit(null); onEditingChange?.(false); };
+  const editorSaved = (saved: CodeMappingRow) => {
+    onSaved();
+    setRevision(value => value + 1);
+    // Stored rows reload with new revisions; a selection made over the old ones must not be approved.
+    if (mode !== 'candidates') { setSelected(new Set()); return; }
+    const key = edit ? sourceKey(edit.source) : '';
+    setSelected(previous => { const next = new Set(previous); next.delete(key); return next; });
+    if (edit) {
+      patchRow(edit.source, {
+        edited: true, mapping_id: saved.mapping_id, status: saved.status,
+        destination_concept_id: saved.destination_concept_id, destination_concept_name: saved.destination_concept_name,
+        destination_standard_concept: saved.standard_concept ?? null,
+        curator_note: saved.has_curator_note ? saved.notes : '',
+      });
+    }
+  };
+
+  const editorDeleted = () => {
+    onSaved(); setSelected(new Set()); setRevision(value => value + 1);
+    if (edit) {
+      patchRow(edit.source, {
+        edited: false, mapping_id: null, status: 'unmapped',
+        destination_concept_id: null, destination_concept_name: '', destination_standard_concept: null,
+        curator_note: '',
+      });
+    }
+  };
+
+  // The run's controls and the batch selection wait for a run to finish; a
+  // write in progress blocks everything. Opening a code to edit it waits only
+  // for a write, so a curator works through the list while Suggest searches (#2028).
+  const busy = writing || running || readOnly;
+  const locked = writing || opening || readOnly;
+  // Filtering and ordering are reads: a reader, or a curator waiting on
+  // another's lock, still browses the list (#2416).
+  const viewBusy = writing || running;
+  const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
+  return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
+    <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
+      {([['candidates', 'Suggested Codes'], ['linked', 'Mapped Codes']] as const).map(([key, label]) =>
+        <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
+          onClick={() => changeMode(key)}>{label}</button>)}
+    </div>
+    {mode !== 'candidates' && <input className={`${input} w-full`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
+      value={search} disabled={writing} onChange={event => { setSearch(event.target.value); resetView(); }} />}
+    <div className="space-y-1">
+      {/* The ranker, the limit and the button stay on one line: the button
+          is read with the settings it runs (#2034). */}
+      <div role="group" aria-label="Suggest settings" className="flex flex-wrap items-center gap-3">
+        {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
+          <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
+          {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
+        <label className="flex items-center gap-1 text-sm" title="Search the sources a ranker declined in earlier runs again, instead of skipping them">
+          <input type="checkbox" checked={retryDeclined} disabled={busy} onChange={event => setRetryDeclined(event.target.checked)} />
+          Retry declined</label>
+        <label className="flex items-center gap-1 text-sm" title="Automatically propose source codes with confidence at or above this threshold">
+          <input type="checkbox" checked={autoPropose} disabled={busy || ranker === 'none'} onChange={event => setAutoPropose(event.target.checked)} />
+          Auto-propose &ge;</label>
+        <input type="number" aria-label="Auto-propose confidence threshold" className={`${input} w-16`}
+          value={proposeThreshold} min={1} max={100} disabled={busy || !autoPropose || ranker === 'none'}
+          onChange={event => setProposeThreshold(Number(event.target.value))} />
+        <span className="text-sm text-slate-500">%</span>
+        <span className="flex flex-nowrap items-center gap-3">
+          <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
+            <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
+            <option value="both">Both rankers</option><option value="none">Curator review</option>
+          </select>
+          <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
+          <button className={`${button} whitespace-nowrap`} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
+            onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
+        </span>
+      </div>
+      {estimate && <p data-testid="source-estimate" className="text-xs text-slate-600">{estimateText(estimate, limit)}</p>}
+    </div>
+    <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
+      {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
+    {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
+      {running ? 'Searching local vocabulary evidence…' : `${currentRunCandidates.length} candidates retrieved (limit ${run.selection.limit})${previousCandidates.length ? `, ${candidates.length} total across runs` : ''}${run.destinations ? `, ${run.destinations} auto-proposed` : ''}.`}
+      {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
+      {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
+      {run.error && ` ${run.error}`}
+    </p>}
+    {run && mode === 'candidates' && run.selection.include_zero_seen === seenOnly && <p className="text-xs text-amber-800">Run Suggest source codes again to search with the changed Seen filter.</p>}
+    {(error || loadError) && <p role="alert" className="text-sm text-rose-700">{error || loadFailed}
+      {loadError && <button type="button" className="ml-2 underline" onClick={retry}>Retry</button>}</p>}
+    {progress && <p role="status" className="text-sm font-medium text-slate-800">{progress}</p>}
+    {loading && <p role="status" className="text-sm text-slate-500">Loading source codes…</p>}
+    {(canApprove || (mode === 'linked' && statusCounts)) && <div className="flex flex-wrap items-center gap-3">
+      {canApprove && <button className="rounded bg-slate-950 px-3 py-1.5 text-sm text-white disabled:opacity-40" disabled={busy || !pending.length}
+        onClick={() => void approve()}>Approve selected ({pending.length})</button>}
+      {canApprove && <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-800 hover:bg-red-50 disabled:opacity-40" disabled={busy || !pending.length}
+        onClick={() => void reject()}>Reject selected ({pending.length})</button>}
+      {mode === 'linked' && statusCounts && <span className="text-xs text-slate-500">
+        {STATUSES.reduce((sum, status) => sum + statusCounts[status], 0)} matching sources{zeroSeen ? ` · ${zeroSeen} with Seen 0` : ''}</span>}
+    </div>}
+    <div className="overflow-x-auto"><table aria-label="Source codes for selected concept" className="w-full text-left text-sm">
+      <thead className="border-y bg-slate-50 text-xs text-slate-600"><tr>
+        <th className="p-2"><input type="checkbox" aria-label="Select displayed proposed sources" disabled={busy || !editable.length}
+          checked={editable.length > 0 && editable.every(row => selected.has(sourceKey(row)))}
+          onChange={event => setSelected(new Set(event.target.checked ? editable.map(sourceKey) : []))} /></th>
+        <th className="p-2"><div className="flex flex-wrap items-center gap-2">Source code
+          <span className="flex items-center gap-1 whitespace-nowrap font-normal">
+            <button type="button" className="rounded border border-slate-300 bg-white px-2 py-0.5 hover:bg-slate-100 disabled:opacity-40"
+              title={confident.length ? `Select ${confident.length} source(s) above ${threshold}% confidence` : `No suggested source is above ${validThreshold ? threshold : '—'}% confidence`}
+              disabled={busy || !confident.length} onClick={selectConfident}>Select</button>
+            &gt;<input type="number" aria-label="Select sources with confidence above, percent" className="w-14 rounded border border-slate-300 bg-white px-1 py-0.5"
+              min={0} max={100} value={Number.isNaN(threshold) ? '' : threshold} disabled={busy}
+              onChange={event => setThreshold(event.target.valueAsNumber)} />% confidence</span></div></th>
+        <th className="p-2">Description
+          <label className="ml-2 inline-flex items-center gap-1 whitespace-nowrap font-normal">
+            <input type="checkbox" aria-label="Only source codes with a curator note" checked={withNotes} disabled={viewBusy}
+              title="Show only source codes a curator has left a note on"
+              onChange={event => { setWithNotes(event.target.checked); resetView(); }} />with notes</label></th>
+        <th className="p-2" aria-sort={order ? 'none' : 'descending'}>{/* The Seen filter narrows what could be mapped; mapped codes are all listed (#2686). */}
+          {mode === 'candidates' && <label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
+            <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={viewBusy}
+              onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>}
+          {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={viewBusy} title="Order by Seen"
+            onClick={() => { setOrder(''); resetView(); }}>Seen ↕</button> : 'Seen ↓'}</th>
+        <th className="p-2">Current destination</th>
+        <th className="p-2" aria-sort={order === '-confidence' ? 'descending' : order === 'confidence' ? 'ascending' : 'none'}>
+          <button type="button" className="flex items-center gap-1 font-semibold hover:text-slate-950 disabled:opacity-40" disabled={viewBusy}
+            title="Order by confidence" onClick={changeOrder}>Status / evidence · Confidence
+            <span aria-hidden="true">{order === '-confidence' ? '↓' : order === 'confidence' ? '↑' : '↕'}</span></button></th>
+      </tr></thead>
+      {mode === 'linked' ? STATUSES.map(status => {
+        const group = groups[status];
+        const count = statusCounts?.[status];
+        return <tbody key={status} data-testid={`mapping-group-${status}`}>
+          <tr className="border-b border-slate-100 bg-slate-50">
+            <td colSpan={6} className="p-2">
+              <button type="button" className="flex items-center gap-2 text-sm font-semibold text-slate-800 disabled:opacity-40"
+                aria-expanded={open[status]} disabled={writing} onClick={() => toggleGroup(status)}>
+                <span aria-hidden="true">{open[status] ? '▾' : '▸'}</span>
+                {statusLabel[status]}{count !== undefined ? ` (${count})` : ''}
+              </button>
+            </td>
+          </tr>
+          {open[status] && group.data?.results.map(renderRow)}
+          {open[status] && group.data && !group.data.results.length && <tr><td colSpan={6} className="p-2 text-sm text-slate-500">
+            No {status} mappings{withNotes ? ' with a curator note' : ''}{search ? ' match this search' : ''}.</td></tr>}
+          {open[status] && group.data && <tr><td colSpan={6} className="p-0">
+            <Pagination data={group.data} disabled={writing || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
+        </tbody>;
+      }) : <tbody>{candidateGroups.map(renderGroup)}</tbody>}
+    </table></div>
+    {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {withNotes ? 'Uncheck with notes to include codes without a curator note. ' : ''}{seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
+      Run Suggest source codes to search.</p>}
+    <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
+      reference={reference ?? emptyReference} canApprove={canApprove} currentUserId={currentUserId} canWrite={!readOnly}
+      strategies={dialogStrategies} rankingModel={dialogRanking}
+      onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
+      onSaved={editorSaved} onDeleted={editorDeleted}
+      defaultDestination={destination} sourceExamples surface="concept2code" />
+  </section>;
+
+  // Render a group of candidates sharing the same normalised description.
+  // Single-member groups render exactly as a plain row. Multi-member groups
+  // show a collapsible header with a group-level checkbox.
+  function renderGroup(group: CandidateGroup) {
+    if (group.members.length === 1) return renderRow(group.members[0]);
+    const isExpanded = expanded.has(group.key);
+    const editableMembers = group.members.filter(row => editable.includes(row));
+    const selectedCount = editableMembers.filter(row => selected.has(sourceKey(row))).length;
+    const allSelected = editableMembers.length > 0 && selectedCount === editableMembers.length;
+    const someSelected = selectedCount > 0 && !allSelected;
+    const toggleGroupSelection = (checked: boolean) => {
+      setSelected(previous => {
+        const next = new Set(previous);
+        for (const row of editableMembers) { if (checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); }
+        return next;
+      });
+    };
+    const confidenceLabel = group.maxConfidence != null
+      ? (group.minConfidence !== null && Math.round(group.minConfidence * 100) !== Math.round(group.maxConfidence * 100)
+        ? `${percent(group.minConfidence)}–${percent(group.maxConfidence)}` : percent(group.maxConfidence))
+      : null;
+    return <React.Fragment key={group.key}>
+      <tr className="border-b border-slate-100 bg-slate-50/50 align-top">
+        <td className="p-2"><input type="checkbox" aria-label={`Select all ${group.members.length} codes for ${group.description}`}
+          disabled={busy || !editableMembers.length} checked={allSelected}
+          ref={el => { if (el) el.indeterminate = someSelected; }}
+          onChange={event => toggleGroupSelection(event.target.checked)} /></td>
+        <td className="p-2" colSpan={2}>
+          <button type="button" className="flex items-center gap-2 text-sm text-slate-800"
+            onClick={() => setExpanded(prev => { const next = new Set(prev); if (isExpanded) next.delete(group.key); else next.add(group.key); return next; })}>
+            <span aria-hidden="true" className="text-xs">{isExpanded ? '▾' : '▸'}</span>
+            <span>{group.description || '—'}</span>
+            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-700">{group.members.length} codes</span>
+            {group.hasVariants && <span className="text-xs text-sky-700">axis variants</span>}
+          </button>
+        </td>
+        <td className="p-2 text-right tabular-nums">{group.totalSeen}</td>
+        <td className="p-2 text-xs text-slate-500">{group.members[0].destination_concept_name || 'None'}</td>
+        <td className="p-2 text-xs">{confidenceLabel != null
+          ? <span className="font-medium tabular-nums">{confidenceLabel}</span>
+          : <span className="text-slate-500">not scored</span>}</td>
+      </tr>
+      {isExpanded && group.members.map(row => <tr key={sourceKey(row)} className="cursor-pointer border-b border-slate-100 bg-white align-top hover:bg-slate-50"
+        onClick={event => { if ((event.target as HTMLElement).closest('input, button, a, select, label')) return; void openEditor(row); }}>
+        <td className="p-2 pl-6"><input type="checkbox" aria-label={`Select ${row.source_vocabulary_id || 'Uncoded'} ${row.source_code}`}
+          disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
+          onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
+        <td className="p-2 pl-6 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
+          disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
+          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
+        <td className="p-2 text-slate-500">{row.source_code_description || '—'}<CuratorNoteMark note={row.curator_note} />
+          {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+            {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
+            {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
+          </div> : null}
+        </td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
+        <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
+          OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
+        <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
+          <div className="mt-1 text-slate-700">
+            {row.confidence != null
+              ? <>Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></>
+              : <span className="text-slate-500">not scored</span>}</div>
+          {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
+      </tr>)}
+    </React.Fragment>;
+  }
+
+  // A plain render function, not a nested component: a component declared here
+  // would be a new type every render and remount each row.
+  function renderRow(row: Source) {
+    return <tr key={sourceKey(row)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50"
+        onClick={event => {
+          // The checkbox and the code button act on their own.
+          if ((event.target as HTMLElement).closest('input, button, a, select, label')) return;
+          void openEditor(row);
+        }}>
+        <td className="p-2"><input type="checkbox" aria-label={`Select ${row.source_vocabulary_id || 'Uncoded'} ${row.source_code}`}
+          disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
+          onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
+        <td className="p-2 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
+          disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
+          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
+        <td className="p-2">{row.source_code_description || '—'}<CuratorNoteMark note={row.curator_note} />
+          {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+            {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
+            {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
+          </div> : null}
+        </td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
+        <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
+          OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
+        <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
+          {!!row.evidence?.length && <div className="mt-1 text-slate-500">{row.evidence.join(' + ')}</div>}
+          <div className="mt-1 text-slate-700">
+            {row.confidence != null
+              ? <>Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></>
+              : <span className="text-slate-500">not scored</span>}</div>
+          {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
+          {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}
+          {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
+      </tr>;
+  }
+}

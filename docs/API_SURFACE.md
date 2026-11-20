@@ -812,9 +812,27 @@ Query params:
 | `vocabulary_id` | no | Exact match filter, e.g. `LOINC`, `SNOMED`, `RxNorm`, `HemOnc` |
 | `domain_id` | no | Exact match filter, e.g. `Measurement`, `Condition`, `Drug` |
 | `concept_class_id` | no | Exact match filter, e.g. `Lab Test`, `Clinical Finding` |
-| `standard_concept` | no | Exact match filter; usually `S` for standard or `C` for classification |
+| `standard_concept` | no | Exact match filter; usually `S` for standard or `C` for classification. Passing it disables the standard-only default below |
+| `include_retired` | no | `true` to also return concepts that have an `invalid_reason` |
+| `include_non_standard` | no | `true` to also return non-standard concepts |
 | `page` | no | 1-based page number |
 | `page_size` | no | Defaults to 25; capped at 100 |
+
+**Default scope (changed in #1465).** Only concepts usable as a mapping destination are
+returned: active (`invalid_reason` empty), and either standard (`standard_concept = 'S'`) or
+authored on this instance (`source = 'HealthKey'`, the `HK-*` vocabularies). Previously every
+concept in the vocabulary was returned — for SNOMED that is two-thirds retired. A client that
+needs the old behaviour passes `include_retired=true&include_non_standard=true`. The listing
+endpoint `GET /api/v1/concepts/` is unscoped, as before.
+
+`q` also matches an exact `concept_code` (case-insensitive) and, when numeric, an OMOP
+`concept_id`.
+
+Results are ordered by match quality, best first: exact code or id, exact name, name starting
+with `q`, any other match; within each, standard concepts first, then shorter names, then
+`concept_id`. (Before #1466 the order was `concept_id`.) The order is stable, so paging is
+safe. A client that pages the whole vocabulary should use `GET /api/v1/concepts/`, which stays
+ordered by `concept_id`.
 
 **Request**
 ```
@@ -1126,10 +1144,9 @@ kappa_lambda_ratio                 80517-6    {ratio}         Kappa/Lambda light
 kappa_lambda_ratio                 104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
 clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
 
-# 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC
-# codes — they exist only as this app's seeded demo concepts and are kept so
-# demo patients keep rendering. Note that 33944-8 (seeded kappa) and 33944-0
-# (real LOINC lambda) differ by one character and are opposite analytes.
+# The invented demo codes 33944-8 (kappa) and 33945-5 (lambda) were retired by
+# migration 0328, which recoded their rows to 36916-5 and 33944-0; the MM
+# generator emits those real LOINC codes. 36916-5 is kappa, 33944-0 is lambda.
 #
 # UNITS: kappa_flc and lambda_flc are converted to mg/L from the Measurement's
 # unit_source_value (mg/L, mg/dL, mg/100mL, ug/mL, g/L). Labs report FLC in mg/L
@@ -1221,8 +1238,8 @@ OMOP table save / delete
 ```
 1. LOINC concept code (primary)
       Measurement JOIN Concept
-      WHERE concept_code IN _LOINC_LAB_FIELDS
-        AND vocabulary_id = 'LOINC'
+      WHERE concept_code IN resolve_lab_code_fields()   -- approved FieldConceptMapping codes
+        AND vocabulary_id = 'LOINC'                     -- and their approved SCCM aliases
       → populates hemoglobin_g_dl, wbc_count_thousand_per_ul, serum_creatinine_mg_dl, etc.
 
 2. measurement_source_value fallback (when LOINC Concepts are not loaded in Concept table)

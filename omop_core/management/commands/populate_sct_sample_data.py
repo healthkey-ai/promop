@@ -6,6 +6,9 @@ that currently have no SCT data.
 
 Usage:
     DATABASE_URL="..." python manage.py populate_sct_sample_data [--overwrite]
+
+Settings also need SECRET_KEY, from .env or exported — that deployment's key if
+the DSN points at a shared database. DEBUG=True instead on a throwaway local one.
 """
 import random
 from datetime import date, timedelta

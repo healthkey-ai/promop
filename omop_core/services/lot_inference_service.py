@@ -18,6 +18,7 @@ from typing import Optional
 
 from omop_core.models import Concept, ConceptAncestor, ConceptRelationship, DrugExposure, ProcedureOccurrence
 from omop_core.services.episode_service import upsert_therapy_line_episode
+from omop_core.services.disease_episodes import regimen_episodes
 from omop_core.services.lot_regimens import (
     DRUG_SUBTYPE_MAP,
     HEMONC_CART_CLASSES,
@@ -247,7 +248,7 @@ def _build_procedure_events(person=None, procedures=None) -> list[_ProcedureEven
     events = []
     if procedures is None:
         procs = ProcedureOccurrence.objects.filter(
-            person=person,
+            person=person, confidence__isnull=True,
             procedure_concept__concept_code__in=list(PROCEDURE_SNOMED_MAP.keys()),
         ).select_related('procedure_concept')
     else:
@@ -512,12 +513,13 @@ def infer_lot_for_person(
     Never raises — failures are logged to the audit logger.
     """
     try:
-        if not force and Episode.objects.filter(person=person).exists():
+        # Lines only: a Disease Episode (#1739) is not a line of therapy.
+        if not force and regimen_episodes(person).exists():
             return []
 
         if exposures is None:
             exposures = list(
-                DrugExposure.objects.filter(person=person)
+                DrugExposure.objects.filter(person=person, confidence__isnull=True)
                 .select_related('drug_concept')
                 .order_by('drug_exposure_start_date')
             )

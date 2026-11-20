@@ -106,7 +106,7 @@ def ordered_bundle_entries(bundle):
     if not patients:
         raise ValidationError('The bundle must contain Patient resources.')
     subject_types = {'Condition', 'Observation', 'MedicationStatement', 'MedicationRequest',
-                     'Procedure', 'DiagnosticReport', 'Encounter'}
+                     'Procedure', 'DiagnosticReport', 'Encounter', 'ImagingStudy'}
     for entry in other:
         resource = entry['resource']
         kind = resource.get('resourceType')

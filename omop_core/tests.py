@@ -7,6 +7,7 @@ TEST-03: Signal integration tests at omop_core level
 TEST-04: FLBundleGenerator unit tests
 """
 
+import io
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -20,7 +21,7 @@ from django.db import IntegrityError, ProgrammingError, connection, transaction
 from django.test import TestCase, override_settings
 
 from omop_core.models import (
-    Concept, ConceptClass, Domain, Vocabulary,
+    Concept, ConceptClass, ConceptMappingLock, Domain, Vocabulary,
     Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
     PersonLanguageSkill, SourceCodeConceptMapping,
 )
@@ -382,6 +383,58 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(pi.disease, 'Multiple Myeloma')
         self.assertEqual(pi.disease_slug, 'multiple-myeloma')
 
+    def test_cb_source_value_wins_over_status_variant_concept(self):
+        # A CB profile-write stores the canonical disease title in condition_source_value while the
+        # resolved standard concept may be a status/subtype variant ("Multiple myeloma in remission").
+        # The canonical source value must win, else PatientRecord.disease is a name that does not match
+        # EXACT's trial disease strings and the matcher scopes to zero (or wrong) trials.
+        remission = _concept(90051, 'Multiple myeloma in remission', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92206,
+            person=self.person,
+            condition_concept=remission,
+            condition_source_value='multiple myeloma',
+            condition_start_date=date(2022, 5, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.disease, 'Multiple Myeloma')  # canonicalized source value, not the status variant
+
+    def test_non_canonical_source_value_keeps_concept_first(self):
+        # A non-CB row (e.g. FHIR import with a coded/free-text source value) is NOT a recognized
+        # canonical disease, so the mapped concept name is still preferred (unchanged behavior).
+        concept = _concept(90052, 'Breast Cancer', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92207,
+            person=self.person,
+            condition_concept=concept,
+            condition_source_value='C50.9',  # ICD code, not a CB canonical title
+            condition_start_date=date(2022, 6, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.disease, 'Breast Cancer')  # concept name, not the raw code
+
+    def test_sync_condition_resolves_exact_concept_not_status_variant(self):
+        # _sync_condition must deterministically resolve the EXACT Condition concept, not arbitrarily
+        # .first() a status/subtype variant (the old `concept_name__icontains(...).first()` could pick
+        # "Multiple myeloma in remission").
+        from omop_core.services.omop_write_service import _sync_condition
+        from omop_core.services.mappings import CONCEPT_EHR_TYPE
+        _concept(CONCEPT_EHR_TYPE, 'EHR', self.dom_cond, self.vocab, self.cc)  # _sync_condition needs the type concept
+        _concept(90060, 'Multiple myeloma in remission', self.dom_cond, self.vocab, self.cc)  # variant, lower id
+        _concept(90061, 'multiple myeloma', self.dom_cond, self.vocab, self.cc)               # exact match
+
+        class _PI:  # duck-typed patient_info the writer reads
+            disease = 'multiple myeloma'
+            stage = condition_code_icd_10 = condition_code_snomed_ct = None
+
+        _sync_condition(self.person, _PI(), date(2022, 7, 1))
+        co = ConditionOccurrence.objects.filter(
+            person=self.person, condition_source_value='multiple myeloma').first()
+        self.assertIsNotNone(co)
+        self.assertEqual(co.condition_concept.concept_name, 'multiple myeloma')  # exact, not the remission variant
+
 
 class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
     """Labs are derived from Measurement records using source_value fallback."""
@@ -520,6 +573,17 @@ class LegacyLaboratoryProjectionTest(_OmopBase):
 
         self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
         self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+        self.assertIsNone(pi.hemoglobin_g_dl)
+
+    def test_latest_legacy_hemoglobin_in_another_unit_wins(self):
+        self._measurement(92330, 'Hemoglobin measurement', 10.0, code='older-hgb', unit='mmol/L')
+        self._measurement(92331, 'Hemoglobin measurement', 11.2, code='newer-hgb', unit='mmol/L')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
+        self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+        self.assertIsNone(pi.hemoglobin_g_dl)
 
     def test_direct_bilirubin_does_not_populate_total_bilirubin(self):
         self._measurement(92332, 'Direct bilirubin', 0.3, code='1968-7', unit='mg/dL')
@@ -1039,16 +1103,49 @@ class RefreshPatientRecordComputedFieldsTest(_OmopBase):
             person=self.person,
             monoclonal_protein_serum=0.1,
             monoclonal_protein_urine=50,
+            kappa_flc=10,
+            lambda_flc=10,
         )
         from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertFalse(pi.measurable_disease_imwg)
+
+    def test_measurable_disease_imwg_none_with_partial_values(self):
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            monoclonal_protein_serum=0.1,
+        )
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertIsNone(pi.measurable_disease_imwg)
+
+    def test_measurable_disease_imwg_true_with_abnormal_flc_ratio(self):
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            kappa_flc=150,
+            lambda_flc=75,
+        )
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertTrue(pi.measurable_disease_imwg)
 
     def test_measurable_disease_imwg_none_when_no_data(self):
         pi = PatientRecord.objects.create(person=self.person)
         from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertIsNone(pi.measurable_disease_imwg)
+
+    def test_flc_derivations_with_one_stored_and_one_projected_value(self):
+        # A refresh re-projects one light chain as a float while the other
+        # keeps the Decimal the database returned; mixing them must not crash.
+        from decimal import Decimal
+        pi = PatientRecord.objects.create(person=self.person, lambda_flc=Decimal('1.00'))
+        pi.refresh_from_db()
+        pi.kappa_flc = 150.0
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertAlmostEqual(float(pi.involved_uninvolved_ratio), 150.0, places=3)
+        self.assertTrue(pi.measurable_disease_imwg)  # ratio > 100 and difference >= 10
 
 
 # ===========================================================================
@@ -1213,10 +1310,15 @@ class GetVisibleOrgsTest(TestCase):
         self.assertIn(self.org_b, orgs)
         self.assertNotIn(self.org_a, orgs)
 
-    def test_direct_org_analyst_sees_their_org(self):
+    def test_direct_org_analyst_sees_no_org(self):
+        """An analyst grant reads no patient data, so it opens no org (#2416)."""
         analyst = Identity.objects.create_user(email='analyst@test.com', password='x')
         GroupAccess.objects.create(
             identity=analyst, org=self.org_b, role='analyst',
+        )
+        self.assertEqual(list(get_visible_orgs(analyst)), [])
+        GroupAccess.objects.create(
+            identity=analyst, org=self.org_b, role='doctor',
         )
         orgs = list(get_visible_orgs(analyst))
         self.assertIn(self.org_b, orgs)
@@ -2357,9 +2459,48 @@ class LoadLoincClassesArchiveTest(TestCase):
         with self.assertRaisesMessage(CommandError, 'File not found'):
             call_command('load_loinc_classes', archive='/nonexistent/loinc.zip')
 
-    def test_malformed_gcs_uri_is_reported(self):
-        with self.assertRaisesMessage(CommandError, 'bucket and an object'):
-            call_command('load_loinc_classes', archive='gs://bucket-only')
+    def test_a_real_release_archive_has_no_loincclass_csv_and_loads_anyway(self):
+        """The central finding of #1624: a loinc.org release carries no
+        LoincClass.csv. LOINC models CLASS as a Part, so the class table is
+        AccessoryFiles/PartFile/Part.csv filtered to PartTypeName == 'CLASS'.
+
+        This path used to demand a LoincClass.csv member, so --archive could
+        not read the very thing it names -- only the hand-assembled zip from
+        the retired upload script.
+        """
+        import zipfile
+        from omop_core.models import LoincClass, LoincCodeClass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'Loinc_2.83.zip'
+            with zipfile.ZipFile(path, 'w') as zf:
+                zf.writestr(
+                    'AccessoryFiles/PartFile/Part.csv',
+                    '"PartNumber","PartTypeName","PartName","PartDisplayName","Status"\n'
+                    '"LP7786-9","CLASS","CHEM","Chemistry - non-challenge","ACTIVE"\n'
+                    '"LP1234-5","COMPONENT","Albumin","Albumin","ACTIVE"\n')
+                zf.writestr(
+                    'LoincTable/Loinc.csv',
+                    'LOINC_NUM,CLASS,EXAMPLE_UNITS,PROPERTY,SCALE_TYP\n'
+                    '2160-0,CHEM,mg/dL,MCnc,Qn\n')
+            call_command('load_loinc_classes', archive=str(path))
+
+        self.assertEqual(
+            LoincClass.objects.get(code='CHEM').display_name, 'Chemistry - non-challenge')
+        # Only CLASS parts become classes.
+        self.assertFalse(LoincClass.objects.filter(code='Albumin').exists())
+        row = LoincCodeClass.objects.get(loinc_num='2160-0')
+        self.assertEqual((row.property, row.scale_type), ('MCnc', 'Qn'))
+
+    def test_an_archive_with_neither_class_source_is_reported(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'loinc.zip'
+            with zipfile.ZipFile(path, 'w') as zf:
+                zf.writestr('LoincTable/Loinc.csv', 'LOINC_NUM,CLASS\n2160-0,CHEM\n')
+            with self.assertRaisesMessage(CommandError, 'Part.csv'):
+                call_command('load_loinc_classes', archive=str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -2379,7 +2520,7 @@ class PatientRecordSchemaSyncTest(TestCase):
     catches chain-introduced drift only. It cannot see out-of-band schema
     changes made directly against a deployed database -- that is what made the
     ``patient_info`` view 297 columns in staging and production but 296 in CI.
-    Use the sync check in CLAUDE.md against those environments for that.
+    Use the sync check in AGENTS.md against those environments for that.
     """
 
     def _db_columns(self):
@@ -2714,6 +2855,48 @@ class WearableConceptMappingTest(TestCase):
                     row[field], seeded[field],
                     f'{key} {field} differs between migration 0143 and seed_omop_concepts')
             self.assertEqual(row.get('source'), seeded.get('source'), f'{key} source differs')
+
+    def test_openwearables_migration_matches_seed_definitions(self):
+        """Migration 0343 duplicates its two concepts; the copies must not drift (#2595)."""
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0343_mint_openwearables_local_concepts')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+        for row in mig._HK_WEARABLE_CONCEPTS:
+            seeded = seed_by_key.get((mig.VOCABULARY_ID, row['concept_code']))
+            self.assertIsNotNone(
+                seeded, f"migration 0343 mints {row['concept_code']}, which the fixture does not")
+            for field in ('concept_id', 'concept_name', 'domain_id'):
+                self.assertEqual(
+                    row[field], seeded[field],
+                    f"{row['concept_code']} {field} differs between migration 0343 and the fixture")
+            self.assertEqual(seeded['concept_class_id'], mig.CONCEPT_CLASS_ID)
+            self.assertEqual(seeded['source'], 'HealthKey')
+
+    def test_openwearables_seed_local_targets_are_installed_by_migration(self):
+        """A local code the OpenWearables seed names must be minted by a migration.
+
+        No vocabulary load supplies an HK-Wearable concept, so a seed row naming
+        one that no migration installs resolves to nothing on every deployment.
+        """
+        from importlib import import_module
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRICS,
+        )
+
+        installed = set()
+        for name in ('0143_seed_wearable_runtime_concepts',
+                     '0343_mint_openwearables_local_concepts'):
+            mig = import_module(f'omop_core.migrations.{name}')
+            installed |= {r['concept_code'] for r in mig._HK_WEARABLE_CONCEPTS}
+        named = {
+            t_code for _code, _name, _unit, _domain, t_vocab, t_code in OPENWEARABLES_METRICS
+            if t_vocab == 'HK-Wearable'
+        }
+        self.assertEqual(named - installed, set())
 
     def test_locally_minted_wearable_concepts_are_installed_by_migration(self):
         """Athena can never supply a local mint, so a migration must.
@@ -4827,8 +5010,14 @@ class RefreshQueryCountTest(TestCase):
     """Ensure refresh_patient_record stays within a bounded query budget.
 
     The prefetch refactor (issue #541) reduced queries from ~80 to ~10.
-    This test catches regressions by asserting the total stays under 20.
+    This test catches regressions by asserting the total stays under the
+    budget below. Bump it only for a deliberate new lookup, and name that
+    lookup in the breakdown comment.
     """
+
+    #: 21 for the derivation itself plus the #1924 therapy-history
+    #: attestation existence check.
+    QUERY_BUDGET = 22
 
     @classmethod
     def setUpTestData(cls):
@@ -4872,16 +5061,16 @@ class RefreshQueryCountTest(TestCase):
             )
 
     def test_query_count_under_budget(self):
-        """refresh_patient_record must not exceed 21 SQL queries."""
+        """refresh_patient_record must not exceed QUERY_BUDGET SQL queries."""
         from django.test.utils import CaptureQueriesContext
         with CaptureQueriesContext(connection) as ctx:
             refresh_patient_record(self.person)
         # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
         # + a few ancillary lookups (Episode, concept cache, genomics OMOP
-        # projections, etc.)
+        # projections, the #1924 therapy-history attestation check, etc.)
         self.assertLessEqual(
-            len(ctx.captured_queries), 21,
-            f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
+            len(ctx.captured_queries), self.QUERY_BUDGET,
+            f'Expected ≤{self.QUERY_BUDGET} queries, got {len(ctx.captured_queries)}. '
             f'Query breakdown:\n'
             + '\n'.join(
                 f'  [{i}] {q["sql"][:120]}'
@@ -6282,7 +6471,7 @@ class MappingSuggestionsTest(_OmopBase):
              'lexical_score': 0.6},
         ]
         with override_settings(ANTHROPIC_API_KEY=''):
-            chosen, note = rank_candidates('anything', candidates)
+            chosen, note, _alts = rank_candidates('anything', candidates)
         self.assertEqual(chosen['concept_id'], 1)
         self.assertIn('Ranking model unavailable', note)
 
@@ -6306,7 +6495,7 @@ class MappingSuggestionsTest(_OmopBase):
         client.messages.create.return_value = MagicMock(content=[block])
         with override_settings(ANTHROPIC_API_KEY='test-key'), \
                 patch('anthropic.Anthropic', return_value=client):
-            chosen, note = rank_candidates('SERUM FREE LIGHT CHAIN KAPPA', candidates)
+            chosen, note, _alts = rank_candidates('SERUM FREE LIGHT CHAIN KAPPA', candidates)
         self.assertEqual(chosen['concept_id'], 3034860, 'the ratio was not demoted')
         self.assertIn('A ratio is not the analyte', note)
         self.assertEqual(client.messages.create.call_args.kwargs['model'], 'claude-opus-5')
@@ -6325,7 +6514,7 @@ class MappingSuggestionsTest(_OmopBase):
         client.messages.create.return_value = MagicMock(content=[block])
         with override_settings(ANTHROPIC_API_KEY='k'), \
                 patch('anthropic.Anthropic', return_value=client):
-            chosen, note = rank_candidates('x', candidates)
+            chosen, note, _alts = rank_candidates('x', candidates)
         self.assertEqual(chosen['concept_id'], 1)
         self.assertIn('Ranking model unavailable', note)
 
@@ -6337,7 +6526,7 @@ class MappingSuggestionsTest(_OmopBase):
                        'lexical_score': 0.7}]
         with override_settings(ANTHROPIC_API_KEY='k'), \
                 patch('anthropic.Anthropic', side_effect=RuntimeError('network down')):
-            chosen, note = rank_candidates('x', candidates)
+            chosen, note, _alts = rank_candidates('x', candidates)
         self.assertEqual(chosen['concept_id'], 1)
         self.assertIn('Ranking model unavailable', note)
 
@@ -6353,7 +6542,7 @@ class MappingSuggestionsTest(_OmopBase):
         client.messages.create.return_value = MagicMock(content=[block])
         with override_settings(ANTHROPIC_API_KEY='k'), \
                 patch('anthropic.Anthropic', return_value=client):
-            chosen, note = rank_candidates('x', candidates)
+            chosen, note, _alts = rank_candidates('x', candidates)
         self.assertIsNone(chosen, 'a wrong mapping is written into patient records')
         self.assertIn('none match', note)
 
@@ -6475,7 +6664,7 @@ class MappingSuggestionsTest(_OmopBase):
             client.messages.create.return_value = MagicMock(content=[block])
             with override_settings(ANTHROPIC_API_KEY='k'), \
                     patch('anthropic.Anthropic', return_value=client):
-                chosen, note = rank_candidates('x', candidates)
+                chosen, note, _alts = rank_candidates('x', candidates)
             self.assertEqual(chosen['concept_id'], 1, f'{payload!r} was not handled')
             self.assertIn('Ranking model unavailable', note)
 
@@ -6630,11 +6819,95 @@ class OpenWearablesVocabularyTest(TestCase):
         self.assertLess(ow_key, uncoded_key)
         self.assertLess(ow_key, loinc_key)
 
+    def test_wearables_is_the_first_tab(self):
+        from omop_core.services.source_vocabularies import (
+            SOURCE_TAB_ORDER, source_tab_sort_key,
+        )
+        self.assertEqual(SOURCE_TAB_ORDER[0], 'OpenWearables')
+        for other in ('EPIC', 'CERNER', 'ICD10CM', 'RxNorm', '', 'LOINC', 'SNOMED'):
+            with self.subTest(other):
+                self.assertLess(source_tab_sort_key('OpenWearables'), source_tab_sort_key(other))
+        # A vocabulary with no place in the order still sorts after it.
+        self.assertLess(source_tab_sort_key('OpenWearables'), source_tab_sort_key('SomeNewVocab'))
+
     def test_tables_for_openwearables(self):
         from omop_core.services.source_vocabularies import tables_for_source_vocabulary
         tables = tables_for_source_vocabulary('OpenWearables')
         self.assertIn('measurement', tables)
         self.assertIn('observation', tables)
+
+
+class HospitalSourceVocabularyTest(TestCase):
+    """Hospital resolver keys stay tenant-scoped while their tabs roll up."""
+
+    def test_epic_systems_are_recognised(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
+
+        systems = [
+            'urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+            'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+        ]
+        for system in systems:
+            self.assertEqual(fhir_source_vocabulary(system), system)
+            self.assertEqual(hospital_vendor(system), 'EPIC')
+
+    def test_cerner_codeset_retains_the_tenant_resolver_key(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
+
+        system = 'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'
+        self.assertEqual(fhir_source_vocabulary(system), system)
+        self.assertEqual(hospital_vendor(system), 'CERNER')
+
+    def test_generic_and_unknown_systems_are_not_misclassified(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+
+        self.assertEqual(fhir_source_vocabulary('http://loinc.org'), 'LOINC')
+        self.assertEqual(fhir_source_vocabulary(
+            'http://hl7.org/fhir/us/core/CodeSystem/us-core-category'), '')
+        self.assertEqual(fhir_source_vocabulary('https://fhir.cerner.com/metadata'), '')
+
+    def test_hospital_tabs_precede_other_curation_queues(self):
+        from omop_core.services.source_vocabularies import source_tab_sort_key
+
+        self.assertLess(source_tab_sort_key('EPIC'), source_tab_sort_key('ICD10CM'))
+        self.assertLess(source_tab_sort_key('CERNER'), source_tab_sort_key('ICD10CM'))
+
+    def test_hospital_sources_are_available_for_every_clinical_domain(self):
+        from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, source_systems_for
+
+        for domain in DOMAIN_TO_TABLE:
+            with self.subTest(domain=domain):
+                vocabularies = {entry['vocabulary_id'] for entry in source_systems_for(domain)}
+                self.assertTrue({'EPIC', 'CERNER'} <= vocabularies)
+
+    def test_tabs_and_suggest_include_every_tenant_without_merging_resolver_keys(self):
+        from omop_core.mapping.suggestions import suggestable_queryset
+        from omop_core.services.mapping_browse import tab_queryset
+
+        epic_a = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+            source_code='10627', omop_table='measurement', status='proposed')
+        epic_b = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13.670.2.7.5.737384.45',
+            source_code='10627', omop_table='measurement', status='proposed')
+        cerner = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id=(
+                'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+            source_code='10627', omop_table='measurement', status='proposed')
+
+        self.assertEqual(
+            set(tab_queryset(SourceCodeConceptMapping.objects.all(), 'EPIC')
+                .values_list('pk', flat=True)),
+            {epic_a.pk, epic_b.pk},
+        )
+        self.assertEqual(
+            set(suggestable_queryset(
+                'measurement', source_vocabulary_id='EPIC', min_occurrences=1)
+                .values_list('pk', flat=True)),
+            {epic_a.pk, epic_b.pk},
+        )
+        self.assertNotEqual(epic_a.source_vocabulary_id, epic_b.source_vocabulary_id)
+        self.assertNotIn(cerner.pk, {epic_a.pk, epic_b.pk})
 
 
 class SeedOpenWearablesMappingsTest(TestCase):
@@ -6651,6 +6924,43 @@ class SeedOpenWearablesMappingsTest(TestCase):
         # and concepts including heart rate (8867-4 / concept_id 3027018).
         seed_test_concepts()
         cls.hr_concept = Concept.objects.get(concept_id=3027018)
+
+        # The three targets the HL7 PHR code list replaced (#2595), each beside
+        # the code the seed carried before, under their Athena ids.
+        def loinc(concept_id, code, name):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=name, domain_id='Measurement',
+                vocabulary_id='LOINC', concept_class_id='Clinical Observation',
+                standard_concept='S', concept_code=code,
+                valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+            )
+        cls.lean_mass = loinc(37020574, '91557-9', 'Lean body weight')
+        cls.lean_mass_old = loinc(36305481, '88334-8', 'Lean body weight Calculated')
+        cls.fvc = loinc(3020158, '19870-5', 'Forced vital capacity [Volume] Respiratory system')
+        cls.pefr = loinc(
+            3043729, '33452-4', 'Maximum expiratory gas flow Respiratory system airway')
+
+    def _row(self, source_code):
+        return SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='OpenWearables', source_code=source_code)
+
+    def _seed_then_hold(self, source_code, **fields):
+        """Seed, then put *source_code*'s row in the state an earlier run left."""
+        call_command('seed_openwearables_mappings', verbosity=0)
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables', source_code=source_code,
+        ).update(**fields)
+        return self._row(source_code)
+
+    def _snapshot(self):
+        return list(
+            SourceCodeConceptMapping.objects
+            .filter(source_vocabulary_id='OpenWearables')
+            .order_by('source_code')
+            .values_list(
+                'source_code', 'target_concept_id', 'destination_vocabulary_id',
+                'status', 'origin_system', 'updated_at')
+        )
 
     def test_dry_run_creates_nothing(self):
         call_command('seed_openwearables_mappings', '--dry-run', verbosity=0)
@@ -6701,6 +7011,1453 @@ class SeedOpenWearablesMappingsTest(TestCase):
             source_vocabulary_id='OpenWearables',
         ).count()
         self.assertEqual(count1, count2)
+
+    # -- wearable mapping v4 / HL7 PHR (#2595) -----------------------------
+
+    def test_hl7_phr_codes_are_seeded(self):
+        """Where the proposal and the HL7 PHR list disagreed, the HL7 code wins."""
+        call_command('seed_openwearables_mappings', verbosity=0)
+        for source_code, concept in (
+            ('lean_body_mass', self.lean_mass),
+            ('forced_vital_capacity', self.fvc),
+            ('peak_expiratory_flow_rate', self.pefr),
+        ):
+            row = self._row(source_code)
+            self.assertEqual(row.target_concept_id, concept.concept_id, source_code)
+            self.assertEqual(row.destination_vocabulary_id, 'LOINC', source_code)
+
+    def test_local_wearable_targets_are_seeded(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        for source_code, concept_code in (
+            ('walking_step_length', 'HK-WEAR-STEP-LENGTH'),
+            ('walking_double_support_percentage', 'HK-WEAR-DBL-SUPPORT'),
+            ('walking_heart_rate_average', 'HK-WEAR-WALK-HR'),
+            ('heart_rate_variability_rmssd', 'HK-WEAR-HRV-RMSSD'),
+            ('estimated_workout_effort_score', 'HK-WEAR-OW-WORKOUT-EFFORT'),
+            ('cardiovascular_age', 'HK-WEAR-OW-CARDIO-AGE'),
+        ):
+            row = self._row(source_code)
+            self.assertIsNotNone(row.target_concept, source_code)
+            self.assertEqual(row.target_concept.concept_code, concept_code)
+            self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+
+    def test_flights_climbed_mapped_to_loinc(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = self._row('flights_climbed')
+        self.assertEqual(row.target_concept.concept_code, '100304-5')
+        self.assertEqual(row.omop_table, 'observation')
+
+    def test_average_met_stays_unmapped(self):
+        """SNOMED 16821004 is unverified, so the seed proposes nothing for it."""
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertIsNone(self._row('average_met').target_concept)
+
+    def test_rerun_without_flag_changes_nothing(self):
+        """A plain re-run leaves a row at an older target exactly as it is."""
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = self._snapshot()
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(
+            self._row('lean_body_mass').target_concept_id, self.lean_mass_old.concept_id)
+
+    def test_update_seeded_repoints_an_untouched_row(self):
+        held = self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('lean_body_mass')
+        self.assertEqual(row.target_concept_id, self.lean_mass.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertGreater(row.updated_at, held.updated_at)
+        # Still the seed's row, so a later change of target can move it again.
+        self.assertEqual(row.status, 'proposed')
+        self.assertEqual(row.origin_system, 'open-wearables-seed')
+        self.assertEqual(row.decision_surface, '')
+        self.assertIsNone(row.updated_by_id)
+
+    def test_update_seeded_fills_a_row_suggest_declined_and_drops_its_note(self):
+        """A declined Suggest run leaves a note and no destination; the row is still the seed's."""
+        self._seed_then_hold(
+            'walking_step_length', target_concept=None, destination_vocabulary_id='',
+            last_suggest_attempt='v0.4-both',
+            notes='No candidate concept found by any enabled strategy.')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('walking_step_length')
+        self.assertEqual(row.target_concept.concept_code, 'HK-WEAR-STEP-LENGTH')
+        self.assertEqual(row.notes, '')
+        self.assertEqual(row.last_suggest_attempt, 'v0.4-both')
+
+    def test_update_seeded_fills_an_untouched_row_with_no_destination(self):
+        self._seed_then_hold(
+            'walking_step_length', target_concept=None, destination_vocabulary_id='')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('walking_step_length')
+        self.assertEqual(row.target_concept.concept_code, 'HK-WEAR-STEP-LENGTH')
+        self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+
+    def test_update_seeded_touches_only_rows_that_differ(self):
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = {r[0]: r for r in self._snapshot()}
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        changed = [r[0] for r in self._snapshot() if before[r[0]] != r]
+        self.assertEqual(changed, ['lean_body_mass'])
+
+    def test_update_seeded_skips_rows_it_does_not_own(self):
+        """Approved, rejected, Suggest-answered and curator-saved rows are left alone."""
+        curator = Identity.objects.create_user(email='curator-2595@test.com', password='x')
+        for label, fields in (
+            ('approved', {'status': 'approved'}),
+            ('rejected', {'status': 'rejected'}),
+            ('suggest answered', {'origin_system': 'suggest v0.4'}),
+            ('another importer', {'origin': 'user'}),
+            ('suggest score', {'suggestion_confidence': 0.4}),
+            ('suggest candidate', {'suggested_target_concept': self.hr_concept}),
+            ('curator decision', {'decision_surface': 'code2concept'}),
+            ('curator save before decision_surface', {'updated_by': curator}),
+            ('curator note on a copied row', {'curator_note_at': timezone.now()}),
+            ('curator unit', {'destination_unit_concept': self.hr_concept}),
+            ('curator axes', {'loinc_axes': {'system': 'Bld'}}),
+            ('curator attributes', {'snomed_attributes': {'reference_concept_id': 1}}),
+        ):
+            with self.subTest(label):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                self._seed_then_hold(
+                    'lean_body_mass', target_concept=self.lean_mass_old, **fields)
+                before = self._snapshot()
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                self.assertEqual(self._snapshot(), before)
+                self.assertIn('[LEFT ALONE] lean_body_mass', out.getvalue())
+                self.assertIn('0 re-pointed, 1 left alone', out.getvalue())
+
+    def test_update_seeded_skips_a_target_a_curator_has_locked(self):
+        """A locked concept refuses every write that names it (#2390)."""
+        curator = Identity.objects.create_user(email='locker-2595@test.com', password='x')
+        ConceptMappingLock.objects.create(concept=self.lean_mass, locked_by=curator)
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        self.assertIn('locked by a curator', out.getvalue())
+
+    def test_target_in_another_domain_is_not_used(self):
+        """The row is filed by the seed's domain, so a concept elsewhere is no target."""
+        Concept.objects.filter(pk=self.lean_mass.pk).update(domain_id='Observation')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=out)
+        self.assertIsNone(self._row('lean_body_mass').target_concept)
+        self.assertIn('Concept is in domain Observation', out.getvalue())
+
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables', source_code='lean_body_mass',
+        ).update(target_concept=self.lean_mass_old)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('lean_body_mass').target_concept_id, self.lean_mass_old.concept_id)
+
+    def test_retired_target_is_not_used(self):
+        Concept.objects.filter(pk=self.fvc.pk).update(invalid_reason='D')
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertIsNone(self._row('forced_vital_capacity').target_concept)
+
+    def test_update_seeded_never_clears_a_destination(self):
+        """The seed names no target for average_met; a destination there stays."""
+        self._seed_then_hold(
+            'average_met', target_concept=self.hr_concept, destination_vocabulary_id='LOINC')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        self.assertEqual(
+            self._row('average_met').target_concept_id, self.hr_concept.concept_id)
+        self.assertIn('[KEPT] average_met', out.getvalue())
+        self.assertIn('0 left alone at another destination, 1 kept', out.getvalue())
+
+    def test_update_seeded_keeps_a_destination_when_the_target_is_not_loaded(self):
+        """SNOMED 250825003 is not in this database: the row keeps what it has."""
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='SNOMED', concept_code='250825003').exists())
+        self._seed_then_hold(
+            'air_temperature', target_concept=self.hr_concept, destination_vocabulary_id='LOINC')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('air_temperature').target_concept_id, self.hr_concept.concept_id)
+
+    def test_update_seeded_dry_run_writes_nothing(self):
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command(
+            'seed_openwearables_mappings', '--update-seeded', '--dry-run', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        self.assertIn('[RE-POINT] lean_body_mass: LOINC:88334-8 -> LOINC:91557-9', out.getvalue())
+        self.assertIn('1 re-pointed', out.getvalue())
+
+    # -- units -----------------------------------------------------------
+
+    def _ucum(self, concept_id, code, name):
+        """A UCUM unit concept, as a vocabulary load would have left it."""
+        Vocabulary.objects.get_or_create(vocabulary_id='UCUM', defaults=dict(
+            vocabulary_name='UCUM', vocabulary_reference='test',
+            vocabulary_version='test', vocabulary_concept_id=0))
+        Domain.objects.get_or_create(
+            domain_id='Unit', defaults=dict(domain_name='Unit', domain_concept_id=0))
+        ConceptClass.objects.get_or_create(concept_class_id='Unit', defaults=dict(
+            concept_class_name='Unit', concept_class_concept_id=0))
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=name, domain_id='Unit',
+            vocabulary_id='UCUM', concept_class_id='Unit', standard_concept='S',
+            concept_code=code, valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+    def test_every_metric_unit_has_a_ucum_code(self):
+        """A unit missing from UCUM_BY_UNIT would be dropped without a word."""
+        from omop_core.management.commands.seed_hl7_phr_mappings import HL7_PHR_METRICS
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRICS, UCUM_BY_UNIT,
+        )
+        used = {unit for _c, _n, unit, *_rest in OPENWEARABLES_METRICS + HL7_PHR_METRICS if unit}
+        self.assertEqual(used - set(UCUM_BY_UNIT), set())
+
+    def test_seed_sets_the_destination_unit(self):
+        per_minute = self._ucum(8541, '/min', 'per minute')
+        kilogram = self._ucum(9529, 'kg', 'kilogram')
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._row('heart_rate').destination_unit_concept_id, per_minute.pk)
+        self.assertEqual(self._row('respiratory_rate').destination_unit_concept_id, per_minute.pk)
+        self.assertEqual(self._row('lean_body_mass').destination_unit_concept_id, kilogram.pk)
+        # A metric with no destination still records the unit it is measured in.
+        self.assertIsNone(self._row('skeletal_muscle_mass').target_concept)
+        self.assertEqual(self._row('skeletal_muscle_mass').destination_unit_concept_id, kilogram.pk)
+
+    def test_unit_with_no_ucum_concept_is_left_unset_and_reported(self):
+        self._ucum(9529, 'kg', 'kilogram')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=out)
+        self.assertIsNone(self._row('heart_rate').destination_unit_concept)
+        listed = out.getvalue().split('No UCUM concept loaded for:')[1]
+        self.assertIn('bpm (/min)', listed)
+        self.assertNotIn('kg (kg)', listed)
+
+    def test_retired_ucum_concept_is_not_used(self):
+        unit = self._ucum(9529, 'kg', 'kilogram')
+        Concept.objects.filter(pk=unit.pk).update(invalid_reason='D')
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertIsNone(self._row('lean_body_mass').destination_unit_concept)
+
+    def test_rerun_without_flag_does_not_fill_units(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self._ucum(9529, 'kg', 'kilogram')
+        before = self._snapshot()
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._snapshot(), before)
+        self.assertIsNone(self._row('lean_body_mass').destination_unit_concept)
+
+    def test_update_seeded_fills_a_blank_unit(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        held = self._row('lean_body_mass')
+        kilogram = self._ucum(9529, 'kg', 'kilogram')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        row = self._row('lean_body_mass')
+        self.assertEqual(row.destination_unit_concept_id, kilogram.pk)
+        self.assertGreater(row.updated_at, held.updated_at)
+        # Nothing else about the row moved.
+        self.assertEqual(row.target_concept_id, held.target_concept_id)
+        self.assertEqual(row.origin_system, 'open-wearables-seed')
+        self.assertIn('[UNIT] lean_body_mass: kg', out.getvalue())
+        # Every kg metric on the tab, not only this one.
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRICS,
+        )
+        kg_metrics = sum(1 for _c, _n, unit, *_rest in OPENWEARABLES_METRICS if unit == 'kg')
+        self.assertIn(f' {kg_metrics} units filled, ', out.getvalue())
+        # A second run finds nothing left to fill.
+        again = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=again)
+        self.assertIn(
+            ' 0 units filled, 0 source units filled, 0 categories filled, '
+            '0 measure classes filled, 0 metric keys filled.', again.getvalue())
+
+    def test_update_seeded_fills_the_unit_beside_a_suggest_destination(self):
+        """A blank unit is nobody's answer, so Suggest's row gets it too."""
+        self._seed_then_hold(
+            'lean_body_mass', target_concept=self.lean_mass_old, origin_system='suggest v0.4',
+            suggested_target_concept=self.lean_mass_old, suggestion_confidence=0.6)
+        kilogram = self._ucum(9529, 'kg', 'kilogram')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('lean_body_mass')
+        self.assertEqual(row.destination_unit_concept_id, kilogram.pk)
+        # The destination is still Suggest's: only the unit was filled.
+        self.assertEqual(row.target_concept_id, self.lean_mass_old.concept_id)
+        self.assertEqual(row.origin_system, 'suggest v0.4')
+        self.assertEqual(row.suggestion_confidence, 0.6)
+
+    def test_update_seeded_never_changes_a_unit_that_is_set(self):
+        self._ucum(9529, 'kg', 'kilogram')
+        gram = self._ucum(8504, 'g', 'gram')
+        self._seed_then_hold('lean_body_mass', destination_unit_concept=gram)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(self._row('lean_body_mass').destination_unit_concept_id, gram.pk)
+
+    def test_update_seeded_does_not_fill_a_decided_or_saved_row(self):
+        curator = Identity.objects.create_user(email='unit-2600@test.com', password='x')
+        self._ucum(9529, 'kg', 'kilogram')
+        for label, fields in (
+            ('approved', {'status': 'approved'}),
+            ('rejected', {'status': 'rejected'}),
+            ('curator decision', {'decision_surface': 'code2concept'}),
+            ('curator save', {'updated_by': curator}),
+            ('reviewed', {'reviewer': curator}),
+            ('curator note', {'curator_note_at': timezone.now()}),
+            # All a copied instance keeps of the curator who entered them.
+            ('curator axes', {'loinc_axes': {'system': 'Bld'}}),
+            ('curator attributes', {'snomed_attributes': {'reference_concept_id': 1}}),
+        ):
+            with self.subTest(label):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                self._seed_then_hold(
+                    'lean_body_mass', destination_unit_concept=None, **fields)
+                call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+                self.assertIsNone(self._row('lean_body_mass').destination_unit_concept)
+
+    def test_update_seeded_dry_run_reports_units_and_writes_nothing(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self._ucum(9529, 'kg', 'kilogram')
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command(
+            'seed_openwearables_mappings', '--update-seeded', '--dry-run', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        self.assertIsNone(self._row('lean_body_mass').destination_unit_concept)
+        self.assertIn('[UNIT] lean_body_mass: kg', out.getvalue())
+
+    def test_update_seeded_does_not_fill_the_unit_of_a_locked_destination(self):
+        """A locked concept refuses every write that names it (#2390)."""
+        curator = Identity.objects.create_user(email='unit-lock-2647@test.com', password='x')
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self._ucum(9529, 'kg', 'kilogram')
+        ConceptMappingLock.objects.create(concept=self.lean_mass, locked_by=curator)
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        self.assertIsNone(self._row('lean_body_mass').destination_unit_concept)
+        self.assertIn('[UNIT LEFT ALONE] lean_body_mass', out.getvalue())
+        # Another kg metric, whose destination nobody holds, is still filled.
+        self.assertIsNotNone(self._row('weight').destination_unit_concept)
+
+    def test_update_seeded_fills_the_unit_and_repoints_in_one_run(self):
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        kilogram = self._ucum(9529, 'kg', 'kilogram')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        row = self._row('lean_body_mass')
+        self.assertEqual(row.destination_unit_concept_id, kilogram.pk)
+        self.assertEqual(row.target_concept_id, self.lean_mass.concept_id)
+        self.assertIn('1 re-pointed', out.getvalue())
+        self.assertIn('[UNIT] lean_body_mass: kg', out.getvalue())
+
+    def test_non_standard_ucum_concept_is_not_used(self):
+        unit = self._ucum(9529, 'kg', 'kilogram')
+        Concept.objects.filter(pk=unit.pk).update(standard_concept=None)
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertIsNone(self._row('lean_body_mass').destination_unit_concept)
+
+    def test_temperature_differences_get_no_destination_unit(self):
+        """Cel on a deviation would convert a difference as if it were a reading."""
+        celsius = self._ucum(586323, 'Cel', 'degree Celsius')
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._row('body_temperature').destination_unit_concept_id, celsius.pk)
+        for code in ('skin_temperature_deviation', 'skin_temperature_trend_deviation',
+                     'garmin_skin_temperature'):
+            with self.subTest(code):
+                row = self._row(code)
+                self.assertIsNone(row.destination_unit_concept)
+                # What the source reports in is still recorded.
+                self.assertEqual(row.source_unit_evidence[0]['code'], 'Cel')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertIsNone(self._row('skin_temperature_deviation').destination_unit_concept)
+
+    def test_plain_rerun_says_what_update_seeded_would_fill(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self._ucum(9529, 'kg', 'kilogram')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=out)
+        self.assertIn('existing rows have no unit or source unit; --update-seeded would fill them',
+                      out.getvalue())
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        again = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=again)
+        self.assertNotIn('--update-seeded would fill them', again.getvalue())
+
+    def test_seed_records_the_source_unit(self):
+        from omop_core.services.mapping_source_units import source_units
+        call_command('seed_openwearables_mappings', verbosity=0)
+        row = self._row('heart_rate')
+        self.assertEqual(row.source_unit_evidence, [
+            {'code': '/min', 'display': 'bpm', 'system': 'http://unitsofmeasure.org'}])
+        self.assertEqual(source_units(row), ['/min'])
+        # No count: it is not a sighting, so the approval unit check ignores it.
+        from omop_core.services.mapping_unit_consistency import _imported_unit_counts
+        self.assertEqual(sum(_imported_unit_counts([row])[row.pk].values()), 0)
+
+    def test_update_seeded_fills_a_missing_source_unit_whatever_the_status(self):
+        for label, fields in (
+            ('proposed', {}),
+            ('approved', {'status': 'approved'}),
+            ('suggest answered', {'origin_system': 'suggest v0.4'}),
+            ('curator decision', {'decision_surface': 'code2concept'}),
+        ):
+            with self.subTest(label):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                held = self._seed_then_hold('heart_rate', source_unit_evidence=[], **fields)
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                row = self._row('heart_rate')
+                self.assertEqual(row.source_unit_evidence[0]['code'], '/min')
+                self.assertIn('[SOURCE UNIT] heart_rate: /min', out.getvalue())
+                self.assertIn(
+                    ' 1 source units filled, 0 categories filled, 0 measure classes filled, '
+                    '0 metric keys filled.', out.getvalue())
+                # A sighting, like the Seen count: updated_at is not stamped.
+                self.assertEqual(row.updated_at, held.updated_at)
+
+    def test_source_units_already_recorded_are_never_replaced(self):
+        seen = [{'code': '{beats}/min', 'display': 'beats/min', 'count': 4, 'source': 'patient-data'}]
+        self._seed_then_hold('heart_rate', source_unit_evidence=seen)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(self._row('heart_rate').source_unit_evidence, seen)
+
+    def test_rerun_without_flag_does_not_fill_source_units(self):
+        self._seed_then_hold('heart_rate', source_unit_evidence=[])
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._row('heart_rate').source_unit_evidence, [])
+
+    def test_update_seeded_dry_run_does_not_write_source_units(self):
+        self._seed_then_hold('heart_rate', source_unit_evidence=[])
+        out = io.StringIO()
+        call_command(
+            'seed_openwearables_mappings', '--update-seeded', '--dry-run', stdout=out)
+        self.assertEqual(self._row('heart_rate').source_unit_evidence, [])
+        self.assertIn('[SOURCE UNIT] heart_rate: /min', out.getvalue())
+
+    def test_the_unit_the_seed_set_does_not_stop_a_repoint(self):
+        """Only a unit somebody else chose marks the row as a curator's."""
+        self._ucum(9529, 'kg', 'kilogram')
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        self.assertIsNotNone(self._row('lean_body_mass').destination_unit_concept)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('lean_body_mass').target_concept_id, self.lean_mass.concept_id)
+
+    # ── Category, Measure Class and Metric Key ───────────────────────────
+    # (field, the seed's value for resting_heart_rate, its report tag, its summary noun)
+    DESCRIBED = (
+        ('category', 'Heart & Cardiovascular', 'CATEGORY', 'categories'),
+        ('measure_class', 'Aggregate over interval', 'MEASURE CLASS', 'measure classes'),
+        ('metric_key', 'resting_hr', 'METRIC KEY', 'metric keys'),
+    )
+
+    def test_seed_sets_the_category_measure_class_and_metric_key_of_every_metric(self):
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_CATEGORIES, OPENWEARABLES_MEASURE_CLASSES, OPENWEARABLES_METRIC_KEYS,
+        )
+        call_command('seed_openwearables_mappings', verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(source_vocabulary_id='OpenWearables')
+        self.assertEqual(
+            dict(rows.values_list('source_code', 'category')), OPENWEARABLES_CATEGORIES)
+        self.assertEqual(
+            dict(rows.values_list('source_code', 'measure_class')),
+            OPENWEARABLES_MEASURE_CLASSES)
+        self.assertEqual(
+            dict(rows.values_list('source_code', 'metric_key')), OPENWEARABLES_METRIC_KEYS)
+        self.assertFalse(rows.filter(metric_key='').exists())
+        row = self._row('heart_rate')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Heart & Cardiovascular', 'Direct measurement', 'heart_rate'))
+        # The proposal's internal key where it names one, the code itself elsewhere.
+        self.assertEqual(self._row('resting_heart_rate').metric_key, 'resting_hr')
+        self.assertEqual(self._row('weight').metric_key, 'body_mass')
+        self.assertEqual(self._row('running_power').metric_key, 'running_power')
+        # cgm_glucose has no OpenWearables code in the proposal; its row is the
+        # one keyed by the internal metric name.
+        self.assertEqual(self._row('cgm_glucose').category, 'Blood & Respiratory')
+        self.assertEqual(self._row('garmin_body_battery').measure_class, 'Vendor score')
+
+    def test_update_seeded_fills_a_blank_described_field_whatever_the_status(self):
+        for field, value, tag, noun in self.DESCRIBED:
+            for label, fields in (
+                ('proposed', {}),
+                ('approved', {'status': 'approved'}),
+                ('rejected', {'status': 'rejected'}),
+                ('suggest answered', {'origin_system': 'suggest v0.4'}),
+                ('curator decision', {'decision_surface': 'code2concept'}),
+            ):
+                with self.subTest(field=field, state=label):
+                    SourceCodeConceptMapping.objects.filter(
+                        source_vocabulary_id='OpenWearables').delete()
+                    held = self._seed_then_hold('resting_heart_rate', **{field: ''}, **fields)
+                    out = io.StringIO()
+                    call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                    row = self._row('resting_heart_rate')
+                    self.assertEqual(getattr(row, field), value)
+                    self.assertIn(f'[{tag}] resting_heart_rate: {value}', out.getvalue())
+                    self.assertIn(f' 1 {noun} filled', out.getvalue())
+                    # The list API returns it, so the delta has to see the row.
+                    self.assertGreater(row.updated_at, held.updated_at)
+                    # Nothing else about the row moved.
+                    self.assertEqual(row.status, held.status)
+                    self.assertEqual(row.target_concept_id, held.target_concept_id)
+                    self.assertEqual(row.origin_system, held.origin_system)
+                    self.assertEqual(row.decision_surface, held.decision_surface)
+
+    def test_update_seeded_summary_counts_the_three_fills_at_its_end(self):
+        call_command('seed_openwearables_mappings', verbosity=0)
+        rows = SourceCodeConceptMapping.objects.filter(source_vocabulary_id='OpenWearables')
+        rows.filter(source_code__in=['heart_rate', 'steps', 'weight']).update(category='')
+        rows.filter(source_code__in=['steps', 'weight']).update(measure_class='')
+        rows.filter(source_code='weight').update(metric_key='')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        self.assertTrue(out.getvalue().rstrip().endswith(
+            ' 0 source units filled, 3 categories filled, 2 measure classes filled, '
+            '1 metric keys filled.'))
+        row = self._row('weight')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Body Composition', 'Direct measurement', 'body_mass'))
+
+    def test_update_seeded_never_replaces_a_described_field_that_is_set(self):
+        for field, other in (('category', 'Fitness'), ('measure_class', 'Vendor score'),
+                             ('metric_key', 'pulse')):
+            with self.subTest(field):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                held = self._seed_then_hold('heart_rate', **{field: other})
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+                row = self._row('heart_rate')
+                self.assertEqual(getattr(row, field), other)
+                self.assertEqual(row.updated_at, held.updated_at)
+                self.assertNotIn('] heart_rate:', out.getvalue())
+
+    def test_rerun_without_flag_does_not_fill_a_described_field(self):
+        for field, _value, _tag, _noun in self.DESCRIBED:
+            with self.subTest(field):
+                SourceCodeConceptMapping.objects.filter(
+                    source_vocabulary_id='OpenWearables').delete()
+                held = self._seed_then_hold('heart_rate', **{field: ''})
+                out = io.StringIO()
+                call_command('seed_openwearables_mappings', stdout=out)
+                row = self._row('heart_rate')
+                self.assertEqual(getattr(row, field), '')
+                self.assertEqual(row.updated_at, held.updated_at)
+                self.assertIn(
+                    ' 1 existing rows have no category, measure class or metric key; '
+                    '--update-seeded would fill it.', out.getvalue())
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        again = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=again)
+        self.assertNotIn('existing rows have no category', again.getvalue())
+
+    def test_update_seeded_dry_run_reports_the_fills_and_writes_none(self):
+        self._seed_then_hold('heart_rate', category='', measure_class='', metric_key='')
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command(
+            'seed_openwearables_mappings', '--update-seeded', '--dry-run', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        row = self._row('heart_rate')
+        self.assertEqual((row.category, row.measure_class, row.metric_key), ('', '', ''))
+        self.assertIn('[CATEGORY] heart_rate: Heart & Cardiovascular', out.getvalue())
+        self.assertIn('[MEASURE CLASS] heart_rate: Direct measurement', out.getvalue())
+        self.assertIn('[METRIC KEY] heart_rate: heart_rate', out.getvalue())
+        self.assertIn(
+            ' 1 categories filled, 1 measure classes filled, 1 metric keys filled.',
+            out.getvalue())
+
+    def test_dry_run_of_a_first_seed_writes_no_category(self):
+        call_command('seed_openwearables_mappings', '--dry-run', verbosity=0)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables').exists())
+
+
+class SeedHl7PhrMappingsTest(TestCase):
+    """seed_hl7_phr_mappings: the rows it seeds in the HL7-PHR vocabulary."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.management.commands.seed_hl7_phr_mappings import (
+            HL7_PHR_METRICS, SEED_SETS,
+        )
+        # The first list of HL7 PHR codes, and everything seeded as HL7-PHR:
+        # that list plus the HL7 codes of the proposal's wearable metrics.
+        cls.first_metrics = HL7_PHR_METRICS
+        [cls.seed_set] = [s for s in SEED_SETS if s[0] == 'HL7-PHR']
+        cls.metrics = cls.seed_set[1]
+        seed_test_concepts()
+        cls.hr_concept = Concept.objects.get(concept_id=3027018)
+        cls.total_energy = Concept.objects.create(
+            concept_id=3028782, concept_name='Calories burned', domain_id='Measurement',
+            vocabulary_id='LOINC', concept_class_id='Clinical Observation',
+            standard_concept='S', concept_code='41981-2',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+    def _rows(self):
+        return SourceCodeConceptMapping.objects.filter(source_vocabulary_id='HL7-PHR')
+
+    def _row(self, source_code):
+        return self._rows().get(source_code=source_code)
+
+    def test_seeds_one_proposed_row_per_metric_with_hl7_phr_provenance(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(self._rows().count(), len(self.metrics))
+        self.assertEqual(len(self.first_metrics), 17)
+        self.assertEqual(len(self.metrics), 122)
+        self.assertEqual(self.metrics[:17], self.first_metrics)
+        for row in self._rows():
+            with self.subTest(row.source_code):
+                self.assertEqual(row.status, 'proposed')
+                self.assertEqual(row.origin, 'import')
+                self.assertEqual(row.origin_system, 'HL7 PHR')
+                self.assertIsNone(row.organization_id)
+        row = self._row('highHeartRateEvent')
+        self.assertEqual(row.domain_id, 'Observation')
+        self.assertEqual(row.omop_table, 'observation')
+        self.assertEqual(row.source_code_description, 'High heart rate event (count)')
+
+    def test_sets_the_loinc_destination_the_hl7_table_names(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        row = self._row('totalEnergyBurned')
+        self.assertEqual(row.target_concept_id, self.total_energy.concept_id)
+        self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+        self.assertEqual(row.omop_table, 'measurement')
+
+    def test_leaves_a_metric_with_no_hl7_loinc_without_a_destination(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for code in ('rrInterval', 'stepsCadence', 'snoreIndex'):
+            with self.subTest(code):
+                self.assertIsNone(self._row(code).target_concept)
+                self.assertEqual(self._row(code).destination_vocabulary_id, '')
+
+    def test_a_loinc_not_loaded_here_is_reported_and_left_unmapped(self):
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertIsNone(self._row('dietaryCalcium').target_concept)
+        self.assertIn('Concept not found: LOINC:9045-6 for metric dietaryCalcium', out.getvalue())
+
+    def test_is_idempotent(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        before = list(self._rows().order_by('pk').values_list('pk', 'updated_at'))
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertEqual(list(self._rows().order_by('pk').values_list('pk', 'updated_at')), before)
+        self.assertIn('HL7-PHR: 0 created, 122 already existed', out.getvalue())
+
+    def test_dry_run_creates_nothing(self):
+        call_command('seed_hl7_phr_mappings', '--dry-run', verbosity=0)
+        self.assertFalse(self._rows().exists())
+
+    def test_the_two_seeds_leave_each_other_alone(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables').exists())
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertEqual(self._rows().count(), len(self.metrics))
+        self.assertFalse(self._rows().filter(origin_system='open-wearables-seed').exists())
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables', origin_system='HL7 PHR').exists())
+
+    def test_update_seeded_repoints_a_row_only_this_seed_wrote(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self._rows().filter(source_code='totalEnergyBurned').update(target_concept=self.hr_concept)
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('totalEnergyBurned').target_concept_id, self.total_energy.concept_id)
+
+    def test_update_seeded_leaves_a_row_suggest_answered(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self._rows().filter(source_code='totalEnergyBurned').update(
+            target_concept=self.hr_concept, origin_system='suggest v0.4')
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', stdout=out)
+        self.assertEqual(self._row('totalEnergyBurned').target_concept_id, self.hr_concept.concept_id)
+        self.assertIn('[LEFT ALONE] totalEnergyBurned', out.getvalue())
+
+    def test_units_are_seeded_and_filled_through_this_command_too(self):
+        Vocabulary.objects.get_or_create(vocabulary_id='UCUM', defaults=dict(
+            vocabulary_name='UCUM', vocabulary_reference='test',
+            vocabulary_version='test', vocabulary_concept_id=0))
+        Domain.objects.get_or_create(
+            domain_id='Unit', defaults=dict(domain_name='Unit', domain_concept_id=0))
+        ConceptClass.objects.get_or_create(concept_class_id='Unit', defaults=dict(
+            concept_class_name='Unit', concept_class_concept_id=0))
+
+        def ucum(concept_id, code):
+            return Concept.objects.create(
+                concept_id=concept_id, concept_name=code, domain_id='Unit',
+                vocabulary_id='UCUM', concept_class_id='Unit', standard_concept='S',
+                concept_code=code, valid_start_date=date(1970, 1, 1),
+                valid_end_date=date(2099, 12, 31))
+        kcal = ucum(710194, 'kcal')
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(self._row('totalEnergyBurned').destination_unit_concept_id, kcal.pk)
+        self.assertEqual(self._row('totalEnergyBurned').source_unit_evidence[0]['code'], 'kcal')
+        self.assertIsNone(self._row('rrInterval').destination_unit_concept)
+        millisecond = ucum(9593, 'ms')
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', stdout=out)
+        self.assertEqual(self._row('rrInterval').destination_unit_concept_id, millisecond.pk)
+        self.assertIn('[UNIT] rrInterval: ms', out.getvalue())
+
+    def test_seed_sets_the_category_measure_class_and_metric_key_of_every_metric(self):
+        from omop_core.management.commands.seed_hl7_phr_mappings import (
+            HL7_PHR_CATEGORIES, HL7_PHR_MEASURE_CLASSES, HL7_PHR_METRIC_KEYS,
+        )
+        _vocabulary, _metrics, categories, measure_classes, metric_keys = self.seed_set
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(
+            dict(self._rows().values_list('source_code', 'category')), categories)
+        self.assertEqual(
+            dict(self._rows().values_list('source_code', 'measure_class')), measure_classes)
+        self.assertEqual(
+            dict(self._rows().values_list('source_code', 'metric_key')), metric_keys)
+        # The first list's values are seeded as they were.
+        for first, seeded in ((HL7_PHR_CATEGORIES, categories),
+                              (HL7_PHR_MEASURE_CLASSES, measure_classes),
+                              (HL7_PHR_METRIC_KEYS, metric_keys)):
+            self.assertEqual({code: seeded[code] for code in first}, first)
+        row = self._row('totalEnergyBurned')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Activity', 'Algorithmic estimate', 'total_energy_burned'))
+        row = self._row('dietarySodium')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Nutrition', 'User-entered or device log', 'dietary_sodium'))
+
+    def test_update_seeded_fills_the_blank_described_fields_through_this_command(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        # One row still proposed, one a curator approved.
+        self._rows().filter(source_code='snoreIndex').update(
+            category='', measure_class='', metric_key='')
+        self._rows().filter(source_code='rrInterval').update(
+            category='', measure_class='', metric_key='', status='approved')
+        self._rows().filter(source_code='boneMass').update(
+            category='Fitness', measure_class='Vendor score', metric_key='bone')
+
+        # A plain re-run fills nothing.
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertEqual(self._row('snoreIndex').category, '')
+        self.assertEqual(self._row('rrInterval').measure_class, '')
+        self.assertEqual(self._row('rrInterval').metric_key, '')
+        self.assertIn(
+            ' 2 existing rows have no category, measure class or metric key', out.getvalue())
+
+        # Neither does a dry run of the fill.
+        dry = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', '--dry-run', stdout=dry)
+        self.assertEqual(self._row('snoreIndex').category, '')
+        self.assertIn('[CATEGORY] snoreIndex: Sleep', dry.getvalue())
+
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', stdout=out)
+        row = self._row('snoreIndex')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Sleep', 'Aggregate over interval', 'snore_index'))
+        row = self._row('rrInterval')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key, row.status),
+            ('Heart & Cardiovascular', 'Direct measurement', 'rr_interval', 'approved'))
+        # A value somebody set is never replaced.
+        row = self._row('boneMass')
+        self.assertEqual(
+            (row.category, row.measure_class, row.metric_key),
+            ('Fitness', 'Vendor score', 'bone'))
+        self.assertIn('[MEASURE CLASS] rrInterval: Direct measurement', out.getvalue())
+        self.assertIn('[METRIC KEY] rrInterval: rr_interval', out.getvalue())
+        self.assertIn(
+            ' 2 categories filled, 2 measure classes filled, 2 metric keys filled.',
+            out.getvalue())
+
+    def test_browse_and_suggest_find_hl7_phr_rows_on_the_wearables_tab(self):
+        from omop_core.mapping.suggestions import suggestable_queryset
+        from omop_core.services.mapping_browse import tab_queryset
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        on_tab = tab_queryset(SourceCodeConceptMapping.objects.all(), 'OpenWearables')
+        self.assertEqual(on_tab.filter(source_vocabulary_id='HL7-PHR').count(), 122)
+        # min_occurrences=1, as the Wearables tab asks: a seeded row has no sightings.
+        waiting = suggestable_queryset(
+            None, source_vocabulary_id='OpenWearables', min_occurrences=1)
+        codes = set(waiting.filter(source_vocabulary_id='HL7-PHR')
+                    .values_list('source_code', flat=True))
+        self.assertIn('rrInterval', codes)
+        # A row that already has a destination is not Suggest's to answer.
+        self.assertNotIn('totalEnergyBurned', codes)
+
+    def test_hl7_phr_rows_sit_on_the_wearables_tab(self):
+        from omop_core.services.mapping_browse import canonical_source
+        from omop_core.services.source_vocabularies import (
+            SOURCE_TAB_ORDER, WEARABLE_SOURCE_VOCABULARIES, source_systems_for,
+        )
+        self.assertIn('HL7-PHR', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertEqual(canonical_source('HL7-PHR'), 'OpenWearables')
+        self.assertNotIn('HL7-PHR', SOURCE_TAB_ORDER)
+        for domain in ('Measurement', 'Observation'):
+            with self.subTest(domain):
+                self.assertIn(
+                    'HL7-PHR', [s['vocabulary_id'] for s in source_systems_for(domain)])
+
+
+class SeedHl7PhrSourceCodesTest(TestCase):
+    """seed_hl7_phr_mappings: the HealthKit, Health Connect and HL7 PHR codes of
+    the proposal's wearable metrics, seeded as proposed mappings."""
+
+    VOCABULARIES = ('HL7-PHR', 'Apple', 'HealthConnect')
+    OUT_OF_SCOPE = ('Nutrition', 'Symptoms', 'Reproductive Health', 'Self-care',
+                    'Mental Wellbeing', 'Hearing')
+
+    @classmethod
+    def setUpTestData(cls):
+        from omop_core.management.commands.seed_hl7_phr_mappings import SEED_SETS
+        cls.seed_sets = {s[0]: s for s in SEED_SETS}
+        seed_test_concepts()
+        cls.hr_concept = Concept.objects.get(concept_id=3027018)
+        cls.steps_concept = Concept.objects.get(vocabulary_id='LOINC', concept_code='55423-8')
+
+    def _rows(self, vocabulary=None):
+        rows = SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=[vocabulary] if vocabulary else self.VOCABULARIES)
+        return rows.exclude(origin_system='hk-wearables-apple')
+
+    def _row(self, vocabulary, source_code):
+        return SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id=vocabulary, source_code=source_code)
+
+    def _snapshot(self, **filters):
+        """Every stored column of the wearable rows, so any write shows."""
+        return list(
+            SourceCodeConceptMapping.objects
+            .filter(source_vocabulary_id__in=(*self.VOCABULARIES, 'Garmin', 'OpenWearables'),
+                    **filters)
+            .order_by('source_vocabulary_id', 'source_code').values())
+
+    def _ucum(self, concept_id, code):
+        Vocabulary.objects.get_or_create(vocabulary_id='UCUM', defaults=dict(
+            vocabulary_name='UCUM', vocabulary_reference='test',
+            vocabulary_version='test', vocabulary_concept_id=0))
+        Domain.objects.get_or_create(
+            domain_id='Unit', defaults=dict(domain_name='Unit', domain_concept_id=0))
+        ConceptClass.objects.get_or_create(concept_class_id='Unit', defaults=dict(
+            concept_class_name='Unit', concept_class_concept_id=0))
+        return Concept.objects.create(
+            concept_id=concept_id, concept_name=code, domain_id='Unit',
+            vocabulary_id='UCUM', concept_class_id='Unit', standard_concept='S',
+            concept_code=code, valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31))
+
+    # ── Creation ────────────────────────────────────────────────────────
+
+    def test_seeds_each_vocabulary_as_proposed_rows_with_hl7_phr_provenance(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(
+            {v: self._rows(v).count() for v in self.VOCABULARIES},
+            {'HL7-PHR': 122, 'Apple': 60, 'HealthConnect': 35})
+        for vocabulary in self.VOCABULARIES:
+            self.assertEqual(
+                set(self._rows(vocabulary).values_list('source_code', flat=True)),
+                {metric[0] for metric in self.seed_sets[vocabulary][1]})
+        for row in self._rows():
+            with self.subTest(f'{row.source_vocabulary_id}:{row.source_code}'):
+                self.assertEqual(row.status, 'proposed')
+                self.assertEqual(row.origin, 'import')
+                self.assertEqual(row.origin_system, 'HL7 PHR')
+                self.assertIsNone(row.organization_id)
+                # Nobody reviewed or decided it.
+                self.assertIsNone(row.reviewer_id)
+                self.assertIsNone(row.updated_by_id)
+                self.assertEqual(row.decision_surface, '')
+                self.assertEqual(row.occurrence_count, 0)
+
+    def test_the_codes_of_one_metric_get_its_target_table_and_description(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for vocabulary, code in (('Apple', 'HKQuantityTypeIdentifierHeartRate'),
+                                 ('HealthConnect', 'HeartRateRecord'),
+                                 ('HL7-PHR', 'heartRate')):
+            with self.subTest(vocabulary):
+                row = self._row(vocabulary, code)
+                self.assertEqual(row.target_concept_id, self.hr_concept.concept_id)
+                self.assertEqual(row.destination_vocabulary_id, 'LOINC')
+                self.assertEqual((row.domain_id, row.omop_table), ('Measurement', 'measurement'))
+                self.assertEqual(row.source_code_description, 'Heart rate (bpm)')
+                self.assertEqual(
+                    (row.category, row.measure_class, row.metric_key),
+                    ('Heart & Cardiovascular', 'Direct measurement', 'heart_rate'))
+        # A count is filed under Observation, as the proposal's Domain says.
+        row = self._row('HealthConnect', 'StepsRecord')
+        self.assertEqual(row.target_concept_id, self.steps_concept.concept_id)
+        self.assertEqual((row.domain_id, row.omop_table), ('Observation', 'observation'))
+
+    def test_a_metric_the_proposal_gives_no_target_has_no_destination(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for vocabulary, code in (('Apple', 'HKQuantityTypeIdentifierRunningPower'),
+                                 ('HealthConnect', 'PowerRecord'),
+                                 ('HL7-PHR', 'cyclingPedalingCadence'),
+                                 # Unverified in the proposal: unmapped, as average_met is.
+                                 ('HL7-PHR', 'met')):
+            with self.subTest(code):
+                row = self._row(vocabulary, code)
+                self.assertIsNone(row.target_concept)
+                self.assertEqual(row.destination_vocabulary_id, '')
+                self.assertEqual(row.status, 'proposed')
+
+    def test_a_target_not_loaded_here_is_reported_and_left_unmapped(self):
+        self.assertFalse(Concept.objects.filter(
+            vocabulary_id='LOINC', concept_code='19870-5').exists())
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertIsNone(self._row('Apple', 'HKQuantityTypeIdentifierForcedVitalCapacity').target_concept)
+        self.assertIsNone(self._row('HL7-PHR', 'forcedVitalCapacity').target_concept)
+        self.assertIn(
+            'Concept not found: LOINC:19870-5 for metric '
+            'HKQuantityTypeIdentifierForcedVitalCapacity', out.getvalue())
+        # Nothing was invented for it, and it is loaded later by --update-seeded.
+        fvc = Concept.objects.create(
+            concept_id=3020158, concept_name='Forced vital capacity', domain_id='Measurement',
+            vocabulary_id='LOINC', concept_class_id='Clinical Observation',
+            standard_concept='S', concept_code='19870-5',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertIsNone(self._row('HL7-PHR', 'forcedVitalCapacity').target_concept)
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(self._row('HL7-PHR', 'forcedVitalCapacity').target_concept_id, fvc.pk)
+        self.assertEqual(
+            self._row('Apple', 'HKQuantityTypeIdentifierForcedVitalCapacity').target_concept_id,
+            fvc.pk)
+
+    def test_a_target_that_is_not_a_standard_concept_is_not_proposed(self):
+        glucose = Concept.objects.get(vocabulary_id='LOINC', concept_code='2339-0')
+        self.assertIsNone(glucose.standard_concept)
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        for vocabulary, code in (('Apple', 'HKQuantityTypeIdentifierBloodGlucose'),
+                                 ('HealthConnect', 'BloodGlucoseRecord'),
+                                 ('HL7-PHR', 'bloodGlucose')):
+            with self.subTest(vocabulary):
+                self.assertIsNone(self._row(vocabulary, code).target_concept)
+        self.assertIn(
+            'Concept is not standard: LOINC:2339-0 for metric bloodGlucose', out.getvalue())
+
+    def test_a_retired_target_is_not_proposed(self):
+        Concept.objects.filter(pk=self.hr_concept.pk).update(invalid_reason='D')
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertIsNone(self._row('HealthConnect', 'HeartRateRecord').target_concept)
+
+    def test_a_local_wearable_concept_is_proposed_though_it_is_not_standard(self):
+        local = Concept.objects.get(
+            vocabulary_id='HK-Wearable', concept_code='HK-WEAR-BASAL-ENERGY')
+        self.assertIsNone(local.standard_concept)
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for vocabulary, code in (('HealthConnect', 'BasalMetabolicRateRecord'),
+                                 ('HL7-PHR', 'basalEnergyBurned')):
+            with self.subTest(vocabulary):
+                row = self._row(vocabulary, code)
+                self.assertEqual(row.target_concept_id, local.pk)
+                self.assertEqual(row.destination_vocabulary_id, 'HK-Wearable')
+
+    def test_the_hl7_spelling_of_a_code_is_the_source_code(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(
+            self._row('HL7-PHR', 'exerciiseRepetitions').metric_key, 'exercise_repetitions')
+        self.assertFalse(self._rows('HL7-PHR').filter(source_code='exerciseRepetitions').exists())
+
+    def test_one_hl7_code_is_one_row_and_it_is_blood_glucose(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(self._row('HL7-PHR', 'bloodGlucose').metric_key, 'blood_glucose')
+        self.assertFalse(self._rows().filter(metric_key='cgm_glucose').exists())
+
+    def test_a_cell_that_is_not_a_single_code_seeds_nothing(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        codes = set(self._rows().values_list('source_code', flat=True))
+        for code in codes:
+            self.assertRegex(code, r'^[A-Za-z][A-Za-z0-9]*$')
+        # The notes, pairs and profiles of the proposal's HL7 column.
+        for fragment in ('related', 'example', 'profile', 'cyclingCadence', 'sleepAHI (',
+                         'TotalCaloriesBurnedRecord /'):
+            self.assertFalse([code for code in codes if fragment in code], fragment)
+        # sleepAHI and appleStandHour are codes of their own metrics.
+        self.assertEqual(self._row('HL7-PHR', 'sleepAHI').metric_key, 'sleep_ahi')
+        self.assertEqual(self._row('HL7-PHR', 'appleStandHour').metric_key, 'apple_stand_hour')
+
+    # ── Scope: wearable metrics only ────────────────────────────────────
+
+    def test_no_apple_or_health_connect_row_is_outside_the_wearable_scope(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for vocabulary in ('Apple', 'HealthConnect'):
+            with self.subTest(vocabulary):
+                self.assertFalse(
+                    self._rows(vocabulary).filter(category__in=self.OUT_OF_SCOPE).exists())
+        codes = set(self._rows().values_list('source_code', flat=True))
+        for code in (
+                'HKCategoryTypeIdentifierHeadache', 'headache',              # Symptoms
+                'HKQuantityTypeIdentifierDietaryCalcium', 'dietaryBiotin',   # Nutrition
+                'HKCategoryTypeIdentifierMenstrualFlow', 'MenstruationFlowRecord',
+                'menstrualFlow', 'CervicalMucusRecord',                      # Reproductive Health
+                'HKCategoryTypeIdentifierHandwashingEvent', 'handwashingEvent',  # Self-care
+                'HKCategoryTypeIdentifierMindfulSession', 'MindfulnessSessionRecord',
+                'stateOfMind', 'phq9',                                       # Mental Wellbeing
+                'hearingSensitivity',                                        # Hearing
+                'HKCorrelationTypeIdentifierFood', 'food', 'medicationAdherence'):
+            self.assertNotIn(code, codes)
+
+    def test_the_only_nutrition_rows_are_the_six_the_first_list_seeds(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(
+            set(self._rows().filter(category='Nutrition')
+                .values_list('source_vocabulary_id', 'source_code')),
+            {('HL7-PHR', code) for code in (
+                'dietaryCalcium', 'dietaryCarbohydrates', 'dietaryEnergyConsumed',
+                'dietaryFatTotal', 'dietaryProtein', 'dietarySodium')})
+        self.assertFalse(self._rows().filter(
+            category__in=[c for c in self.OUT_OF_SCOPE if c != 'Nutrition']).exists())
+
+    # ── The device seed's Apple rows ────────────────────────────────────
+
+    def test_the_device_seeds_apple_codes_are_not_seeded_again(self):
+        from omop_core.management.commands.seed_wearable_device_mappings import APPLE_METRICS
+        device_codes = {metric[0] for metric in APPLE_METRICS}
+        self.assertEqual(len(device_codes), 17)
+        self.assertFalse(device_codes & {m[0] for m in self.seed_sets['Apple'][1]})
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple', source_code__in=device_codes).exists())
+
+    def test_the_device_seeds_rows_are_left_exactly_as_they_are(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        device = dict(origin_system__in=('hk-wearables-apple', 'hk-wearables-garmin'))
+        before = self._snapshot(**device)
+        self.assertEqual(len(before), 28)
+        self.assertEqual({row['status'] for row in before}, {'approved'})
+        # A blank this command could fill, were the row its own.
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple',
+            source_code='HKQuantityTypeIdentifierStepCount').update(category='')
+        before = self._snapshot(**device)
+
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(self._snapshot(**device), before)
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(self._snapshot(**device), before)
+        # 17 approved device rows and 60 proposed ones beside them.
+        apple = SourceCodeConceptMapping.objects.filter(source_vocabulary_id='Apple')
+        self.assertEqual(apple.filter(status='approved').count(), 17)
+        self.assertEqual(apple.filter(status='proposed').count(), 60)
+        self.assertEqual(apple.values('source_code').distinct().count(), 77)
+
+    def test_the_device_seed_still_seeds_its_rows_after_this_one(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        before = self._snapshot(origin_system='HL7 PHR')
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        self.assertEqual(self._snapshot(origin_system='HL7 PHR'), before)
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple', status='approved').count(), 17)
+
+    def test_proposed_apple_rows_do_not_reach_the_apple_adapter(self):
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        resolved = resolve_wearable_mappings('apple')
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(resolve_wearable_mappings('apple'), resolved)
+
+    # ── Existing rows, dry run, idempotence ─────────────────────────────
+
+    def test_dry_run_writes_nothing_and_reports_each_vocabulary_and_a_total(self):
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--dry-run', stdout=out)
+        self.assertFalse(self._rows().exists())
+        text = out.getvalue()
+        self.assertIn('DRY RUN [HL7-PHR]: would have 122 created, 0 already existed', text)
+        self.assertIn('DRY RUN [Apple]: would have 60 created, 0 already existed', text)
+        self.assertIn('DRY RUN [HealthConnect]: would have 35 created, 0 already existed', text)
+        self.assertIn('DRY RUN total: would have 217 created, 0 already existed', text)
+        self.assertIn('(of 217 total).', text)
+        self.assertIn('[CREATE MAPPED] HeartRateRecord -> LOINC:8867-4', text)
+        self.assertIn('[CREATE UNMAPPED] PowerRecord -> -:-', text)
+
+    def test_dry_run_after_a_seed_writes_nothing(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        before = self._snapshot()
+        for flags in (('--dry-run',), ('--dry-run', '--update-seeded')):
+            call_command('seed_hl7_phr_mappings', *flags, verbosity=0)
+            self.assertEqual(self._snapshot(), before)
+
+    def test_rerun_is_idempotent(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        before = self._snapshot()
+        self.assertEqual(len(before), 217)
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        text = out.getvalue()
+        self.assertIn('HL7-PHR: 0 created, 122 already existed', text)
+        self.assertIn('Apple: 0 created, 60 already existed', text)
+        self.assertIn('HealthConnect: 0 created, 35 already existed', text)
+        self.assertIn('Done: 0 created, 217 already existed', text)
+        # --update-seeded has nothing to change on rows it just seeded.
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(self._snapshot(), before)
+
+    def test_a_row_that_exists_is_not_repointed_or_restatused(self):
+        curator = Identity.objects.create_user(email='hkhc-curator@example.test')
+        held = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='HealthConnect', source_code='HeartRateRecord',
+            domain_id='Observation', omop_table='observation',
+            target_concept=self.steps_concept, destination_vocabulary_id='LOINC',
+            status='approved', reviewer=curator, updated_by=curator,
+            decision_surface='code2concept', category='Fitness')
+        rejected = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='Apple', source_code='HKQuantityTypeIdentifierHeartRate',
+            domain_id='Measurement', omop_table='measurement', status='rejected')
+        before = self._snapshot(pk__in=(held.pk, rejected.pk))
+        for flags in ((), ('--update-seeded',)):
+            with self.subTest(flags):
+                call_command('seed_hl7_phr_mappings', *flags, verbosity=0)
+                held.refresh_from_db()
+                rejected.refresh_from_db()
+                self.assertEqual(
+                    (held.status, held.target_concept_id, held.omop_table, held.reviewer_id,
+                     held.category),
+                    ('approved', self.steps_concept.pk, 'observation', curator.pk, 'Fitness'))
+                self.assertEqual((rejected.status, rejected.target_concept_id), ('rejected', None))
+                if not flags:
+                    self.assertEqual(self._snapshot(pk__in=(held.pk, rejected.pk)), before)
+        # --update-seeded filled only what was blank, as it does for every seed.
+        self.assertEqual(held.metric_key, 'heart_rate')
+        self.assertEqual(rejected.category, 'Heart & Cardiovascular')
+        self.assertEqual(self._rows('HealthConnect').count(), 35)
+
+    def test_update_seeded_leaves_a_row_alone_when_its_target_is_locked(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self._rows('HealthConnect').filter(source_code='HeartRateRecord').update(
+            target_concept=self.steps_concept)
+        curator = Identity.objects.create_user(email='hkhc-lock@example.test')
+        ConceptMappingLock.objects.create(concept=self.hr_concept, locked_by=curator)
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', stdout=out)
+        self.assertEqual(
+            self._row('HealthConnect', 'HeartRateRecord').target_concept_id,
+            self.steps_concept.pk)
+        self.assertIn('[LEFT ALONE] HeartRateRecord', out.getvalue())
+        self.assertIn('is locked by a curator', out.getvalue())
+
+    def test_a_new_row_is_not_pointed_at_a_concept_a_curator_holds(self):
+        """The API refuses a save that names a locked concept (#2390); so does a create."""
+        curator = Identity.objects.create_user(email='hkhc-lock-create@example.test')
+        lock = ConceptMappingLock.objects.create(concept=self.hr_concept, locked_by=curator)
+        codes = (('HL7-PHR', 'heartRate'), ('Apple', 'HKQuantityTypeIdentifierHeartRate'),
+                 ('HealthConnect', 'HeartRateRecord'))
+        dry = io.StringIO()
+        call_command('seed_hl7_phr_mappings', '--dry-run', stdout=dry)
+        self.assertIn('Concept is locked by a curator: LOINC:8867-4 for metric heartRate', dry.getvalue())
+        self.assertIn('[CREATE UNMAPPED] heartRate', dry.getvalue())
+        out = io.StringIO()
+        call_command('seed_hl7_phr_mappings', stdout=out)
+        self.assertIn('created without a destination', out.getvalue())
+        for vocabulary, code in codes:
+            with self.subTest(vocabulary):
+                row = self._row(vocabulary, code)
+                self.assertIsNone(row.target_concept_id)
+                self.assertEqual(row.destination_vocabulary_id, '')
+                self.assertEqual(row.status, 'proposed')
+        # Another metric's rows are pointed as usual.
+        self.assertEqual(self._row('HealthConnect', 'StepsRecord').target_concept_id, self.steps_concept.pk)
+        # Still held: --update-seeded leaves them without a destination.
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        self.assertIsNone(self._row('HealthConnect', 'HeartRateRecord').target_concept_id)
+        # Released: --update-seeded points them at the proposal's target.
+        lock.delete()
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        for vocabulary, code in codes:
+            with self.subTest(f'{vocabulary} after unlock'):
+                self.assertEqual(self._row(vocabulary, code).target_concept_id, self.hr_concept.pk)
+
+    def test_a_failed_run_says_nothing_was_written(self):
+        """Each vocabulary reports as it finishes; a later failure rolls all of them back."""
+        from omop_core.management.commands import seed_hl7_phr_mappings as module
+        real_seed = module.Command.seed
+
+        def failing(command, vocabulary_id, *args, **kwargs):
+            if vocabulary_id == 'HealthConnect':
+                raise RuntimeError('boom')
+            return real_seed(command, vocabulary_id, *args, **kwargs)
+
+        err = io.StringIO()
+        with patch.object(module.Command, 'seed', failing):
+            with self.assertRaises(RuntimeError):
+                call_command('seed_hl7_phr_mappings', verbosity=0, stderr=err)
+        self.assertIn('rolled back: nothing above was written', err.getvalue())
+        self.assertFalse(self._rows().exists())
+
+    def test_update_seeded_fills_blanks_in_every_vocabulary(self):
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for vocabulary, code in (('Apple', 'HKQuantityTypeIdentifierHeartRate'),
+                                 ('HealthConnect', 'HeartRateRecord')):
+            self._rows(vocabulary).filter(source_code=code).update(
+                category='', measure_class='', metric_key='', source_unit_evidence=[])
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(self._row('HealthConnect', 'HeartRateRecord').metric_key, '')
+        call_command('seed_hl7_phr_mappings', '--update-seeded', verbosity=0)
+        for vocabulary, code in (('Apple', 'HKQuantityTypeIdentifierHeartRate'),
+                                 ('HealthConnect', 'HeartRateRecord')):
+            with self.subTest(vocabulary):
+                row = self._row(vocabulary, code)
+                self.assertEqual(
+                    (row.category, row.measure_class, row.metric_key),
+                    ('Heart & Cardiovascular', 'Direct measurement', 'heart_rate'))
+                self.assertEqual(row.source_unit_evidence[0]['code'], '/min')
+
+    # ── Units ───────────────────────────────────────────────────────────
+
+    def test_units_follow_the_proposal_and_a_blank_unit_seeds_none(self):
+        per_minute = self._ucum(8541, '/min')
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for vocabulary, code in (('Apple', 'HKQuantityTypeIdentifierHeartRate'),
+                                 ('HealthConnect', 'HeartRateRecord'),
+                                 ('HL7-PHR', 'heartRate')):
+            with self.subTest(vocabulary):
+                row = self._row(vocabulary, code)
+                self.assertEqual(row.destination_unit_concept_id, per_minute.pk)
+                self.assertEqual(row.source_unit_evidence, [{
+                    'code': '/min', 'display': 'bpm', 'system': 'http://unitsofmeasure.org'}])
+        # rpm is /min too: a unit assigned where the proposal's cell is blank.
+        row = self._row('HealthConnect', 'CyclingPedalingCadenceRecord')
+        self.assertEqual(row.destination_unit_concept_id, per_minute.pk)
+        self.assertEqual(row.source_code_description, 'Cycling pedaling cadence (rpm)')
+        # No unit in the proposal and none obvious: none is guessed.
+        for vocabulary, code in (('HealthConnect', 'ExerciseLapRecord'),
+                                 ('HealthConnect', 'BloodPressureRecord'),
+                                 ('Apple', 'HKElectrocardiogramType'),
+                                 ('HL7-PHR', 'minuteVolume')):
+            with self.subTest(code):
+                row = self._row(vocabulary, code)
+                self.assertIsNone(row.destination_unit_concept)
+                self.assertEqual(row.source_unit_evidence, [])
+                self.assertNotIn('(', row.source_code_description)
+
+    def test_a_temperature_difference_gets_no_destination_unit_by_its_metric_key(self):
+        from omop_core.management.commands.seed_hl7_phr_mappings import Command
+        celsius = self._ucum(586323, 'Cel')
+        codes = {'SkinTemperatureRecord': 'skin_temperature_deviation',
+                 'BodyTemperatureRecord': 'body_temperature'}
+        Command().seed(
+            'HealthConnect',
+            [(code, 'Temperature', '\u00b0C', 'Measurement', None, None) for code in codes],
+            dict.fromkeys(codes, 'Body Composition'),
+            dict.fromkeys(codes, 'Direct measurement'), codes,
+            dry_run=False, update_seeded=False, verbosity=0)
+        deviation = self._row('HealthConnect', 'SkinTemperatureRecord')
+        self.assertIsNone(deviation.destination_unit_concept)
+        self.assertEqual(deviation.source_unit_evidence[0]['code'], 'Cel')
+        self.assertEqual(
+            self._row('HealthConnect', 'BodyTemperatureRecord').destination_unit_concept_id,
+            celsius.pk)
+
+    # ── Category, measure class and metric key ──────────────────────────
+
+    def test_every_seeded_category_measure_class_and_key_is_an_allowed_value(self):
+        from omop_core.services.source_vocabularies import (
+            WEARABLE_MEASURE_CLASSES, WEARABLE_METRIC_CATEGORIES, clean_metric_key,
+        )
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        for row in self._rows():
+            with self.subTest(f'{row.source_vocabulary_id}:{row.source_code}'):
+                self.assertIn(row.category, WEARABLE_METRIC_CATEGORIES)
+                self.assertIn(row.measure_class, WEARABLE_MEASURE_CLASSES)
+                self.assertTrue(row.metric_key)
+                self.assertEqual(clean_metric_key(row.metric_key), row.metric_key)
+
+    def test_every_code_of_one_metric_carries_one_key_in_all_five_vocabularies(self):
+        from omop_core.management.commands.seed_hl7_phr_mappings import PHR_SOURCE_METRICS
+        from omop_core.management.commands.seed_openwearables_mappings import (
+            OPENWEARABLES_METRIC_KEYS,
+        )
+        from omop_core.management.commands.seed_wearable_device_mappings import (
+            APPLE_METRIC_KEYS, GARMIN_METRIC_KEYS,
+        )
+        call_command('seed_openwearables_mappings', verbosity=0)
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        wearable = SourceCodeConceptMapping.objects.filter(source_vocabulary_id__in=(
+            'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect'))
+        stored = {(row.source_vocabulary_id, row.source_code): row for row in wearable}
+        self.assertEqual(
+            len(stored),
+            len(OPENWEARABLES_METRIC_KEYS) + len(APPLE_METRIC_KEYS) + len(GARMIN_METRIC_KEYS)
+            + 217)
+
+        # Every code the proposal lists for a metric is a row with that key.
+        self.assertEqual(len({row[0] for row in PHR_SOURCE_METRICS}), len(PHR_SOURCE_METRICS))
+        ow_code = {key: code for code, key in OPENWEARABLES_METRIC_KEYS.items()}
+        garmin_code = {key: code for code, key in GARMIN_METRIC_KEYS.items()}
+        for key, *_described, hl7_code, healthkit, health_connect in PHR_SOURCE_METRICS:
+            codes = (('HL7-PHR', hl7_code), ('Apple', healthkit),
+                     ('HealthConnect', health_connect),
+                     ('OpenWearables', ow_code.get(key)), ('Garmin', garmin_code.get(key)))
+            for vocabulary, code in codes:
+                if code:
+                    with self.subTest(key=key, vocabulary=vocabulary):
+                        self.assertEqual(stored[(vocabulary, code)].metric_key, key)
+
+        # And no key is shared by accident: one code per vocabulary, one
+        # category and one measure class for all of a key's rows.
+        by_key = {}
+        for row in stored.values():
+            by_key.setdefault(row.metric_key, []).append(row)
+        self.assertNotIn('', by_key)
+        for key, rows in by_key.items():
+            with self.subTest(key=key):
+                vocabularies = [row.source_vocabulary_id for row in rows]
+                self.assertEqual(len(vocabularies), len(set(vocabularies)))
+                self.assertEqual(len({(row.category, row.measure_class) for row in rows}), 1)
+        # The key is what ties a metric's five source codes together.
+        self.assertEqual(
+            {(row.source_vocabulary_id, row.source_code) for row in by_key['steps']},
+            {('OpenWearables', 'steps'), ('Garmin', 'steps'),
+             ('Apple', 'HKQuantityTypeIdentifierStepCount'),
+             ('HealthConnect', 'StepsRecord'), ('HL7-PHR', 'stepCount')})
+        # A metric the proposal gives no key takes its OpenWearables code's.
+        self.assertEqual(
+            {(row.source_vocabulary_id, row.source_code) for row in by_key['hydration']},
+            {('OpenWearables', 'hydration'), ('Apple', 'HKQuantityTypeIdentifierDietaryWater'),
+             ('HealthConnect', 'HydrationRecord'), ('HL7-PHR', 'dietaryWater')})
+        # HL7's one glucose code is blood glucose; CGM glucose keeps its own key.
+        self.assertEqual(
+            {row.source_vocabulary_id for row in by_key['blood_glucose']},
+            {'OpenWearables', 'Apple', 'HealthConnect', 'HL7-PHR'})
+        self.assertEqual(
+            {(row.source_vocabulary_id, row.source_code) for row in by_key['cgm_glucose']},
+            {('OpenWearables', 'cgm_glucose')})
+
+    # ── The Wearables tab ───────────────────────────────────────────────
+
+    def test_health_connect_rows_sit_on_the_wearables_tab(self):
+        from omop_core.mapping.suggestions import suggestable_queryset
+        from omop_core.services.athena_mapping_guard import source_tab_filter
+        from omop_core.services.mapping_browse import canonical_source, tab_queryset
+        from omop_core.services.source_vocabularies import (
+            SOURCE_TAB_ORDER, WEARABLE_SOURCE_VOCABULARIES, source_systems_for,
+            tables_for_source_vocabulary,
+        )
+        self.assertIn('HealthConnect', WEARABLE_SOURCE_VOCABULARIES)
+        self.assertEqual(canonical_source('HealthConnect'), 'OpenWearables')
+        self.assertNotIn('HealthConnect', SOURCE_TAB_ORDER)
+        for domain in ('Measurement', 'Observation'):
+            with self.subTest(domain):
+                self.assertIn(
+                    {'vocabulary_id': 'HealthConnect',
+                     'label': 'Health Connect — Android Health Connect record types'},
+                    source_systems_for(domain))
+        self.assertEqual(
+            tables_for_source_vocabulary('HealthConnect'), ['measurement', 'observation'])
+
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        everything = SourceCodeConceptMapping.objects.filter(origin_system='HL7 PHR')
+        on_tab = tab_queryset(everything, 'OpenWearables')
+        self.assertEqual(on_tab.filter(source_vocabulary_id='HealthConnect').count(), 35)
+        self.assertEqual(on_tab.filter(source_vocabulary_id='Apple').count(), 60)
+        for tab in ('OpenWearables', 'HealthConnect'):
+            self.assertEqual(everything.filter(source_tab_filter(tab)).count(), 217)
+        # Suggest answers the rows waiting for a destination, and only those.
+        waiting = suggestable_queryset(
+            None, source_vocabulary_id='OpenWearables', min_occurrences=1)
+        codes = set(waiting.filter(source_vocabulary_id='HealthConnect')
+                    .values_list('source_code', flat=True))
+        self.assertIn('PowerRecord', codes)
+        self.assertNotIn('HeartRateRecord', codes)
+
+    def test_the_tab_counts_fold_health_connect_into_wearables(self):
+        from patient_portal.api.views import _merge_vocab_counts
+        counts = {'HealthConnect': 35, 'Apple': 60, 'OpenWearables': 85, 'LOINC': 2}
+        _merge_vocab_counts(counts)
+        self.assertEqual(counts, {'OpenWearables': 180, 'LOINC': 2})
+
+
+class MintOpenWearablesLocalConceptsMigrationTest(TestCase):
+    """Migration 0343 against the states a deployment can be in (#2595)."""
+
+    CODES = ('HK-WEAR-OW-WORKOUT-EFFORT', 'HK-WEAR-OW-CARDIO-AGE')
+
+    def _run(self):
+        from importlib import import_module
+        from django.apps import apps as live_apps
+
+        mig = import_module(
+            'omop_core.migrations.0343_mint_openwearables_local_concepts')
+        mig.mint_openwearables_local_concepts(live_apps, None)
+
+    def _concepts(self):
+        return Concept.objects.filter(
+            vocabulary_id='HK-Wearable', concept_code__in=self.CODES)
+
+    def test_migration_installed_both_concepts(self):
+        """The test database is built by migrating, so they are already here."""
+        rows = {c.concept_code: c for c in self._concepts()}
+        self.assertEqual(set(rows), set(self.CODES))
+        self.assertEqual(rows['HK-WEAR-OW-WORKOUT-EFFORT'].concept_id, 2029606355)
+        self.assertEqual(rows['HK-WEAR-OW-WORKOUT-EFFORT'].domain_id, 'Observation')
+        self.assertEqual(rows['HK-WEAR-OW-CARDIO-AGE'].concept_id, 2029606356)
+        self.assertEqual(rows['HK-WEAR-OW-CARDIO-AGE'].domain_id, 'Measurement')
+        for concept in rows.values():
+            self.assertEqual(concept.source, 'HealthKey')
+            self.assertIsNone(concept.standard_concept)
+
+    def test_replay_changes_nothing(self):
+        before = list(self._concepts().order_by('concept_id').values())
+        self._run()
+        self.assertEqual(list(self._concepts().order_by('concept_id').values()), before)
+
+    def test_hand_made_concept_gets_its_source_and_keeps_the_rest(self):
+        """Staging's rows were inserted with no source and their own names."""
+        self._concepts().update(source=None, concept_name='Entered by hand')
+        self._run()
+        for concept in self._concepts():
+            self.assertEqual(concept.source, 'HealthKey')
+            self.assertEqual(concept.concept_name, 'Entered by hand')
+        self.assertEqual(self._concepts().count(), 2)
+
+    def test_concept_under_another_id_is_kept_and_not_minted_again(self):
+        """Matched on the code: an instance that minted it elsewhere keeps its id."""
+        Concept.objects.filter(
+            vocabulary_id='HK-Wearable', concept_code='HK-WEAR-OW-CARDIO-AGE',
+        ).update(concept_id=2_100_999_001)
+        self._run()
+        self.assertEqual(
+            sorted(self._concepts().values_list('concept_id', flat=True)),
+            [2029606355, 2_100_999_001])
+        self.assertFalse(Concept.objects.filter(concept_id=2029606356).exists())
+
+    def test_taken_id_mints_at_the_next_free_local_id(self):
+        """An id another concept holds must not fail the deploy or be overwritten."""
+        self._concepts().filter(concept_code='HK-WEAR-OW-CARDIO-AGE').delete()
+        squatter = Concept.objects.create(
+            concept_id=2029606356, concept_name='Somebody else', domain_id='Measurement',
+            vocabulary_id='HK-Wearable', concept_class_id='Clinical Observation',
+            concept_code='HK-SOMETHING-ELSE', source='HealthKey',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        highest = Concept.objects.order_by('-concept_id').first().concept_id
+        self._run()
+        minted = Concept.objects.get(
+            vocabulary_id='HK-Wearable', concept_code='HK-WEAR-OW-CARDIO-AGE')
+        self.assertEqual(minted.concept_id, highest + 1)
+        self.assertGreaterEqual(minted.concept_id, 2_000_000_000)
+        squatter.refresh_from_db()
+        self.assertEqual(squatter.concept_code, 'HK-SOMETHING-ELSE')
 
 
 class WearableDeviceVocabularyTest(TestCase):
@@ -6847,6 +8604,150 @@ class SeedWearableDeviceMappingsTest(TestCase):
             source_vocabulary_id__in=['Apple', 'Garmin'],
         ).count()
         self.assertEqual(count1, count2)
+
+
+class SeedWearableDeviceSourceUnitsTest(TestCase):
+    """seed_wearable_device_mappings records the unit each adapter reports in."""
+
+    @classmethod
+    def setUpTestData(cls):
+        seed_test_concepts()
+
+    def _rows(self):
+        return SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=['Apple', 'Garmin'])
+
+    def test_new_rows_carry_the_source_unit(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        self.assertTrue(self._rows().exists())
+        for row in self._rows():
+            with self.subTest(f'{row.source_vocabulary_id}:{row.source_code}'):
+                self.assertEqual(len(row.source_unit_evidence), 1)
+                self.assertIn('code', row.source_unit_evidence[0])
+                self.assertNotIn('count', row.source_unit_evidence[0])
+
+    def test_every_device_unit_has_a_ucum_code(self):
+        from omop_core.management.commands.seed_openwearables_mappings import UCUM_BY_UNIT
+        from omop_core.management.commands.seed_wearable_device_mappings import (
+            APPLE_METRICS, GARMIN_METRICS,
+        )
+        used = {unit for _c, _n, unit, *_rest in APPLE_METRICS + GARMIN_METRICS if unit}
+        self.assertEqual(used - set(UCUM_BY_UNIT), set())
+
+    def test_rerun_fills_a_missing_source_unit_and_nothing_else(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().order_by('pk').first()
+        self._rows().filter(pk=row.pk).update(source_unit_evidence=[])
+        before = self._rows().get(pk=row.pk)
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual(len(after.source_unit_evidence), 1)
+        self.assertIn('Source units filled on 1 existing rows.', out.getvalue())
+        # Still approved, same destination, and updated_at is not stamped.
+        self.assertEqual(after.status, 'approved')
+        self.assertEqual(after.target_concept_id, before.target_concept_id)
+        self.assertEqual(after.updated_at, before.updated_at)
+        self.assertIsNone(after.destination_unit_concept)
+
+    def test_rerun_never_replaces_recorded_source_units(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().order_by('pk').first()
+        seen = [{'code': 'km', 'display': 'km', 'count': 9, 'source': 'patient-data'}]
+        self._rows().filter(pk=row.pk).update(source_unit_evidence=seen)
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=out)
+        self.assertEqual(self._rows().get(pk=row.pk).source_unit_evidence, seen)
+        self.assertNotIn('Source units filled', out.getvalue())
+
+    # ── Category, Measure Class and Metric Key ───────────────────────────
+
+    def test_new_rows_carry_the_category_measure_class_and_metric_key(self):
+        from omop_core.management.commands.seed_wearable_device_mappings import (
+            APPLE_CATEGORIES, APPLE_MEASURE_CLASSES, APPLE_METRIC_KEYS,
+            GARMIN_CATEGORIES, GARMIN_MEASURE_CLASSES, GARMIN_METRIC_KEYS,
+        )
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        for vocabulary, categories, measure_classes, metric_keys in (
+            ('Apple', APPLE_CATEGORIES, APPLE_MEASURE_CLASSES, APPLE_METRIC_KEYS),
+            ('Garmin', GARMIN_CATEGORIES, GARMIN_MEASURE_CLASSES, GARMIN_METRIC_KEYS),
+        ):
+            rows = self._rows().filter(source_vocabulary_id=vocabulary)
+            self.assertTrue(rows.exists())
+            for row in rows:
+                with self.subTest(f'{vocabulary}:{row.source_code}'):
+                    self.assertEqual(row.category, categories[row.source_code])
+                    self.assertEqual(row.measure_class, measure_classes[row.source_code])
+                    self.assertEqual(row.metric_key, metric_keys[row.source_code])
+        # One code, two vocabularies, each with its own row and values.
+        steps = self._rows().get(source_vocabulary_id='Garmin', source_code='steps')
+        self.assertEqual(
+            (steps.category, steps.measure_class, steps.metric_key),
+            ('Activity', 'Aggregate over interval', 'steps'))
+        # The key is what the Apple code for the same metric shares.
+        apple = self._rows().get(
+            source_vocabulary_id='Apple', source_code='HKQuantityTypeIdentifierStepCount')
+        self.assertEqual(apple.metric_key, 'steps')
+
+    def test_one_metric_key_joins_the_vocabularies_once_all_seeds_have_run(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        call_command('seed_openwearables_mappings', verbosity=0)
+        shared = set(SourceCodeConceptMapping.objects.filter(metric_key='resting_hr')
+                     .values_list('source_vocabulary_id', 'source_code'))
+        self.assertEqual(shared, {
+            ('Apple', 'HKQuantityTypeIdentifierRestingHeartRate'),
+            ('Garmin', 'resting_hr'), ('OpenWearables', 'resting_heart_rate')})
+
+    def test_rerun_fills_the_blank_described_fields_on_an_approved_row(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().get(source_vocabulary_id='Garmin', source_code='resting_hr')
+        self.assertEqual(row.status, 'approved')
+        self._rows().filter(pk=row.pk).update(category='', measure_class='', metric_key='')
+        before = self._rows().get(pk=row.pk)
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual(
+            (after.category, after.measure_class, after.metric_key),
+            ('Heart & Cardiovascular', 'Aggregate over interval', 'resting_hr'))
+        self.assertIn('Categories filled on 1 existing rows.', out.getvalue())
+        self.assertIn('Measure classes filled on 1 existing rows.', out.getvalue())
+        self.assertIn('Metric keys filled on 1 existing rows.', out.getvalue())
+        # The list API returns both, so the delta has to see the row.
+        self.assertGreater(after.updated_at, before.updated_at)
+        self.assertEqual(after.status, 'approved')
+        self.assertEqual(after.target_concept_id, before.target_concept_id)
+        self.assertEqual(after.source_unit_evidence, before.source_unit_evidence)
+        # A further run has nothing left to fill and says nothing.
+        again = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=again)
+        self.assertNotIn('filled on', again.getvalue())
+        self.assertEqual(self._rows().get(pk=row.pk).updated_at, after.updated_at)
+
+    def test_rerun_never_replaces_a_described_field_that_is_set(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().get(source_vocabulary_id='Garmin', source_code='resting_hr')
+        self._rows().filter(pk=row.pk).update(
+            category='Fitness', measure_class='Vendor score', metric_key='pulse')
+        before = self._rows().get(pk=row.pk)
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual(
+            (after.category, after.measure_class, after.metric_key),
+            ('Fitness', 'Vendor score', 'pulse'))
+        self.assertEqual(after.updated_at, before.updated_at)
+        self.assertNotIn('filled on', out.getvalue())
+
+    def test_dry_run_fills_no_described_field(self):
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        row = self._rows().get(source_vocabulary_id='Garmin', source_code='resting_hr')
+        self._rows().filter(pk=row.pk).update(category='', measure_class='', metric_key='')
+        out = io.StringIO()
+        call_command('seed_wearable_device_mappings', '--dry-run', stdout=out)
+        after = self._rows().get(pk=row.pk)
+        self.assertEqual((after.category, after.measure_class, after.metric_key), ('', '', ''))
+        self.assertNotIn('filled on', out.getvalue())
 
 
 class ResolveWearableMappingsTest(TestCase):
@@ -7010,3 +8911,157 @@ class SeedHkLabsMappingsTest(TestCase):
             origin_system='hk-labs-seed',
         ).count()
         self.assertEqual(count1, count2)
+
+
+# ===========================================================================
+# recount_source_code_occurrences management command
+# ===========================================================================
+
+class RecountSourceCodeOccurrencesTest(_OmopBase):
+    """Tests for the recount_source_code_occurrences management command."""
+
+    PERSON_ID = 90800
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import ProcedureOccurrence
+        cls.ProcedureOccurrence = ProcedureOccurrence
+
+        cls.generic_meas = _concept(
+            3090801, 'Lab test', cls.dom_meas, cls.vocab, cls.cc,
+        )
+        cls.generic_cond = _concept(
+            3090802, 'Condition finding', cls.dom_cond, cls.vocab, cls.cc,
+        )
+
+    # -- helpers --
+
+    def _create_measurement(self, mid, source_value, dt):
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=dt,
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=source_value,
+        )
+
+    def _create_condition(self, cid, source_value, dt):
+        return ConditionOccurrence.objects.create(
+            condition_occurrence_id=cid,
+            person=self.person,
+            condition_concept=self.generic_cond,
+            condition_start_date=dt,
+            condition_type_concept=self.type_concept,
+            condition_source_value=source_value,
+        )
+
+    def _create_sccm(self, source_code, omop_table, **kwargs):
+        defaults = dict(
+            source_vocabulary_id='',
+            source_code=source_code,
+            omop_table=omop_table,
+            domain_id='Measurement' if omop_table == 'measurement' else 'Condition',
+            status='proposed',
+            occurrence_count=0,
+            first_seen=None,
+            last_seen=None,
+            organization=None,
+        )
+        defaults.update(kwargs)
+        return SourceCodeConceptMapping.objects.create(**defaults)
+
+    # -- tests --
+
+    def test_happy_path_updates_count_and_dates(self):
+        """Clinical rows → SCCM row gets updated count and date range."""
+        self._create_measurement(908001, 'GLUCOSE', date(2024, 1, 10))
+        self._create_measurement(908002, 'GLUCOSE', date(2024, 6, 15))
+        self._create_measurement(908003, 'GLUCOSE', date(2024, 3, 20))
+        sccm = self._create_sccm('GLUCOSE', 'measurement')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 3)
+        self.assertEqual(sccm.first_seen.date(), date(2024, 1, 10))
+        self.assertEqual(sccm.last_seen.date(), date(2024, 6, 15))
+
+    def test_no_sccm_row_no_creation(self):
+        """Clinical rows without a mapping row are skipped, not created."""
+        self._create_measurement(908010, 'ORPHAN_CODE', date(2024, 5, 1))
+
+        before = SourceCodeConceptMapping.objects.count()
+        call_command('recount_source_code_occurrences', verbosity=0)
+        after = SourceCodeConceptMapping.objects.count()
+
+        self.assertEqual(before, after)
+
+    def test_approved_mapping_updated(self):
+        """Approved SCCM rows still get their count updated."""
+        self._create_measurement(908020, 'APPROVED_LAB', date(2024, 2, 1))
+        self._create_measurement(908021, 'APPROVED_LAB', date(2024, 8, 1))
+        sccm = self._create_sccm(
+            'APPROVED_LAB', 'measurement', status='approved', occurrence_count=1,
+        )
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 2)
+
+    def test_dry_run_no_write(self):
+        """--dry-run reports but does not update."""
+        self._create_measurement(908030, 'DRY_CODE', date(2024, 4, 1))
+        sccm = self._create_sccm('DRY_CODE', 'measurement', occurrence_count=0)
+
+        call_command('recount_source_code_occurrences', '--dry-run', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 0)
+
+    def test_empty_source_value_skipped(self):
+        """Rows with NULL or empty source_value are excluded."""
+        Measurement.objects.create(
+            measurement_id=908040,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='',
+        )
+        Measurement.objects.create(
+            measurement_id=908041,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=None,
+        )
+        # Only the non-empty row should count
+        self._create_measurement(908042, 'REAL_CODE', date(2024, 1, 1))
+        sccm = self._create_sccm('REAL_CODE', 'measurement')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 1)
+
+    def test_multiple_tables_independent(self):
+        """Codes in measurement and condition update their SCCM rows independently."""
+        self._create_measurement(908050, 'MEAS_MULTI', date(2024, 1, 1))
+        self._create_measurement(908051, 'MEAS_MULTI', date(2024, 2, 1))
+        self._create_condition(908060, 'COND_MULTI', date(2024, 5, 1))
+
+        sccm_meas = self._create_sccm('MEAS_MULTI', 'measurement')
+        sccm_cond = self._create_sccm('COND_MULTI', 'condition')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm_meas.refresh_from_db()
+        sccm_cond.refresh_from_db()
+        self.assertEqual(sccm_meas.occurrence_count, 2)
+        self.assertEqual(sccm_cond.occurrence_count, 1)
+        self.assertEqual(sccm_meas.first_seen.date(), date(2024, 1, 1))
+        self.assertEqual(sccm_cond.first_seen.date(), date(2024, 5, 1))

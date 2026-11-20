@@ -10,7 +10,10 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import json
 import os
+
+from django.core.exceptions import ImproperlyConfigured
 from pathlib import Path
 import dj_database_url
 from dotenv import load_dotenv
@@ -47,6 +50,9 @@ FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT'
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
+# Previous keys that still verify during a rotation, comma-separated; signing uses
+# SECRET_KEY only. See docs/signing-key-rotation.md.
+SECRET_KEY_FALLBACKS = _env_list('SECRET_KEY_FALLBACKS')
 
 # DEBUG controls diagnostics, not the security defaults below.
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
@@ -122,6 +128,13 @@ if IS_DEPLOYED or not DEBUG:
             'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
             'e.g. "https://app.example.com"'
         )
+    if (not _no_http and not _running_worker
+            and _env_bool('CORS_ALLOW_ALL_ORIGINS')
+            and _env_bool('CORS_ALLOW_CREDENTIALS', True)):
+        _config_errors.append(
+            'CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS cannot both be true: '
+            'credentialed cross-origin requests require an origin allowlist'
+        )
     if _config_errors:
         raise ImproperlyConfigured(
             'Missing required production settings:\n'
@@ -149,6 +162,8 @@ INSTALLED_APPS = [
     # PROlog survey runner. Contributes its own tables to this database and
     # binds every response to an omop_core.Person; see docs/prolog-surveys.md.
     'prolog_surveys',
+    # PROMOP as identity host for phr installations (phr#43); docs/family-auth.md.
+    'family_auth',
 ]
 
 MIDDLEWARE = [
@@ -196,15 +211,27 @@ LOGGING = {
         'audit_stdout': {
             'class': 'logging.StreamHandler',
             'formatter': 'audit_json',
+            # SIEM reads stdout; without this the handler inherits stderr and
+            # the operational console stream can interleave with the JSON
+            # records (#1929).
+            'stream': 'ext://sys.stdout',
         },
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'stream': 'ext://sys.stderr',
         },
     },
     'loggers': {
         'audit': {
             'handlers': ['audit_stdout'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Operational warnings/errors from audit-adjacent code. Separate from
+        # `audit` so SIEM consumers never have to parse plain text (#1929).
+        'omop.ops': {
+            'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
         },
@@ -272,6 +299,9 @@ AUTH_USER_MODEL = "patient_portal.Identity"
 # Bound the optional whole-vocabulary semantic query; other retrievers continue
 # if it times out. Model loading/encoding is outside this database timeout.
 SUGGEST_SEMANTIC_TIMEOUT_MS = max(1, int(os.environ.get('SUGGEST_SEMANTIC_TIMEOUT_MS', '3000')))
+
+# How long a curator's edit lock on a code mapping stays active (minutes).
+MAPPING_LOCK_TIMEOUT_MINUTES = max(1, int(os.environ.get('MAPPING_LOCK_TIMEOUT_MINUTES', '15')))
 
 AUTHENTICATION_BACKENDS = [
     "patient_portal.backends.EmailBackend",
@@ -344,6 +374,44 @@ APP_BASE_URL = os.environ.get(
     os.environ.get('RENDER_EXTERNAL_URL', 'http://localhost:5173'),
 ).rstrip('/')
 
+# Public voting on wearable mapping proposals (#2678). Counted in the database,
+# under locks, so they hold whatever the cache backend and however many
+# workers: how many unconfirmed submissions one address may have waiting on one
+# share (the oldest gives way to a new one), and how many confirmation emails
+# are sent in 24 hours to one address across all shares, for one share, and by
+# this deployment to every address together. The last two are the backstop for
+# a sender who varies the address; past either, submissions are answered 503
+# until the day rolls on. An address is counted without its "+tag".
+MAPPING_VOTE_MAX_PENDING_PER_EMAIL = int(os.environ.get('MAPPING_VOTE_MAX_PENDING_PER_EMAIL', '3'))
+MAPPING_VOTE_MAX_EMAILS_PER_DAY = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY', '5'))
+MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY = int(
+    os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY', '200'))
+MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL = int(os.environ.get('MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL', '500'))
+# Two-person rule for code mappings: the curator who proposed a destination may
+# not approve it (#2726, docs/concept_to_code_architecture.md). On wherever
+# DEBUG is off. A local development instance is usually one person, who could
+# otherwise approve nothing, so DEBUG (and with it the test runs, which set it)
+# turns it off unless MAPPING_SEPARATE_APPROVER says otherwise. Set it to false
+# on a deployed instance only when a single administrator runs it.
+def separate_approver_default(debug, raw):
+    """The setting's value: the variable when set, else on wherever DEBUG is off."""
+    raw = (raw or '').strip().lower()
+    return (not debug) if not raw else raw not in ('0', 'false', 'no', 'off')
+
+
+MAPPING_SEPARATE_APPROVER = separate_approver_default(DEBUG, os.environ.get('MAPPING_SEPARATE_APPROVER'))
+# Where the public voting throttles read the client's address. 0: the socket's
+# peer (REMOTE_ADDR), right only when nothing proxies the request. N >= 1: the
+# Nth entry from the right of X-Forwarded-For, the address the outermost of N
+# trusted proxies saw. Measure it per platform: one too many and the entry is
+# whatever the client typed, so every request is a fresh bucket; one too few
+# and it is a proxy's own address, so every voter shares one bucket. Only these
+# throttles read it; DRF's NUM_PROXIES is left as it is for everything else.
+MAPPING_VOTE_PROXY_HOPS = int(os.environ.get('MAPPING_VOTE_PROXY_HOPS', '0'))
+# Seconds the mail backend may take over one confirmation email. Applied to
+# that message's own connection, so no other sender's timeout changes.
+MAPPING_VOTE_EMAIL_TIMEOUT = int(os.environ.get('MAPPING_VOTE_EMAIL_TIMEOUT', '10'))
+
 # Internationalization
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
@@ -375,11 +443,40 @@ CORS_EXPOSE_HEADERS = (
     'X-Total-Count',
     'X-Page',
     'X-Page-Size',
+    # The conditional-write tag. A cross-origin client cannot read a response
+    # header that is not exposed, and the clients that write preferences are
+    # cross-origin — this service does serve its own SPA same-origin through
+    # WhiteNoise, but that SPA never touches these endpoints. EXACT prefers
+    # the body's `updated_at` and treats this as the fallback, so its absence
+    # degraded rather than broke — but the fallback documented in `state.ts`
+    # was simply never reachable from a browser.
+    'ETag',
+    # The FHIR export's integrity headers (#1603). The export is served to the
+    # patient's own cross-origin app, which could not read either until they
+    # were exposed; the filename is exposed for the same download.
+    'X-Content-SHA256',
+    'X-Content-Signature',
+    'Content-Disposition',
 )
 CORS_ALLOW_HEADERS = (
     *default_headers,
     'x-provenance-source',
     'x-provenance-user-id',
+    # A shared Personal Health Record is read with its link's token in this
+    # header (patient_portal/api/phr/sharing.py), cross-origin from the app
+    # that shows it.
+    'x-share-token',
+    # Conditional writes (#1312) are opt-in on the API and unavoidable for
+    # EXACT's filter saves: `default_headers` carries neither of these, so the
+    # preflight was refused with "Request header field if-match is not allowed
+    # by Access-Control-Allow-Headers" and the request never left the browser.
+    # Not env-specific — both tuples are literals, so it is every deployment —
+    # and not new-client-specific: no cross-origin browser has ever completed
+    # a conditional write against this service. Measured in a browser against
+    # the local stack: the trial-search preferences save failed silently,
+    # which is how the saved-filters feature was failing.
+    'if-match',
+    'if-none-match',
 )
 
 # ── Pluggable partner auth providers ──────────────────────────────────────
@@ -413,6 +510,49 @@ PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
 # including local development.
 PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "")
 
+# ── Sign-up policy (patient_portal/signup_policy.py) ───────────────────────
+# The countries a member may sign up from (ISO 3166-1 alpha-2) and the age they
+# must declare per country. Unset, the pilot list and 18 apply. A value that is
+# not JSON of the right shape refuses to start, naming the variable.
+#   PHR_SIGNUP_COUNTRIES='["GB","IE","US"]'   PHR_SIGNUP_MINIMUM_AGES='{"CA": 19}'
+def _json_env(name, default, expected, example):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f"{name} must be JSON, e.g. {example}") from None
+    if not isinstance(value, expected):
+        raise ImproperlyConfigured(f"{name} must be a JSON {expected.__name__}, e.g. {example}")
+    return value
+
+
+PHR_SIGNUP_COUNTRIES = _json_env("PHR_SIGNUP_COUNTRIES", None, list, '["GB","IE","US"]')
+PHR_SIGNUP_MINIMUM_AGES = _json_env("PHR_SIGNUP_MINIMUM_AGES", {}, dict, '{"CA": 19}')
+
+# ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
+# PROMOP issues the HealthKey family's RS256 tokens for its own identities, so
+# a phr installation signs users in against PROMOP accounts. Off until a key
+# and issuer are set: the endpoints answer 404 and no token is accepted.
+FAMILY_AUTH_PRIVATE_KEY = os.environ.get("FAMILY_AUTH_PRIVATE_KEY", "").replace("\\n", "\n")
+FAMILY_AUTH_PUBLIC_KEY = os.environ.get("FAMILY_AUTH_PUBLIC_KEY", "").replace("\\n", "\n")
+# This PROMOP's https origin: the `iss` siblings trust. Never a shared name.
+FAMILY_AUTH_ISSUER = os.environ.get("FAMILY_AUTH_ISSUER", "")
+# The access token's `aud`: PROMOP's own audience plus any sibling that checks one.
+FAMILY_AUTH_AUDIENCE = _env_list("FAMILY_AUTH_AUDIENCE", "promop-api")
+FAMILY_AUTH_ACCESS_SECONDS = int(os.environ.get("FAMILY_AUTH_ACCESS_SECONDS", "900"))
+FAMILY_AUTH_REFRESH_SECONDS = int(os.environ.get("FAMILY_AUTH_REFRESH_SECONDS", str(7 * 86400)))
+# Each phr installation's sign-up organization, "slug:Name" pairs. Every deploy
+# keeps them in place (manage.py ensure_signup_orgs, scripts/prepare-deployment.sh).
+FAMILY_AUTH_SIGNUP_ORGS = _env_list("FAMILY_AUTH_SIGNUP_ORGS")
+# Each installation's origin, "slug=https://…" by sign-up org: an account that
+# signed up there gets its verification link to that installation, not PROMOP.
+FAMILY_AUTH_APP_URLS = _env_list("FAMILY_AUTH_APP_URLS")
+# The installations (sign-up org slugs) whose app serves /reset-password: their
+# accounts' reset links go there. Any other account resets on PROMOP's page.
+FAMILY_AUTH_RESET_APPS = _env_list("FAMILY_AUTH_RESET_APPS")
+
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
     "FIREBASE_SKIP_REVOCATION_CHECK", "false"
@@ -427,7 +567,8 @@ SERVICE_AUTH_TOKENS = parse_service_tokens(os.environ.get("SERVICE_AUTH_TOKENS",
 SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
 # The legacy credential is read-only by default. ``system/etl.write`` is a
 # narrow compatibility capability accepted only on explicitly approved ETL
-# endpoints, and never for DELETE.
+# endpoints, and never for DELETE. Deleting clinical rows is the separate
+# ``system/etl.delete`` grant.
 SERVICE_AUTH_SCOPES = os.environ.get("SERVICE_AUTH_SCOPES", "patient/*.read")
 service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES)
 
@@ -436,8 +577,21 @@ service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES
 # because a Suggest button that returns nothing when a third party is down is
 # worse than one that returns a guess a curator can correct.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Required only by a key that is not scoped to a workspace (see
+# omop_core/mapping/anthropic_client.py).
+ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
+JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
+JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
+
+# loinc.org release API. LOINC is licensed, so there is no anonymous access and
+# no default to fall back to -- an instance without these cannot refresh its
+# LOINC tables, and says so rather than serving a stale copy silently (#1624).
+LOINC_USER = os.environ.get("LOINC_USER", "")
+LOINC_PASSWORD = os.environ.get("LOINC_PASSWORD", "")
 
 _auth_classes = [
+    # Tokens PROMOP issued itself (family auth). Others pass through untouched.
+    'family_auth.authentication.FamilyTokenAuthentication',
     'patient_portal.api.authentication.ServiceTokenAuthentication',
     'patient_portal.api.authentication.PartnerAuthentication',
     'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
@@ -490,10 +644,17 @@ REST_FRAMEWORK = {
         # abuse-facing ones.
         'run.read': os.environ.get('PROLOG_THROTTLE_READ', '1200/hour'),
         'run.create': os.environ.get('PROLOG_THROTTLE_CREATE', '30/hour'),
+        # Someone opening a record a patient shared with them: no account, so
+        # keyed by IP. One visit reads about a dozen sections.
+        'phr_shared': os.environ.get('PHR_SHARED_THROTTLE_RATE', '120/minute'),
+        # Invites a patient emails from their record, per patient.
+        'phr_share_email': os.environ.get('PHR_SHARE_EMAIL_THROTTLE_RATE', '20/hour'),
         'run.capture': os.environ.get('PROLOG_THROTTLE_CAPTURE', '30/hour'),
         'run.answer': os.environ.get('PROLOG_THROTTLE_ANSWER', '600/hour'),
         'run.write': os.environ.get('PROLOG_THROTTLE_WRITE', '3000/hour'),
         'patient_signup': '10/hour',
+        # Family auth login/refresh/introspect, per client address.
+        'family_auth': os.environ.get('FAMILY_AUTH_THROTTLE_RATE', '30/minute'),
         # OMOP clinical-row CRUD (conditions / drug-exposures / measurements /
         # observations / procedures). These viewsets set throttle_scope='omop_write'
         # and override throttle_classes, so this bucket REPLACES 'user' for them
@@ -502,6 +663,18 @@ REST_FRAMEWORK = {
         # 300/minute would otherwise become the new ceiling once per-row request
         # overhead is gone.
         'omop_write': os.environ.get('OMOP_WRITE_THROTTLE_RATE', '300/minute'),
+        # The public voting pages for wearable mapping proposals (#2678): no
+        # account, so keyed by client address (MAPPING_VOTE_PROXY_HOPS below
+        # says where that address is read from). Reading the page, submitting
+        # votes (which sends an email) and following the emailed link each
+        # have their own bucket. Submitting is generous on purpose: a working
+        # group voting from one meeting room is one address. What bounds
+        # outgoing mail is counted in the database: MAPPING_VOTE_MAX_* below.
+        'mapping_vote_read': os.environ.get('MAPPING_VOTE_READ_THROTTLE_RATE', '60/minute'),
+        # Builds a file (the Word document is ~0.5s of CPU), so tighter than the page read.
+        'mapping_vote_export': os.environ.get('MAPPING_VOTE_EXPORT_THROTTLE_RATE', '20/minute'),
+        'mapping_vote_submit': os.environ.get('MAPPING_VOTE_SUBMIT_THROTTLE_RATE', '30/hour'),
+        'mapping_vote_confirm': os.environ.get('MAPPING_VOTE_CONFIRM_THROTTLE_RATE', '60/hour'),
     },
 }
 
@@ -558,9 +731,13 @@ SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', True)
 SECURE_CONTENT_TYPE_NOSNIFF = _env_bool('SECURE_CONTENT_TYPE_NOSNIFF', True)
 X_FRAME_OPTIONS = os.environ.get('X_FRAME_OPTIONS', 'DENY')
 # Only trust this header behind a proxy that strips client-supplied values.
-# Render supplies such a proxy; direct/local servers default to no trust.
+# Render and Cloud Run (K_SERVICE) supply such a proxy; direct/local servers
+# default to no trust. Without it every absolute URL Django builds -- the
+# code-mapping list's Link next/prev, for one -- is http://, and a client
+# that follows it sends its bearer token in cleartext (#2451).
 TRUST_PROXY_SSL_HEADER = _env_bool('TRUST_PROXY_SSL_HEADER', bool(
     _env_bool('RENDER') or _render_hostname or os.environ.get('RENDER_EXTERNAL_URL')
+    or os.environ.get('K_SERVICE')
 ))
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') if TRUST_PROXY_SSL_HEADER else None
 
@@ -673,8 +850,11 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     # Must exceed CELERY_TASK_TIME_LIMIT. Below it, Redis decides a still
     # running task was lost and hands the same job to a second worker.
+    # The Athena queue can perform a first full vocabulary load. Keep its
+    # message invisible longer than that task's six-hour hard limit so Redis
+    # cannot hand the same release to a second worker while the first is live.
     'visibility_timeout': int(
-        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '1800')),
+        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '25200')),
     # The refresh endpoint enqueues inside the request, so an unreachable
     # broker has to fail fast. Unset, kombu waits on the connect indefinitely
     # and the caller sits there until gunicorn kills the worker.
@@ -697,7 +877,9 @@ def _init_firebase_admin():
         return
 
     project_id = FIREBASE_PROJECT_ID
-    options = {"projectId": project_id} if project_id else {}
+    options = {"httpTimeout": 10}
+    if project_id:
+        options["projectId"] = project_id
 
     if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
         class _EmulatorCredential(fb_credentials.Base):
@@ -756,6 +938,11 @@ PROLOG_THEME_DIRS = [d for d in os.environ.get('PROLOG_THEME_DIRS', '').split(os
 # environment variable gets nothing — which is how it went unnoticed until a
 # real notice was mounted.
 PROLOG_LEGAL_DIRS = [d for d in os.environ.get('PROLOG_LEGAL_DIRS', '').split(os.pathsep) if d]
+# Record mappings: which answers of which survey versions a deployment writes
+# into the patient's own record when a response is submitted
+# (patient_portal/survey_record_mapping.py). Data, reviewed like a definition.
+# Empty by default: answers stay in the survey tables (PROlog DEP-7).
+PROLOG_RECORD_MAPPING_DIRS = [d for d in os.environ.get('PROLOG_RECORD_MAPPING_DIRS', '').split(os.pathsep) if d]
 
 # The built runner front end, when a deployment mounts one. It is a separate SPA
 # from PRomop's own, so its assets are served under their own prefix
@@ -764,5 +951,60 @@ PROLOG_LEGAL_DIRS = [d for d in os.environ.get('PROLOG_LEGAL_DIRS', '').split(os
 # prolog_surveys.views.runner_index reads settings.RUNNER_DIST directly.
 RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_RUNNER_DIST') else None
 
+# Languages this deployment serves as machine translations, e.g. "es,pt". PROlog
+# refuses to activate a version whose translations are unreviewed unless the
+# deployment names them here — a statement that respondents will read machine
+# translations, which the runner discloses to them (PROlog DEF-5).
+# Who may read a survey's results at /s/<slug>/report: the same people the
+# Django admin lets read them, checked through the ordinary login path
+# (patient_portal.services.prolog_results_viewer).
+PROLOG_RESULTS_AUTH = 'patient_portal.services.prolog_results_viewer'
+# Callback import path, not a hardcoded credential.
+PROLOG_RESULTS_PASSWORD_CHANGE = 'patient_portal.services.prolog_results_password_change'  # nosec B105
+
+PROLOG_MACHINE_LANGUAGES = [
+    lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
+]
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
+
+# Sharing a Personal Health Record (patient_portal/api/phr/sharing.py).
+# PHR_SHARE_URL is where the app that shows a shared record lives; the link is
+# PHR_SHARE_URL/<token>. PHR_SHARE_SECRET derives the links, so rotating it
+# closes every open link; it falls back to SECRET_KEY.
+PHR_SHARE_URL = os.environ.get('PHR_SHARE_URL', f'{APP_BASE_URL.rstrip("/")}/r')
+# The PHR's My outcomes: the PROlog surveys it lists, in order, by slug. Each
+# shows once a version of it is active (manage.py load_definition --activate).
+PHR_OUTCOME_SURVEYS = [
+    slug.strip()
+    for slug in os.environ.get('PHR_OUTCOME_SURVEYS', 'quality-of-life,side-effects').split(',')
+    if slug.strip()
+]
+PHR_SHARE_SECRET = os.environ.get('PHR_SHARE_SECRET', '')
+# The product name in the invite email ("<name> shared their <product> record").
+PHR_SHARE_PRODUCT_NAME = os.environ.get('PHR_SHARE_PRODUCT_NAME', 'HealthKey')
+# Where a scan happened is read from headers the edge sets from the client IP
+# (e.g. a load balancer's {client_city}). Only list headers the edge overwrites:
+# a client can send any header. Unset, scans are logged without a place.
+# AI explanations in the PHR are written by ONE's server, which sends this key
+# beside the patient's token; without it a patient's own token could store
+# text shown as "written by HealthTree AI". Unset, writes are refused.
+PHR_EXPLANATION_WRITE_KEY = os.environ.get('PHR_EXPLANATION_WRITE_KEY', '')
+PHR_SHARE_GEO_HEADERS = {
+    key: os.environ[f'PHR_SHARE_GEO_{key.upper()}_HEADER']
+    for key in ('city', 'region', 'country')
+    if os.environ.get(f'PHR_SHARE_GEO_{key.upper()}_HEADER')
+}
 PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)
+
+# Provisional data (#2434): OMOP rows written from proposed, not yet approved,
+# mappings carry a `confidence` percentage. Off, every writer behaves as it did
+# before the feature and a clinical write that carries a confidence is refused.
+# docs/provisional_data_plan.md#settings
+PROVISIONAL_DATA_ENABLED = os.environ.get(
+    'PROVISIONAL_DATA_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes')
+# Least confidence (percent) a provisional row is written at.
+try:
+    PROVISIONAL_CONFIDENCE_FLOOR = max(0, min(100, int(
+        os.environ.get('PROVISIONAL_CONFIDENCE_FLOOR', '70'))))
+except ValueError:
+    PROVISIONAL_CONFIDENCE_FLOOR = 70   # a typo must not stop the app from loading

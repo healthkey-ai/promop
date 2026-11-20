@@ -12,6 +12,7 @@ import logging
 import secrets
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
@@ -227,11 +228,32 @@ def patient_invitation_lookup(request):
     return Response(data)
 
 
+class _Refused(Exception):
+    """Raised inside the acceptance transaction to roll it back and answer ``response``."""
+
+    def __init__(self, response):
+        super().__init__()
+        self.response = response
+
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def accept_patient_invitation(request):
-    """Public: the patient sets a password; create/reuse a local Identity and link the Person."""
+    """Public: the patient sets a password; create/reuse a local Identity and link the Person.
+
+    The sign-up form's answers travel in the same body and are written in the
+    same transaction (``patient_portal.signup``): ``country`` (ISO alpha-2 from
+    the sign-up policy), ``year_of_birth`` (year only), and ``consent`` with the
+    ``decisions`` and ``documents`` the deployment asks for at sign-up, each
+    naming the version the form showed. A deployment with sign-up declarations
+    or documents loaded refuses an acceptance that omits one (400); wording
+    republished since the form loaded is a 409.
+    """
+    from patient_portal import signup
+    from patient_portal.api.phr.consent import language_of
+    from patient_portal.consent import StaleVersion
+
     token = (request.data.get('token') or '').strip()
     password = request.data.get('password') or ''
 
@@ -248,9 +270,19 @@ def accept_patient_invitation(request):
         )
 
     email = invitation.email
-    pr = None
+    data = request.data if isinstance(request.data, dict) else {}
+    language = language_of(request)
+    record = None
     try:
         with transaction.atomic():
+            # Two requests racing on one token must not both record the
+            # sign-up: lock the row and re-check it before anything is written.
+            invitation = PatientInvitation.objects.select_for_update().select_related('person').get(pk=invitation.pk)
+            if invitation.accepted_at or invitation.cancelled_at:
+                raise _Refused(Response(
+                    {'error': 'Invitation already accepted. Please sign in.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                ))
             # Search all issuers — not just urn:local — so we don't create a
             # duplicate Identity when the email already has an SSO/OAuth account.
             identity = _find_local_or_any_identity(email)
@@ -269,10 +301,14 @@ def accept_patient_invitation(request):
                 # A real account already exists for this email — never overwrite its
                 # credentials from a token-gated public endpoint (that email could
                 # belong to a provider/admin). Send them to sign in instead.
-                return Response(
+                raise _Refused(Response(
                     {'error': 'An account already exists for this email. Please sign in instead.'},
                     status=status.HTTP_400_BAD_REQUEST,
-                )
+                ))
+
+            # The token reached the invited mailbox; holding it proves the address.
+            if (identity.email or '').lower() == email.lower():
+                identity.mark_email_verified()
 
             try:
                 PatientUser.objects.update_or_create(
@@ -281,30 +317,45 @@ def accept_patient_invitation(request):
                 )
             except IntegrityError:
                 # The identity is already linked to a different Person.
-                return Response(
+                raise _Refused(Response(
                     {'error': 'This account is already linked to another patient record.'},
                     status=status.HTTP_400_BAD_REQUEST,
-                )
+                ))
 
             # Keep Person and its PatientRecord projection aligned with the claimed account.
             person = invitation.person
             if person.email != email:
                 person.email = email
                 person.save(update_fields=['email'])
+            record = PatientRecord.objects.filter(person=person).select_related('organization').first()
+
+            # The form's country, year of birth and declarations; derives the
+            # record once the country and year are written, then records the
+            # consent against the derived country.
             from omop_core.services.patient_record_service import refresh_patient_record
-            refresh_patient_record(person)
+            try:
+                signup.apply_signup(
+                    person, record, email=email, data=data, language=language,
+                    recorded_by=identity, refresh=refresh_patient_record,
+                )
+            except StaleVersion as e:
+                raise _Refused(Response({'error': e.messages[0]}, status=status.HTTP_409_CONFLICT))
+            except ValidationError as e:
+                raise _Refused(Response({'error': e.messages[0]}, status=status.HTTP_400_BAD_REQUEST))
 
             # Grant patient-level access to the record's org so the patient
             # can use org-scoped views after signing in.
-            if pr and pr.organization:
+            if record and record.organization:
                 GroupAccess.objects.get_or_create(
                     identity=identity,
-                    org=pr.organization,
-                    defaults={'role': 'patient'},
+                    org=record.organization,
+                    role='patient',
                 )
 
             invitation.accepted_at = timezone.now()
             invitation.save(update_fields=['accepted_at'])
+    except _Refused as refused:
+        return refused.response
     except IntegrityError:
         logger.exception('IntegrityError during patient invitation acceptance for token=%s…%s',
                          token[:8], token[-4:])
@@ -314,6 +365,6 @@ def accept_patient_invitation(request):
         )
 
     resp = {'detail': 'Account created. You can now sign in with your email and password.'}
-    if pr and pr.organization:
-        resp['redirect_url'] = f'/org/{pr.organization.slug}/'
+    if record and record.organization:
+        resp['redirect_url'] = f'/org/{record.organization.slug}/'
     return Response(resp)

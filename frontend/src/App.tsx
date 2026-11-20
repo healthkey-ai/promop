@@ -12,7 +12,7 @@ import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
 import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
-import PatientDetail from "@/components/Patient/PatientDetail";
+import { PatientDetailRoute } from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
 import UploadPage from "@/components/Patient/UploadPage";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
@@ -21,15 +21,26 @@ import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import SourceSystemManagementPage from "@/components/CodeMappings/SourceSystemManagementPage";
 import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
+import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
+import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import { canViewMappings, isAnalystOnly, isStaffOrOrgAdmin } from "@/utils/roles";
+import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
+import ChronicConditionOverridesPage from "@/components/MappingHub/ChronicConditionOverridesPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
+import VerifyEmail from "@/components/Auth/VerifyEmail";
+import VerifyEmailBanner from "@/components/Auth/VerifyEmailBanner";
 import UserProfilePage from "@/components/User/UserProfilePage";
+import RolesPage from "@/components/Roles/RolesPage";
 import { useAuth } from "@/hooks/useAuth";
+import PublicVotePage from "@/components/MappingVotes/PublicVotePage";
+import ConfirmVotesPage from "@/components/MappingVotes/ConfirmVotesPage";
 
 function OrgHome({
   currentUser,
@@ -64,7 +75,7 @@ function AppRoutes() {
   const { currentUser, loading: authLoading, refresh, logout } = useAuth();
   const location = useLocation();
 
-  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/login', '/auth/callback'];
+  const publicPaths = ['/accept-invite', '/accept-patient-invite', '/reset-password', '/forgot-password', '/verify-email', '/login', '/auth/callback'];
   const isPublicPath = (path: string) =>
     publicPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (authLoading && !isPublicPath(location.pathname)) {
@@ -80,7 +91,7 @@ function AppRoutes() {
   // backend independently refuses every other /api/ request meanwhile, so this
   // is a UX affordance over a server-enforced rule. Public auth pages (reset
   // link, invite acceptance) are exempt so those flows can still complete.
-  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/accept-invite', '/accept-patient-invite'];
+  const forceChangeExemptPaths = ['/reset-password', '/forgot-password', '/verify-email', '/accept-invite', '/accept-patient-invite'];
   const isForceChangeExempt = (path: string) =>
     forceChangeExemptPaths.includes(path) || /^\/org\/[^/]+\/(login|signup|forgot-password|accept-invite)$/.test(path);
   if (
@@ -91,33 +102,43 @@ function AppRoutes() {
   }
 
   const isPatient = !!currentUser?.is_patient;
+  // An analyst-only account sees no patient data (#2416): its home is the
+  // Code Mapping page, and the patient pages send it there.
+  const analystOnly = isAnalystOnly(currentUser);
 
   // Provider-only routes: require a signed-in provider. Signed-in patients are
   // redirected home (their own record); logged-out users go to login.
   const providerRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
     if (isPatient) return <Navigate to="/" replace />;
+    if (analystOnly) return <Navigate to="/code-mappings" replace />;
     return element;
   };
 
-  // Mapping curation is available to any professional role (staff, org_admin,
-  // doctor, analyst).  Doctors and analysts can propose; only staff and
-  // org_admin can approve.  The API independently enforces the same policy.
-  const hasProfessionalRole = currentUser?.is_staff || currentUser?.is_org_admin
-    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? ''));
-  const mappingAdminRoute = (element: ReactNode) => {
+  // Roles are additive (#2416). Every professional role opens the mapping
+  // pages; a doctor reads them, and writing (create, edit, propose, Suggest)
+  // is for staff, org_admin and the analyst grant, which each page hides
+  // from a reader. Analysts propose; only staff and org_admin approve. The
+  // API independently enforces the same policy.
+  const mappingRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!hasProfessionalRole) return <Navigate to="/" replace />;
+    if (!canViewMappings(currentUser)) return <Navigate to="/" replace />;
     return element;
   };
 
-  const uploadRoute = (element: ReactNode) => {
+  const orgAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
+    if (!isStaffOrOrgAdmin(currentUser)) return <Navigate to="/" replace />;
     return element;
   };
+
+  // A prompt, not a gate: the account works, only address-derived access waits.
+  // Strictly `=== false` so a backend that predates the field shows nothing.
+  const showVerifyBanner = currentUser?.email_verified === false && !isPublicPath(location.pathname);
 
   return (
+    <>
+    {showVerifyBanner && <VerifyEmailBanner email={currentUser?.email} />}
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<Navigate to="/" replace />} />
@@ -128,6 +149,7 @@ function AppRoutes() {
       <Route path="/accept-patient-invite" element={<AcceptPatientInvite />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
+      <Route path="/verify-email" element={<VerifyEmail />} />
 
       <Route path="/org/:slug/login" element={<OrgLogin />} />
       <Route path="/org/:slug/signup" element={<OrgSignup />} />
@@ -140,6 +162,8 @@ function AppRoutes() {
           currentUser ? (
             isPatient ? (
               <PatientHome user={currentUser} onLogout={logout} />
+            ) : analystOnly ? (
+              <Navigate to="/code-mappings" replace />
             ) : (
               <PatientList />
             )
@@ -148,19 +172,25 @@ function AppRoutes() {
           )
         }
       />
-      <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
-      <Route path="/upload" element={uploadRoute(<UploadPage />)} />
-      <Route path="/upload-fhir" element={uploadRoute(<UploadFHIR />)} />
-      <Route path="/upload-csv" element={uploadRoute(<UploadCSV />)} />
+      <Route path="/patient/:personId" element={providerRoute(<PatientDetailRoute user={currentUser} />)} />
+      <Route path="/upload" element={orgAdminRoute(<UploadPage />)} />
+      <Route path="/upload-fhir" element={orgAdminRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={orgAdminRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
-      <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
-      <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
-      <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
-      <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
-      <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
-      <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
-      <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
+      <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
+      <Route path="/roles" element={currentUser ? <RolesPage /> : <Navigate to="/login" replace />} />
+      <Route path="/mappings" element={mappingRoute(<MappingHubPage />)} />
+      <Route path="/field-mappings" element={mappingRoute(<FieldMappingPage />)} />
+      <Route path="/code-mappings" element={mappingRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/source-systems" element={mappingRoute(<SourceSystemManagementPage />)} />
+      <Route path="/code-mappings/suggest-runs/:runId" element={mappingRoute(<SuggestRunLogPage />)} />
+      <Route path="/code-mappings/accuracy" element={mappingRoute(<CodeMappingAccuracyPage />)} />
+      <Route path="/code-mappings/accuracy/analytics" element={mappingRoute(<MappingAccuracyAnalyticsPage />)} />
+      <Route path="/therapy-mappings" element={mappingRoute(<TherapyMappingPage />)} />
+      <Route path="/relevance-signals" element={mappingRoute(<RelevanceSignalsPage />)} />
+      <Route path="/disease-category-mappings" element={mappingRoute(<DiseaseCategoryPage />)} />
+      <Route path="/chronic-condition-overrides" element={mappingRoute(<ChronicConditionOverridesPage />)} />
       <Route
         path="/profile"
         element={
@@ -170,10 +200,40 @@ function AppRoutes() {
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
+  );
+}
+
+/**
+ * The public voting pages (#2678): `/vote#<token>` and the emailed
+ * `/vote/confirm#<token>`. The token is the URL fragment, so it never reaches
+ * a server log. Their visitors have no account, so these routes are chosen
+ * before anything reads the session: `AppRoutes` calls `useAuth`, which asks
+ * the server who is signed in and sends a stranger to the login page.
+ * Nothing here redirects into the app either.
+ */
+const isPublicVotePath = (path: string) => path === "/vote" || path.startsWith("/vote/");
+
+function PublicVoteRoutes() {
+  return (
+    <Routes>
+      <Route path="/vote" element={<PublicVotePage />} />
+      <Route path="/vote/confirm" element={<ConfirmVotesPage />} />
+      <Route
+        path="*"
+        element={
+          <div className="flex min-h-dvh items-start justify-center bg-slate-50 px-4 py-12">
+            <h1 className="text-xl font-semibold text-slate-900">This link is not available</h1>
+          </div>
+        }
+      />
+    </Routes>
   );
 }
 
 export default function App() {
+  const location = useLocation();
+  if (isPublicVotePath(location.pathname)) return <PublicVoteRoutes />;
   return (
     <div className="min-h-dvh">
       <div className="app-page-content">

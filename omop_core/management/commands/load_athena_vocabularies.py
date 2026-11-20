@@ -18,13 +18,15 @@ from django.core.management.base import CommandError
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 from django.apps import apps
 from django.db import connection, transaction
-from django.db.models import Count
+from django.db.models import CASCADE, Count
 import requests
 
 import logging
 
+from omop_core.services import concept_priority, vocabulary_source
+from omop_core.services.vocabulary_source import DEFAULT_LFS_URL, LOINC_ZIP_RE, sha256_file
 from omop_core.models import (
-    Vocabulary, Domain, ConceptClass, Concept,
+    Vocabulary, Domain, ConceptClass, Concept, ConceptMappingPriority,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
     VocabularyVersionHistory, record_vocabulary_version_history,
     VocabularyRelease,
@@ -49,8 +51,16 @@ VOCAB_SCOPE = frozenset({
     'SNOMED', 'ICD10CM', 'CVX',
     # US procedure and professional-service codes. CPT4 is used as a source
     # vocabulary by the code-mapping and FHIR ingestion paths, so it must be
-    # retained whenever the Athena bundle includes it.
-    'CPT4',
+    # retained whenever the Athena bundle includes it. HCPCS Level II (~12.7k
+    # concepts) names the supplies, drugs administered and services the ETL
+    # sends as HCPCS codes; without it the PHR showed the bare code (#2300).
+    # Its Procedure/Device/Observation concepts are standard, so they become
+    # Suggest candidates too; its Drug-domain J-codes are non-standard and
+    # resolve through their 'Maps to' RxNorm edges, which only a full load
+    # (not --concepts-only) carries. NDC is deliberately not here: ~1.3M
+    # concepts, and the 14-digit package codes seen in ETL data match no
+    # Athena NDC, so loading it names nothing.
+    'CPT4', 'HCPCS',
     # Genomic + oncology coding vocabularies (#459)
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
@@ -91,7 +101,7 @@ LOINC_DOMAIN_SCOPE = frozenset({
 })
 BATCH = 100_000
 PROGRESS_EVERY = 500_000
-DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
+DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7'
 UMLS_RELEASES_URL = 'https://uts-ws.nlm.nih.gov/releases'
 UMLS_DOWNLOAD_URL = 'https://uts-ws.nlm.nih.gov/download'
 DEFAULT_UMLS_CACHE_DIR = '/tmp/promop-umls'
@@ -184,7 +194,73 @@ class _VocabularyArchive:
             return io.TextIOWrapper(stream, encoding='utf-8', newline='')
 
 
-def _download_gdrive_vocabulary(url, download_dir, log):
+def _resolve_gdrive_vocabulary(url, log):
+    """Resolve the selected Drive ZIP without downloading its multi-GB payload."""
+    try:
+        import gdown
+    except ImportError as exc:
+        raise CommandError(
+            'Google Drive vocabulary loading requires gdown. Install dependencies '
+            'from requirements.txt, then rerun with --gdrive.'
+        ) from exc
+
+    if '/folders/' in url:
+        result = gdown.download_folder(
+            url=url, output=None, quiet=True,
+            use_cookies=False, skip_download=True,
+        )
+        if result is None:
+            raise CommandError(f'Google Drive folder listing failed: {url}')
+        zips = sorted(
+            (item for item in result
+             if Path(item.path).suffix.lower() == '.zip'
+             and not LOINC_ZIP_RE.match(PurePosixPath(item.path).name)),
+            key=lambda item: item.path,
+        )
+        if not zips:
+            raise CommandError(f'No .zip file found in Google Drive vocabulary source: {url}')
+        if len(zips) > 1:
+            log(
+                f'  Found {len(zips)} zip files; using first by name: {zips[0].path}. '
+                'Pass a direct Google Drive file URL to select a specific zip.'
+            )
+        name = Path(zips[0].path).name
+        loinc_zips = sorted(
+            (item for item in result
+             if LOINC_ZIP_RE.match(PurePosixPath(item.path).name)),
+            key=lambda item: item.path,
+            reverse=True,
+        )
+        loinc_id = loinc_zips[0].id if loinc_zips else None
+        loinc_name = PurePosixPath(loinc_zips[0].path).name if loinc_zips else None
+        # Include LOINC archive identity so a new LOINC release (even with the
+        # same Athena vocabulary) invalidates the deploy-time sync check.
+        loinc_suffix = f'+loinc:{loinc_id}:{loinc_name}' if loinc_id else ''
+        return {
+            'id': zips[0].id,
+            'name': name,
+            # The governed folder names bundles with their Athena UUID and
+            # build timestamp. Include both provider ID and name so either a
+            # replacement upload or a renamed in-place revision invalidates
+            # the cheap deploy-time check. SHA-256 is recorded after download.
+            'identity': f'gdrive-file:{zips[0].id}:{name}{loinc_suffix}',
+            'loinc_archive_id': loinc_id,
+            'loinc_archive_name': loinc_name,
+        }
+
+    match = re.search(r'(?:/d/|[?&]id=)([-\w]+)', url)
+    file_id = match.group(1) if match else None
+    return {
+        'id': file_id,
+        'name': 'athena-vocabulary.zip',
+        'identity': (
+            f'gdrive-file:{file_id}' if file_id else
+            f'gdrive-url-sha256:{hashlib.sha256(url.encode()).hexdigest()}'
+        ),
+    }
+
+
+def _download_gdrive_vocabulary(url, download_dir, log, selection=None):
     """Download only the selected ZIP, leaving unrelated folder files on Drive."""
     try:
         import gdown
@@ -195,28 +271,11 @@ def _download_gdrive_vocabulary(url, download_dir, log):
         ) from exc
 
     download_dir.mkdir(parents=True, exist_ok=True)
-
     log(f'Loading Athena vocabulary archive from Google Drive: {url}')
-    if '/folders/' in url:
-        result = gdown.download_folder(
-            url=url, output=str(download_dir), quiet=False,
-            use_cookies=False, skip_download=True,
-        )
-        if result is None:
-            raise CommandError(f'Google Drive folder listing failed: {url}')
-        zips = sorted(
-            (item for item in result if Path(item.path).suffix.lower() == '.zip'),
-            key=lambda item: item.path,
-        )
-        if not zips:
-            raise CommandError(f'No .zip file found in Google Drive vocabulary source: {url}')
-        if len(zips) > 1:
-            log(
-                f'  Found {len(zips)} zip files; using first by name: {zips[0].path}. '
-                'Pass a direct Google Drive file URL to select a specific zip.'
-            )
+    selection = selection or _resolve_gdrive_vocabulary(url, log)
+    if '/folders/' in url and selection.get('id'):
         filename = gdown.download(
-            id=zips[0].id, output=str(download_dir / 'athena-vocabulary.zip'),
+            id=selection['id'], output=str(download_dir / 'athena-vocabulary.zip'),
             quiet=False, use_cookies=False,
         )
     else:
@@ -227,6 +286,60 @@ def _download_gdrive_vocabulary(url, download_dir, log):
     if not filename:
         raise CommandError(f'Google Drive file download failed: {url}')
     return Path(filename)
+
+
+def _download_gdrive_loinc_archive(loinc_archive_id, loinc_archive_name, download_dir, log):
+    """Download a LOINC release ZIP from Google Drive when present in the vocabulary folder."""
+    import gdown
+
+    dest = download_dir / (loinc_archive_name or 'loinc-release.zip')
+    log(f'  Downloading {loinc_archive_name or "LOINC archive"} from Google Drive (id={loinc_archive_id})...')
+    filename = gdown.download(
+        id=loinc_archive_id, output=str(dest),
+        quiet=True, use_cookies=False,
+    )
+    if not filename or not dest.is_file():
+        log('  WARNING: LOINC archive download failed; LOINC axes will not be loaded.')
+        return None
+    return dest
+
+
+def load_loinc_axes_from_archive(loinc_archive_path, log):
+    """Load LoincClass and LoincCodeClass from a LOINC release ZIP.
+
+    Delegates to ``loinc_release.load_from_archive`` which handles Part.csv
+    (LoincClass) and Loinc.csv (LoincCodeClass with all six axes), including
+    FK validation and unknown-class reporting.
+
+    ``log`` is a callable (e.g. ``self.stdout.write``); it is wrapped in an
+    object with a ``.write()`` method for ``load_from_archive``'s ``stdout``
+    parameter.
+    """
+    from omop_core.services.loinc_release import LoincReleaseUnavailable, load_from_archive
+
+    def _file_chunks(path, chunk_size=4 * 1024 * 1024):
+        with open(path, 'rb') as handle:
+            while True:
+                block = handle.read(chunk_size)
+                if not block:
+                    return
+                yield block
+
+    class _LogWriter:
+        """Adapt a callable to an object with .write() for load_from_archive."""
+        def __init__(self, fn):
+            self._fn = fn
+        def write(self, msg):
+            self._fn(msg)
+
+    try:
+        class_count, code_count = load_from_archive(
+            _file_chunks(loinc_archive_path), stdout=_LogWriter(log),
+        )
+    except LoincReleaseUnavailable as exc:
+        log(f'  WARNING: LOINC archive unusable: {exc}')
+        return 0
+    return code_count
 
 
 def _release_version_from_url(url):
@@ -281,12 +394,8 @@ def _validate_umls_archive(path):
         raise CommandError(f'UMLS archive {path} is not a valid zip file.') from exc
 
 
-def _sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, 'rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
+# Kept under this name for its importers; the one definition is the service's.
+_sha256_file = sha256_file
 
 
 def _cache_umls_release(api_key, cache_dir, release_url=None, log=lambda _msg: None,
@@ -427,7 +536,14 @@ class Command(EmbeddingLoadCommand):
         parser.add_argument('--gdrive', nargs='?', const=DEFAULT_GDRIVE_URL,
                             help=(
                                 'Google Drive folder or file URL containing a zipped '
-                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}.'
+                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}. '
+                                'With --lfs it is the fallback source.'
+                            ))
+        parser.add_argument('--lfs', nargs='?', const=DEFAULT_LFS_URL,
+                            help=(
+                                'GitHub repository publishing the Athena and LOINC ZIPs as '
+                                'Git LFS objects with a manifest.json. Tried before --gdrive. '
+                                f'Defaults to {DEFAULT_LFS_URL}.'
                             ))
         parser.add_argument('--replace', action='store_true', help=(
             'Remove Athena concepts absent from the incoming release after loading. '
@@ -455,6 +571,14 @@ class Command(EmbeddingLoadCommand):
                             ))
         parser.add_argument('--skip-umls-cache', action='store_true',
                             help='Skip optional UMLS archive caching even when UMLS_API_KEY is set.')
+        parser.add_argument('--loinc-archive',
+                            help=(
+                                'Path to a LOINC release ZIP (e.g. Loinc_2.83.zip '
+                                'from loinc.org). Loads LoincClass (from Part.csv) '
+                                'and LoincCodeClass axis columns (component, property, '
+                                'time_aspect, system, scale_type, method_type) from '
+                                'LoincTable/Loinc.csv inside the archive.'
+                            ))
         parser.add_argument('--migration-bootstrap', action='store_true', help=(
             'Load only the LOINC concepts required by migration 0201, verify '
             'all are present, and stop before release publication. Intended '
@@ -473,11 +597,14 @@ class Command(EmbeddingLoadCommand):
         archive = options['archive']
         bucket_name = options['bucket']
         gdrive_url = options['gdrive']
+        lfs_url = options.get('lfs')
         replace = options['replace']
         dry_run = options['dry_run']
+        loinc_archive = options.get('loinc_archive')
         migration_bootstrap = options.get('migration_bootstrap', False)
         skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
         self._umls_release = None
+        self._loinc_archive_path = Path(loinc_archive) if loinc_archive else None
 
         if migration_bootstrap and (replace or dry_run):
             raise CommandError('--migration-bootstrap cannot be combined with --replace or --dry-run')
@@ -486,9 +613,12 @@ class Command(EmbeddingLoadCommand):
             options['concepts_only'] = True
             options['skip_umls_cache'] = True
 
-        sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
+        # --lfs and --gdrive may be given together: LFS first, Drive as the
+        # fallback (#2288). Every other source stands alone.
+        remote = bool(lfs_url or gdrive_url)
+        sources = [bool(base), bool(archive), bool(bucket_name), remote]
         if sum(sources) != 1:
-            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive')
+            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive/--lfs')
 
         self._gcs_bucket = None
         self._archive = None
@@ -496,8 +626,22 @@ class Command(EmbeddingLoadCommand):
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
-        if gdrive_url:
-            archive = _download_gdrive_vocabulary(gdrive_url, download_dir, self._log)
+        if remote:
+            selection = vocabulary_source.resolve_vocabulary_source(
+                lfs=lfs_url, gdrive=gdrive_url, log=self._log,
+            )
+            archive = vocabulary_source.download_vocabulary_archive(
+                selection, download_dir, self._log,
+            )
+            # The published LOINC release rides along unless --loinc-archive
+            # named one. Not on a dry run or the migration bootstrap, which
+            # return before the axes load: the web boot would download 93 MB
+            # to discard it.
+            wants_loinc = not dry_run and not migration_bootstrap
+            if wants_loinc and self._loinc_archive_path is None and selection.get('loinc_archive_id'):
+                self._loinc_archive_path = vocabulary_source.download_loinc_archive(
+                    selection, download_dir, self._log,
+                )
         if archive:
             self._archive = _VocabularyArchive(archive, self._log)
 
@@ -572,6 +716,7 @@ class Command(EmbeddingLoadCommand):
                 return
             if replace:
                 self._remove_stale_concepts()
+            self._refresh_suggest_synonym_terms()
             self._sync_cdm_source_metadata()
             if not skip_clinical_vocabulary_verification:
                 self._verify_required_clinical_vocabularies()
@@ -581,7 +726,9 @@ class Command(EmbeddingLoadCommand):
                 self._log('  --skip-code-mappings: skipping code mapping artifact load.')
             else:
                 self._load_code_mappings(options['verbosity'])
+            self._load_loinc_axes()
             self._publish_release(counts)
+            self._resolve_field_concept_mappings()
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -604,6 +751,65 @@ class Command(EmbeddingLoadCommand):
     def _log(self, msg):
         self.stdout.write(msg)
         self.stdout.flush()
+
+    def _resolve_field_concept_mappings(self):
+        """Point the seeded field mappings at the Concepts this load brought.
+
+        On a fresh instance migration 0240 runs before any vocabulary is
+        loaded, so every FieldConceptMapping it seeds has its concept named
+        only by (vocabulary_id, concept_code) and a NULL FK; lab derivation
+        then falls back to the extractor table and the editor shows every row
+        unresolved. Runs after every table load and the release publication,
+        on every successful non-dry-run load including --concepts-only, and
+        not on the migration bootstrap, which loads at the 0200 schema
+        baseline before the curation tables are seeded. Under the plain
+        loader the table loads are already committed by then; under
+        ``sync_athena_vocabulary`` the whole load, this step included, is one
+        transaction: it commits together, and a sync that rolls back a load
+        with nothing new discards this too (the rows resolve on the next
+        load that applies).
+
+        Best effort: the load is complete and published, so a failure here is
+        logged with the manual fallback (``manage.py
+        resolve_field_concept_mappings``) and never fails the load. The call
+        runs in a savepoint so that a database error inside it is confined
+        and does not leave the sync's outer transaction aborted, which would
+        roll back the whole vocabulary at its next statement.
+        """
+        from omop_core.services.field_concept_resolution import (
+            resolve_field_concept_mappings,
+        )
+
+        try:
+            with transaction.atomic():
+                result = resolve_field_concept_mappings()
+        except Exception:
+            logger.exception(
+                'field mappings: resolution failed after the load; run '
+                'manage.py resolve_field_concept_mappings'
+            )
+            self._log('  WARNING: field mappings were not resolved; '
+                      'run manage.py resolve_field_concept_mappings.')
+            return
+        self._log(f'  {result.summary()}')
+        if result.rollout_note():
+            self._log(f'  {result.rollout_note()}')
+
+    def _load_loinc_axes(self):
+        """Load LOINC axes from a LOINC release archive when available.
+
+        Uses ``loinc_release.load_from_archive`` which handles both Part.csv
+        (LoincClass) and Loinc.csv (LoincCodeClass axes), including FK
+        validation and unknown-class reporting.
+
+        Source: ``--loinc-archive`` command-line argument (explicit path).
+        """
+        if not self._loinc_archive_path:
+            return
+        if not self._loinc_archive_path.is_file():
+            self._log(f'  WARNING: --loinc-archive path does not exist: {self._loinc_archive_path}')
+            return
+        load_loinc_axes_from_archive(self._loinc_archive_path, self._log)
 
     def _verify_required_clinical_vocabularies(self):
         """Fail the load when a partial Athena bundle omits core clinical vocabularies."""
@@ -728,10 +934,32 @@ class Command(EmbeddingLoadCommand):
                     not field.auto_created
                     and getattr(field, 'many_to_one', False)
                     and field.related_model is Concept
+                    and field.remote_field.on_delete is not CASCADE
                 ):
                     references.append((model, field))
+        # A row that cascades is about its concept and means nothing without
+        # it: a curator's note, rank, Done mark or lock, a concept's embedding,
+        # a source code Suggest declined for it. The raw DELETE below runs no
+        # Django cascade, so they are removed here. Left alone, a one-to-one
+        # row's foreign key refuses the replacement; pointed at concept 0, two
+        # concepts' declines of one source code collide on their unique key.
+        tables = set(connection.introspection.table_names())
+        owned = [
+            (model, field)
+            for model in apps.get_models()
+            for field in model._meta.get_fields()
+            if not field.auto_created
+            and (getattr(field, 'one_to_one', False) or getattr(field, 'many_to_one', False))
+            and field.related_model is Concept
+            and field.remote_field.on_delete is CASCADE
+            # concept_embedding does not exist on a server without pgvector.
+            and model._meta.db_table in tables
+        ]
 
-        with connection.cursor() as cur:
+        # One transaction: the concept delete can still be refused (a unit
+        # preference protects its concept), and the notes, ranks and links
+        # detached before it must then come back with it.
+        with transaction.atomic(), connection.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM ({stale_sql}) stale', params)
             stale_count = cur.fetchone()[0]
             if not stale_count:
@@ -752,8 +980,19 @@ class Command(EmbeddingLoadCommand):
                         f'UPDATE {table} SET {column} = {value} '
                         f'WHERE {column} IN ({stale_sql})', params
                     )
+            unranked = 0
+            for model, field in owned:
+                cur.execute(
+                    f'DELETE FROM {qn(model._meta.db_table)} '
+                    f'WHERE {qn(field.column)} IN ({stale_sql})', params
+                )
+                if model is ConceptMappingPriority:
+                    unranked = cur.rowcount
             cur.execute(f'DELETE FROM concept WHERE concept_id IN ({stale_sql})', params)
             cur.execute(f'DROP TABLE {_INCOMING_CONCEPT_TABLE}')
+            if unranked:
+                # Positions stay 1..N with no gaps (#1914).
+                concept_priority.renumber()
         self._log(
             f'  --replace: removed {stale_count:,} stale Athena concept(s); '
             'patient-owned rows were retained.'
@@ -1202,6 +1441,19 @@ class Command(EmbeddingLoadCommand):
         self._cleanup('CONCEPT_ANCESTOR.csv')
         self._log(f'  ancestors: {count:,} loaded from {scanned:,} rows in {time.monotonic() - t:.0f}s')
         return count
+
+    def _refresh_suggest_synonym_terms(self):
+        """Rebuild what Suggest reads synonyms from (#1467).
+
+        A load adds synonyms and changes which concepts are standard and active.
+        suggest_synonym_term is derived from both, so without this a newly loaded
+        synonym is invisible to Suggest until someone refreshes by hand. After
+        _remove_stale_concepts, so removed concepts' terms go in the same pass.
+        """
+        from omop_core.services import suggest_synonym_terms
+        self._log('Refreshing suggest_synonym_term...')
+        inserted, deleted = suggest_synonym_terms.refresh()
+        self._log(f'  suggest_synonym_term: {inserted:,} added, {deleted:,} removed.')
 
     def _load_concept_synonym(self, dry_run):
         self._log('Loading CONCEPT_SYNONYM.csv...')

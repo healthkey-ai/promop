@@ -17,6 +17,7 @@ from omop_core.services.genomics_catalog import marker_for_variant, patient_fiel
 from omop_core.services.genomics_components import component_codes, components
 from omop_core.services.genomics_vocabulary import resolve_loinc
 from omop_core.services.genomics_state import ASSESSMENT_STATUS, effective_status
+from omop_core.services.genomics_features import FEATURE_TYPES, FINDING_CATEGORIES, marker_features
 from omop_core.services.pk import next_pk
 from omop_core.services.clinical_text import OwnedTextReader, store_text
 from omop_core.signals import suppress_patient_record_refresh
@@ -35,26 +36,52 @@ _VARIANT_LEVEL_FIELDS = frozenset({
 })
 
 
+def _is_positive(value):
+    """True for a number above zero; blanks and malformed values are left to validation."""
+    try:
+        return Decimal(str(value)) > 0
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _same_number(a, b):
+    try:
+        return Decimal(str(a)) == Decimal(str(b))
+    except (InvalidOperation, ValueError):
+        return False
+
+
 def mapping_is_usable(mapping, *, parent=False):
     """Shared storage gate for the writer, catalog and readiness audit.
 
     A standard concept is optional: source-only parent storage is supported.
-    This checks the recipe, not actor permissions or payload-specific fields.
+    This checks the recipe -- where the fact lives and the source code it is
+    keyed by -- not its approval, actor permissions or payload-specific fields.
     """
     tables = ('measurement',) if parent else ('measurement', 'observation')
-    return bool(mapping is not None and mapping.status == 'approved'
+    return bool(mapping is not None
                 and mapping.omop_table in tables and mapping.source_value
                 and len(mapping.source_value) <= 50)
 
 
-def approved_mapping(field_name):
-    mapping = FieldConceptMapping.objects.filter(field_name=field_name, status='approved').select_related('concept').first()
+def recipe_mapping(field_name):
+    """The field's storage recipe, whatever its review status.
+
+    A genomics field is editable whether or not its concept is approved: the
+    recipe says how to store the fact, and approval only decides whether the
+    mapped concept flows forward with it (see mapped_concept).
+    """
+    mapping = FieldConceptMapping.objects.filter(field_name=field_name).select_related('concept').first()
     if not mapping_is_usable(mapping):
-        raise ValidationError({field_name: 'A complete approved genomics field mapping is required.'})
+        raise ValidationError({field_name: 'A complete genomics field recipe is required.'})
     return mapping
 
 
 def mapped_concept(mapping):
+    # Until the mapping is approved the fact is stored under its source code
+    # alone, as an unmapped (concept 0) row.
+    if mapping.status != 'approved':
+        return 0, None
     if (mapping.concept_id and mapping.concept.standard_concept == 'S'
             and mapping.concept.invalid_reason is None):
         if mapping.concept.domain_id.lower() == mapping.omop_table:
@@ -92,6 +119,11 @@ def normalize_variant(payload, existing=None):
     if unknown:
         raise ValidationError({key: 'Unknown variant field.' for key in sorted(unknown)})
     data = {**(existing or {}), **payload}
+    if existing and 'gene' in payload and payload['gene'] != existing.get('gene') and 'genomic_feature' not in payload:
+        # Compatibility for old clients editing the original gene field.
+        for key in ('genomic_feature', 'feature_type', 'finding_category'):
+            if key not in payload:
+                data.pop(key, None)
     if 'mutation' in payload and 'variant' not in payload:
         data['variant'] = payload['mutation']
     if 'assay_method' in payload and 'variant_analysis_method_type' not in payload:
@@ -111,8 +143,21 @@ def normalize_variant(payload, existing=None):
         data['gene'] = 'PALB2'
     if data.get('marker_key') == 'palb1':
         data['marker_key'] = 'palb2'
-    if not data['gene'] or len(data['gene']) > 50:
-        raise ValidationError({'gene': 'Enter a gene symbol (at most 50 characters).'})
+    if not data['gene'] and not data['genomic_feature']:
+        raise ValidationError({'genomic_feature': 'Enter a genomic feature.'})
+    if len(data['gene']) > 50 or len(data['genomic_feature']) > 50:
+        raise ValidationError({'genomic_feature': 'Use at most 50 characters.'})
+    if data['feature_type'] not in ('', *FEATURE_TYPES):
+        raise ValidationError({'feature_type': 'Choose a supported feature type.'})
+    if data['finding_category'] not in ('', *FINDING_CATEGORIES):
+        raise ValidationError({'finding_category': 'Choose a supported finding category.'})
+    if 'genomic_feature' in payload and data['genomic_feature'] and not data['feature_type']:
+        raise ValidationError({'feature_type': 'Select the feature type.'})
+    if data['feature_type'] == 'Gene' and data['genomic_feature']:
+        data['genomic_feature'] = data['genomic_feature'].upper()
+        if data['genomic_feature'] == 'PALB1':
+            data['genomic_feature'] = 'PALB2'
+        data['gene'] = data['genomic_feature']
     # A gene-only result is allowed (e.g. a test with no specific variant).
     raw_date = data.get('test_date')
     try:
@@ -159,6 +204,15 @@ def normalize_variant(payload, existing=None):
                 data[k] = None
             else:
                 data[k] = ''
+        # A positive clone fraction asserts the finding (#1417). Zero stays
+        # accepted: a negative FISH report records it explicitly.
+        # An echo of the stored value counts as inherited, so a record saved
+        # before this rule stays editable.
+        if _is_positive(data.get('clone_fraction')):
+            if 'clone_fraction' in (payload or {}) and not _same_number(
+                    payload['clone_fraction'], (existing or {}).get('clone_fraction')):
+                raise ValidationError({'clone_fraction': 'A positive clone fraction is not accepted on an absent finding.'})
+            data['clone_fraction'] = None
     frequency = data.get('allelic_frequency')
     unit = data.get('allelic_frequency_unit') or '%'
     if unit not in ('%', '1'):
@@ -264,12 +318,23 @@ def _components(person, parent_id):
     )
 
 
+def _mapped_component_mappings():
+    """Every genetic_mutations.* mapping that names a component code.
+
+    Status is not filtered: reads survive withdrawn approval. A blank
+    source_value is: a row proposed before its recipe is complete names no
+    code, and '' in the code set would claim every linked fact without one.
+    """
+    return FieldConceptMapping.objects.filter(
+        field_name__startswith='genetic_mutations.',
+    ).exclude(source_value__isnull=True).exclude(source_value='')
+
+
 def _component_codes(snapshot):
     if 'component_codes' not in snapshot.genomics_cache:
         codes = component_codes()
-        # Reads survive withdrawn approval; only writes require current approval.
         codes.update({m.source_value: m.field_name.split('.', 1)[1]
-            for m in FieldConceptMapping.objects.filter(field_name__startswith='genetic_mutations.')})
+            for m in _mapped_component_mappings()})
         snapshot.genomics_cache['component_codes'] = codes
     return snapshot.genomics_cache['component_codes']
 
@@ -335,12 +400,18 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     marker = marker_for_variant(data)
     if data.get('marker_key') and marker is None:
         raise ValidationError({'marker_key': 'Unknown priority marker.'})
-    if marker and data['gene'].upper() != marker['gene'].upper():
-        raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
-    parent_mapping = approved_mapping(marker['field_name']) if marker else None
+    if marker:
+        if data['genomic_feature']:
+            expected = marker_features(marker)
+            if (data['genomic_feature'].casefold() != expected['genomic_feature'].casefold()
+                    or data['feature_type'] != expected['feature_type']):
+                raise ValidationError({'genomic_feature': 'The feature and its type must match the selected priority marker.'})
+        elif data['gene'].upper() != marker['gene'].upper():
+            raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
+    parent_mapping = recipe_mapping(marker['field_name']) if marker else None
     if parent_mapping and not mapping_is_usable(parent_mapping, parent=True):
         raise ValidationError({marker['field_name']: 'Variant parents must map to Measurement.'})
-    component_mappings = {key: approved_mapping('genetic_mutations.' + key)
+    component_mappings = {key: recipe_mapping('genetic_mutations.' + key)
         for key in FIELDS if key in payload or (data.get(key) is not None and data.get(key) != '')}
     if payload.get('id') is not None and payload['id'] != variant_id:
         raise ValidationError({'id': 'Use the variant ID in the URL; new IDs are assigned by the server.'})
@@ -384,8 +455,8 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     for rows in _components(person, parent.pk):
         # Only replace known component fields; unrelated linked facts survive.
         source_field = f'{rows.model._meta.model_name}_source_value'
-        codes = list(component_codes()) + list(FieldConceptMapping.objects.filter(
-            field_name__startswith='genetic_mutations.').values_list('source_value', flat=True))
+        codes = list(component_codes()) + list(
+            _mapped_component_mappings().values_list('source_value', flat=True))
         concept_field = f'{rows.model._meta.model_name}_concept'
         rows.filter(Q(**{f'{source_field}__in': codes}) | Q(**{
             f'{concept_field}__vocabulary_id': 'LOINC', f'{concept_field}__concept_code__in': codes,
@@ -438,7 +509,7 @@ def delete_variant(person, variant_id, skip_refresh=False):
     previous = _find(person, variant_id)
     marker = marker_for_variant(previous)
     if marker:
-        approved_mapping(marker['field_name'])
+        recipe_mapping(marker['field_name'])
     for rows in _components(person, variant_id):
         rows.update(is_erroneous=True, erroneous_reason='Removed in Genomics editor')
     Measurement.objects.filter(person=person, pk=variant_id).update(
@@ -481,7 +552,7 @@ def replace_priority_fields(person, values, type_concept_id=32817):
     from omop_core.services.genomics_catalog import canonicalize_fields
     for field, rows in canonicalize_fields(values).items():
         marker = patient_fields()[field]
-        approved_mapping(field)
+        recipe_mapping(field)
         if not isinstance(rows, list):
             raise ValidationError({field: 'Expected a list of findings; [] clears this marker.'})
         before = {v['id']: v for v in list_variants(person) if marker_for_variant(v) == marker}
@@ -495,7 +566,7 @@ def replace_priority_fields(person, values, type_concept_id=32817):
             if variant_id is not None and row == before[variant_id]:
                 keep.add(variant_id)
                 continue
-            result = save_variant(person, {**row, 'gene': row.get('gene') or marker['gene'], 'marker_key': marker['key']}, variant_id, type_concept_id)
+            result = save_variant(person, {**row, 'gene': row.get('gene') or ('' if row.get('genomic_feature') else marker['gene']), 'marker_key': marker['key']}, variant_id, type_concept_id)
             keep.add(result['id'])
         for variant_id in before.keys() - keep:
             delete_variant(person, variant_id)

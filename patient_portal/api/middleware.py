@@ -12,6 +12,10 @@ from promop.sentry import redact_path
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
+# Operational warnings/errors live beside the audit event stream, not inside it:
+# SIEM consumers parse every `audit` record as JSON, so plain messages there are
+# both noise and a broken contract (#1929).
+ops_logger = logging.getLogger('omop.ops')
 
 # Sunset of the legacy, non-versioned /api/ prefix (#271).
 #
@@ -152,6 +156,28 @@ def _get_resource_id(request):
     return None
 
 
+# A view's own note on its request (``request.audit_detail``): a small JSON
+# object, free of health data, that the row carries in ``detail`` and the
+# stdout line repeats. It is part of the row's HMAC. Anything else is dropped
+# with an ops warning rather than written, so the row is still recorded.
+_AUDIT_DETAIL_MAX_LENGTH = 2048
+
+
+def _audit_detail(request):
+    detail = getattr(request, 'audit_detail', None)
+    if not isinstance(detail, dict) or not detail:
+        return None
+    try:
+        encoded = json.dumps(detail, sort_keys=True)
+    except (TypeError, ValueError):
+        ops_logger.warning("audit_detail on %s is not JSON; dropped", request.path)
+        return None
+    if len(encoded) > _AUDIT_DETAIL_MAX_LENGTH:
+        ops_logger.warning("audit_detail on %s exceeds %d bytes; dropped", request.path, _AUDIT_DETAIL_MAX_LENGTH)
+        return None
+    return json.loads(encoded)
+
+
 def _should_audit(request):
     """True when this request is on an auditable path (API / OAuth / admin) with
     an audited method. Access to the audit trail itself IS audited (TI.2.2#04)."""
@@ -199,9 +225,14 @@ class AuditLogMiddleware:
                     or request.META.get('REMOTE_ADDR')
                 ),
                 'duration_ms': round((time.monotonic() - start) * 1000),
+                # A view may mark its request (``request.audit_detail``, a small
+                # JSON object) so the row says more than method and path: the
+                # record export writes ``{'export': 'fhir'|'pdf', ...}`` so the
+                # exports of a record can be listed from the audit trail alone.
+                'detail': _audit_detail(request),
             }
         except Exception:
-            logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
             return response
 
         # stdout (SIEM) and DB (review API) are written independently so one
@@ -209,12 +240,12 @@ class AuditLogMiddleware:
         try:
             logger.info(json.dumps(entry))
         except Exception:
-            logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
 
         try:
             self._persist(entry)
         except Exception:
-            logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
 
         return response
 
@@ -235,6 +266,7 @@ class AuditLogMiddleware:
             resource_id=entry['resource_id'],
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],
+            detail=entry.get('detail'),
         )
 
 
@@ -251,11 +283,16 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
     '/auth/login',
     '/auth/request-reset/',
     '/auth/request-reset',
+    '/auth/verify-email/',
+    '/auth/verify-email/resend/',
     '/auth/reset-password/',
     '/auth/reset-password',
     '/user/',
     '/user',
 )
+
+
+_PUBLIC_VOTE_PREFIX = '/api/v1/public/mapping-votes/'
 
 
 class ForcePasswordChangeMiddleware:
@@ -289,6 +326,10 @@ class ForcePasswordChangeMiddleware:
     def _is_blocked(request):
         path = request.path
         if not path.startswith('/api/'):
+            return False
+        # The public voting pages authenticate nobody; a visitor who happens
+        # to hold a flagged session here is still only a visitor there.
+        if path.startswith(_PUBLIC_VOTE_PREFIX):
             return False
         user = getattr(request, 'user', None)
         if not (user and user.is_authenticated):

@@ -51,7 +51,7 @@ A few conventions to follow:
 
 - **Adding a new patient attribute** — touch all required layers (model, migration,
   serializer, FHIR loader, TypeScript type, React UI, FHIR generator). The checklist in
-  [CLAUDE.md](CLAUDE.md) walks through each layer in order.
+  [AGENTS.md](AGENTS.md) walks through each layer in order.
 - **New features must have tests.** Write them before considering the work done. See
   [Running tests](#running-tests) below.
 - **No comments that describe *what* the code does** — well-named identifiers do that.
@@ -63,7 +63,7 @@ A few conventions to follow:
 
 ```bash
 # Backend — Django runner (omop_core + patient_portal)
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
 
 # Backend — pytest (the tests/ package)
@@ -95,7 +95,7 @@ production deployment.
 
 ```bash
 # One-liner: both backend runners + frontend
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput \
   && DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
      .venv/bin/python -m pytest -q \
@@ -123,7 +123,7 @@ PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d postgres \
 PATH="/opt/homebrew/opt/postgresql@14/bin:$PATH" psql -U postgres -d template1 \
   -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 
-DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" \
+DATABASE_URL="postgresql://postgres@localhost:5432/promop_test" DEBUG=True \
   .venv/bin/python manage.py migrate --noinput
 ```
 

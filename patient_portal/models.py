@@ -1,10 +1,13 @@
 import uuid
 
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
+
+from patient_portal.service_tokens import validate_service_scopes
 
 
 class IdentityManager(BaseUserManager):
@@ -23,6 +26,11 @@ class IdentityManager(BaseUserManager):
             raise ValueError("Email is required")
         email = self.normalize_email(email)
         extra_fields.pop("sub", None)
+        # A staff account is made by an operator at a shell, who vouches for the
+        # address. Everyone else proves theirs by following an emailed link.
+        if extra_fields.get("is_staff") and "email_verified_at" not in extra_fields:
+            from django.utils import timezone
+            extra_fields["email_verified_at"] = timezone.now()
         identity = self.model(
             issuer="urn:local",
             sub=str(uuid.uuid4()),
@@ -67,6 +75,16 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     must_change_password = models.BooleanField(
         default=False, help_text="Force a password change on next successful login (e.g. after an admin reset).",
     )
+    email_verified_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text=(
+            "When this account proved it receives mail at `email`: by following an "
+            "emailed verification, invitation or password-reset link. Null for a "
+            "local account that only typed the address in. Anything that grants "
+            "access because of the address (a domain trust, a pending invitation, "
+            "matching a person by email) must go through `has_verified_email`."
+        ),
+    )
     failed_login_count = models.PositiveIntegerField(default=0)
     locked_until = models.DateTimeField(
         null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
@@ -92,6 +110,13 @@ class Identity(AbstractBaseUser, PermissionsMixin):
         ]
 
     def save(self, *args, **kwargs):
+        fields = kwargs.get('update_fields')
+        if self.pk and self.email_verified_at is not None and (fields is None or 'email' in fields):
+            previous_email = type(self).objects.filter(pk=self.pk).values_list('email', flat=True).first()
+            if previous_email is not None and previous_email.lower() != self.email.lower():
+                self.email_verified_at = None
+                if fields is not None:
+                    kwargs['update_fields'] = list(fields) + ['email_verified_at']
         self.uid = f"{self.issuer}:{self.sub}"
         if kwargs.get("update_fields") is not None and "uid" not in kwargs["update_fields"]:
             kwargs["update_fields"] = list(kwargs["update_fields"]) + ["uid"]
@@ -100,6 +125,29 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     @property
     def is_local(self) -> bool:
         return self.issuer == "urn:local"
+
+    @property
+    def has_verified_email(self) -> bool:
+        """Whether `email` may be used to decide what this account can reach.
+
+        Federated logins record the provider's verified claim explicitly too;
+        a stored address alone is never evidence of mailbox ownership.
+        """
+        return bool(self.email) and self.email_verified_at is not None
+
+    @property
+    def verified_email_domain(self) -> str:
+        """The lowercased domain of a verified email, else ''."""
+        if not self.has_verified_email:
+            return ''
+        return self.email.rpartition('@')[2].lower()
+
+    def mark_email_verified(self, save=True):
+        if self.email_verified_at is None:
+            from django.utils import timezone
+            self.email_verified_at = timezone.now()
+            if save:
+                self.save(update_fields=['email_verified_at'])
 
     @property
     def username(self):
@@ -205,7 +253,12 @@ class PatientInvitation(models.Model):
 
 
 class PatientConsent(models.Model):
-    """Track patient consent for data sharing and clinical trials"""
+    """Legacy one-row-per-type consent flags (data sharing, clinical trial, research).
+
+    Kept for ``/api/v1/consents/`` and the HealthKit data-sharing switch. New
+    consent work uses the versioned, append-only model below (``ConsentPurpose``,
+    ``ConsentEvent`` and friends); see docs/consent-v2.md.
+    """
     patient_user = models.ForeignKey(PatientUser, on_delete=models.CASCADE, related_name='consents')
     consent_type = models.CharField(max_length=50, choices=[
         ('data_sharing', 'Data Sharing'),
@@ -426,13 +479,40 @@ class ServiceApplication(models.Model):
     ])
     description = models.TextField(blank=True)
     owner_contact = models.CharField(max_length=255, blank=True)
-    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True)
+    scopes = models.CharField(max_length=512, default='patient/*.read', blank=True,
+                              validators=[validate_service_scopes])
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['name', 'pk']
+
+    SCOPES_IN_USE = ('Clearing scopes would leave this application\'s live tokens '
+                     'granting nothing. Revoke them first, or choose scopes.')
+
+    def live_tokens(self):
+        """Tokens that can still authenticate: not revoked, not past their expiry.
+
+        An expired token is refused by stored_credential already, so counting it
+        would make an operator revoke credentials that are dead anyway.
+        """
+        return self.tokens.filter(revoked_at__isnull=True).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+
+    def clean(self):
+        """Blank scopes are storable, but not while a live token depends on them.
+
+        The field validator cannot express this — it sees a value, not the row —
+        and the serializer's copy of the rule does not reach Django admin, which
+        edits `scopes` as free text for any staff user. That is the same gap the
+        scope cap fell through before it moved onto the field.
+        """
+        super().clean()
+        if (self.scopes or '').split() or not self.pk:
+            return
+        if self.live_tokens().exists():
+            raise ValidationError({'scopes': [self.SCOPES_IN_USE]})
 
     def __str__(self):
         return self.name
@@ -458,3 +538,461 @@ class ServiceAccessToken(models.Model):
 
     def __str__(self):
         return f'{self.application.name}: {self.label} (…{self.suffix})'
+
+
+class LabMarker(models.Model):
+    """How the Personal Health Record ranks and groups one lab test.
+
+    The PHR lists labs "most important first" and filters them by panel and by
+    cancer. Those labels belong to HealthTree's clinical admins, not to code, so
+    they live here and are edited in the Django admin. The seeded rows are a
+    starting point until the CureHub observation labels are imported.
+    """
+
+    loinc_code = models.CharField(max_length=20, unique=True)
+    label = models.CharField(
+        max_length=120, blank=True, default='',
+        help_text='Display name; blank uses the LOINC concept name.',
+    )
+    rank = models.PositiveIntegerField(
+        help_text='Lower is more important. Unranked tests sort after ranked ones.',
+    )
+    panels = models.JSONField(
+        default=list, blank=True,
+        help_text='Panels this test belongs to, e.g. ["CBC"] or ["BMP", "CMP"].',
+    )
+    disease_slugs = models.JSONField(
+        default=list, blank=True,
+        help_text='Cancers this test is a disease marker for (PatientRecord.disease_slug values).',
+    )
+
+    class Meta:
+        ordering = ['rank', 'loinc_code']
+
+    def __str__(self):
+        return f'{self.loinc_code} (rank {self.rank})'
+
+
+class PatientStatement(models.Model):
+    """What a patient says about an item in their record, kept beside it.
+
+    Record data is never changed by the patient: confirming a prescription,
+    saying they stopped it, or giving the reason a line of therapy ended is a
+    statement here, keyed to the item it is about. Deleting the statement is
+    the undo. One statement per item and subject.
+    """
+
+    SUBJECT_MEDICATION = 'medication'
+    SUBJECT_MEDICATION_NOTE = 'medication_note'
+    SUBJECT_THERAPY_LINE = 'therapy_line'
+    SUBJECT_CONDITION = 'condition'
+    SUBJECT_PROCEDURE = 'procedure'
+    SUBJECTS = [
+        (SUBJECT_MEDICATION, 'Medication'), (SUBJECT_MEDICATION_NOTE, 'Note on a medication'),
+        (SUBJECT_THERAPY_LINE, 'Line of therapy'), (SUBJECT_CONDITION, 'Condition the patient added'),
+        (SUBJECT_PROCEDURE, 'Procedure the patient added'),
+    ]
+
+    # Medication answers. taking/not_taking are for a current prescription,
+    # took/not_taken for one that has ended; stopped follows a confirmation.
+    TAKING, NOT_TAKING, TOOK, NOT_TAKEN, STOPPED = 'taking', 'not_taking', 'took', 'not_taken', 'stopped'
+    END_REASON = 'end_reason'
+    # The patient's own words about an item, and the form details of an item
+    # they added (an OMOP row has no column for "where it was done").
+    NOTE, ENTRY = 'note', 'entry'
+    STATUSES = [
+        (TAKING, "I'm taking it"), (NOT_TAKING, 'Not taking'), (TOOK, 'I took it'),
+        (NOT_TAKEN, 'Not taken'), (STOPPED, 'I stopped taking this'), (END_REASON, 'Why the line ended'),
+        (NOTE, 'Note'), (ENTRY, 'Added by the patient'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='patient_statements')
+    subject = models.CharField(max_length=20, choices=SUBJECTS)
+    # The PHR's id for the item: a medication group key, a therapy line's
+    # episode id, or the id of the OMOP row a patient added.
+    subject_key = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=STATUSES)
+    reason = models.CharField(max_length=40, blank=True, default='')
+    note = models.TextField(blank=True, default='')
+    stopped_on = models.DateField(null=True, blank=True)
+    details = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'subject', 'subject_key'], name='uq_patient_statement_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.subject}:{self.subject_key} = {self.status}'
+
+
+class RecordShare(models.Model):
+    """View-only access to part of a patient's record, granted by the patient.
+
+    The holder of the link (or QR code) reads the record without an account,
+    so the link itself is the credential: it is never stored. It is derived
+    from ``public_id`` with a server-side key (see
+    ``patient_portal.api.phr.sharing``), which lets the patient see their link
+    again while a copy of the database alone opens nothing.
+    """
+    CHECKIN, DOCTOR, FAMILY, OTHER = 'checkin', 'doctor', 'family', 'other'
+    RECIPIENTS = [
+        (CHECKIN, 'Appointment check-in (care center)'), (DOCTOR, 'Doctor'),
+        (FAMILY, 'Caregiver or family member'), (OTHER, 'Other'),
+    ]
+    EMAIL, LINK, QR = 'email', 'link', 'qr'
+    METHODS = [(EMAIL, 'Email invite'), (LINK, 'Private link'), (QR, 'QR code')]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='record_shares')
+    public_id = models.CharField(max_length=16, unique=True)
+    recipient = models.CharField(max_length=10, choices=RECIPIENTS)
+    name = models.CharField(max_length=100)
+    email = models.EmailField(blank=True, default='')
+    method = models.CharField(max_length=5, choices=METHODS)
+    # {section: {"all": true}} shares the whole section, including records
+    # that arrive later; {section: {"items": [...]}} only the items chosen.
+    selection = models.JSONField(default=dict)
+    created_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['person', '-created_at'], name='record_share_person_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} → {self.name} ({self.recipient}, {self.method})'
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at <= timezone.now()
+
+    @property
+    def is_active(self) -> bool:
+        return self.revoked_at is None and not self.is_expired
+
+
+class ShareScan(models.Model):
+    """One opening of a shared record: when, and roughly where.
+
+    The place comes from the opener's IP as resolved at the edge; the IP itself
+    is never stored.
+    """
+    share = models.ForeignKey(RecordShare, on_delete=models.CASCADE, related_name='scans')
+    scanned_at = models.DateTimeField(default=timezone.now)
+    city = models.CharField(max_length=100, blank=True, default='')
+    region = models.CharField(max_length=100, blank=True, default='')
+    country = models.CharField(max_length=100, blank=True, default='')
+
+    class Meta:
+        ordering = ['-scanned_at']
+
+    def __str__(self):
+        return f'{self.share_id} @ {self.scanned_at:%Y-%m-%d %H:%M}'
+
+
+class AiExplanation(models.Model):
+    """A plain-language explanation of one item in a patient's record.
+
+    ONE writes it: its admins approve the prompt, it calls the model and stores
+    the text here, so the explanation (PHI) never sits in ONE. PRomop only
+    stores and serves it. ``source_hash`` is what ONE hashed the item, prompt
+    version and model into; a mismatch tells ONE to write a fresh one.
+    """
+    DIAGNOSIS, LAB_TEST, LAB_RESULT, GENETIC_TEST, IMAGING_STUDY = (
+        'diagnosis', 'lab_test', 'lab_result', 'genetic_test', 'imaging_study',
+    )
+    KINDS = [
+        (DIAGNOSIS, 'About your diagnosis'), (LAB_TEST, 'What the test measures'),
+        (LAB_RESULT, 'What your results mean'), (GENETIC_TEST, 'What a genetic result means'),
+        (IMAGING_STUDY, 'What a scan showed'),
+    ]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='ai_explanations')
+    kind = models.CharField(max_length=20, choices=KINDS)
+    # The PHR's id for the item: a diagnosis id, a lab test's concept id, a
+    # genetic test id, an imaging study id.
+    target_key = models.CharField(max_length=120)
+    text = models.TextField()
+    prompt_version = models.CharField(max_length=64)
+    model = models.CharField(max_length=100)
+    source_hash = models.CharField(max_length=64)
+    generated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'kind', 'target_key'], name='uq_ai_explanation_item'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.kind}:{self.target_key} ({self.model}, {self.prompt_version})'
+
+
+# ---------------------------------------------------------------------------
+# Consent model v2: purposes and documents as versioned data, decisions as an
+# append-only history, and a ledger that outlives the account.
+# See docs/consent-v2.md.
+# ---------------------------------------------------------------------------
+
+
+class ConsentPurpose(models.Model):
+    """Something a member can agree to: a permission, a contact preference or
+    a declaration. Held as data so that a deployment defines its own set.
+
+    The wording lives in ``ConsentText`` rows, versioned per language. What a
+    member answered is a ``ConsentEvent``; nothing here is ever overwritten.
+    """
+    PERMISSION, CONTACT_PREFERENCE, DECLARATION = 'permission', 'contact_preference', 'declaration'
+    KINDS = [
+        (PERMISSION, 'Permission'), (CONTACT_PREFERENCE, 'Contact preference'),
+        (DECLARATION, 'Declaration'),
+    ]
+    YES_NO, YES_NO_ASK_LATER = 'yes_no', 'yes_no_ask_later'
+    ANSWER_SETS = [(YES_NO, 'Yes or no'), (YES_NO_ASK_LATER, 'Yes, no, or ask me later')]
+
+    key = models.SlugField(max_length=50, unique=True)
+    kind = models.CharField(max_length=20, choices=KINDS, default=PERMISSION)
+    answers = models.CharField(max_length=20, choices=ANSWER_SETS, default=YES_NO)
+    asks_frequency = models.BooleanField(
+        default=False, help_text='A granted answer carries a frequency chosen from frequency_options.',
+    )
+    frequency_options = models.JSONField(
+        default=list, blank=True, help_text='Allowed frequency values, e.g. ["weekly", "monthly"].',
+    )
+    stage = models.CharField(
+        max_length=30, blank=True, default='',
+        help_text='When the app asks it (e.g. "sign_up", "first_profile"); the app decides what each means.',
+    )
+    gated_by_country = models.BooleanField(
+        default=False,
+        help_text='Only available to members whose record country is in enabled_countries.',
+    )
+    enabled_countries = models.JSONField(
+        default=list, blank=True,
+        help_text='Countries where a gated purpose is available, matched case-insensitively to the record.',
+    )
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'consent_purpose'
+        ordering = ['sort_order', 'key']
+
+    def __str__(self):
+        return self.key
+
+    def allowed_decisions(self):
+        allowed = [ConsentEvent.GRANTED, ConsentEvent.DECLINED, ConsentEvent.WITHDRAWN]
+        if self.answers == self.YES_NO_ASK_LATER:
+            allowed.append(ConsentEvent.ASK_LATER)
+        return allowed
+
+    def clean(self):
+        for name, limit in (('frequency_options', 30), ('enabled_countries', 10)):
+            value = getattr(self, name)
+            if not isinstance(value, list) or not all(isinstance(v, str) and 0 < len(v) <= limit for v in value):
+                raise ValidationError({name: f'Must be a list of strings of at most {limit} characters.'})
+        if self.asks_frequency and not self.frequency_options:
+            raise ValidationError({'frequency_options': 'A purpose that asks a frequency needs options.'})
+
+    def available_in(self, country) -> bool:
+        if not self.gated_by_country:
+            return True
+        wanted = (country or '').strip().casefold()
+        return bool(wanted) and wanted in {str(c).strip().casefold() for c in self.enabled_countries}
+
+
+class VersionedText(models.Model):
+    """One version of a text in one language. Published versions are never
+    edited: a wording change is a new version."""
+    version = models.CharField(max_length=20)
+    language = models.CharField(max_length=10, default='en')
+    title = models.CharField(max_length=200)
+    body = models.TextField(help_text='The full wording shown to the member (Markdown).')
+    summary = models.TextField(blank=True, default='', help_text='Optional short form, e.g. a checkbox label.')
+    published_at = models.DateTimeField(
+        null=True, blank=True, help_text='Unpublished versions are drafts and are never shown.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+
+    @property
+    def is_published(self) -> bool:
+        return self.published_at is not None and self.published_at <= timezone.now()
+
+
+class ConsentText(VersionedText):
+    purpose = models.ForeignKey(ConsentPurpose, on_delete=models.CASCADE, related_name='texts')
+
+    class Meta:
+        db_table = 'consent_text'
+        ordering = ['purpose_id', '-published_at', 'language']
+        constraints = [
+            models.UniqueConstraint(fields=['purpose', 'version', 'language'], name='uq_consent_text_version_lang'),
+        ]
+
+    def __str__(self):
+        return f'{self.purpose_id} v{self.version} [{self.language}]'
+
+
+class LegalDocument(models.Model):
+    """A document the member accepts, such as terms of service or a privacy
+    policy. Versions are ``LegalDocumentVersion`` rows."""
+    key = models.SlugField(max_length=50, unique=True)
+    name = models.CharField(max_length=100)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'legal_document'
+        ordering = ['sort_order', 'key']
+
+    def __str__(self):
+        return self.key
+
+
+class LegalDocumentVersion(VersionedText):
+    document = models.ForeignKey(LegalDocument, on_delete=models.CASCADE, related_name='versions')
+    requires_reacceptance = models.BooleanField(
+        default=True,
+        help_text='A significant change: members who accepted an earlier version must confirm this one.',
+    )
+
+    class Meta:
+        db_table = 'legal_document_version'
+        ordering = ['document_id', '-published_at', 'language']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['document', 'version', 'language'], name='uq_legal_document_version_lang',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.document_id} v{self.version} [{self.language}]'
+
+
+class AppendOnlyQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError('This history is append-only.')
+
+    def bulk_update(self, *args, **kwargs):
+        raise ValidationError('This history is append-only.')
+
+    def delete(self):
+        raise ValidationError('This history is append-only.')
+
+
+class AppendOnlyModel(models.Model):
+    """Rows are written once. ``save()`` always inserts, and updates and
+    deletes through the model's manager are refused.
+
+    Django's deletion collector works through the base manager, not this
+    queryset, so a cascade from the owning person (or SET_NULL from a deleted
+    identity) still goes through: that is how closing an account removes its
+    events. A database role that can only insert into these tables is the
+    guard below this one.
+    """
+    objects = AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('This history is append-only.')
+        kwargs['force_insert'] = True
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('This history is append-only.')
+
+
+class ConsentEvent(AppendOnlyModel):
+    """One answer a member gave to a purpose: the grant, refusal, deferral or
+    withdrawal, with the exact text version they saw. The member's current
+    position on a purpose is their latest event for it."""
+    GRANTED, DECLINED, ASK_LATER, WITHDRAWN = 'granted', 'declined', 'ask_later', 'withdrawn'
+    DECISIONS = [
+        (GRANTED, 'Granted'), (DECLINED, 'Declined'),
+        (ASK_LATER, 'Ask me later'), (WITHDRAWN, 'Withdrawn'),
+    ]
+    MEMBER, STAFF, MIGRATION, SYSTEM = 'member', 'staff', 'migration', 'system'
+    SOURCES = [(MEMBER, 'Member'), (STAFF, 'Staff'), (MIGRATION, 'Migration'), (SYSTEM, 'System')]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='consent_events')
+    purpose = models.ForeignKey(ConsentPurpose, on_delete=models.PROTECT, related_name='events')
+    text = models.ForeignKey(ConsentText, on_delete=models.PROTECT, null=True, blank=True, related_name='events')
+    version = models.CharField(max_length=20, help_text='The text version the member answered.')
+    language = models.CharField(max_length=10, default='en')
+    decision = models.CharField(max_length=10, choices=DECISIONS)
+    frequency = models.CharField(max_length=30, blank=True, default='')
+    source = models.CharField(max_length=10, choices=SOURCES, default=MEMBER)
+    recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'consent_event'
+        ordering = ['-recorded_at', '-id']
+        indexes = [models.Index(fields=['person', 'purpose', '-recorded_at'], name='consent_event_person_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} {self.purpose_id} {self.decision} v{self.version} @ {self.recorded_at:%Y-%m-%d}'
+
+
+class DocumentAcceptance(AppendOnlyModel):
+    """Which version of a legal document a member accepted, and when."""
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='document_acceptances')
+    document = models.ForeignKey(LegalDocument, on_delete=models.PROTECT, related_name='acceptances')
+    text = models.ForeignKey(
+        LegalDocumentVersion, on_delete=models.PROTECT, null=True, blank=True, related_name='acceptances',
+    )
+    version = models.CharField(max_length=20)
+    language = models.CharField(max_length=10, default='en')
+    source = models.CharField(max_length=10, choices=ConsentEvent.SOURCES, default=ConsentEvent.MEMBER)
+    recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    accepted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'document_acceptance'
+        ordering = ['-accepted_at', '-id']
+        indexes = [models.Index(fields=['person', 'document', '-accepted_at'], name='document_acceptance_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} {self.document_id} v{self.version} @ {self.accepted_at:%Y-%m-%d}'
+
+
+class ConsentLedgerEntry(AppendOnlyModel):
+    """The permission history kept after the account is gone.
+
+    Holds the member's email address and what they decided (which purpose or
+    document, which version, when) and nothing else: no foreign key to the
+    account or person, so deleting either leaves this row in place. Written
+    in the same transaction as every ConsentEvent and DocumentAcceptance.
+    """
+    CONSENT, DOCUMENT = 'consent', 'document'
+    KINDS = [(CONSENT, 'Consent'), (DOCUMENT, 'Document acceptance')]
+
+    email = models.EmailField(db_index=True)
+    kind = models.CharField(max_length=10, choices=KINDS)
+    key = models.CharField(max_length=50, help_text='Key of the purpose or document this entry is about.')
+    version = models.CharField(max_length=20)
+    language = models.CharField(max_length=10, default='en')
+    decision = models.CharField(max_length=10, help_text='A ConsentEvent decision, or "accepted" for a document.')
+    frequency = models.CharField(max_length=30, blank=True, default='')
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'consent_ledger_entry'
+        ordering = ['-recorded_at', '-id']
+
+    def __str__(self):
+        return f'{self.email} {self.key} {self.decision} v{self.version} @ {self.recorded_at:%Y-%m-%d}'

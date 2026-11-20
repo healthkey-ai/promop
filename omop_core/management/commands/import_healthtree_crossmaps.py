@@ -8,7 +8,9 @@ from django.db import transaction
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping, MappingDestinationCandidate
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, canonical_source_vocabulary
+from omop_core.data_migrations.snomed_relationships_v1 import REPAIRED_ORIGINS
+from omop_core.services.snomed_identity import apply_import_identity, snomed_identities
 
 
 DEFAULT_ARTIFACT = Path(__file__).resolve().parents[3] / 'docs' / 'ht-code-concept-mapping.md'
@@ -41,7 +43,7 @@ class Command(EmbeddingLoadCommand):
         grouped = defaultdict(dict)
         metadata = {}
         for row in mappings:
-            key = (row['source_vocabulary_id'], row['source_code'])
+            key = (canonical_source_vocabulary(row['source_vocabulary_id']), row['source_code'])
             metadata.setdefault(key, row)
             for candidate in row.get('candidates') or [row]:
                 target_key = (candidate['target_vocabulary_id'], str(candidate['target_concept_code']))
@@ -59,6 +61,7 @@ class Command(EmbeddingLoadCommand):
                    'standard_concept', 'invalid_reason')
         }
         source_ids = {r.get('source_concept_id') for r in metadata.values()} - {None}
+        identities = snomed_identities({code for vocab, code in grouped if vocab == 'SNOMED'})
         sources = set(Concept.objects.filter(concept_id__in=source_ids).values_list('concept_id', flat=True))
         source_filter = dict(
             source_vocabulary_id__in={v for v, _ in grouped},
@@ -82,10 +85,13 @@ class Command(EmbeddingLoadCommand):
                 target = targets.get(next(iter(candidates))) if len(candidates) == 1 else None
                 if target and (target.standard_concept != 'S' or target.invalid_reason):
                     target = None
+                identity = identities.get(key[1]) if key[0] == 'SNOMED' and all(v == 'RxNorm' for v, _ in candidates) else None
+                if identity:
+                    target = identity
                 domain = target.domain_id if target else row['domain_id']
                 origins = sorted({o for c in candidates.values() for o in c['origins']})
                 origin = 'HT-One' if 'HT-One' in origins else (origins[0] if origins else 'HT-One')
-                pending.append(SourceCodeConceptMapping(
+                new_mapping = SourceCodeConceptMapping(
                     source_vocabulary_id=key[0], source_code=key[1],
                     domain_id=domain, source_code_description=row.get('source_code_description', ''),
                     source_concept_id=row.get('source_concept_id') if row.get('source_concept_id') in sources else None,
@@ -94,7 +100,10 @@ class Command(EmbeddingLoadCommand):
                     omop_table=DOMAIN_TO_TABLE.get(domain, ''),
                     status=row.get('status', 'approved') if target else 'proposed',
                     origin='import', origin_system=origin, source=origin,
-                ))
+                )
+                if identity:
+                    apply_import_identity(new_mapping, identity, ', '.join(f'{v}:{c}' for v, c in candidates))
+                pending.append(new_mapping)
                 stats['created'] += 1
             if not options['dry_run']:
                 SourceCodeConceptMapping.objects.bulk_create(pending, batch_size=options['batch_size'], ignore_conflicts=True)
@@ -105,6 +114,8 @@ class Command(EmbeddingLoadCommand):
                 additions, updates = [], []
                 for key, candidates in grouped.items():
                     mapping = stored[key]
+                    if mapping.origin_system in REPAIRED_ORIGINS:
+                        continue
                     for (vocab, code), candidate in candidates.items():
                         target = targets.get((vocab, code))
                         target_id = target.pk if target else None

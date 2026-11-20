@@ -35,10 +35,10 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.functions import Coalesce, JSONObject, NullIf
+from django.db.models.functions import Coalesce, JSONObject
 
 from omop_core.models import ConditionOccurrence, Measurement, Observation, PatientRecord, Person
-from omop_core.services.clinical_units import blood_count_to_canonical
+from omop_core.services.clinical_units import blood_count_to_canonical, count_unit
 
 
 TRIAL_ELIGIBILITY_FIELDS = [
@@ -150,17 +150,17 @@ def _latest_blood_count_subquery(code):
         ).order_by('-measurement_date', '-measurement_id').annotate(
             count_payload=JSONObject(
                 value='value_as_number',
-                unit=Coalesce(
-                    NullIf('unit_source_value', Value('')),
-                    Case(When(unit_concept__vocabulary_id='UCUM', then='unit_concept__concept_code')),
-                ),
+                unit='unit_source_value',
+                ucum=Case(When(unit_concept__vocabulary_id='UCUM', then='unit_concept__concept_code')),
             ),
         ).values('count_payload')[:1]
     )
 
 
 def _canonical_blood_count(payload):
-    return blood_count_to_canonical(payload['value'], payload['unit']) if payload else None
+    if not payload:
+        return None
+    return blood_count_to_canonical(payload['value'], count_unit(payload['unit'], payload['ucum']))
 
 
 def _latest_observation_text_subquery(concept_codes):

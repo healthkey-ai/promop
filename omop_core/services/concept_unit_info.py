@@ -5,12 +5,39 @@ and by code-mapping serialisation to show curators the expected unit for a
 LOINC Measurement concept.
 """
 import logging
+import functools
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
+def _memoize_when_populated(build):
+    """Cache like ``lru_cache(maxsize=1)``, but never cache an empty result.
+
+    These caches are process-local with no TTL, and the LOINC tables are now
+    loaded *after* the web process is up -- queued on Celery at boot (#1624).
+    A first-ever load therefore completes on a worker while every gunicorn
+    worker keeps serving the empty mapping it cached at boot, leaving
+    ``property_for()`` and unit checks degraded until the next restart with
+    nothing to indicate it.
+
+    Not caching the empty case costs one cheap query per call while the table
+    is genuinely empty, and nothing at all once it is populated -- which is the
+    steady state.
+    """
+    cached = {}
+
+    @functools.wraps(build)
+    def wrapper():
+        if not cached.get('value'):
+            cached['value'] = build()
+        return cached['value']
+
+    wrapper.cache_clear = cached.clear
+    return wrapper
+
+
+@_memoize_when_populated
 def get_loinc_to_unit() -> dict[str, str]:
     """Build LOINC-code -> unit mapping, DB-backed with curated overrides.
 
@@ -73,6 +100,17 @@ def measurement_input_type(concept_name, suggested_unit):
     return ''
 
 
+def suggested_unit(vocabulary_id, domain_id, concept_code):
+    """The unit a LOINC Measurement code is usually reported in, '' otherwise.
+
+    Takes the three columns rather than a concept so a caller holding only an
+    aggregate (a grouped queue entry) can ask without building a fake concept.
+    """
+    if domain_id != 'Measurement' or vocabulary_id != 'LOINC' or not concept_code:
+        return ''
+    return get_loinc_to_unit().get(concept_code, '')
+
+
 def concept_unit_fields(concept):
     """Return measurement_type/suggested_unit dict for a LOINC Measurement concept.
 
@@ -85,12 +123,20 @@ def concept_unit_fields(concept):
         or getattr(concept, 'vocabulary_id', None) != 'LOINC'
     ):
         return {}
-    loinc_units = get_loinc_to_unit()
-    unit = loinc_units.get(concept.concept_code, '')
+    unit = suggested_unit(concept.vocabulary_id, concept.domain_id, concept.concept_code)
     mtype = measurement_input_type(concept.concept_name, unit)
     result = {}
+    examples = get_loinc_example_units().get(concept.concept_code, [])
+    if examples:
+        result['example_units'] = examples
     if mtype:
         result['measurement_type'] = mtype
     if unit:
         result['suggested_unit'] = unit
     return result
+
+
+@_memoize_when_populated
+def get_loinc_example_units():
+    return {code: list(dict.fromkeys(u.strip() for u in units.split(';') if u.strip()))
+            for code, units in _db_loinc_units().items()}

@@ -38,7 +38,7 @@ class FirebaseTokenProvider(TokenProvider):
         except firebase_auth.InvalidIdTokenError:
             return None
         except Exception as exc:
-            logger.debug("Firebase verify failed (%s), skipping", type(exc).__name__)
+            logger.warning("Firebase verify failed (%s), skipping", type(exc).__name__)
             return None
 
         return TokenClaims(

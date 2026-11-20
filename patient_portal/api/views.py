@@ -3,12 +3,12 @@ from collections import defaultdict
 from typing import Any, Callable, ContextManager
 
 from drf_spectacular.utils import (
-    OpenApiParameter, OpenApiResponse, extend_schema, inline_serializer,
+    OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view, inline_serializer,
 )
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import ValidationError
-from rest_framework.pagination import PageNumberPagination
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.pagination import CursorPagination, PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -17,8 +17,9 @@ from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError, models, transaction
-from django.db.models import Count, Q, F, Prefetch
+from django.db import DataError, IntegrityError, models, transaction
+from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
+from django.db.models.functions import Cast, Concat, Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -27,10 +28,13 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
+from omop_core.services.source_descriptions import source_metadata_description
+from omop_core.services.source_fhir_context import based_on_labels as _source_based_on
+from omop_core.services.provisional import is_real_row as _is_real_row
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
-    SourceCodeConceptMapping, SuggestRun, UmlsSourceCode,
+    SourceCodeConceptMapping, SourceVocabulary, MappingSuggestionReview, SuggestRun, UmlsSourceCode,
     ConditionOccurrence, DrugExposure, Measurement, MeasurementOwnership,
     Observation, ProcedureOccurrence, VisitOccurrence, VisitDetail, Location, Death,
     PatientDocument, PatientTrialEnrollment, TrialSearchPreferences,
@@ -44,7 +48,8 @@ from omop_core.models import (
     ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
     RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
     PreExistingConditionCategory,
-    Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
+    ChronicConditionOverride, Disease, DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping,
+    CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
@@ -72,24 +77,38 @@ from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, get_gender_concept
 from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
+from omop_core.mapping.table_relocation import relocatable, relocate_clinical_rows
+from omop_core.services.concept_lock import ConceptLocked, check_concept_lock, check_concept_locks
+from omop_core.services.provenance_attribution import (
+    ATTRIBUTION, FOREIGN, OWN, UNATTRIBUTED, classify, same_attribution,
+    with_attribution,
+)
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
 from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES,
     _QUARANTINE_TARGETS,
+    _QUARANTINE_VOCABULARIES,
     NO_MATCHING_CONCEPT_ID,
+    SOURCE_CODE_MAX,
+    approved_mapping_for,
     normalize_omop_table,
     repoint_clinical_rows,
     resolve_source_code,
+    revert_provisional_rows,
 )
 from omop_core.mapping.suggestions import (
+    CURATOR_PROVENANCE,
     ALL_STRATEGIES,
+    DEFAULT_RANKING_MODEL,
     DEFAULT_STRATEGIES,
     CANDIDATE_LIMIT,
     LEXICAL_LIMIT_MAX,
+    RANKING_MODELS,
     STRATEGY_LEXICAL,
     STRATEGY_SEMANTIC,
     STRATEGY_UMLS,
+    STRATEGY_VECTORS,
     SUGGESTION_MODEL_VERSION,
     VOCAB_TO_UMLS_ROOT,
     suggest_one_mapping,
@@ -97,7 +116,8 @@ from omop_core.mapping.suggestions import (
 )
 from omop_core.services.suggest_jobs import get_dispatcher as get_suggest_dispatcher
 from omop_core.services.write_descriptor import mapping_table_is_writable
-from omop_core.services import source_vocabularies
+from omop_core.services import mapping_approval, source_vocabularies
+from omop_core.services import wearable_mapping_export as wearable_export
 from omop_core.mapping.therapy import (
     get_or_create_quarantine_drug,
     get_or_create_quarantine_observation,
@@ -107,7 +127,10 @@ from omop_core.mapping.therapy import (
     validate_hemonc_regimen,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
-from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs, has_org_admin_access, has_professional_access
+from omop_core.services.access import (
+    MAPPING_WRITE_ROLES, PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
+    has_org_admin_access, has_mapping_read_access, has_mapping_write_access, has_curation_access,
+)
 from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate, make_aware, is_naive
 import datetime as _dt
@@ -119,20 +142,31 @@ import os
 import re
 from decimal import Decimal, InvalidOperation
 from io import StringIO
+from urllib.parse import urlparse
+from patient_portal.api.public_errors import public_errors
 from patient_portal.api.bulk_upload import (
     BULK_UPLOAD_AUTHENTICATION, BulkUploadPermission, ordered_bundle_entries,
     upload_organization, upload_actor_id,
 )
 from .permissions import (
-    EtlPatientCrudPermission, EtlWritePermission, PatientCrudPermission, GenomicsCrudPermission,
+    EtlDeletePermission, EtlPatientCrudPermission, EtlWritePermission,
+    PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, LabSyncPermission, get_request_org, is_service_token, is_machine_request,
+    VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
+    get_request_org, is_service_token, is_machine_request, has_system_read_grant,
 )
 from .providers.base import TokenClaims
+from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
+from .provenance_org import (
+    PROVENANCE_ORG_HEADER, ProvenanceContext, header_organization, raise_on_foreign_attribution,
+    resolve_explicit_organization,
+)
+from .condition_serializers import V1MeasurementSerializer, V1ObservationSerializer
 from .serializers import (
+    may_write_confidence,
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
-    ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
+    ConditionOccurrenceSerializer, ConditionContextSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
@@ -153,9 +187,239 @@ def _genomics_type_concept(user, person):
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
 
 
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save.
+
+    The patient or a verified representative writes patient self-report; the
+    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
+    service credential with no Identity, writes with the recipe's type.
+    """
+    from omop_core.authorization import get_actor_role
+    from omop_core.services.omop_projection import patient_self_report_type
+
+    if not getattr(actor, 'is_authenticated', False):
+        return {}
+    role = get_actor_role(actor, person.person_id)
+    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
+        return {}
+    authorship = {'type_concept_id': self_report}
+    if role == 'self':
+        authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
+    return authorship
+
+
 def _write_genetic_mutations(person, mutations, type_concept_id):
     from omop_core.services.genomics import replace_variants
     replace_variants(person, mutations, type_concept_id=type_concept_id)
+
+
+def _drop_proposed_list_items(patient_info, patch_data):
+    """*patch_data* without the proposed items of the list fields it echoes (#2534).
+
+    The editor PATCHes the whole record it read, and a list field it read holds
+    the approved items and the proposed ones (``provisional_items``). The proposed
+    ones are not the user's to write: an echo of the merged list is a no-op, and a
+    genuine edit stores only the items that are not proposals, so a proposal never
+    becomes approved data by being carried back. Only a field the record holds
+    proposals for is touched; with the switch off nothing is.
+    """
+    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
+    present = [field for field in PROVISIONAL_JSON_FIELDS if field in patch_data]
+    if not present:
+        return patch_data
+    from omop_core.services.provisional_record import overlay, without_proposed
+    proposed = getattr(overlay(patient_info)[0], 'provisional_items', None) or {}
+    stripped = dict(patch_data)
+    for field in present:
+        if field not in proposed:
+            continue
+        kept = without_proposed(field, patch_data[field], proposed[field])
+        if (kept or []) == (getattr(patient_info, field) or []):
+            del stripped[field]                      # an echo: nothing to write
+        else:
+            # An edit: the rest of the pipeline (or the variant writers) sees the
+            # list without the proposed items.
+            stripped[field] = kept
+    return stripped
+
+
+def apply_patient_record_patch(person, patient_info, data, *, actor):
+    """Apply a partial update to a person's PatientRecord, as ``actor`` writes it.
+
+    The save path of ``PATCH /api/v1/patient-records/<id>/`` and ``/me/``,
+    after their access checks, and of anything else that writes the record on
+    a person's behalf (their questionnaire answers: ``survey_record_mapping``).
+    Validation errors raise; returns the saved record and the previous value
+    of each field the patch touched. ``actor`` decides authorship: the
+    patient's own edit is typed patient self-report and carries PATIENT_SELF
+    provenance (``_patient_authorship``).
+    """
+    # patient_name targets Person, not PatientRecord, so it is handled by hand
+    # here exactly as /patient-info/me/ handles it — through the same pair of
+    # helpers, so the two routes cannot drift apart again. This is the route
+    # the provider UI PATCHes, and leaving the key in the body would 405 the
+    # request below as a non-projection-owned field.
+    patient_name, patch_data = _pop_patient_name(data)
+    from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
+    patch_data = _drop_proposed_list_items(patient_info, canonicalize_fields(patch_data))
+    priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
+    priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
+
+    # Sensitive profile fields are staff-only; patients attest via /me/confirm/.
+    # Silent drop (not 400) because auto-save sends the full GET representation.
+    if not getattr(actor, 'is_staff', False):
+        for f in PatientRecordViewSet._STAFF_ONLY_FIELDS:
+            patch_data.pop(f, None)
+    # language_skills are PersonLanguageSkill rows, not PatientRecord columns.
+    # Pop them before the serializer sees an unknown key.
+    language_skills = patch_data.pop('language_skills', None) if 'language_skills' in patch_data else None
+    # Demographics (gender/race/ethnicity) are popped because the serializer's
+    # GenderField is read-only and would silently drop the value.  They are
+    # projected to Person separately, writing the raw display text as the
+    # source value and resolving the concept.
+    demographics = {
+        f: patch_data.pop(f)
+        for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
+    }
+    mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
+    # The editor PATCHes the complete GET representation.  A projected
+    # mutation list carried back unchanged is therefore an autosave echo,
+    # not an instruction to replace its OMOP rows (and it may be empty
+    # before the vocabulary has been loaded).  Proposed items were stripped
+    # above (_drop_proposed_list_items), so the merged list the record read
+    # showed compares equal to the approved one here.
+    if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
+        mutations = None
+    if mutations is not None and priority_edits:
+        raise ValidationError({'genetic_mutations': 'Edit either the full list or named priority fields in one request.'})
+
+    with transaction.atomic():
+        # Match derivation's lock order and serialize the read/modify/write
+        # of user_edited_fields as well as same-day OMOP projection.
+        patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
+        serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        # Validate location fields early, before serializer.save() writes
+        # to PatientRecord — the model has a check constraint requiring
+        # both lat/lng or neither, so a partial clear would fail at the DB.
+        location_in_patch = {
+            f: serializer.validated_data[f]
+            for f in serializer.validated_data if f in _PROFILE_LOCATION_FIELDS
+        }
+        _validate_location_fields(location_in_patch, person, patient_info)
+        previous_values = {
+            field: getattr(patient_info, field)
+            for field in serializer.validated_data
+            if hasattr(patient_info, field)
+        }
+        direct_fields = {
+            field for field in serializer.validated_data
+            if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
+            and (serializer.validated_data[field] != previous_values.get(field)
+                 or (field in {'relapse_count', 'treatment_refractory_status'}
+                     and field not in (patient_info.therapy_overrides or {})
+                     and serializer.validated_data[field] is not None))
+        }
+        _apply_patient_name(person, patient_name)
+        if priority_edits:
+            from omop_core.services.genomics import replace_priority_fields
+            type_id = _genomics_type_concept(actor, person)
+            replace_priority_fields(person, priority_edits, type_id)
+            patient_info.refresh_from_db()
+        if mutations is not None:
+            _write_genetic_mutations(person, mutations, _genomics_type_concept(actor, person))
+            patient_info.refresh_from_db()
+        # The UI's height/weight inputs use canonical units. Set them before
+        # Model.save computes BMI, without requiring an OMOP read-back.
+        for field, unit in (('weight', 'kg'), ('height', 'cm')):
+            if field in direct_fields:
+                setattr(patient_info, f'{field}_units', unit)
+        serializer.save()
+
+        # These edits already passed the dedicated source writer and fresh
+        # readback. Never mark them pending or send them to same-day upsert.
+        direct_fields.difference_update(getattr(serializer, '_clinical_input_fields', ()))
+
+        # Demographics were popped before the serializer (GenderField is
+        # read-only and translates 'Female' → 'F'). Write the DB code to
+        # PatientRecord and the raw display text to Person.
+        if demographics:
+            from patient_portal.api.serializers import GenderField
+            gender_field = GenderField()
+            demo_update_fields = []
+            for demo_field, demo_value in demographics.items():
+                old = getattr(patient_info, demo_field)
+                # For gender, translate the display text to the DB code.
+                db_value = (gender_field.to_internal_value(demo_value)
+                            if demo_field == 'gender' and demo_value else demo_value)
+                if old != db_value:
+                    setattr(patient_info, demo_field, db_value)
+                    previous_values[demo_field] = old
+                    direct_fields.add(demo_field)
+                    demo_update_fields.append(demo_field)
+            if demo_update_fields:
+                patient_info.save(update_fields=demo_update_fields)
+
+        # Profile fields are backed by Person/Location, not OMOP clinical
+        # tables — exclude them from user_edited_fields.
+        # Pass the raw demographic values (not the serializer-translated ones)
+        # so Person.gender_source_value gets the display text.
+        profile_patch_data = dict(serializer.validated_data)
+        profile_patch_data.update(demographics)
+        profile_projected = _project_profile_fields(
+            person, direct_fields, profile_patch_data,
+        )
+        if 'date_of_birth' in profile_projected:
+            # PatientRecord.save calculates age from its related Person when
+            # DOB is cleared. Keep that relation on the just-updated Person
+            # instance rather than the stale object cached by serializer.save().
+            patient_info.person = person
+        clinical_fields = direct_fields - profile_projected
+
+        if clinical_fields:
+            edited = set(patient_info.user_edited_fields or []) | clinical_fields
+            patient_info.user_edited_fields = sorted(edited)
+            patient_info.save(update_fields=['user_edited_fields'])
+        _write_record_revisions(patient_info, previous_values, actor)
+
+        # Handle language skills (PersonLanguageSkill rows).
+        touched_languages = False
+        if language_skills is not None:
+            try:
+                created, removed = set_language_skills(person, language_skills)
+                touched_languages = bool(created or removed)
+            except LanguageSkillError as exc:
+                raise ValidationError({'detail': str(exc)})
+
+        if clinical_fields:
+            from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+            projection_data = dict(serializer.validated_data)
+            if 'medication_contexts' in clinical_fields:
+                from omop_core.services.medication_context import context_delta
+                projection_data['medication_contexts'] = context_delta(
+                    previous_values.get('medication_contexts') or {},
+                    projection_data['medication_contexts'])
+            projected = PatientRecordViewSet._project_mapped_fields(
+                person, clinical_fields, projection_data, actor=actor,
+            )
+            patient_info.user_edited_fields = sorted(
+                set(patient_info.user_edited_fields or []) - projected
+            )
+            recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
+            patient_info.refresh_from_db()
+        elif profile_projected or touched_languages:
+            from omop_core.services.patient_record_service import recompute_patient_record_fields
+            recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
+            patient_info.refresh_from_db()
+
+        # A direct edit is approved: the provisional picture takes it too,
+        # and drops any proposal's confidence on the edited fields.
+        if direct_fields:
+            from omop_core.services.provisional_record import mirror_user_edit
+            mirror_user_edit(patient_info, direct_fields)
+
+    return patient_info, previous_values
 
 
 class PatientRecordPagination(PageNumberPagination):
@@ -382,7 +646,7 @@ class CurrentUserViewSet(viewsets.ViewSet):
 
         has_active_clinical_grant = GroupAccess.objects.filter(
             identity=user,
-            role__in=['org_admin', 'doctor', 'analyst'],
+            role__in=PROFESSIONAL_ROLES,
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
         ).exists()
@@ -423,6 +687,28 @@ def _extract_provenance(request):
         source_user_id = f"{request.user.issuer}|{request.user.sub}"
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
+
+
+_PROVENANCE_CONTEXT_ATTR = '_promop_provenance_context'
+
+
+def _provenance_context(request, *, header: bool) -> ProvenanceContext:
+    cached = getattr(request, _PROVENANCE_CONTEXT_ATTR, None)
+    if cached is not None:
+        return cached
+    if header:
+        organization, explicit = header_organization(request)
+    else:
+        organization, explicit = get_request_org(request), False
+    source, source_user_id, reason = _extract_provenance(request)
+    if explicit and not source:
+        raise ValidationError({'organization_id': (
+            f'{PROVENANCE_ORG_HEADER} requires a provenance source '
+            "(X-Provenance-Source header or body 'source')."
+        )})
+    context = ProvenanceContext(source, source_user_id or '', reason, organization, explicit)
+    setattr(request, _PROVENANCE_CONTEXT_ATTR, context)
+    return context
 
 
 def _echoed_unchanged_fields(patient_info, patch_data):
@@ -527,7 +813,7 @@ _ALL_PROFILE_FIELDS = (
     _PROFILE_SIMPLE_PERSON_FIELDS
     | set(_PROFILE_DEMOGRAPHIC_FIELDS)
     | set(_PROFILE_LOCATION_FIELDS)
-    | {'date_of_birth'}
+    | {'date_of_birth', 'date_of_birth_precision'}
 )
 
 
@@ -617,19 +903,48 @@ def _project_profile_fields(person, direct_fields, patch_data):
     # A date of birth is factual source data, not a computed field. Corrections
     # therefore replace every OMOP representation together; otherwise a stale
     # birth_datetime could disagree with year/month/day after an edit.
-    if 'date_of_birth' in profile_fields:
-        dob = patch_data['date_of_birth']
+    if profile_fields & {'date_of_birth', 'date_of_birth_precision'}:
+        dob = patch_data.get('date_of_birth')
+        if dob is None and 'date_of_birth' not in patch_data:
+            # Precision-only PATCH: reconstruct DOB from Person's existing fields.
+            if person.year_of_birth:
+                from datetime import date as _date
+                try:
+                    dob = _date(
+                        person.year_of_birth,
+                        person.month_of_birth or 1,
+                        person.day_of_birth or 1,
+                    )
+                except ValueError:
+                    dob = _date(person.year_of_birth, 1, 1)
         if isinstance(dob, str):
             dob = parse_date(dob)
-        values = {
-            'year_of_birth': dob.year if dob else None,
-            'month_of_birth': dob.month if dob else None,
-            'day_of_birth': dob.day if dob else None,
-            'birth_datetime': (
-                timezone.make_aware(datetime.combine(dob, datetime.min.time()))
-                if dob else None
-            ),
-        }
+        precision = patch_data.get('date_of_birth_precision')
+        if dob:
+            if precision == 'year':
+                month_val = None
+                day_val = None
+            elif precision == 'month':
+                month_val = dob.month
+                day_val = None
+            else:
+                month_val = dob.month
+                day_val = dob.day
+            values = {
+                'year_of_birth': dob.year,
+                'month_of_birth': month_val,
+                'day_of_birth': day_val,
+                'birth_datetime': (
+                    timezone.make_aware(datetime.combine(dob, datetime.min.time()))
+                ),
+            }
+        else:
+            values = {
+                'year_of_birth': None,
+                'month_of_birth': None,
+                'day_of_birth': None,
+                'birth_datetime': None,
+            }
         for attr, value in values.items():
             if getattr(person, attr) != value:
                 setattr(person, attr, value)
@@ -695,18 +1010,31 @@ def _project_profile_fields(person, direct_fields, patch_data):
 
 
 def _record_provenance(record, source, source_user_id, target_patient_id=None, modification_reason=None, organization=None):
-    """Create or update a ProvenanceRecord pointing at any model instance."""
-    ProvenanceRecord.objects.update_or_create(
-        content_type=ContentType.objects.get_for_model(record),
-        object_id=record.pk,
-        source_user_id=source_user_id or '',
-        source=source,
-        defaults={
-            'target_patient_id': target_patient_id,
-            'modification_reason': modification_reason,
-            'organization': organization,
-        },
-    )
+    """Create or update a ProvenanceRecord pointing at any model instance.
+
+    The organization is the hospital the row came from: set once, never changed.
+    """
+    with transaction.atomic():
+        provenance, created = ProvenanceRecord.objects.select_for_update().get_or_create(
+            content_type=ContentType.objects.get_for_model(record),
+            object_id=record.pk,
+            source_user_id=source_user_id or '',
+            source=source,
+            defaults={
+                'target_patient_id': target_patient_id,
+                'modification_reason': modification_reason,
+                'organization': organization,
+            },
+        )
+        if created:
+            return
+        provenance.target_patient_id = target_patient_id
+        provenance.modification_reason = modification_reason
+        fields = ['target_patient_id', 'modification_reason']
+        if provenance.organization_id is None and organization is not None:
+            provenance.organization = organization
+            fields.append('organization')
+        provenance.save(update_fields=fields)
 
 
 def _changed_fields(patient_record, previous_values, prev_val):
@@ -728,7 +1056,7 @@ def _changed_fields(patient_record, previous_values, prev_val):
     }
 
 
-def _write_record_revisions(patient_record, previous_values, request):
+def _write_record_revisions(patient_record, previous_values, user):
     """Persist field-level revision-history rows for a PatientRecord update.
 
     PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
@@ -744,7 +1072,6 @@ def _write_record_revisions(patient_record, previous_values, request):
         # Normalize to a stable string form for storage + comparison.
         return None if v is None else str(v)
 
-    user = getattr(request, 'user', None)
     changed_by = (
         str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
         else 'system'
@@ -834,9 +1161,28 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
-            # Group grants: see patients in those groups
+            # Public demo orgs: every grant there, whatever its role, lists
+            # the org's sample patients (#1392). A public demo org hands out
+            # no individual access, so its role restrictions do not matter:
+            # a self-signed-up patient and an analyst browse it alike
+            # (#2416). Only direct org grants are checked -- no trust
+            # expansion, no admin powers, no mapping curation access. This
+            # is the one place an analyst grant reaches a patient list.
+            demo_org_ids = list(
+                active_grants.filter(
+                    org__isnull=False,
+                    org__allows_patient_signup=True,
+                ).values_list('org_id', flat=True)
+            )
+            all_visible_org_ids = list(set(admin_org_ids) | set(demo_org_ids))
+
+            # Group grants: see patients in those groups. An analyst grant
+            # lists nothing here (#2416): the role is code mapping and PRism
+            # analytics, never a patient's data.
             actor_group_ids = list(
-                active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+                active_grants.exclude(role__in=MAPPING_WRITE_ROLES)
+                             .filter(group__isnull=False)
+                             .values_list('group_id', flat=True)
             )
             if actor_group_ids:
                 group_pids = PatientGroupMembership.objects.filter(
@@ -844,15 +1190,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 ).values_list('person_id', flat=True)
                 accessible_pids.update(group_pids)
 
-            if not accessible_pids and not admin_org_ids:
+            if not accessible_pids and not all_visible_org_ids:
                 return qs.none()
 
-            if admin_org_ids and accessible_pids:
+            if all_visible_org_ids and accessible_pids:
                 qs = qs.filter(
-                    Q(organization_id__in=admin_org_ids) | Q(person_id__in=accessible_pids)
+                    Q(organization_id__in=all_visible_org_ids) | Q(person_id__in=accessible_pids)
                 )
-            elif admin_org_ids:
-                qs = qs.filter(organization_id__in=admin_org_ids)
+            elif all_visible_org_ids:
+                qs = qs.filter(organization_id__in=all_visible_org_ids)
             else:
                 qs = qs.filter(person_id__in=accessible_pids)
         return qs
@@ -878,9 +1224,36 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 queryset = queryset.filter(organization__slug=org_slug)
 
+        disease_category = self._normalize_all_param(params.get('disease_category'))
+        if disease_category:
+            from omop_core.models import DiseaseCategoryMapping
+            cat_diseases = list(
+                DiseaseCategoryMapping.objects
+                .filter(category__iexact=disease_category)
+                .values_list('disease_name', flat=True)
+            )
+            if cat_diseases:
+                from omop_core.services.disease_episodes import disease_slug as _cat_slug
+                cat_match = Q()
+                for d in cat_diseases:
+                    cat_match |= Q(disease__iexact=d)
+                    slug = _cat_slug(d)
+                    if slug:
+                        cat_match |= Q(disease_slugs__contains=[slug])
+                queryset = queryset.filter(cat_match)
+            else:
+                queryset = queryset.none()
+
         disease = self._normalize_all_param(params.get('disease'))
         if disease:
-            queryset = queryset.filter(disease__iexact=disease)
+            # Any cancer on the record, not only the primary one (#2182). The
+            # primary match also covers records not re-derived since.
+            from omop_core.services.disease_episodes import disease_slug
+            match = Q(disease__iexact=disease)
+            slug = disease_slug(disease)
+            if slug:
+                match |= Q(disease_slugs__contains=[slug])
+            queryset = queryset.filter(match)
 
         stage = self._normalize_all_param(params.get('stage'))
         if stage:
@@ -902,21 +1275,32 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
             queryset = queryset.filter(updated_at__gte=start_of_year)
 
+        # The withheld reader (#2460) searches, filters and sorts only on what
+        # it is shown: ids and clinical fields, never a name, email or address.
+        withheld = self._withholds_identifiers(self.request)
         search = self._normalize_all_param(params.get('search'))
         if search:
+            from omop_core.services.patient_list_context import visible_demographics
+            queryset = queryset.annotate(_search_name=Concat(
+                'person__given_name', Value(' '), 'person__family_name',
+                output_field=CharField(),
+            ))
             name_query = (
                 Q(person__given_name__icontains=search) |
                 Q(person__family_name__icontains=search) |
-                Q(email__icontains=search)
+                Q(_search_name__icontains=search) |
+                Q(email__icontains=search) |
+                Q(person__portal_user__identity__email__icontains=search)
             )
+            search_query = name_query & visible_demographics(self.request.user, withheld)
             try:
-                name_query |= Q(person__person_id=int(search))
+                search_query |= Q(person__person_id=int(search))
             except (TypeError, ValueError):
                 pass
-            queryset = queryset.filter(name_query)
+            queryset = queryset.filter(search_query)
 
         from omop_core.services.patient_list_context import filter_context
-        return filter_context(queryset, params, self.request.user)
+        return filter_context(queryset, params, self.request.user, withheld)
 
     def _build_filter_options(self, queryset):
         org_rows = (
@@ -934,31 +1318,64 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if queryset.filter(organization__isnull=True).exists():
             org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
 
-        diseases = (
-            queryset
-            .exclude(disease__isnull=True)
-            .exclude(disease='')
-            .values_list('disease', flat=True)
-            .distinct()
-            .order_by('disease')
-        )
+        from omop_core.models import DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping
+        rows = list(DiseaseCategoryChoice.objects.values_list('label', flat=True))
+        diseases = rows if rows else [c.label for c in DiseaseCategory]
+
+        # Categories as {value, label} objects
+        category_rows = list(DiseaseCategoryChoice.objects.values('code', 'label'))
+        if category_rows:
+            disease_categories = [{'value': r['code'], 'label': r['label']} for r in category_rows]
+        else:
+            disease_categories = [{'value': c.value, 'label': c.label} for c in DiseaseCategory]
+
+        # Diseases grouped by category code
+        mapping_rows = DiseaseCategoryMapping.objects.values_list('category', 'disease_name')
+        diseases_by_category = {}
+        for cat_code, disease_name in mapping_rows:
+            diseases_by_category.setdefault(cat_code, []).append(disease_name)
+        for v in diseases_by_category.values():
+            v.sort()
 
         return {
             'orgs': org_options,
-            'diseases': list(diseases),
+            'diseases': diseases,
+            'disease_categories': disease_categories,
+            'diseases_by_category': diseases_by_category,
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
+    def _withholds_identifiers(self, request) -> bool:
+        """A session reader with no curation access sees no demographics (#2460).
+
+        The demo-org browse lists sample patients to an analyst or a
+        patient-role grant (#1392), neither of which may read a patient's
+        data: the list and the CSV export carry their rows de-identified.
+        Machine credentials and org-scoped tokens are not readers here.
+        """
+        if is_service_token(request) or get_request_org(request) is not None:
+            return False
+        user = request.user
+        # A reader this cannot classify is withheld, not shown: fail closed.
+        if not (user and user.is_authenticated):
+            return True
+        return not has_curation_access(user)
+
     def list(self, request):
         """List all patients - accessible to authenticated users"""
         base_queryset = self.get_queryset()
         from omop_core.services.patient_list_context import annotate_context, order_context
+        withheld = self._withholds_identifiers(request)
         queryset = order_context(self._apply_patient_list_filters(base_queryset),
-                                 request.query_params.get('ordering', '-updated'), request.user)
+                                 request.query_params.get('ordering', '-updated'), request.user, withheld)
+        if settings.PROVISIONAL_DATA_ENABLED:
+            # The overlay reads each row's provisional pair: one join, not a query per row.
+            queryset = queryset.select_related(
+                'person__patient_record_provisional', 'person__patient_record_confidence')
         from patient_portal.models import PatientUser
         own_person_id = (PatientUser.objects.filter(identity=request.user).values_list('person_id', flat=True).first()
                          if request.user and request.user.is_authenticated else None)
-        context = {'request': request, 'own_person_id': own_person_id}
+        context = {'request': request, 'own_person_id': own_person_id, 'withhold_identifiers': withheld}
 
         if 'page' in request.query_params or 'page_size' in request.query_params:
             page = self.paginate_queryset(queryset)
@@ -996,10 +1413,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         # Pass request in context so PH.1.2#05 demographic redaction can
         # identify whether the reader is the account holder.
-        patient_serializer = PatientRecordSerializer(patient_info, context={'request': request})
+        from omop_core.services.provisional_record import overlay
+        shown, provisional_fields = overlay(patient_info)
+        patient_serializer = PatientRecordSerializer(shown, context={'request': request})
 
         return Response({
-            'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
+            # legacy wire format — preserved for frontend/federation host compatibility
+            'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
             'user': user_data
         })
 
@@ -1034,7 +1454,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
             if not can_write_patient(request.user, person.person_id):
                 return Response(
-                    {'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                    {'error': 'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
@@ -1081,6 +1501,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.models import FieldConceptMapping
         from omop_core.services.genomics import mapping_is_usable
         from omop_core.services.genomics_catalog import catalog, disease_code, markers
+        from omop_core.services.genomics_features import marker_features
         person, error = self._genomics_access(request, pk)
         if error is not None:
             return error
@@ -1091,9 +1512,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         mappings = {m.field_name: m for m in FieldConceptMapping.objects.filter(
             field_name__in=[m['field_name'] for m in selected],
         ).only('field_name', 'status', 'omop_table', 'source_value')}
+        from omop_core.services.genomics_components import components
         return Response({'version': catalog()['version'], 'disease': code,
-            'markers': [{**m, 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
-                        for m in selected]})
+            'markers': [{**m, **marker_features(m), 'writable': mapping_is_usable(mappings.get(m['field_name']), parent=True)}
+                        for m in selected],
+            # Finding attributes the field mapper lists as genetic_mutations.<key>.
+            'attributes': [a['key'] for a in components()]})
 
     @action(detail=True, methods=['get', 'patch', 'delete'], url_path=r'genomics/(?P<variant_id>[0-9]+)', permission_classes=[GenomicsCrudPermission, PatientSelfScopePermission])
     def genomic_variant(self, request, pk=None, variant_id=None):
@@ -1112,173 +1536,40 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _patch_record(self, request, person, patient_info):
         """Shared save path after the provider or self-service access check."""
-        # patient_name targets Person, not PatientRecord, so it is handled by hand
-        # here exactly as /patient-info/me/ handles it — through the same pair of
-        # helpers, so the two routes cannot drift apart again. This is the route
-        # the provider UI PATCHes, and leaving the key in the body would 405 the
-        # request below as a non-projection-owned field.
-        patient_name, patch_data = _pop_patient_name(request.data)
-        from omop_core.services.genomics_catalog import canonicalize_fields, patient_fields
-        patch_data = canonicalize_fields(patch_data)
-        priority_edits = {key: patch_data.pop(key) for key in list(patch_data) if key in patient_fields()}
-        priority_edits = {key: value for key, value in priority_edits.items() if value != getattr(patient_info, key)}
-
-        # Sensitive profile fields are staff-only; patients attest via /me/confirm/.
-        # Silent drop (not 400) because auto-save sends the full GET representation.
-        if not getattr(request.user, 'is_staff', False):
-            for f in self._STAFF_ONLY_FIELDS:
-                patch_data.pop(f, None)
-        # language_skills are PersonLanguageSkill rows, not PatientRecord columns.
-        # Pop them before the serializer sees an unknown key.
-        language_skills = patch_data.pop('language_skills', None) if 'language_skills' in patch_data else None
-        # Demographics (gender/race/ethnicity) are popped because the serializer's
-        # GenderField is read-only and would silently drop the value.  They are
-        # projected to Person separately, writing the raw display text as the
-        # source value and resolving the concept.
-        demographics = {
-            f: patch_data.pop(f)
-            for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
-        }
-        mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
-        # The editor PATCHes the complete GET representation.  A projected
-        # mutation list carried back unchanged is therefore an autosave echo,
-        # not an instruction to replace its OMOP rows (and it may be empty
-        # before the vocabulary has been loaded).
-        if mutations == PatientRecordSerializer(patient_info).data.get('genetic_mutations'):
-            mutations = None
-        if mutations is not None and priority_edits:
-            raise ValidationError({'genetic_mutations': 'Edit either the full list or named priority fields in one request.'})
-
-        # Validate language_skills early, before the transaction.
+        language_skills = request.data.get('language_skills') if 'language_skills' in request.data else None
         if language_skills is not None and not isinstance(language_skills, dict):
             return Response(
                 {'detail': "'language_skills' must be an object mapping a "
                            "language to its capabilities."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        with transaction.atomic():
-            # Match derivation's lock order and serialize the read/modify/write
-            # of user_edited_fields as well as same-day OMOP projection.
-            patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
-            serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            # Validate location fields early, before serializer.save() writes
-            # to PatientRecord — the model has a check constraint requiring
-            # both lat/lng or neither, so a partial clear would fail at the DB.
-            location_in_patch = {
-                f: serializer.validated_data[f]
-                for f in serializer.validated_data if f in _PROFILE_LOCATION_FIELDS
-            }
-            _validate_location_fields(location_in_patch, person, patient_info)
-            previous_values = {
-                field: getattr(patient_info, field)
-                for field in serializer.validated_data
-                if hasattr(patient_info, field)
-            }
-            direct_fields = {
-                field for field in serializer.validated_data
-                if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
-                and (serializer.validated_data[field] != previous_values.get(field)
-                     or (field in {'relapse_count', 'treatment_refractory_status'}
-                         and field not in (patient_info.therapy_overrides or {})
-                         and serializer.validated_data[field] is not None))
-            }
-            _apply_patient_name(person, patient_name)
-            if priority_edits:
-                from omop_core.services.genomics import replace_priority_fields
-                type_id = _genomics_type_concept(request.user, person)
-                replace_priority_fields(person, priority_edits, type_id)
-                patient_info.refresh_from_db()
-            if mutations is not None:
-                _write_genetic_mutations(person, mutations, _genomics_type_concept(request.user, person))
-                patient_info.refresh_from_db()
-            # The UI's height/weight inputs use canonical units. Set them before
-            # Model.save computes BMI, without requiring an OMOP read-back.
-            for field, unit in (('weight', 'kg'), ('height', 'cm')):
-                if field in direct_fields:
-                    setattr(patient_info, f'{field}_units', unit)
-            serializer.save()
-
-            # Demographics were popped before the serializer (GenderField is
-            # read-only and translates 'Female' → 'F'). Write the DB code to
-            # PatientRecord and the raw display text to Person.
-            if demographics:
-                from patient_portal.api.serializers import GenderField
-                gender_field = GenderField()
-                demo_update_fields = []
-                for demo_field, demo_value in demographics.items():
-                    old = getattr(patient_info, demo_field)
-                    # For gender, translate the display text to the DB code.
-                    db_value = (gender_field.to_internal_value(demo_value)
-                                if demo_field == 'gender' and demo_value else demo_value)
-                    if old != db_value:
-                        setattr(patient_info, demo_field, db_value)
-                        previous_values[demo_field] = old
-                        direct_fields.add(demo_field)
-                        demo_update_fields.append(demo_field)
-                if demo_update_fields:
-                    patient_info.save(update_fields=demo_update_fields)
-
-            # Profile fields are backed by Person/Location, not OMOP clinical
-            # tables — exclude them from user_edited_fields.
-            # Pass the raw demographic values (not the serializer-translated ones)
-            # so Person.gender_source_value gets the display text.
-            profile_patch_data = dict(serializer.validated_data)
-            profile_patch_data.update(demographics)
-            profile_projected = _project_profile_fields(
-                person, direct_fields, profile_patch_data,
-            )
-            if 'date_of_birth' in profile_projected:
-                # PatientRecord.save calculates age from its related Person when
-                # DOB is cleared. Keep that relation on the just-updated Person
-                # instance rather than the stale object cached by serializer.save().
-                patient_info.person = person
-            clinical_fields = direct_fields - profile_projected
-
-            if clinical_fields:
-                edited = set(patient_info.user_edited_fields or []) | clinical_fields
-                patient_info.user_edited_fields = sorted(edited)
-                patient_info.save(update_fields=['user_edited_fields'])
-            _write_record_revisions(patient_info, previous_values, request)
-
-            # Handle language skills (PersonLanguageSkill rows).
-            touched_languages = False
-            if language_skills is not None:
-                try:
-                    created, removed = set_language_skills(person, language_skills)
-                    touched_languages = bool(created or removed)
-                except LanguageSkillError as exc:
-                    raise ValidationError({'detail': str(exc)})
-
-            if clinical_fields:
-                from omop_core.services.patient_record_service import recompute_patient_record_fields
-
-                projected = self._project_mapped_fields(person, clinical_fields, serializer.validated_data)
-                patient_info.user_edited_fields = sorted(
-                    set(patient_info.user_edited_fields or []) - projected
-                )
-                recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
-                patient_info.refresh_from_db()
-            elif profile_projected or touched_languages:
-                from omop_core.services.patient_record_service import recompute_patient_record_fields
-                recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
-                patient_info.refresh_from_db()
-
+        patient_info, previous_values = apply_patient_record_patch(
+            person, patient_info, request.data, actor=request.user,
+        )
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
         edit for a later retry. Return fields backed by OMOP, including an
         identical existing fact. PatientRecord already has these values, so
         there is no OMOP-to-PatientRecord refresh on a direct save.
+
+        A patient's or representative's edit is typed patient self-report
+        (32865), as genomics edits are; the patient's own also gets a
+        PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
+        if 'medication_contexts' in direct_fields:
+            from omop_core.services.medication_context import project_record_contexts
+            project_record_contexts(person, patch_data['medication_contexts'],
+                                    **_patient_authorship(actor, person))
+            # Structured edits retain protection until a later full derivation
+            # confirms them. Never read OMOP back during this interactive save.
         try:
             with transaction.atomic():
                 descriptors = build_writable_field_descriptor()
@@ -1286,11 +1577,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.warning('Could not resolve OMOP projections')
             return set()
         projected = set()
+        authorship = None
         for field in direct_fields:
+            if field == 'medication_contexts':
+                continue  # Per-exposure attributes have their dedicated forward projector.
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
+                if authorship is None:
+                    authorship = _patient_authorship(actor, person)
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True):
+                                        acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     if (projection['omop_table'] in ('measurement', 'observation')
@@ -1515,7 +1811,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 getattr(request.user, 'is_staff', False)
                 or GroupAccess.objects.filter(
                     identity=request.user,
-                    role__in=['org_admin', 'doctor', 'analyst'],
+                    role__in=PROFESSIONAL_ROLES,
                 ).filter(
                     Q(expires_at__isnull=True) | Q(expires_at__gt=now)
                 ).exists()
@@ -1538,10 +1834,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         if request.method == 'GET':
             user_serializer = UserSerializer(request.user)
-            patient_serializer = PatientRecordSerializer(patient_info)
+            from omop_core.services.provisional_record import overlay
+            shown, provisional_fields = overlay(patient_info)
+            patient_serializer = PatientRecordSerializer(shown)
             full_name = f"{person.given_name or ''} {person.family_name or ''}".strip()
             return Response({
-                'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
+                # legacy wire format — preserved for frontend/federation host compatibility
+                'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
                 'user': user_serializer.data,
                 'patient_name': full_name,
             })
@@ -1725,11 +2024,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
         """
-        from omop_core.services.fhir_export import serialize_signed_fhir_bundle
-        from patient_portal.api.fhir.integrity import (
-            check_fhir_version, EXPORT_DIGEST_HEADER, EXPORT_SIGNATURE_HEADER,
-        )
-        from django.http import HttpResponse
+        from patient_portal.api.fhir.integrity import check_fhir_version, signed_fhir_response
 
         # Bounded multi-version interchange (TI.5.2#01): only R4 is served.
         version_error = check_fhir_version(request)
@@ -1745,16 +2040,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # this keeps DRF permission hooks in the path as a second layer.
         self.check_object_permissions(request, patient_record)
 
-        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
-        # the bundle to canonical bytes, then emit a SHA-256 digest and an HMAC
-        # signature over EXACTLY those bytes so the recipient can verify content
-        # integrity. We return an HttpResponse (not DRF Response) so the digest
-        # matches the body verbatim.
-        body_bytes, digest, signature = serialize_signed_fhir_bundle(person)
-        response = HttpResponse(body_bytes, content_type='application/fhir+json')
-        response[EXPORT_DIGEST_HEADER] = digest
-        response[EXPORT_SIGNATURE_HEADER] = signature
-        return response
+        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): a SHA-256
+        # digest and an HMAC signature over exactly the bytes returned. Shared
+        # with the PHR's own export (patient_portal/api/phr/export.py).
+        return signed_fhir_response(person)
 
     @action(detail=False, methods=['post'],
             authentication_classes=BULK_UPLOAD_AUTHENTICATION,
@@ -1993,6 +2282,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         'medication_requests': [],
                         'immunizations': [],
                         'diagnostic_reports': [],
+                        'imaging_studies': [],
                         'allergy_intolerances': [],
                         'encounters': [],
                     }
@@ -2050,6 +2340,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patient_id = _resolve_patient_ref(patient_ref)
                     if patient_id in patients_data:
                         patients_data[patient_id]['diagnostic_reports'].append(resource)
+                elif resource_type == 'ImagingStudy':
+                    patient_ref = resource.get('subject', {}).get('reference', '')
+                    patient_id = _resolve_patient_ref(patient_ref)
+                    if patient_id in patients_data:
+                        patients_data[patient_id]['imaging_studies'].append(resource)
                 elif resource_type == 'AllergyIntolerance':
                     patient_ref = resource.get('patient', {}).get('reference', '')
                     patient_id = _resolve_patient_ref(patient_ref)
@@ -2140,6 +2435,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Process each patient
             import time as _time
+            _imaging_index = None  # the bundle's resources by reference, built once
             for fhir_patient_id, data in patients_data.items():
                 try:
                     _atomic_entered = False
@@ -2165,11 +2461,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     month_of_birth = None
                     day_of_birth = None
                     
-                    if patient_resource.get('birthDate'):
-                        birth_date = datetime.strptime(patient_resource['birthDate'], '%Y-%m-%d').date()
-                        year_of_birth = birth_date.year
-                        month_of_birth = birth_date.month
-                        day_of_birth = birth_date.day
+                    raw_birth = patient_resource.get('birthDate') or ''
+                    try:
+                        if len(raw_birth) >= 10:  # YYYY-MM-DD (full date)
+                            birth_date = datetime.strptime(raw_birth[:10], '%Y-%m-%d').date()
+                            year_of_birth = birth_date.year
+                            month_of_birth = birth_date.month
+                            day_of_birth = birth_date.day
+                        elif len(raw_birth) == 7 and raw_birth[4] == '-':  # YYYY-MM (month precision)
+                            y, m = int(raw_birth[:4]), int(raw_birth[5:7])
+                            if 1 <= m <= 12:
+                                year_of_birth, month_of_birth = y, m
+                            else:
+                                year_of_birth = y  # degrade to year-only
+                        elif len(raw_birth) == 4:  # YYYY (year precision)
+                            year_of_birth = int(raw_birth)
+                    except (ValueError, TypeError):
+                        logger.warning('Could not parse FHIR birthDate; importing patient without DOB')
                     
                     # Extract address information from FHIR
                     country = None
@@ -3503,7 +3811,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         for _coding in _obs_fhir_code.get('coding', []):
                             _sys = _coding.get('system', '')
                             _code = _coding.get('code', '')
-                            if 'loinc.org' in _sys and _code in _ASSESSMENT_LOINC:
+                            if urlparse(_sys).hostname == 'loinc.org' and _code in _ASSESSMENT_LOINC:
                                 _obs_concept = _cc_by_loinc(_code)
                                 _obs_src = _code
                                 break
@@ -3767,6 +4075,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         )
 
                     def _vocab_from_system(system):
+                        vendor_or_standard = source_vocabularies.fhir_source_vocabulary(system)
+                        if vendor_or_standard:
+                            return vendor_or_standard
                         system = (system or '').lower()
                         if 'rxnorm' in system:
                             return 'RxNorm'
@@ -4084,6 +4395,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     logger.info(
                         "TIMING patient=%s phase=diagnostic_reports elapsed=%.1fs count=%d",
                         _timing_hash, _time.monotonic() - _pt_start, len(data.get('diagnostic_reports', [])),
+                    )
+
+                    # --- Radiology reports and ImagingStudy → structured imaging (#1731) ---
+                    # References may only reach this patient's own resources:
+                    # the bundle can hold several patients.
+                    from omop_core.services.imaging import import_imaging, index_resources
+                    if _imaging_index is None:
+                        _imaging_index = index_resources(entries)
+                    import_imaging(
+                        person, data.get('diagnostic_reports', []), data.get('imaging_studies', []),
+                        _imaging_index,
+                        subject_refs={ref for ref, pid in patient_ref_aliases.items() if pid == fhir_patient_id},
+                        record_provenance=(
+                            (lambda _row: _record_provenance(
+                                _row, prov_source, prov_user_id,
+                                modification_reason=prov_reason, organization=upload_org))
+                            if prov_source else None
+                        ),
                     )
 
                     # --- Write AllergyIntolerance rows into OMOP Observation ---
@@ -4959,16 +5288,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
                             continue
-                        # can_access_patient grants the analyst role, which is read-only
-                        # (omop_core.authorization: 'analyst' is in _READ_ROLES, not
-                        # _WRITE_ROLES) — so the read predicate alone would let an analyst
-                        # delete patients. The read-denial above stays a "not found" so the
-                        # endpoint is not an existence oracle; here the caller demonstrably
-                        # can read the patient, so hiding existence buys nothing and an
-                        # explicit reason is more useful than a false "not found".
+                        # The read predicate alone once let an analyst (then a
+                        # reader, never a writer) delete patients, so the write
+                        # predicate is checked on its own. The read-denial above
+                        # stays a "not found" so the endpoint is not an existence
+                        # oracle; here the caller demonstrably can read the
+                        # patient, so hiding existence buys nothing and an explicit
+                        # reason is more useful than a false "not found".
                         if not can_write_patient(request.user, person_id):
                             errors.append(
-                                "Analysts have read-only access. Contact a doctor or org admin to delete patient data."
+                                "You have read-only access to this patient. Contact a doctor or org admin to delete patient data."
                             )
                             continue
                     with transaction.atomic():
@@ -5069,6 +5398,88 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.exception("bulk_delete_filtered: unexpected error")
             return Response({'error': 'Delete operation failed.'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    # Each record costs ~8 queries (therapy lines, supportive courses) and this
+    # runs inside the request under gunicorn's 30s timeout.
+    EXPORT_CSV_MAX_ROWS = 500
+
+    @action(detail=False, methods=['get'], url_path='export-csv')
+    def export_csv(self, request):
+        """Download the full PatientRecord of the selected patients as CSV.
+
+        ``?person_ids=1,2,3`` exports those patients; without it the patient
+        list filters (org, search, disease, stage, date, review filters) pick
+        the rows, so "select all" exports what the list is showing. Either way
+        the rows come from ``get_queryset()``, so an id the caller cannot see
+        is silently absent rather than an error — the endpoint is not an
+        existence oracle. Columns are the ``PatientRecordSerializer`` output,
+        demographic redaction included.
+        """
+        from omop_core.services.patient_list_context import order_context
+
+        queryset = self.get_queryset()
+        withheld = self._withholds_identifiers(request)
+        raw_ids = request.query_params.get('person_ids')
+        if raw_ids is not None:
+            try:
+                person_ids = {int(v) for v in raw_ids.split(',') if v.strip()}
+            except ValueError:
+                return Response({'error': 'person_ids must be a comma-separated list of integers.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not person_ids:
+                return Response({'error': 'No person_ids provided.'}, status=status.HTTP_400_BAD_REQUEST)
+            if len(person_ids) > self.EXPORT_CSV_MAX_ROWS:
+                return Response({'error': f'At most {self.EXPORT_CSV_MAX_ROWS} patients per export.'},
+                                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+            queryset = queryset.filter(person__person_id__in=person_ids).order_by('person__person_id')
+        else:
+            queryset = order_context(self._apply_patient_list_filters(queryset),
+                                     request.query_params.get('ordering', '-updated'), request.user, withheld)
+            if queryset.count() > self.EXPORT_CSV_MAX_ROWS:
+                return Response({'error': f'At most {self.EXPORT_CSV_MAX_ROWS} patients per export; '
+                                          'narrow the filters.'},
+                                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
+        rows = PatientRecordSerializer(queryset, many=True,
+                                       context={'request': request, 'withhold_identifiers': withheld}).data
+        columns = list(rows[0].keys()) if rows else ['person_id']
+
+        buffer = StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([_csv_cell(row.get(column)) for column in columns])
+
+        from django.http import HttpResponse
+        response = HttpResponse(buffer.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="patients_{localdate().isoformat()}.csv"'
+        )
+        response['Cache-Control'] = 'no-store'
+        return response
+
+
+def _csv_cell(value):
+    """One exported value as CSV text.
+
+    Nested values (therapy lines, biomarker lists) are written as JSON so they
+    survive a round trip. Text that a spreadsheet would read as a formula is
+    prefixed with an apostrophe (OWASP CSV injection guidance): patient data
+    comes from uploads and free-text edits, so it is not trusted.
+    """
+    if value is None:
+        return ''
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, default=str)
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, str) and value[:1] in ('=', '+', '-', '@', '\t', '\r'):
+        # DRF renders DecimalField as a string, so "-1.50" is a number, not a formula.
+        try:
+            float(value)
+        except ValueError:
+            return "'" + value
+    return value
+
 @csrf_exempt
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -5093,6 +5504,23 @@ def login_view(request):
                 user = authenticate(request, username=identity.uid, password=password)
 
         if user is not None:
+            # Block login for self-signup accounts that have not verified their
+            # email. Only self-signup sets pending_email_verification on the grant;
+            # admin-created, ETL-provisioned and invited accounts are unaffected.
+            from omop_core.models import GroupAccess
+            if (user.has_usable_password()
+                    and not user.has_verified_email
+                    and GroupAccess.objects.filter(
+                        identity=user, pending_email_verification=True,
+                    ).exists()):
+                from patient_portal.api.email_verification import send_verification_email
+                send_verification_email(user)
+                return Response({
+                    'error': 'Please verify your email address before signing in. '
+                             'We have sent a new verification link to your email.',
+                    'code': 'email_not_verified',
+                }, status=status.HTTP_403_FORBIDDEN)
+
             login(request, user)
             user_serializer = UserSerializer(user)
             return Response({
@@ -5180,16 +5608,41 @@ def health_check(request):
 
 
 # Disease label lookup — human-readable names for known disease slugs.
-_DISEASE_LABELS = {
+# Hardcoded entries for legacy slugs that don't follow the standard pattern.
+_DISEASE_LABELS_HARDCODED = {
     'mm':                     'Multiple Myeloma',
     'MM':                     'Multiple Myeloma',
     'er-erbb2-breast-cancer': 'ER+/HER2+ Breast Cancer',
-    'breast-cancer':           'Breast Cancer',
-    'follicular-lymphoma':     'Follicular Lymphoma',
     'cll':                    'Chronic Lymphocytic Leukemia',
-    'lung-cancer':             'Lung Cancer',
-    'colon-cancer':            'Colon Cancer',
 }
+
+
+def _disease_labels() -> dict[str, str]:
+    """Build slug→label from DiseaseCategoryChoice, merged with hardcoded entries."""
+    import re
+    from omop_core.services.patient_record_service import _category_titles
+    labels = dict(_DISEASE_LABELS_HARDCODED)
+    for _code, label in _category_titles().items():
+        slug = re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')[:100]
+        if slug and slug not in labels:
+            labels[slug] = label
+    return labels
+
+
+def _patients_per_disease(queryset) -> list[tuple[str, int]]:
+    """(disease_slug, patients) for the records in ``queryset``, largest first.
+
+    A patient counts once under each cancer on the record (``disease_slugs``,
+    plus ``disease_slug``, which a direct edit can change alone); a patient
+    with none counts under ''. Counts therefore add up to more than the
+    patients when anyone has two cancers (#2182).
+    """
+    from collections import Counter
+
+    counts = Counter()
+    for primary, slugs in queryset.values_list('disease_slug', 'disease_slugs').iterator():
+        counts.update({s for s in (primary, *(slugs or ())) if s} or {''})
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
 @api_view(['GET'])
@@ -5199,21 +5652,15 @@ def org_disease_stats(request):
     from django.db.models import Count
 
     def _disease_counts(qs):
-        rows = (
-            qs.values('disease_slug')
-            .annotate(count=Count('id'))
-            .order_by('-count')
-        )
+        labels = _disease_labels()
         return [
             {
-                'disease_slug': r['disease_slug'] or '',
-                'label': _DISEASE_LABELS.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
-                'count': r['count'],
+                'disease_slug': slug,
+                'label': labels.get(slug, slug or 'Unknown'),
+                'count': count,
             }
-            for r in rows
+            for slug, count in _patients_per_disease(qs)
         ]
-
-    from django.db.models import Count
 
     orgs = get_visible_orgs(request.user)
     org_list = list(orgs.order_by('name'))
@@ -5236,8 +5683,9 @@ def org_disease_stats(request):
 
     result = []
     for org in org_list:
-        owned_counts = _disease_counts(PatientRecord.objects.filter(organization=org))
-        owned_count = sum(d['count'] for d in owned_counts)
+        # A patient with two cancers is in two disease rows, so totals are
+        # counted on their own, never summed from the rows (#2182).
+        owned_count = PatientRecord.objects.filter(organization=org).count()
         accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
         accessible_org_ids = {org.id} | trusting_map[org.id]
         counts = _disease_counts(PatientRecord.objects.filter(organization_id__in=accessible_org_ids))
@@ -5253,9 +5701,10 @@ def org_disease_stats(request):
 
     # For staff users: also surface patients not assigned to any org.
     if getattr(request.user, 'is_staff', False):
-        counts = _disease_counts(PatientRecord.objects.filter(organization__isnull=True))
-        if counts:
-            unassigned_total = sum(d['count'] for d in counts)
+        unassigned = PatientRecord.objects.filter(organization__isnull=True)
+        unassigned_total = unassigned.count()
+        if unassigned_total:
+            counts = _disease_counts(unassigned)
             result.insert(0, {
                 'org_slug': '__unassigned__',
                 'org_name': 'All Patients (Unassigned)',
@@ -5275,7 +5724,6 @@ def auth_test(request):
     """Test auth endpoint — DEBUG only."""
     if not settings.DEBUG:
         return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
-    import traceback as tb
     try:
         step = 'start'
         username = request.data.get('username', 'test')
@@ -5285,8 +5733,9 @@ def auth_test(request):
         user = do_auth(request, username=username, password='badpassword_test_only')
         step = 'authenticate done'
         return Response({'status': 'ok', 'step': step, 'user': str(user)})
-    except Exception as e:
-        return Response({'status': 'error', 'step': step, 'error': str(e), 'traceback': tb.format_exc()}, status=500)
+    except Exception:
+        logger.exception('auth_test failed at step %s', step)
+        return Response({'status': 'error', 'step': step}, status=500)
 
 # =============================================================================
 # Person ViewSet — identity resolution and demographic patch
@@ -5380,17 +5829,30 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         patient*. Without it the response describes the deployment: which fields
         could be written by someone permitted to write them.
 
+        Pass ``?disease=MM`` (a Disease Category code, repeatable) for one
+        profile: the base record plus those diseases' extensions. ``Other`` is
+        the base record alone.
+
         That distinction matters because a field being mapped is not the same as
-        the reader being allowed to edit it. Analysts have read-only access to
-        every patient, and a caller may have no access to a given person at all —
+        the reader being allowed to edit it. A caller may read a patient without
+        being allowed to write them, or have no access to a given person at all —
         so a descriptor that reported those fields writable would put a typeable
         box in front of someone whose every save is refused. The point of asking
         before rendering is to be told the truth for the person doing the
         editing.
         """
+        from omop_core.services import disease_profiles
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
-        descriptor = build_writable_field_descriptor()
+        # Every entry says whose record it is part of: the base record, or the
+        # extension of the diseases it names (#2331). ?disease= narrows the
+        # answer to one profile; it describes the record and refuses nothing.
+        descriptor = disease_profiles.annotate(build_writable_field_descriptor())
+        named = [value for value in request.query_params.getlist('disease') if value.strip()]
+        if named:
+            with public_errors(disease_profiles.ScopeError, field='detail'):
+                codes = disease_profiles.profile_codes(named)
+            descriptor = disease_profiles.profile(descriptor, codes)
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:
@@ -5449,6 +5911,529 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             status=status.HTTP_202_ACCEPTED,
         )
 
+    # ------------------------------------------------------------------
+    # Source codes on a patient
+    # ------------------------------------------------------------------
+
+    @action(detail=True, methods=['get', 'post', 'patch'], url_path='source-codes',
+            permission_classes=[EtlWritePermission, PatientSelfScopePermission])
+    def source_codes(self, request: Request, pk: str | None = None) -> Response:
+        """Source codes for a patient.
+
+        GET  — list source codes with mapping status (admin only).
+        POST — upsert source codes from ETL (staff or service token with
+               ``system/etl.write`` scope). ``replace`` prunes against the
+               payload, ``upload_id`` plus ``final`` against the run; see
+               `_post_source_codes`.
+
+        EtlWritePermission, not ScopedTokenPermission: the POST documents the
+        ``system/etl.write`` scope, and only this class consults it. Under the
+        base class an ETL token reached `has_scopes`, which accepts nothing but
+        ``patient/*.write``/``user/*.write``, so every ETL POST was 403 before
+        the view ran. Same oversight as /refresh/ (#1170). GET is unaffected:
+        the ETL grant covers POST/PUT/PATCH only, so a read falls through to
+        the base class exactly as before.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if request.method == 'POST':
+            return self._post_source_codes(request, person)
+        if request.method == 'PATCH':
+            return self._patch_source_code(request, person)
+
+        # --- GET ---
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators can view source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        source_codes = _get_patient_source_codes(person)
+        summary = {'total': 0, 'unmapped': 0, 'proposed': 0, 'approved': 0}
+        for sc in source_codes:
+            summary['total'] += 1
+            ms = sc.get('mapping_status', 'unmapped')
+            if ms in summary:
+                summary[ms] += 1
+
+        return Response({
+            'person_id': person.person_id,
+            'source_codes': source_codes,
+            'summary': summary,
+        })
+
+    def _patch_source_code(self, request: Request, person: Person) -> Response:
+        """Correct displayed source context without rewriting ETL evidence."""
+        from omop_core.models import PatientSourceCode
+
+        if is_machine_request(request) or not _is_admin_actor(request):
+            return Response({'detail': 'Only human curators can correct source codes.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        try:
+            source_code_id = int(request.data.get('source_code_id'))
+        except (TypeError, ValueError):
+            return Response({'source_code_id': 'A source-code row ID is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        row = PatientSourceCode.objects.filter(person=person, pk=source_code_id).first()
+        if row is None:
+            return Response({'detail': 'Source-code row not found.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        fields = {
+            'source_unit_override': 50,
+            'example_quantity_override': 100,
+        }
+        supplied = set(request.data) & set(fields)
+        if not supplied or set(request.data) - (set(fields) | {'source_code_id'}):
+            return Response({'detail': 'Only source unit and quantity corrections are accepted.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        for name in supplied:
+            value = request.data[name]
+            if value is not None and (
+                not isinstance(value, str) or len(value.strip()) > fields[name]
+                or _contains_nul(value)
+            ):
+                return Response({name: f'Must be text of at most {fields[name]} characters, or null.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            setattr(row, name, value.strip() if value is not None else None)
+        row.source_corrected_by = request.user
+        row.source_corrected_at = timezone.now()
+        row.save(update_fields=[*supplied, 'source_corrected_by', 'source_corrected_at'])
+        return Response({
+            'source_code_id': row.pk,
+            'source_unit': row.source_unit_override if row.source_unit_override is not None else row.source_unit,
+            'example_quantity': (row.example_quantity_override if row.example_quantity_override is not None
+                                 else row.example_quantity),
+            'source_unit_override': row.source_unit_override,
+            'example_quantity_override': row.example_quantity_override,
+        })
+
+    # ---- POST helper (kept on the viewset for permission context) ----
+
+    # DATA_UPLOAD_MAX_MEMORY_SIZE usually binds first: with a FHIR resource in
+    # source_metadata, 2.5 MB is ~1,200 entries. That is a 413 with max_bytes.
+    _SOURCE_CODES_MAX = 5000
+    # Long enough for a uuid4 with dashes, or a run id of the caller's own
+    # shape; it is an opaque token, so nothing here parses it.
+    _SOURCE_CODES_UPLOAD_ID_MAX = 64
+    # A run that goes this long without a chunk is taken to have died, so a
+    # crashed import cannot lock a patient out of every later one.
+    _UPLOAD_STALE_AFTER = timedelta(hours=24)
+
+    def _open_source_code_upload(
+        self, person: Person, upload_id: str,
+    ) -> tuple['PatientSourceCodeUpload | None', Response | None]:
+        """Claim this run for the patient, or say why it cannot be claimed.
+
+        Call with the person row locked. One patient has at most one open run,
+        because a single token slot per source-code row cannot describe two:
+        a run that re-sends a code retags it, and the other run's final chunk
+        would then delete a code it had uploaded itself.
+        """
+        from omop_core.models import PatientSourceCodeUpload
+
+        now = timezone.now()
+        open_runs = PatientSourceCodeUpload.objects.filter(
+            person=person, finalized_at__isnull=True,
+        )
+        # A crashed import must not lock the patient out for good, so close
+        # what has gone quiet before looking for a conflict.
+        open_runs.filter(
+            last_chunk_at__lt=now - self._UPLOAD_STALE_AFTER,
+        ).update(finalized_at=now)
+
+        conflict = open_runs.exclude(upload_id=upload_id).first()
+        if conflict is not None:
+            return None, Response(
+                {'detail': (
+                    f'Upload {conflict.upload_id} is still open for this '
+                    f'patient. Finish or abandon it before starting another.'
+                ), 'open_upload_id': conflict.upload_id},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        run, created = PatientSourceCodeUpload.objects.get_or_create(
+            person=person, upload_id=upload_id,
+        )
+        if not created and run.finalized_at is not None:
+            # Reusing a token would prune against a run start that has
+            # already been honoured, so it is a caller bug, not a retry.
+            return None, Response(
+                {'detail': f'Upload {upload_id} has already been finalized.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if not created:
+            run.save(update_fields=['last_chunk_at'])
+        return run, None
+
+    def _post_source_codes(self, request: Request, person: Person) -> Response:
+        """Upsert PatientSourceCode rows from an ETL payload.
+
+        Two ways to say "the stored set is exactly what I sent":
+
+        ``replace: true`` prunes against the keys in this one request, so it
+        only tells the truth for a set that fits under the cap. A caller that
+        has to chunk cannot use it past the first request without deleting the
+        chunks that follow.
+
+        ``upload_id`` is the chunked form (#1824). The caller tags every chunk
+        of one run with the same token and marks the last one ``final: true``;
+        the prune then runs against the token rather than the payload, so set
+        size stops mattering. A run that dies before ``final`` prunes nothing,
+        which leaves stale rows rather than a truncated patient. One patient
+        takes one run at a time: a chunk that arrives while another run is
+        open is a 409, as is a chunk on a token already finalized.
+        """
+        from omop_core.models import PatientSourceCode
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': 'Only administrators or ETL service tokens can post source codes.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        entries = request.data.get('source_codes')
+        if not isinstance(entries, list) or not entries:
+            return Response(
+                {'detail': 'source_codes must be a non-empty list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(entries) > self._SOURCE_CODES_MAX:
+            return Response(
+                {'detail': f'Maximum {self._SOURCE_CODES_MAX} source codes per request.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        replace = request.data.get('replace') is True
+        final = request.data.get('final') is True
+        raw_upload_id = request.data.get('upload_id')
+        upload_id = ''
+        if raw_upload_id is not None:
+            if not isinstance(raw_upload_id, str) or not raw_upload_id.strip():
+                return Response(
+                    {'detail': 'upload_id must be a non-empty string.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            upload_id = raw_upload_id.strip()
+            if len(upload_id) > self._SOURCE_CODES_UPLOAD_ID_MAX:
+                return Response(
+                    {'detail': (
+                        f'upload_id must be at most '
+                        f'{self._SOURCE_CODES_UPLOAD_ID_MAX} characters.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # PostgreSQL stores NUL in no text column, so this would be a bare
+            # 500 at insert time, same as the entry fields below (#1778).
+            if _contains_nul(upload_id):
+                return Response(
+                    {'detail': (
+                        'upload_id contains a NUL character (\u0000), which '
+                        'cannot be stored.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        # The two prune rules contradict each other: one deletes what this
+        # payload omits, the other what this run omits.
+        if replace and upload_id:
+            return Response(
+                {'detail': 'replace and upload_id cannot be combined.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if final and not upload_id:
+            return Response(
+                {'detail': 'final requires an upload_id.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate and build model instances.
+        now = timezone.now()
+        objs: list[PatientSourceCode] = []
+        for i, entry in enumerate(entries):
+            sv = entry.get('source_value', '').strip() if isinstance(entry, dict) else ''
+            if not sv:
+                return Response(
+                    {'detail': f'Entry {i}: source_value is required.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            raw_count = entry.get('occurrence_count', 1)
+            try:
+                occ = int(raw_count if raw_count is not None else 1)
+                if occ < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': f'Entry {i}: occurrence_count must be a positive integer.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            source_unit = (entry.get('source_unit') or '').strip()[:50]
+            example_quantity = (entry.get('example_quantity') or '').strip()[:100]
+            source_metadata = entry.get('source_metadata')
+            if not isinstance(source_metadata, dict):
+                source_metadata = {}
+            # PostgreSQL stores NUL in neither text nor jsonb, so the insert
+            # would fail below DRF as a bare 500 (#1778).
+            nul_fields = [
+                name for name, value in (
+                    ('source_value', sv),
+                    ('source_vocabulary_id', entry.get('source_vocabulary_id')),
+                    ('omop_table', entry.get('omop_table')),
+                    ('source_unit', source_unit),
+                    ('example_quantity', example_quantity),
+                    ('source_metadata', source_metadata),
+                ) if _contains_nul(value)
+            ]
+            if nul_fields:
+                return Response(
+                    {'detail': (
+                        f'Entry {i}: {", ".join(nul_fields)} contains a NUL '
+                        f'character (\\u0000), which cannot be stored.'
+                    )},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            objs.append(PatientSourceCode(
+                person=person,
+                source_value=sv,
+                source_vocabulary_id=(entry.get('source_vocabulary_id') or '').strip(),
+                omop_table=(entry.get('omop_table') or '').strip(),
+                occurrence_count=occ,
+                source_unit=source_unit,
+                example_quantity=example_quantity,
+                source_metadata=source_metadata,
+                upload_id=upload_id,
+                last_seen=now,
+            ))
+
+        request_keys = {
+            (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
+        }
+
+        # Codes whose rows a replace or a final chunk removes: their Seen
+        # counts are rebuilt too (#2123).
+        removed_keys = set()
+        with transaction.atomic():
+            deleted = 0
+            if replace or upload_id:
+                # Lock the person row, not this person's source codes: a
+                # queryset `exists()` compiles to LIMIT 1 FOR UPDATE, which
+                # locks one arbitrary row and serialises nothing. Every writer
+                # below takes the same single lock before it reads.
+                Person.objects.select_for_update().get(pk=person.pk)
+
+            run = None
+            if upload_id:
+                run, err = self._open_source_code_upload(person, upload_id)
+                if err:
+                    return err
+
+            if replace and request_keys:
+                # Delete rows for this person that are absent from the payload.
+                # The upsert below will re-create or update every row in the
+                # payload, so afterwards the person's set equals exactly what
+                # the caller sent.
+                keep = Q()
+                for sv, svid, ot in request_keys:
+                    keep |= Q(source_value=sv, source_vocabulary_id=svid,
+                              omop_table=ot)
+                gone = PatientSourceCode.objects.filter(person=person).exclude(keep)
+                removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
+                deleted, _ = gone.delete()
+
+            # Count existing rows inside the transaction (after delete if
+            # replace) so created/updated counts reflect actual DB state.
+            match_q = Q()
+            for sv, svid, ot in request_keys:
+                match_q |= Q(source_value=sv, source_vocabulary_id=svid,
+                             omop_table=ot)
+            existing_keys = set(
+                PatientSourceCode.objects.filter(person=person)
+                .filter(match_q)
+                .values_list('source_value', 'source_vocabulary_id', 'omop_table')
+            )
+            updated = len(request_keys & existing_keys)
+            created = len(request_keys) - updated
+
+            PatientSourceCode.objects.bulk_create(
+                objs,
+                update_conflicts=True,
+                unique_fields=['person', 'source_value', 'source_vocabulary_id', 'omop_table'],
+                update_fields=['occurrence_count', 'source_unit', 'example_quantity',
+                               'source_metadata', 'upload_id', 'last_seen'],
+            )
+
+            if final:
+                # After the upsert, so this chunk's own rows carry the token.
+                # Every other row belongs to a run that has finished or been
+                # abandoned, because an overlapping run was refused above.
+                gone = PatientSourceCode.objects.filter(person=person).exclude(upload_id=upload_id)
+                removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
+                deleted, _ = gone.delete()
+                run.finalized_at = timezone.now()
+                run.save(update_fields=['finalized_at', 'last_chunk_at'])
+                logger.info(
+                    'source-codes upload %s final for person %s: pruned %d stale rows',
+                    upload_id, person.person_id, deleted,
+                )
+
+        # A code that now arrives in two units may imply two LOINC tests; the
+        # queue flags it. Evidence only, so a failure here never fails the upload.
+        keys = {(svid, sv) for sv, svid, _ot in request_keys}
+        try:
+            from omop_core.mapping.axis_variants import refresh_multi_unit_codes
+            refresh_multi_unit_codes(keys)
+        except Exception:  # noqa: BLE001
+            logger.warning('Axis variant refresh after source-code upload failed.', exc_info=True)
+        # The codes' Seen counts become what their per-patient rows now say,
+        # replacing the provisional count a lookup kept while no rows existed
+        # (#2123); a mapping stored under a vocabulary's canonical id is
+        # reached through it as well.
+        try:
+            from omop_core.mapping.axis_variants import rebuild_seen_counts
+            from omop_core.services.source_vocabularies import canonical_source_vocabulary
+            touched = keys | removed_keys
+            touched |= {(canonical_source_vocabulary(svid), sv) for svid, sv in touched}
+            rebuild_seen_counts(touched)
+        except Exception:  # noqa: BLE001
+            logger.warning('Seen count rebuild after source-code upload failed.', exc_info=True)
+
+        result: dict = {'created': created, 'updated': updated}
+        if replace or final:
+            result['deleted'] = deleted
+        resp_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
+        return Response(result, status=resp_status)
+
+    @action(detail=True, methods=['post'], url_path='resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def resolve_source_codes(self, request: Request, pk: str | None = None) -> Response:
+        """POST /api/v1/patient-records/{person_id}/resolve-source-codes/
+
+        Queue a source-code resolution for one person.  Returns 202 with a
+        run_id that the client polls via ``/v1/resolve-runs/{run_id}/``.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': _admin_denial_detail(request)},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.services.resolve_jobs import create_and_dispatch_resolve_run
+
+        run = create_and_dispatch_resolve_run(
+            [person.person_id], user=request.user,
+        )
+        return Response(
+            {'run_id': str(run.id), 'total': 1},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=False, methods=['post'], url_path='bulk-resolve-source-codes',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def bulk_resolve_source_codes(self, request: Request) -> Response:
+        """POST /api/v1/patient-records/bulk-resolve-source-codes/
+
+        Queue a bulk source-code resolution for multiple patients.
+        Returns 202 with a run_id to poll.
+
+        Two modes:
+        - ``person_ids``: explicit list of person IDs (individual selection)
+        - ``select_all``: true + optional filter query params (selectAll mode)
+        """
+        if not _is_admin_actor(request):
+            return Response(
+                {'detail': _admin_denial_detail(request)},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from omop_core.services.resolve_jobs import (
+            BULK_RESOLVE_MAX_PERSONS,
+            create_and_dispatch_resolve_run,
+        )
+
+        person_ids = request.data.get('person_ids', [])
+        select_all = request.data.get('select_all', False)
+
+        if select_all:
+            if not getattr(settings, 'CELERY_BROKER_URL', ''):
+                return Response(
+                    {'detail': 'Resolve-all requires background processing (Celery).'},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            # Use the same filter pipeline as the patient list.
+            qs = self._apply_patient_list_filters(self.get_queryset())
+            pid_qs = qs.values_list('person__person_id', flat=True).distinct()
+            count = pid_qs.count()
+            if count == 0:
+                return Response(
+                    {'detail': 'No patients match the current filters.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if count > BULK_RESOLVE_MAX_PERSONS:
+                return Response(
+                    {'detail': f'Selection exceeds the {BULK_RESOLVE_MAX_PERSONS}-patient cap.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            person_ids = list(pid_qs)
+        else:
+            if not isinstance(person_ids, list) or not person_ids:
+                return Response(
+                    {'detail': 'person_ids must be a non-empty list of integers.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not all(isinstance(pid, int) for pid in person_ids):
+                return Response(
+                    {'detail': 'person_ids must contain only integers.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if len(person_ids) > BULK_RESOLVE_MAX_PERSONS:
+                return Response(
+                    {'detail': f'Maximum {BULK_RESOLVE_MAX_PERSONS} person_ids per request.'},
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
+
+        run = create_and_dispatch_resolve_run(person_ids, user=request.user)
+        return Response(
+            {'run_id': str(run.id), 'total': run.total},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def resolve_run_status(request: Request, run_id) -> Response:
+    """GET /api/v1/resolve-runs/{run_id}/ — poll a bulk resolve run."""
+    if not _is_admin_actor(request):
+        return Response(
+            {'detail': 'Only administrators can view resolve run status.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    from omop_core.models import SourceCodeResolveRun
+
+    try:
+        run = SourceCodeResolveRun.objects.get(id=run_id)
+    except SourceCodeResolveRun.DoesNotExist:
+        return Response({'detail': 'Run not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    return Response({
+        'run_id': str(run.id),
+        'state': run.state,
+        'total': run.total,
+        'done': run.done,
+        'resolved': run.resolved,
+        'created': run.created,
+        'provisional': run.provisional,
+        'reverted': run.reverted,
+        'skipped': run.skipped,
+        'already_resolved': run.already_resolved,
+        'errors': run.errors,
+        'code_details': run.code_details if run.state in ('completed', 'failed') else [],
+    })
 
 
 @api_view(['GET'])
@@ -5474,6 +6459,79 @@ def derivation_status(request: Request, task_id: str) -> Response:
 
 
 
+def _resolve_provision_org(request):
+    """Return ``(organization, error_response)`` for a caller naming a tenant.
+
+    Shared by ``provision`` and the PATCH that fills an organization in
+    afterwards, so both answer a bad slug the same way.
+
+    The rule ``PatientSignupView._resolve_org`` applies: the caller's own
+    organization wins, otherwise it may name a slug. One difference, the slug is
+    optional here. Every ETL caller provisions without one today, and no
+    organization is still a valid answer.
+
+    There is no check that the caller may assign an organization at all, because
+    ``EtlProvisionPermission`` has already narrowed this endpoint to the legacy
+    ETL grant and staff, and both may. The credential's own organization is
+    checked even though it is always ``None`` here for exactly those two: a
+    legacy token carries no organization and staff are unscoped. That is the
+    binding #1764 proposes adding, and the day it lands this endpoint must not
+    start accepting a slug naming somebody else's tenant.
+    """
+    token_org = get_request_org(request)
+    raw = request.data.get('organization')
+    if raw is not None and not isinstance(raw, str):
+        # A JSON body can carry any type here, and normalizing a number or a
+        # list would raise AttributeError, answering bad input with a 500.
+        return None, Response(
+            {'detail': "'organization' must be an organization slug."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    slug = (raw or '').strip()
+    if not slug:
+        return token_org, None
+    if token_org is not None:
+        if token_org.slug != slug:
+            return None, Response(
+                {'detail': 'The organization must match the service credential.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return token_org, None
+    org = Organization.objects.filter(slug=slug).first()
+    if org is None:
+        # 400, not a silent fall back to no organization: a slug nobody owns is
+        # a caller mistake, and accepting it would mint exactly the orphaned
+        # records this parameter exists to stop.
+        return None, Response(
+            {'detail': f"Unknown organization '{slug}'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return org, None
+
+
+def _fill_record_org(record, org):
+    """Fill an empty organization and return the slug of the one now in force.
+
+    Fill-if-empty, as CSV ingest and `import_org_patients` both do it: a
+    patient another organization already owns is not moved by an import that
+    names a different one. The effective slug goes back in the response so the
+    caller can see that happened, rather than reading a success and then
+    finding the patient absent from its own org-scoped queries.
+
+    The row is re-read under a lock, because "empty" has to still be true at the
+    moment of the write. Two retries of one patient naming different
+    organizations would otherwise both find it empty, and the second would move
+    the patient while both responses claimed their own.
+    """
+    if org is not None:
+        with transaction.atomic():
+            record = PatientRecord.objects.select_for_update().get(pk=record.pk)
+            if record.organization_id is None:
+                record.organization = org
+                record.save(update_fields=['organization', 'updated_at'])
+    return record.organization.slug if record.organization_id else None
+
+
 class PersonViewSet(viewsets.GenericViewSet):
     """
     Endpoints:
@@ -5497,7 +6555,8 @@ class PersonViewSet(viewsets.GenericViewSet):
         from patient_portal.api.permissions import is_machine_request
         if is_machine_request(request):
             return Response(
-                {'detail': 'Person identity provisioning requires end-user authentication.'},
+                {'detail': 'Person identity provisioning requires end-user authentication. '
+                           'Service callers use POST /api/persons/provision/.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
         actor_iss = request.data.get('actor_iss', '').strip()
@@ -5575,6 +6634,121 @@ class PersonViewSet(viewsets.GenericViewSet):
         http_status = status.HTTP_201_CREATED if created else status.HTTP_200_OK
         return Response({'person_id': person.person_id, 'created': created}, status=http_status)
 
+    @action(detail=False, methods=['post'], url_path='provision',
+            permission_classes=[EtlProvisionPermission])
+    def provision(self, request):
+        """
+        POST /api/persons/provision/
+        Body: { "email": "...", "organization": "<slug>" }  (both optional)
+        Response 200/201: { "person_id": 1234, "created": true,
+                            "organization": "<slug>" }
+
+        ``organization`` names the tenant the new patient belongs to. Without
+        it the record carries none, and a patient with no organization is
+        missing from every org-scoped query, which is what an importer that had
+        no way to say this used to produce (#1764). It is per request, because
+        one import run can legitimately span organizations.
+
+        The stamp is fill-if-empty, so a re-run cannot move a patient another
+        organization already owns. ``organization`` in the response is the one
+        actually in force, which is how a caller detects that case.
+
+        Mints a person who is not anyone yet, for an importer that holds a
+        source id we cannot verify. No actor claims, so nothing here asserts
+        whose account this is: the address is what a later verified login
+        matches on, and the caller keeps its own source id to person id map.
+
+        An address that already names several persons, or one whose person a
+        patient account has claimed, answers **409** and creates nothing
+        (#1913). Both used to mint another person, which left the import on a
+        row the patient never sees and made the address more ambiguous with
+        every run. A conflict is something the caller can act on.
+
+        The address is written in the same transaction as the insert. A mint
+        followed by a PATCH would leave a window where a login lands on a
+        person with no address and forks.
+        """
+        from patient_portal.api.permissions import reject_machine_actor_claims
+        from patient_portal.models import PatientUser
+        reject_machine_actor_claims(
+            request,
+            request.data.get('actor_iss', ''),
+            request.data.get('actor_sub', ''),
+        )
+
+        org, org_error = _resolve_provision_org(request)
+        if org_error is not None:
+            return org_error
+
+        email = (request.data.get('email') or '').strip() or None
+        if email is not None:
+            try:
+                validate_email(email)
+            except DjangoValidationError:
+                return Response(
+                    {'detail': "'email' must be a valid email address."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if email is not None:
+            # A re-run must not mint a second person for an address it already
+            # minted one for, because two would then fork the login instead of
+            # adopting either.
+            existing = list(
+                Person.objects.filter(email__iexact=email).order_by('person_id')[:2]
+            )
+            if len(existing) > 1:
+                # Minting a third beside two was the old answer, and it made the
+                # address worse every run (#1913). The caller holds its own
+                # source id to person id map, so it can pick; we cannot.
+                return Response(
+                    {
+                        'detail': 'Several persons hold this address. '
+                                  'Resolve them before importing.',
+                        'person_ids': [p.person_id for p in existing],
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if existing and PatientUser.objects.filter(person=existing[0]).exists():
+                # Adopting it would hand an account to whoever the export names,
+                # and minting beside it strands the import on a second person
+                # the patient never sees (#1913). Neither, then: the id is
+                # reported so a caller that may write to it can carry on, and
+                # this grant can already read any person it is given.
+                return Response(
+                    {
+                        'detail': 'A patient account already holds this address.',
+                        'person_id': existing[0].person_id,
+                        'claimed': True,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if existing:
+                record, _ = PatientRecord.objects.get_or_create(person=existing[0])
+                return Response(
+                    {
+                        'person_id': existing[0].person_id,
+                        'created': False,
+                        'organization': _fill_record_org(record, org),
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        from patient_portal.services import create_unidentified_person
+        with transaction.atomic():
+            person = create_unidentified_person(source='etl-provision', organization=org)
+            if email is not None:
+                person.email = email
+                person.save(update_fields=['email'])
+        return Response(
+            {
+                'person_id': person.person_id,
+                'created': True,
+                'organization': org.slug if org is not None else None,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     def partial_update(self, request, person_id=None):
         """
         PATCH /api/persons/{person_id}/
@@ -5585,6 +6759,14 @@ class PersonViewSet(viewsets.GenericViewSet):
 
         Profile fields (demographics, location, language skills) and replaceable
         fields (email, phone, etc.) are delegated to _project_profile_fields.
+
+        ``organization`` names the tenant, on the same fill-if-empty rule as
+        ``provision``, for a patient who was provisioned before that parameter
+        existed (#1819). Re-importing one never filled it: nothing else writes
+        ``PatientRecord.organization``, and ``provision`` cannot be called again
+        without minting a duplicate. The response carries the slug in force
+        whenever the request named one, so a caller can see that a patient
+        another organization owns was left where it is.
         """
         try:
             person = Person.objects.get(person_id=person_id)
@@ -5605,9 +6787,25 @@ class PersonViewSet(viewsets.GenericViewSet):
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
                 if not can_write_patient(request.user, person.person_id):
                     return Response(
-                        {'detail': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                        {'detail': 'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
+
+        # Resolved before any write, so a bad slug cannot leave half a patch
+        # applied. Machine credential or staff only: this is a tenancy change,
+        # and PATCH is reachable by a session patient and by a doctor holding a
+        # write scope, neither of whom may put a patient in an organization.
+        org = None
+        if 'organization' in request.data:
+            if not (is_service_token(request)
+                    or getattr(request.user, 'is_staff', False)):
+                return Response(
+                    {'detail': 'Only a service credential or staff may set the organization.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            org, org_error = _resolve_provision_org(request)
+            if org_error is not None:
+                return org_error
 
         _PERSON_STR_PLACEHOLDERS = {'', 'unknown', 'Unknown'}
 
@@ -5809,10 +7007,19 @@ class PersonViewSet(viewsets.GenericViewSet):
         if changed or touched_location or touched_languages:
             refresh_patient_record(person)
 
-        return Response({
+        body = {
             'person_id': person.person_id,
             'updated_fields': changed + touched_location + touched_languages,
-        })
+        }
+        if 'organization' in request.data:
+            # After the refresh above: derivation rebuilds the record, and the
+            # stamp has to be what the caller is told at the end of the request.
+            record, _ = PatientRecord.objects.get_or_create(person=person)
+            was_unassigned = record.organization_id is None
+            body['organization'] = _fill_record_org(record, org)
+            if org is not None and was_unassigned and body['organization'] == org.slug:
+                body['updated_fields'] = body['updated_fields'] + ['organization']
+        return Response(body)
 
 
 # =============================================================================
@@ -6003,13 +7210,11 @@ class _OmopFilterMixin(_ListQueryParamsMixin):
 #: the limit rather than a timeout — callers chunk to this number.
 OMOP_BULK_MAX_ROWS = int(os.environ.get('OMOP_BULK_MAX_ROWS', 1000))
 
-#: Byte ceiling for a bulk body, checked against CONTENT_LENGTH *before* parsing.
-#: The row cap cannot serve as a memory guard: DRF's JSONParser reads the WSGI
-#: stream directly (Request._load_stream sets _stream to the raw HttpRequest),
-#: so it never touches HttpRequest.body — the only place Django enforces
-#: DATA_UPLOAD_MAX_MEMORY_SIZE. A 500 MB array would therefore be fully parsed
-#: into memory before the row count could reject it. 1,000 measurement rows is
-#: ~250 KB, so this leaves ample headroom.
+#: Byte ceiling for a bulk body, checked against CONTENT_LENGTH *before* parsing,
+#: so a huge array is refused without being read. Since DRF 3.17 parses JSON
+#: through HttpRequest.body, DATA_UPLOAD_MAX_MEMORY_SIZE (2.5 MB by default) binds
+#: first when it is the lower of the two; this still guards a deployment that
+#: raises or disables that setting. 1,000 measurement rows is ~250 KB.
 OMOP_BULK_MAX_BYTES = int(os.environ.get('OMOP_BULK_MAX_BYTES', 8 * 1024 * 1024))
 
 #: Maximum ids accepted by a bulk delete. Higher than the row cap because an id is
@@ -6122,11 +7327,13 @@ _UPSERT_KEYS = {
                             'drug_concept', ()),
     'Measurement':         ('measurement_source_value', 'measurement_date',
                             'measurement_concept',
-                            ('measurement_datetime', 'value_as_number')),
+                            ('measurement_datetime', 'value_as_number',
+                             'measurement_event_id', 'meas_event_field_concept_id')),
     'Observation':         ('observation_source_value', 'observation_date',
                             'observation_concept',
                             ('observation_datetime', 'value_as_number',
-                             'value_as_string', 'value_source_value')),
+                             'value_as_string', 'value_source_value',
+                             'observation_event_id', 'obs_event_field_concept_id')),
     'ProcedureOccurrence': ('procedure_source_value', 'procedure_date',
                             'procedure_concept', ()),
 }
@@ -6165,40 +7372,195 @@ def _upsert_key(instance, sv_field, date_field, extra_fields):
 class _UpsertPlan:
     """What one bulk batch resolves to once matched against the person's rows.
 
-    Built with a single SELECT and executed with a constant number of statements
-    regardless of batch size — the property ``BulkOmopUpsertTest`` pins with
-    ``CaptureQueriesContext``. Per-row ``.get()``/``.save()`` here is what the
-    endpoint exists to avoid; ``fhir/sync.py::_upsert_clinical`` can afford its
-    per-key query because a FHIR compartment is small, a 1,000-row ETL chunk is
-    not.
+    Built with a single SELECT (two when the batch carries source record keys)
+    and executed with a constant number of statements regardless of batch size
+    — the property ``BulkOmopUpsertTest`` pins with ``CaptureQueriesContext``.
+    Per-row ``.get()``/``.save()`` here is what the endpoint exists to avoid;
+    ``fhir/sync.py::_upsert_clinical`` can afford its per-key query because a
+    FHIR compartment is small, a 1,000-row ETL chunk is not.
     """
 
-    def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids):
+    def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids,
+                 unattributed_matches=0, keyed_updates=None, key_ambiguous=None,
+                 organization=None, writable=()):
         self.to_insert = to_insert        # unsaved rows needing a pk, in order
         self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
         self.collapse_ids = collapse_ids  # stacked duplicates to delete
-        self.to_update = to_update        # [(pk, concept_id)] — concept changed
+        self.to_update = to_update        # [(pk, concept_id, confidence)] — either changed
         self.touched_ids = touched_ids    # existing rows updated or de-stacked
+        self.unattributed_matches = unattributed_matches
+        # pk -> (incoming row, attribution class): rows matched by their source
+        # record key, rewritten whole from the incoming row (#2453).
+        self.keyed_updates = keyed_updates or {}
+        self.key_ambiguous = key_ambiguous or []   # request indices, ascending
+        self.organization = organization
+        self.writable = frozenset(writable)  # columns a key match rewrites
 
 
-def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
+#: Models whose rows may carry the producer's ``source_record_key`` (#2453).
+_KEYED_MODELS = frozenset({'Measurement', 'Observation'})
+
+#: Columns a key match never rewrites, among those the request can carry: who
+#: the row belongs to, and a clinician's entered-in-error flag, which a replay
+#: must not revive. Columns the serializer does not accept are never rewritten
+#: either: the request cannot say what they hold.
+_KEYED_KEEP = frozenset({'person', 'is_erroneous', 'erroneous_reason'})
+
+
+class _SourceKeyConflict(Exception):
+    """A source record key is held by another hospital's row (409)."""
+
+
+def _keyed_update_fields(model_cls, pk_field, writable):
+    return [f for f in model_cls._meta.concrete_fields
+            if f.name in writable and f.name != pk_field and f.name not in _KEYED_KEEP]
+
+
+def _keyed_rows(model_cls, pk_field, person, keys):
+    """``{source_record_key: (pk, attribution)}`` for *person*, locked.
+
+    Entered-in-error rows are included, unlike the content match: the unique
+    index covers them, and the update keeps their flag.
+    """
+    rows = with_attribution(
+        model_cls.objects.select_for_update(of=('self',))
+        .filter(person=person, source_record_key__in=keys)
+    ).values_list(pk_field, 'source_record_key', ATTRIBUTION)
+    return {key: (pk, tuple(attribution)) for pk, key, attribution in rows}
+
+
+def _key_class(attribution, organization):
+    """Attribution class of a key-matched row, None without a named hospital.
+
+    A row's hospital is set once: a key held by another hospital's row is a 409.
+    """
+    if organization is None:
+        return None
+    cls = classify(attribution, organization.pk)
+    if cls == FOREIGN:
+        raise _SourceKeyConflict()
+    return cls
+
+
+def _normalize_bulk_measurement_rows(model_cls, new_ids):
+    """Normalize units on newly-inserted Measurement rows (post-create).
+
+    Groups rows by ``measurement_source_value`` and converts each group to its
+    approved mapping's curated unit (``destination_unit_concept``). A row with
+    no approved mapping, or one whose unit an approved axis variant owns, is
+    stored as sent: neither names a unit a curator chose (#2157).
+
+    Works on already-persisted rows so the upsert identity is never altered.
+    """
+    from omop_core.models import SourceCodeAxisVariant
+    from omop_core.services.canonical_units import (
+        normalize_measurement_units, unit_code,
+    )
+
+    # Not a provisional row: its concept came from a proposal, which has no
+    # curated unit, and converting at write time is an approved mapping's
+    # privilege. The row is converted when an approval promotes it (#2530).
+    rows = model_cls.objects.filter(pk__in=new_ids, confidence__isnull=True)
+
+    # Collect unique source values from the inserted rows.
+    source_values = set(
+        rows.exclude(measurement_source_value__isnull=True)
+        .exclude(measurement_source_value='')
+        .values_list('measurement_source_value', flat=True)
+        .distinct()
+    )
+    if not source_values:
+        return
+
+    # Batch-fetch approved mappings for these source values.
+    mappings_by_sv = {}
+    sccm_qs = (
+        SourceCodeConceptMapping.objects
+        .filter(
+            source_code__in=source_values,
+            omop_table='measurement',
+            status='approved',
+        )
+        .select_related('destination_unit_concept')
+    )
+    for m in sccm_qs:
+        mappings_by_sv.setdefault(m.source_code, m)
+
+    # Units owned by approved variants, per mapping.
+    mapping_ids = [m.id for m in mappings_by_sv.values()
+                   if m.axis_variant_count and m.destination_unit_concept_id]
+    variant_units = defaultdict(set)
+    if mapping_ids:
+        for mapping_id, units in SourceCodeAxisVariant.objects.filter(
+            mapping_id__in=mapping_ids,
+            status='approved',
+            target_concept__isnull=False,
+        ).values_list('mapping_id', 'units'):
+            variant_units[mapping_id].update(units or ())
+
+    for sv, mapping in mappings_by_sv.items():
+        if not mapping.destination_unit_concept_id:
+            continue
+        sv_qs = rows.filter(measurement_source_value=sv)
+        owned = variant_units.get(mapping.id)
+        if owned:
+            spellings = [
+                raw for raw in sv_qs.values_list('unit_source_value', flat=True).distinct()
+                if raw and unit_code(raw) in owned
+            ]
+            sv_qs = sv_qs.exclude(unit_source_value__in=spellings)
+        normalize_measurement_units(sv_qs, mapping)
+
+
+def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
+                      organization=None, content_match=True, writable=(),
+                      may_write_confidence=False):
     """Match a batch of unsaved rows against what `person` already has.
 
     Same three outcomes as ``_upsert_clinical``: an event already on file is left
     in place (its concept updated when it changed, its stacked historical
-    duplicates collapsed onto the earliest row), and anything else is inserted.
+    duplicates collapsed onto the first real row — null confidence and a mapped
+    concept — or onto the earliest when every candidate is provisional), and
+    anything else is inserted.
     Only the concept is rewritten on a matched row — every other column is left
     as stored, so a re-run cannot quietly overwrite a value someone corrected.
     Repeats of one event *within* the batch collapse to a single row, last
     occurrence winning, so a source bundle that reports an event twice does not
     write it twice.
+
+    With ``organization`` (the hospital the caller named), only that hospital's
+    rows are matched. An unattributed row could be any hospital's, so it is left
+    as stored; another hospital's row is never touched. Stacked duplicates only
+    collapse into a row with the same attribution.
+
+    A row carrying a ``source_record_key`` (#2453) is the producer's record and
+    matches by that key first, entered-in-error rows included; the stored row is
+    then rewritten from the incoming one: every *writable* column (the ones the
+    request can carry) but ``_KEYED_KEEP``. Without
+    a key match it falls back to the content match against *unkeyed* rows only,
+    and stamps its key on the one row that matches. When that is not one row
+    for one key (several unkeyed candidates of different attribution, or several
+    incoming keys on one row), nothing is stamped, one incoming row maps to the
+    stored row as an unkeyed row would, the others are inserted, and every such
+    request index is reported in ``key_ambiguous``. Keyed rows never merge with
+    each other by content, and a content collapse never deletes a keyed row.
+
+    ``content_match=False`` (``?upsert=false``) keeps only the key match.
     """
     sv_field, date_field, concept_field, extra_fields = _UPSERT_KEYS[model_name]
     cid_attr = f'{concept_field}_id'
+    supports_key = model_name in _KEYED_MODELS
 
-    keys = [_upsert_key(inst, sv_field, date_field, extra_fields)
+    source_keys = [getattr(inst, 'source_record_key', None) if supports_key else None
+                   for inst in instances]
+    keys = [_upsert_key(inst, sv_field, date_field, extra_fields) if content_match else None
             for inst in instances]
     keyed = [k for k in keys if k is not None]
+
+    by_source_key = {}
+    if any(source_keys):
+        by_source_key = _keyed_rows(model_cls, pk_field, person,
+                                    {k for k in source_keys if k})
 
     # One SELECT for every row of this person that could match the batch. The
     # (source_value IN …, date IN …) pair is a superset of the real key set —
@@ -6206,9 +7568,15 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
     # growth this endpoint exists to avoid. The superset is bounded by the
     # person's own rows for those source values.
     existing = {}   # key -> [pk, …] ascending
-    existing_cid = {}
+    cid_by_pk = {}
+    confidence_by_pk = {}   # pk -> stored confidence (null = a real row)
+    attribution_by_pk = {}
+    keyed_pks = set()   # stored rows that carry a source record key
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
+        if supports_key:
+            columns += ('source_record_key',)
+        columns += ('confidence',)
         # Entered-in-error rows are excluded from the match on purpose.
         #
         # A row marked is_erroneous is not the current fact -- derivation already
@@ -6226,54 +7594,181 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
             'is_erroneous': False,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
-        }).order_by(pk_field).values_list(*columns)
+        })
+        if any(source_keys) or any(
+                getattr(inst, 'confidence', None) is not None for inst in instances):
+            # A provisional write reads a row's confidence and rewrites it: lock
+            # the rows so an approval committing in between is not overwritten
+            # with a stale proposal (#2434).
+            # A keyed row may stamp its key on one of these. Lock them so a
+            # concurrent request with another key re-reads the row once the
+            # first commits, sees it keyed, and inserts instead of overwriting.
+            rows = rows.select_for_update(of=('self',))
+        rows = with_attribution(rows).order_by(pk_field).values_list(*columns, ATTRIBUTION)
+        n_extra = len(extra_fields)
         for row in rows:
             # Normalise DB-side datetimes the same way _upsert_key does for
             # in-memory instances: naive → UTC-aware. In practice PostgreSQL
             # with USE_TZ=True already returns aware values, but the explicit
             # normalisation keeps the two sides provably symmetric.
             tail = []
-            for v in row[4:]:
+            for v in row[4:4 + n_extra]:
                 if isinstance(v, datetime) and is_naive(v):
                     v = make_aware(v, _dt.timezone.utc)
                 tail.append(v)
             key = (row[2], row[3]) + tuple(tail)
-            if key in existing:
-                existing[key].append(row[0])
-            else:
-                existing[key] = [row[0]]
-                existing_cid[key] = row[1]
+            existing.setdefault(key, []).append(row[0])
+            cid_by_pk[row[0]] = row[1]
+            confidence_by_pk[row[0]] = row[-2]
+            attribution_by_pk[row[0]] = tuple(row[-1])
+            if supports_key and row[-3]:
+                keyed_pks.add(row[0])
 
+    # Distinct attributions among the unkeyed rows of a key, before the
+    # filtering below narrows it to one: without a named hospital, more than
+    # one is an ambiguous match for a keyed row.
+    unkeyed_groups = {
+        key: {attribution_by_pk[pk] for pk in pks if pk not in keyed_pks}
+        for key, pks in existing.items()
+    }
+
+    def preferred_keep(pks):
+        """The row a content match keeps: a mapped approved row wins, else the first.
+
+        "Approved" means null confidence and a mapped concept (``_is_real_row``);
+        an unmapped row at concept 0 is not evidence, so a proposal may still
+        lift it. The earliest row can be a provisional proposal while a later
+        row holds the approved fact (append-only writes produce that order);
+        keeping the earliest would let the next proposal rewrite it and delete
+        the real row as a duplicate (#2543).
+        """
+        for pk in pks:
+            if _is_real_row(confidence_by_pk[pk], cid_by_pk[pk]):
+                return pk
+        return pks[0]
+
+    skipped = {}
+    for key in list(existing):
+        pks = existing[key]
+        if organization is None:
+            existing[key] = same_attribution(pks, attribution_by_pk)
+            continue
+        by_class = defaultdict(list)
+        for pk in pks:
+            by_class[classify(attribution_by_pk[pk], organization.pk)].append(pk)
+        if by_class[OWN]:
+            existing[key] = by_class[OWN]
+            continue
+        del existing[key]
+        if by_class[UNATTRIBUTED]:
+            skipped[key] = preferred_keep(by_class[UNATTRIBUTED])
+
+    to_insert, row_slots = [], [None] * len(instances)
+    insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
+    keyed_updates, key_ambiguous = {}, []
+    unattributed_matches = 0
+
+    def match_content(i, key):
+        """Today's outcome for a row whose content key is on file."""
+        keep = preferred_keep(existing[key])
+        row_slots[i] = ('old', keep)
+        extras = [pk for pk in existing[key]
+                  if pk != keep and pk not in keyed_pks and pk not in collapse_ids]
+        collapse_ids.extend(extras)
+        new_cid = getattr(instances[i], cid_attr, None)
+        new_conf = getattr(instances[i], 'confidence', None)
+        old_conf = confidence_by_pk[keep]
+        if old_conf is not None and new_conf is None and not may_write_confidence:
+            # Only a machine credential or staff may promote a provisional row.
+            if extras:
+                touched_ids.append(keep)
+        elif _is_real_row(old_conf, cid_by_pk[keep]) and new_conf is not None:
+            # Real beats provisional: a proposal never touches a row an approved
+            # mapping wrote (#2434). A row at concept 0 holds no mapping, so a
+            # proposal may lift it.
+            if extras:
+                touched_ids.append(keep)
+        elif cid_by_pk[keep] != new_cid or old_conf != new_conf:
+            to_update.append((keep, new_cid, new_conf))
+            touched_ids.append(keep)
+        elif extras:
+            touched_ids.append(keep)
+
+    def insert(i):
+        row_slots[i] = ('new', len(to_insert))
+        to_insert.append(instances[i])
+
+    # --- rows with a source record key ----------------------------------------
+    last_by_source_key = {}
+    for i, source_key in enumerate(source_keys):
+        if source_key:
+            last_by_source_key[source_key] = i
+    fallback = defaultdict(list)   # content key -> request indices
+    for source_key, i in last_by_source_key.items():
+        if source_key in by_source_key:
+            pk, attribution = by_source_key[source_key]
+            keyed_updates[pk] = (instances[i], _key_class(attribution, organization))
+            touched_ids.append(pk)
+            row_slots[i] = ('old', pk)
+            continue
+        key = keys[i]
+        if key is not None and key in existing and any(
+                pk not in keyed_pks for pk in existing[key]):
+            fallback[key].append(i)
+        elif key is not None and key in skipped and skipped[key] not in keyed_pks:
+            row_slots[i] = ('old', skipped[key])
+            unattributed_matches += 1
+        else:
+            insert(i)
+    for key, idxs in fallback.items():
+        idxs.sort()
+        candidates = [pk for pk in existing[key] if pk not in keyed_pks]
+        # With a hospital named, only its own rows are candidates: one group.
+        groups = len(unkeyed_groups[key]) if organization is None else 1
+        if len(idxs) == 1 and groups == 1:
+            i, keep = idxs[0], preferred_keep(candidates)
+            collapse_ids.extend(
+                pk for pk in candidates if pk != keep and pk not in collapse_ids)
+            keyed_updates[keep] = (instances[i], _key_class(attribution_by_pk[keep], organization))
+            touched_ids.append(keep)
+            row_slots[i] = ('old', keep)
+            continue
+        key_ambiguous.extend(idxs)
+        existing[key] = candidates
+        match_content(idxs[-1], key)
+        for i in idxs[:-1]:
+            insert(i)
+    # Rows sharing a key with its last occurrence resolve to the same row.
+    for i, source_key in enumerate(source_keys):
+        if source_key and last_by_source_key[source_key] != i:
+            row_slots[i] = row_slots[last_by_source_key[source_key]]
+
+    # --- rows without one: matched by content -----------------------------------
     # Last occurrence of a repeated key wins, matching _upsert_clinical's
     # "desired" dict — so the batch converges on the row the producer emitted
     # most recently rather than the first one it happened to serialise.
     last_index = {}
     for i, key in enumerate(keys):
-        if key is not None:
+        if key is not None and not source_keys[i]:
             last_index[key] = i
 
-    to_insert, row_slots = [], [None] * len(instances)
-    insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
-
     for i, (inst, key) in enumerate(zip(instances, keys)):
+        if source_keys[i]:
+            continue
         if key is None:                       # no identity — always insert
-            row_slots[i] = ('new', len(to_insert))
-            to_insert.append(inst)
+            insert(i)
+            continue
+
+        if key in skipped:
+            row_slots[i] = ('old', skipped[key])
+            unattributed_matches += 1
             continue
 
         if key in existing:
-            keep = existing[key][0]
-            row_slots[i] = ('old', keep)
             if last_index[key] != i:
+                row_slots[i] = ('old', preferred_keep(existing[key]))
                 continue                      # decide the key once, on its last row
-            extras = existing[key][1:]
-            collapse_ids.extend(extras)
-            new_cid = getattr(inst, cid_attr, None)
-            if existing_cid[key] != new_cid:
-                to_update.append((keep, new_cid))
-                touched_ids.append(keep)
-            elif extras:
-                touched_ids.append(keep)
+            match_content(i, key)
             continue
 
         if key in insert_slot:                # repeated within this batch
@@ -6285,12 +7780,20 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances):
             to_insert.append(inst)
         row_slots[i] = ('new', slot)
 
-    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update, touched_ids)
+    # A row kept or rewritten by one match is never deleted as another's copy.
+    kept = {ref for kind, ref in row_slots if kind == 'old'} | set(keyed_updates)
+    collapse_ids = [pk for pk in collapse_ids if pk not in kept]
+    plan = _UpsertPlan(to_insert, row_slots, collapse_ids, to_update,
+                       list(dict.fromkeys(touched_ids)), unattributed_matches,
+                       keyed_updates, key_ambiguous, organization, writable)
+    plan.may_write_confidence = may_write_confidence
+    return plan
 
 
 def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
-    """Execute a plan: collapse duplicates, update changed concepts, insert the
-    rest. Returns (ids aligned with the input rows, newly inserted ids)."""
+    """Execute a plan: collapse duplicates, update changed concepts, rewrite
+    key-matched rows, insert the rest. Returns (ids aligned with the input rows,
+    newly inserted ids)."""
     concept_field = _UPSERT_KEYS[model_name][2]
     cid_attr = f'{concept_field}_id'
 
@@ -6305,19 +7808,212 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
 
     if plan.to_update:
         model_cls.objects.bulk_update(
-            [model_cls(**{pk_field: pk, cid_attr: cid}) for pk, cid in plan.to_update],
-            [concept_field],
+            [model_cls(**{pk_field: pk, cid_attr: cid, 'confidence': conf})
+             for pk, cid, conf in plan.to_update],
+            [concept_field, 'confidence'],
         )
 
     new_ids = []
+    keyed_slots = {}   # insert slot -> its source record key
     if plan.to_insert:
         new_ids = list(next_pk_batch(model_cls, pk_field, len(plan.to_insert)))
-        for row, pk in zip(plan.to_insert, new_ids):
+        for slot, (row, pk) in enumerate(zip(plan.to_insert, new_ids)):
             setattr(row, pk_field, pk)
-        model_cls.objects.bulk_create(plan.to_insert)
+            if getattr(row, 'source_record_key', None):
+                keyed_slots[slot] = row.source_record_key
+        # A concurrent request may insert one of these keys between the plan's
+        # SELECT and this INSERT. ON CONFLICT DO NOTHING lets the batch land,
+        # and the rows that did not are applied below as key matches. It hides
+        # every conflict, so only keyed rows go through it: an unkeyed row's
+        # conflict still raises.
+        keyed_rows = [plan.to_insert[s] for s in keyed_slots]
+        model_cls.objects.bulk_create(
+            [row for s, row in enumerate(plan.to_insert) if s not in keyed_slots])
+        if keyed_rows:
+            model_cls.objects.bulk_create(keyed_rows, ignore_conflicts=True)
+
+    if keyed_slots:
+        # A keyed row landed only if its id now holds its own person and key.
+        landed = {pk: (person_id, key) for pk, person_id, key in model_cls.objects.filter(
+            **{f'{pk_field}__in': [new_ids[s] for s in keyed_slots]}
+        ).values_list(pk_field, 'person_id', 'source_record_key')}
+        lost = {}
+        for slot, source_key in keyed_slots.items():
+            pk = new_ids[slot]
+            if landed.get(pk) == (plan.to_insert[slot].person_id, source_key):
+                continue
+            if pk in landed:
+                raise IntegrityError(f'{model_cls._meta.db_table}: row id {pk} was taken')
+            lost[slot] = source_key
+        if lost:
+            person_id = plan.to_insert[next(iter(lost))].person_id
+            current = _keyed_rows(model_cls, pk_field, person_id, set(lost.values()))
+            remap = {}
+            for slot, source_key in lost.items():
+                if source_key not in current:   # deleted since it blocked the insert
+                    raise IntegrityError(
+                        f'{model_cls._meta.db_table}: a source record key changed concurrently')
+                pk, attribution = current[source_key]
+                plan.keyed_updates[pk] = (plan.to_insert[slot],
+                                          _key_class(attribution, plan.organization))
+                plan.touched_ids.append(pk)
+                remap[slot] = pk
+            plan.row_slots = [('old', remap[ref]) if kind == 'new' and ref in remap
+                              else (kind, ref) for kind, ref in plan.row_slots]
+            new_ids = [pk if s not in remap else None for s, pk in enumerate(new_ids)]
+
+    if plan.keyed_updates and (not plan.may_write_confidence or any(
+            getattr(row, 'confidence', None) is not None
+            for row, _cls in plan.keyed_updates.values())):
+        # Real beats provisional, and only a machine credential or staff may
+        # promote (#2434). Looked up only for a caller without that standing or
+        # a batch carrying a confidence, so the usual ETL write pays no query.
+        stored = {pk: (conf, cid) for pk, conf, cid in model_cls.objects.filter(
+            **{f'{pk_field}__in': list(plan.keyed_updates)}
+        ).values_list(pk_field, 'confidence', cid_attr)}
+        dropped = set()
+        for pk, (row, _cls) in plan.keyed_updates.items():
+            old_conf, old_cid = stored.get(pk, (None, None))
+            new_conf = getattr(row, 'confidence', None)
+            if new_conf is not None and _is_real_row(old_conf, old_cid):
+                dropped.add(pk)            # a proposal never touches a real row
+            elif new_conf is None and old_conf is not None and not plan.may_write_confidence:
+                dropped.add(pk)            # promotion is not a user's to make
+        plan.keyed_updates = {
+            pk: v for pk, v in plan.keyed_updates.items() if pk not in dropped}
+        plan.touched_ids = [pk for pk in plan.touched_ids if pk not in dropped]
+
+    if plan.keyed_updates:
+        fields = _keyed_update_fields(model_cls, pk_field, plan.writable)
+        rows = []
+        for pk, (row, _cls) in plan.keyed_updates.items():
+            values = {f.attname: getattr(row, f.attname) for f in fields}
+            rows.append(model_cls(**{pk_field: pk}, **values))
+        model_cls.objects.bulk_update(rows, [f.name for f in fields])
 
     ids = [new_ids[ref] if kind == 'new' else ref for kind, ref in plan.row_slots]
-    return ids, new_ids
+    return ids, [pk for pk in new_ids if pk is not None]
+
+
+class _ConceptDuplicateConflict(Exception):
+    """Raised inside an atomic block to roll back when reject mode is active."""
+    def __init__(self, duplicates):
+        self.duplicates = duplicates
+
+
+def _parse_concept_dup_flags(request, model_name=None):
+    """Read the two opt-in query params for concept-duplicate detection.
+
+    Returns ``(warn, reject)`` booleans, or raises ``ValidationError``
+    when the flags are set on a non-Measurement model.
+    """
+    warn = str(
+        request.query_params.get('warn_concept_duplicates', 'false')
+    ).strip().lower() in ('1', 'true', 'yes')
+    reject = str(
+        request.query_params.get('reject_concept_duplicates', 'false')
+    ).strip().lower() in ('1', 'true', 'yes')
+    if (warn or reject) and model_name and model_name != 'Measurement':
+        raise serializers.ValidationError(
+            'warn_concept_duplicates and reject_concept_duplicates are only '
+            'supported on /api/v1/measurements/.')
+    return warn, reject
+
+
+def _check_concept_date_duplicates(model_cls, person, inserted_instances,
+                                   exclude_ids=None):
+    """Detect Measurement rows whose (concept_id, date) already exists.
+
+    Returns a list of dicts describing each collision, or an empty list.
+    One SELECT regardless of batch size, using ``ix_meas_person_concept_date``.
+
+    ``exclude_ids`` is the set of pks just inserted in this transaction — they
+    must be excluded from the "existing" query so the batch does not conflict
+    with itself.
+    """
+    if model_cls.__name__ != 'Measurement':
+        return []
+
+    # Collect (concept_id, date) pairs from inserted rows, excluding concept 0.
+    new_pairs = {}  # (concept_id, date) -> [indices]
+    for i, inst in enumerate(inserted_instances):
+        cid = inst.measurement_concept_id
+        d = inst.measurement_date
+        if cid and cid != 0 and d is not None:
+            new_pairs.setdefault((cid, d, inst.measurement_event_id, inst.meas_event_field_concept_id), []).append(i)
+
+    if not new_pairs:
+        return []
+
+    warnings = []
+
+    # Intra-batch collisions: different rows in the same batch share concept+date.
+    for (cid, d, event, kind), indices in new_pairs.items():
+        if len(indices) > 1:
+            svs = [inserted_instances[idx].measurement_source_value
+                   for idx in indices]
+            warnings.append({
+                'type': 'intra_batch',
+                'measurement_concept_id': cid,
+                'measurement_date': d.isoformat() if hasattr(d, 'isoformat') else str(d),
+                'batch_indices': indices,
+                'batch_source_values': svs,
+                'message': (
+                    f'Rows at indices {indices} in this batch share '
+                    f'concept {cid} on {d}.'
+                ),
+            })
+
+    # Collisions with existing rows — one query.
+    # Cross-product filter: concept_id__in × date__in may return rows that
+    # don't match any actual (concept, date) pair. The existing_by_key lookup
+    # below discards those — correctness depends on that step, not this query
+    # alone. Same trade-off as _plan_bulk_upsert: one query, bounded by batch.
+    concept_ids = {key[0] for key in new_pairs}
+    dates = {key[1] for key in new_pairs}
+
+    qs = model_cls.objects.filter(
+        person=person,
+        is_erroneous=False,
+        measurement_concept_id__in=concept_ids,
+        measurement_date__in=dates,
+    )
+    if exclude_ids:
+        qs = qs.exclude(measurement_id__in=exclude_ids)
+
+    existing = qs.values_list(
+        'measurement_concept_id', 'measurement_date',
+        'measurement_id', 'measurement_source_value',
+        'measurement_event_id', 'meas_event_field_concept_id',
+    )
+
+    existing_by_key = {}
+    for cid, d, pk, sv, event, kind in existing:
+        existing_by_key.setdefault((cid, d, event, kind), []).append({
+            'measurement_id': pk,
+            'measurement_source_value': sv,
+        })
+
+    for (cid, d, event, kind), indices in new_pairs.items():
+        if (cid, d, event, kind) in existing_by_key:
+            new_svs = [inserted_instances[idx].measurement_source_value
+                       for idx in indices]
+            date_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
+            warnings.append({
+                'type': 'existing_conflict',
+                'measurement_concept_id': cid,
+                'measurement_date': date_str,
+                'batch_indices': indices,
+                'batch_source_values': new_svs,
+                'existing_rows': existing_by_key[(cid, d, event, kind)],
+                'message': (
+                    f'New row(s) at indices {indices} '
+                    f'(source: {new_svs}) resolve to concept {cid} on {d}, '
+                    f'which already has {len(existing_by_key[(cid, d, event, kind)])} row(s).'
+                ),
+            })
+
+    return warnings
 
 
 def _bulk_body_too_large(request: Request) -> Response | None:
@@ -6370,6 +8066,238 @@ def _is_admin_actor(request: Request) -> bool:
     )
 
 
+def _admin_denial_detail(request: Request) -> str:
+    """Build a diagnostic message explaining why _is_admin_actor returned False."""
+    from omop_core.models import GroupAccess
+    actor = request.user
+    grants = list(
+        GroupAccess.objects.filter(identity=actor)
+        .values_list('org__slug', 'org__is_active', 'role', 'expires_at')
+    )
+    admin_orgs = list(get_admin_orgs(actor).values_list('slug', flat=True))
+    parts = [
+        'Only administrators can perform this action.',
+        f'identity={getattr(actor, "pk", "?")}',
+        f'email={getattr(actor, "email", "?")}',
+        f'issuer={getattr(actor, "issuer", "?")}',
+        f'is_staff={getattr(actor, "is_staff", "?")}',
+        f'grants={grants}',
+        f'admin_orgs={admin_orgs}',
+    ]
+    return ' | '.join(parts)
+
+
+def _contains_nul(value) -> bool:
+    """Whether a JSON value holds a NUL anywhere, keys included."""
+    if isinstance(value, str):
+        return '\x00' in value
+    if isinstance(value, dict):
+        return any(_contains_nul(k) or _contains_nul(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_contains_nul(v) for v in value)
+    return False
+
+
+def _mapping_vocabulary_keys(source_vocabulary_id) -> tuple[str, ...]:
+    """Vocabularies a row may match a mapping on, canonical first.
+
+    Ingest stores the canonical form, the ETL posts the URI it received.
+    """
+    raw = (source_vocabulary_id or '').strip()
+    canonical = source_vocabularies.canonical_source_vocabulary(raw)
+    return (canonical,) if canonical == raw else (canonical, raw)
+
+
+def _resolve_source_code_mappings(
+    rows_by_table: dict[str, list[dict]],
+    *,
+    match_vocabulary: bool = True,
+) -> list[dict]:
+    """Join source-code rows with SCCM mappings and sort by mapping status.
+
+    Shared by both `_get_patient_source_codes` (reads from PatientSourceCode)
+    and `_aggregate_patient_source_codes` (reads from clinical tables).
+
+    Each value in *rows_by_table* is a list of dicts with keys
+    ``source_value``, ``source_vocabulary_id``, ``row_count``.
+
+    An Epic code is local to one hospital, so matching on the code alone served
+    whichever row had the lowest id and showed another site's label (etl#42).
+    The vocabulary is part of the key, as in the table's unique constraint and
+    in ``code_resolution.resolve_source_code``. *match_vocabulary* is False for
+    the clinical-table fallback, whose rows carry ``''`` because the column
+    does not exist there, not because the code is uncoded.
+    """
+    results: list[dict] = []
+
+    for table_key, rows in rows_by_table.items():
+        source_values = [r['source_value'] for r in rows]
+        keys = ['source_code', 'source_vocabulary_id'] if match_vocabulary else ['source_code']
+        # One row per key, only the columns the response uses: hydrating every
+        # match as a model with its joins cost ~4s at a few thousand codes
+        # (#1789). Lowest id wins within one key, so the choice does not
+        # depend on the plan.
+        mapping_by_sv: dict[tuple[str, str], dict] = {}
+        for m in (
+            SourceCodeConceptMapping.objects
+            .filter(source_code__in=source_values, omop_table=table_key)
+            .order_by(*keys, 'id')
+            .distinct(*keys)
+            .values(
+                'id', 'status', 'source_vocabulary_id', 'source_code',
+                'source_code_description', 'origin', 'origin_system',
+                'created_by__email', 'target_concept_id',
+                'target_concept__concept_name', 'target_concept__concept_code',
+                'target_concept__vocabulary_id', 'destination_vocabulary_id',
+            )
+        ):
+            key = (m['source_vocabulary_id'] if match_vocabulary else '',
+                   m['source_code'].lower())
+            mapping_by_sv.setdefault(key, m)
+
+        for row in rows:
+            source_value = row['source_value']
+            vocabularies = (
+                _mapping_vocabulary_keys(row.get('source_vocabulary_id'))
+                if match_vocabulary else ('',)
+            )
+            mapping = next(
+                (found for vocabulary in vocabularies
+                 if (found := mapping_by_sv.get((vocabulary, source_value.lower())))),
+                None,
+            )
+
+            entry: dict = {
+                'source_value': source_value,
+                'omop_table': table_key,
+                'concept_id': 0,
+                'concept_name': None,
+                'row_count': row['row_count'],
+                'mapping_id': None,
+                'mapping_status': 'unmapped',
+                'mapping_target_concept_id': None,
+                'mapping_target_concept_name': None,
+                'source_vocabulary_id': row.get('source_vocabulary_id', ''),
+                'source_code': source_value,
+                'source_code_id': row.get('source_code_id'),
+                'source_unit': row.get('source_unit', ''),
+                'example_quantity': row.get('example_quantity', ''),
+                'extracted_source_unit': row.get('extracted_source_unit', ''),
+                'extracted_example_quantity': row.get('extracted_example_quantity', ''),
+                'source_unit_override': row.get('source_unit_override'),
+                'example_quantity_override': row.get('example_quantity_override'),
+                'source_metadata': row.get('source_metadata') or {},
+                'based_on': _source_based_on(row.get('source_metadata')),
+                # The starting value for the edit dialog: the curator's own
+                # description when the mapping has one, else the source's.
+                'source_code_description': (
+                    (mapping['source_code_description'] if mapping else '')
+                    or source_metadata_description(row.get('source_metadata'))
+                ),
+            }
+
+            if mapping:
+                entry['mapping_id'] = mapping['id']
+                # A proposed mapping with no destination is functionally unmapped.
+                if mapping['status'] == 'proposed' and not mapping['target_concept_id']:
+                    entry['mapping_status'] = 'unmapped'
+                else:
+                    entry['mapping_status'] = mapping['status']
+                entry['source_vocabulary_id'] = mapping['source_vocabulary_id'] or ''
+                entry['source_code'] = mapping['source_code']
+                entry['mapping_origin'] = mapping['origin'] or ''
+                entry['mapping_origin_system'] = mapping['origin_system'] or ''
+                entry['mapping_created_by'] = mapping['created_by__email'] or ''
+                if mapping['target_concept_id']:
+                    entry['mapping_target_concept_id'] = mapping['target_concept_id']
+                    entry['mapping_target_concept_name'] = mapping['target_concept__concept_name']
+                    entry['mapping_destination_concept_code'] = (
+                        mapping['target_concept__concept_code'] or ''
+                    )
+                    entry['mapping_destination_vocabulary_id'] = (
+                        mapping['destination_vocabulary_id']
+                        or mapping['target_concept__vocabulary_id'] or ''
+                    )
+
+            results.append(entry)
+
+    # Sort: unmapped first, then by row count descending.
+    status_order = {'unmapped': 0, 'proposed': 1, 'approved': 2, 'rejected': 3}
+    results.sort(key=lambda e: (status_order.get(e['mapping_status'], 9), -e['row_count']))
+    return results
+
+
+def _get_patient_source_codes(person: Person) -> list[dict]:
+    """Read source codes from PatientSourceCode, falling back to clinical aggregation.
+
+    If the ETL has populated PatientSourceCode rows for this person, use those.
+    Otherwise fall back to the clinical-table aggregation for backward compat.
+    """
+    from collections import defaultdict
+
+    from omop_core.models import PatientSourceCode
+
+    psc_rows = list(
+        PatientSourceCode.objects.filter(person=person)
+        .values('id', 'source_value', 'source_vocabulary_id', 'omop_table', 'occurrence_count',
+                'source_unit', 'example_quantity', 'source_metadata',
+                'source_unit_override', 'example_quantity_override')
+    )
+    if not psc_rows:
+        return _aggregate_patient_source_codes(person)
+
+    by_table: dict[str, list[dict]] = defaultdict(list)
+    for row in psc_rows:
+        by_table[row['omop_table'] or ''].append({
+            'source_value': row['source_value'],
+            'source_vocabulary_id': row.get('source_vocabulary_id', ''),
+            'row_count': row['occurrence_count'],
+            'source_code_id': row['id'],
+            'source_unit': (row['source_unit_override'] if row['source_unit_override'] is not None
+                            else row['source_unit']),
+            'example_quantity': (row['example_quantity_override'] if row['example_quantity_override'] is not None
+                                 else row['example_quantity']),
+            'extracted_source_unit': row['source_unit'],
+            'extracted_example_quantity': row['example_quantity'],
+            'source_unit_override': row['source_unit_override'],
+            'example_quantity_override': row['example_quantity_override'],
+            'source_metadata': row.get('source_metadata') or {},
+        })
+
+    return _resolve_source_code_mappings(by_table)
+
+
+def _aggregate_patient_source_codes(person: Person) -> list[dict]:
+    """Aggregate distinct source codes across all clinical tables for a person.
+
+    For each (source_value, omop_table), count clinical rows and left-join the
+    SourceCodeConceptMapping to get mapping status.  Returns a list sorted by
+    unmapped first, then by row count descending.
+    """
+    by_table: dict[str, list[dict]] = {}
+
+    for table_key, (model, concept_col, source_col) in CLINICAL_TABLES.items():
+        groups = list(
+            model.objects.filter(person=person)
+            .exclude(**{f'{source_col}__isnull': True})
+            .exclude(**{source_col: ''})
+            .values(source_col)
+            .annotate(row_count=Count('pk'))
+            .order_by(source_col)
+        )
+        if not groups:
+            continue
+
+        by_table[table_key] = [
+            {'source_value': g[source_col], 'source_vocabulary_id': '', 'row_count': g['row_count']}
+            for g in groups
+        ]
+
+    # The clinical tables keep no source vocabulary, so this path can only
+    # match on the code. See _resolve_source_code_mappings.
+    return _resolve_source_code_mappings(by_table, match_vocabulary=False)
+
+
 def _skip_refresh_requested(request: Request) -> bool:
     """Whether the caller asked to defer, and is allowed to.
 
@@ -6398,16 +8326,18 @@ class _OmopDeferRefreshMixin:
     def update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         from omop_core.signals import suppress_patient_record_refresh
 
+        self._provenance(request)
+
         if _skip_refresh_requested(request):
             with suppress_patient_record_refresh():
-                return super().update(request, *args, **kwargs)
+                return self._attributed_update(request, *args, **kwargs)
 
         # Suppress signal-driven refresh and call it explicitly so failures
         # surface as an HTTP error instead of being silently swallowed.
         instance = self.get_object()
         person = instance.person
         with suppress_patient_record_refresh():
-            response = super().update(request, *args, **kwargs)
+            response = self._attributed_update(request, *args, **kwargs)
         try:
             refresh_patient_record(person)
         except Exception:
@@ -6424,6 +8354,18 @@ class _OmopDeferRefreshMixin:
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         return response
+
+    def _attributed_update(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        provenance = self._provenance(request)
+        if not (provenance.source and provenance.organization):
+            return super().update(request, *args, **kwargs)
+        pk = self.get_object().pk
+        model_cls = self.get_queryset().model
+        with transaction.atomic():
+            locked = list(model_cls.objects.select_for_update()
+                          .filter(pk=pk).values_list('pk', flat=True))
+            raise_on_foreign_attribution(model_cls, locked, provenance.organization)
+            return super().update(request, *args, **kwargs)
 
     def destroy(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         from omop_core.signals import suppress_patient_record_refresh
@@ -6457,6 +8399,70 @@ class _OmopDeferRefreshMixin:
         return response
 
 
+def _data_error_response(exc, what, logger_args):
+    """400 for a value the database refused (#2101), e.g. ``numeric field overflow``.
+
+    Validation passed, so this is a value something server-side derived that
+    does not fit its column. It is the request's data, not a fault of the
+    service, and the same request will fail the same way, so a retry is not
+    the answer. The driver's first line names the problem; the log keeps the
+    traceback.
+    """
+    logger.exception(*logger_args)
+    return Response(
+        {'detail': (
+            f'The database refused a value in the {what} and rolled it back '
+            'whole; nothing was written. Retrying the same request will fail '
+            'the same way.'
+        ), 'error': str(exc).strip().partition('\n')[0]},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _bulk_row_errors(errors, row_count):
+    """Keep the bulk endpoint's positional error list under DRF 3.18.
+
+    DRF 3.18 switched ``ListSerializer`` child errors to ``{index: detail}`` by
+    default (``LIST_SERIALIZER_ERRORS_AS_DICT``). This endpoint's documented
+    contract is a list aligned with the request rows, so expand the index-keyed
+    form back to a list. List-level errors (non-index keys) pass through.
+    """
+    if isinstance(errors, dict) and errors and set(errors) <= set(range(row_count)):
+        return [errors.get(index, {}) for index in range(row_count)]
+    return errors
+
+
+def _source_key_conflict_response(what):
+    return Response(
+        {'detail': (
+            f'The {what} was rolled back: a source_record_key in it belongs to '
+            "another hospital's row, and a row's hospital is set once."
+        )},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _record_keyed_provenance(model_cls, person, provenance, keyed_updates):
+    """Provenance for rows rewritten by a key match (#2453).
+
+    The hospital is recorded only on a row that is already that hospital's: a
+    replay never adds attribution to a row that had none.
+    """
+    ct = ContentType.objects.get_for_model(model_cls)
+    ProvenanceRecord.objects.bulk_create([
+        ProvenanceRecord(
+            source=provenance.source,
+            source_user_id=provenance.source_user_id,
+            target_patient_id=str(person.person_id),
+            modification_reason=provenance.reason,
+            organization=provenance.organization if cls == OWN else None,
+            content_type=ct,
+            object_id=pk,
+        )
+        for pk, (_row, cls) in keyed_updates.items()
+    ], ignore_conflicts=True)
+
+
 class _OmopBulkCreateMixin:
     """Accept a JSON *list* on POST and insert the rows in one batched transaction.
 
@@ -6465,7 +8471,7 @@ class _OmopBulkCreateMixin:
     the batch entrance to the same fast internals ``fhir/sync.py::_bulk_insert``
     uses — batched PK allocation plus ``bulk_create`` — without going through FHIR.
 
-    Semantics (summarised in CLAUDE.md, "Bulk OMOP Row Writes"):
+    Semantics (summarised in AGENTS.md, "Bulk OMOP Row Writes"):
 
     * A single dict body with no client-supplied primary key uses the same
       natural-key upsert semantics, while preserving the single-row response
@@ -6489,6 +8495,7 @@ class _OmopBulkCreateMixin:
         oversized = _bulk_body_too_large(request)
         if oversized is not None:
             return oversized
+        self._provenance(request)
         if not isinstance(request.data, list):
             if self._should_single_upsert(request):
                 return self._single_upsert_create(request)
@@ -6504,6 +8511,12 @@ class _OmopBulkCreateMixin:
         pk_field, _model_cls = _MODEL_PK_MAP[model_name]
         if request.data.get(pk_field) is not None:
             return False
+        # A source record key matches even with ?upsert=false (#2453).
+        return self._content_upsert(request) or (
+            model_name in _KEYED_MODELS and bool(request.data.get('source_record_key')))
+
+    @staticmethod
+    def _content_upsert(request):
         return str(
             request.query_params.get('upsert', 'true')
         ).strip().lower() not in ('0', 'false', 'no')
@@ -6520,8 +8533,9 @@ class _OmopBulkCreateMixin:
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        org = _authorize_person_write(request, person)
-        source, source_user_id, reason = _extract_provenance(request)
+        _authorize_person_write(request, person)
+        provenance = self._provenance(request)
+        source = provenance.source
         skip_refresh = str(
             request.query_params.get('skip_refresh', 'false')
         ).strip().lower() in ('1', 'true', 'yes')
@@ -6531,27 +8545,55 @@ class _OmopBulkCreateMixin:
         instance = model_cls(**dict(validated))
 
         from omop_core.signals import suppress_patient_record_refresh
+        concept_duplicates = []
         try:
             with transaction.atomic():
                 with suppress_patient_record_refresh():
                     plan = _plan_bulk_upsert(
-                        model_cls, pk_field, model_name, person, [instance])
+                        model_cls, pk_field, model_name, person, [instance],
+                        organization=provenance.match_organization,
+                        content_match=self._content_upsert(request),
+                        writable=self.serializer_class.Meta.fields,
+                        may_write_confidence=may_write_confidence(request))
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
+
+                    # Concept-duplicate detection (opt-in).
+                    concept_dup_warn, concept_dup_reject = (
+                        _parse_concept_dup_flags(request, model_name))
+                    if (concept_dup_warn or concept_dup_reject) and new_ids:
+                        concept_duplicates = _check_concept_date_duplicates(
+                            model_cls, person, plan.to_insert,
+                            exclude_ids=set(new_ids))
+                        if concept_dup_reject and concept_duplicates:
+                            raise _ConceptDuplicateConflict(concept_duplicates)
 
                 row_id = ids[0]
                 if source and new_ids:
                     _record_provenance(
                         model_cls.objects.get(**{pk_field: row_id}),
                         source,
-                        source_user_id,
+                        provenance.source_user_id,
                         target_patient_id=str(person.person_id),
-                        modification_reason=reason,
-                        organization=org,
+                        modification_reason=provenance.reason,
+                        organization=provenance.organization,
                     )
+                if source and plan.keyed_updates:
+                    _record_keyed_provenance(model_cls, person, provenance, plan.keyed_updates)
                 if not skip_refresh:
                     from omop_core.services.patient_record_service import refresh_patient_record
                     refresh_patient_record(person)
+        except _SourceKeyConflict:
+            return _source_key_conflict_response('row')
+        except _ConceptDuplicateConflict as exc:
+            return Response(
+                {'detail': (
+                    'The row was rolled back because it would create a '
+                    'measurement with a (concept_id, date) combination that '
+                    'already exists for this person.'
+                ), 'concept_duplicates': exc.duplicates},
+                status=status.HTTP_409_CONFLICT,
+            )
         except IntegrityError as exc:
             logger.exception(
                 'single %s upsert for person %s failed on a database constraint',
@@ -6563,11 +8605,20 @@ class _OmopBulkCreateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'row',
+                ('single %s upsert for person %s failed on a database value', model_name, person.person_id))
 
         obj = model_cls.objects.get(**{pk_field: row_id})
         response_serializer = self.get_serializer(obj)
         http_status = status.HTTP_201_CREATED if new_ids else status.HTTP_200_OK
-        return Response(response_serializer.data, status=http_status)
+        data = response_serializer.data
+        if concept_duplicates:
+            data['concept_duplicates'] = concept_duplicates
+        if plan.key_ambiguous:
+            data['key_ambiguous'] = True
+        return Response(data, status=http_status)
 
     def _bulk_create(self, request):
         rows = request.data
@@ -6598,11 +8649,17 @@ class _OmopBulkCreateMixin:
         # operator can tell which of N rows to fix.
         serializer = self.get_serializer(data=rows, many=True)
         _prefetch_bulk_related(serializer, rows)
-        serializer.is_valid(raise_exception=True)
+        serializer.is_valid()
+        if serializer.errors:
+            return Response(
+                _bulk_row_errors(serializer.errors, len(rows)),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         validated = serializer.validated_data
 
         if not validated:
-            return Response({'created': 0, 'updated': 0, 'ids': []},
+            return Response({'created': 0, 'updated': 0,
+                             'unattributed_matches': 0, 'ids': []},
                             status=status.HTTP_201_CREATED)
 
         # One batch is one person, by construction on the producer side.
@@ -6625,9 +8682,9 @@ class _OmopBulkCreateMixin:
 
         # Same authorization the single-row path applies in perform_create, run
         # once for the batch's single person.
-        org = _authorize_person_write(request, person)
+        _authorize_person_write(request, person)
 
-        source, source_user_id, reason = _extract_provenance(request)
+        provenance = self._provenance(request)
         skip_refresh = str(
             request.query_params.get('skip_refresh', 'false')
         ).strip().lower() in ('1', 'true', 'yes')
@@ -6644,9 +8701,20 @@ class _OmopBulkCreateMixin:
 
         try:
             return self._bulk_write(
-                request, person, org, model_cls, pk_field, model_name, validated,
-                source, source_user_id, reason, skip_refresh, upsert,
+                request, person, model_cls, pk_field, model_name, validated,
+                provenance, skip_refresh, upsert,
                 suppress_patient_record_refresh)
+        except _ConceptDuplicateConflict as exc:
+            return Response(
+                {'detail': (
+                    'The batch was rolled back because it would create '
+                    'measurements with (concept_id, date) combinations that '
+                    'already exist for this person.'
+                ), 'concept_duplicates': exc.duplicates},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except _SourceKeyConflict:
+            return _source_key_conflict_response('batch')
         except IntegrityError as exc:
             # A conflict over data, not a server fault. The distinction decides
             # whether the caller retries, and a 500 reads as "service is down".
@@ -6660,19 +8728,20 @@ class _OmopBulkCreateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'batch',
+                ('bulk %s write for person %s failed on a database value', model_name, person.person_id))
 
     def _bulk_write(
         self,
         request: Request,
         person: Person,
-        org: Organization | None,
         model_cls: type[models.Model],
         pk_field: str,
         model_name: str,
         validated: list[dict[str, Any]],
-        source: str | None,
-        source_user_id: str | None,
-        reason: str | None,
+        provenance: ProvenanceContext,
         skip_refresh: bool,
         upsert: bool,
         suppress_patient_record_refresh: Callable[[], ContextManager[None]],
@@ -6688,12 +8757,24 @@ class _OmopBulkCreateMixin:
             # so here the suppression is load-bearing, not just defensive.
             with suppress_patient_record_refresh():
                 instances = [model_cls(**dict(attrs)) for attrs in validated]
-                if upsert:
+                unattributed_matches = 0
+                keyed_updates, key_ambiguous = {}, []
+                # ?upsert=false turns off the content match only: a second row
+                # with a source record key already on file cannot be inserted.
+                use_plan = upsert or any(
+                    getattr(inst, 'source_record_key', None) for inst in instances)
+                if use_plan:
                     plan = _plan_bulk_upsert(
-                        model_cls, pk_field, model_name, person, instances)
+                        model_cls, pk_field, model_name, person, instances,
+                        organization=provenance.match_organization,
+                        content_match=upsert,
+                        writable=self.serializer_class.Meta.fields,
+                        may_write_confidence=may_write_confidence(request))
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
                     updated = len(plan.touched_ids)
+                    unattributed_matches = plan.unattributed_matches
+                    keyed_updates, key_ambiguous = plan.keyed_updates, plan.key_ambiguous
                 else:
                     new_ids = list(next_pk_batch(model_cls, pk_field, len(instances)))
                     for inst, pk in zip(instances, new_ids):
@@ -6701,24 +8782,48 @@ class _OmopBulkCreateMixin:
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
 
+                # Normalize units on newly-inserted Measurement rows (#2088).
+                # Done AFTER upsert/bulk_create because value_as_number is part
+                # of the Measurement upsert key — normalizing before the match
+                # would change the identity and create duplicates on a re-run.
+                # Key-matched rows were rewritten with the value as sent, so
+                # they are normalized like inserted ones.
+                if model_cls is Measurement and (new_ids or keyed_updates):
+                    _normalize_bulk_measurement_rows(
+                        model_cls, list(new_ids) + list(keyed_updates))
+
+                # Concept-duplicate detection (opt-in).
+                concept_dup_warn, concept_dup_reject = _parse_concept_dup_flags(
+                    request, model_name)
+                concept_duplicates = []
+                if (concept_dup_warn or concept_dup_reject) and new_ids:
+                    inserted = plan.to_insert if use_plan else instances
+                    concept_duplicates = _check_concept_date_duplicates(
+                        model_cls, person, inserted,
+                        exclude_ids=set(new_ids))
+                    if concept_dup_reject and concept_duplicates:
+                        raise _ConceptDuplicateConflict(concept_duplicates)
+
             # No source supplied means no ProvenanceRecord, matching the single-row
             # path — inventing a source would make provenance unfalsifiable.
             # Only inserted rows get one: an upsert that left a row untouched
             # wrote nothing to attribute, matching _upsert_clinical.
-            if source and new_ids:
+            if provenance.source and new_ids:
                 ct = ContentType.objects.get_for_model(model_cls)
                 ProvenanceRecord.objects.bulk_create([
                     ProvenanceRecord(
-                        source=source,
-                        source_user_id=source_user_id or '',
+                        source=provenance.source,
+                        source_user_id=provenance.source_user_id,
                         target_patient_id=str(person.person_id),
-                        modification_reason=reason,
-                        organization=org,
+                        modification_reason=provenance.reason,
+                        organization=provenance.organization,
                         content_type=ct,
                         object_id=pk,
                     )
                     for pk in new_ids
                 ])
+            if provenance.source and keyed_updates:
+                _record_keyed_provenance(model_cls, person, provenance, keyed_updates)
 
             # Deliberately inside the transaction, and deliberately unguarded:
             # a failing derivation rolls the rows back and 500s rather than
@@ -6736,10 +8841,21 @@ class _OmopBulkCreateMixin:
             if not skip_refresh:
                 refresh_patient_record(person)
 
-        return Response(
-            {'created': len(new_ids), 'updated': updated, 'ids': list(ids)},
-            status=status.HTTP_201_CREATED,
-        )
+        # Rows an ETL just wrote for a code that has a proposal sit at concept 0
+        # until resolved; queue the person's resolve so they are provisional
+        # without waiting for a sweep (#2662). A replay counts too: it rewrites
+        # an existing provisional row back to concept 0, and the resolve puts it
+        # right again. Off, no broker, or nothing covered is free.
+        if new_ids or updated:
+            from omop_core.services.provisional_sweep import queue_person_resolve
+            queue_person_resolve(person.person_id)
+        data = {'created': len(new_ids), 'updated': updated,
+                'unattributed_matches': unattributed_matches, 'ids': list(ids)}
+        if model_name in _KEYED_MODELS:
+            data['key_ambiguous'] = key_ambiguous
+        if concept_duplicates:
+            data['concept_duplicates'] = concept_duplicates
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 def _visible_clinical_rows(
@@ -6790,6 +8906,7 @@ class _OmopBulkUpdateMixin:
         if isinstance(parsed, Response):
             return parsed
         ids, payloads = parsed
+        self._provenance(request)
         if not ids:
             return Response({'updated': 0, 'missing': []})
 
@@ -6808,6 +8925,10 @@ class _OmopBulkUpdateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'batch',
+                ('bulk %s update for %s rows failed on a database value', model_name, len(ids)))
 
     def _write_bulk_update(
         self,
@@ -6825,7 +8946,8 @@ class _OmopBulkUpdateMixin:
         by_id: dict[int, models.Model] = {
             getattr(obj, pk_field): obj
             for obj in _visible_clinical_rows(
-                request, model_cls, pk_field, ids).select_for_update()
+                request, model_cls, pk_field, ids
+            ).order_by(pk_field).select_for_update()
         }
         missing: list[int] = [i for i in ids if i not in by_id]
         present: list[tuple[int, dict[str, Any]]] = [
@@ -6883,13 +9005,19 @@ class _OmopBulkUpdateMixin:
         if not instances:
             return Response({'updated': 0, 'missing': missing})
 
+        provenance = self._provenance(request)
+        if provenance.source:
+            raise_on_foreign_attribution(
+                model_cls, [getattr(obj, pk_field) for obj in instances],
+                provenance.organization)
+
         with suppress_patient_record_refresh():
             # Grouped by patched column set, so a row never writes back a column
             # its own payload did not carry.
             for shape, group in by_shape.items():
                 model_cls.objects.bulk_update(group, sorted(shape))
             self._record_bulk_provenance(
-                request, person, model_cls, pk_field, instances)
+                provenance, person, model_cls, pk_field, instances)
 
         # Unguarded and inside the transaction, so a failed derivation rolls the
         # batch back instead of leaving a stale read model.
@@ -6913,36 +9041,37 @@ class _OmopBulkUpdateMixin:
 
     @staticmethod
     def _record_bulk_provenance(
-        request: Request,
+        provenance: ProvenanceContext,
         person: Person,
         model_cls: type[models.Model],
         pk_field: str,
         instances: list[models.Model],
     ) -> None:
         """Attribute the batch to its source, when the caller names one."""
-        source, source_user_id, reason = _extract_provenance(request)
-        if not source:
+        if not provenance.source:
             return
         content_type = ContentType.objects.get_for_model(model_cls)
         # One record per row, actor and source, as the constraint requires. The
         # conflict update keeps the reason for the latest correction, which
         # _record_provenance also does through update_or_create.
+        update_fields = ['modification_reason', 'target_patient_id']
+        if provenance.organization is not None:
+            update_fields.append('organization')
         ProvenanceRecord.objects.bulk_create(
             [
                 ProvenanceRecord(
-                    source=source,
-                    source_user_id=source_user_id or '',
+                    source=provenance.source,
+                    source_user_id=provenance.source_user_id,
                     target_patient_id=str(person.person_id),
-                    modification_reason=reason,
-                    organization=get_request_org(request),
+                    modification_reason=provenance.reason,
+                    organization=provenance.organization,
                     content_type=content_type,
                     object_id=getattr(obj, pk_field),
                 )
                 for obj in instances
             ],
             update_conflicts=True,
-            update_fields=['modification_reason', 'organization',
-                           'target_patient_id'],
+            update_fields=update_fields,
             unique_fields=['content_type', 'object_id', 'source_user_id',
                            'source'],
         )
@@ -7007,14 +9136,12 @@ class _OmopBulkUpdateMixin:
 class _OmopBulkDeleteMixin:
     """Delete many clinical rows of one person in a single request."""
 
-    # POST, because a DELETE with a body gets stripped by intermediaries. That
-    # makes the permission class matter: the parent viewsets accept the ETL
-    # capability and grant a session patient POST, but this action deliberately
-    # restores ScopedTokenPermission. Evaluated as POST, it requires the broad
-    # patient write scope and rejects both the ETL capability and session users,
-    # so the batch grants nothing the row-level DELETE refuses.
+    # POST, because a DELETE with a body gets stripped by intermediaries. So the
+    # parent viewset's class would let etl.write and session patients in here.
+    # EtlDeletePermission instead takes etl.delete, as the row level DELETE
+    # does, or the base rules, which refuse etl.write and session patients.
     @action(detail=False, methods=['post'], url_path='bulk_delete',
-            permission_classes=[ScopedTokenPermission])
+            permission_classes=[EtlDeletePermission])
     def bulk_delete(self, request: Request, *args: Any, **kwargs: Any) -> Response:
         """Delete the rows named by an id list, ignoring ids that match nothing."""
         oversized: Response | None = _bulk_body_too_large(request)
@@ -7135,10 +9262,19 @@ class _OmopBulkDeleteMixin:
 
 class _ProvenanceMixin:
     """Record provenance on create/update when source headers/body fields are present."""
+    source_organization_header = False
+
+    def _provenance(self, request) -> ProvenanceContext:
+        return _provenance_context(request, header=self.source_organization_header)
+
     def _prov(self, obj):
-        source, user_id, reason = _extract_provenance(self.request)
-        if source:
-            _record_provenance(obj, source, user_id, modification_reason=reason, organization=get_request_org(self.request))
+        context = self._provenance(self.request)
+        if context.source:
+            _record_provenance(
+                obj, context.source, context.source_user_id,
+                modification_reason=context.reason,
+                organization=context.organization,
+            )
 
     def perform_create(self, serializer):
         # Auto-generate PK if not supplied
@@ -7249,7 +9385,7 @@ class DrugExposureViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _Provena
 class MeasurementViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _ProvenanceMixin, _OmopFilterMixin, viewsets.ModelViewSet):
     serializer_class = MeasurementSerializer
     permission_classes = [EtlPatientCrudPermission, PatientSelfScopePermission]
-    queryset = Measurement.objects.select_related('measurement_concept').all()
+    queryset = Measurement.objects.select_related('measurement_concept', 'unit_concept').all()
     clinical_filter_fields = {
         'concept_param': 'measurement_concept_id',
         'concept_field': 'measurement_concept_id',
@@ -7299,29 +9435,81 @@ class ProcedureOccurrenceViewSet(_OmopDeferRefreshMixin, _OmopBulkCreateMixin, _
 
 
 # Batch actions are v1 only, the legacy /api/ prefix stays frozen.
+_PROVENANCE_ORG_PARAMETER = OpenApiParameter(
+    name=PROVENANCE_ORG_HEADER,
+    type=int,
+    location=OpenApiParameter.HEADER,
+    required=False,
+    description=(
+        'The hospital the data came from, stored on the provenance of each '
+        'written row. Requires X-Provenance-Source. 400 when malformed, unknown '
+        'or inactive; 403 when it differs from an org-bound credential; 409 when '
+        'an update targets a row attributed to another hospital. With it, an '
+        'upsert matches only this hospital\'s rows; rows with no hospital are '
+        'left as stored and counted in `unattributed_matches`. Grants no access.'
+    ),
+)
+_PROVENANCE_ORG_SCHEMA = extend_schema_view(**{
+    action_name: extend_schema(parameters=[_PROVENANCE_ORG_PARAMETER])
+    for action_name in ('create', 'update', 'partial_update', 'bulk_update')
+})
+
+
+@_PROVENANCE_ORG_SCHEMA
 class V1ConditionOccurrenceViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ConditionOccurrenceViewSet):
-    """Conditions on /api/v1/, with the batch actions."""
+    """Conditions on /api/v1/, with batch actions and diagnosis context."""
+
+    source_organization_header = True
+
+    @extend_schema(request=ConditionContextSerializer, responses=ConditionContextSerializer)
+    @action(detail=True, methods=['get', 'patch'], url_path='context')
+    def context(self, request, pk=None):
+        from omop_core.services.condition_context import condition_contexts, save_condition_context
+
+        condition = self.get_object()
+        if request.method == 'GET':
+            return Response(condition_contexts(condition.person_id, [condition.pk]).get(condition.pk, {}))
+        _authorize_person_write(request, condition.person)
+        data = ConditionContextSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        self._provenance(request)  # Reject invalid provenance before allocating facts.
+        return Response(save_condition_context(condition, data.validated_data, record_provenance=self._prov))
 
 
+@_PROVENANCE_ORG_SCHEMA
 class V1DrugExposureViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, DrugExposureViewSet):
     """Drug exposures on /api/v1/, with the batch actions."""
 
+    source_organization_header = True
 
+
+
+@_PROVENANCE_ORG_SCHEMA
 class V1MeasurementViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, MeasurementViewSet):
     """Measurements on /api/v1/, with the batch actions."""
 
+    serializer_class = V1MeasurementSerializer
+    source_organization_header = True
 
+
+@_PROVENANCE_ORG_SCHEMA
 class V1ObservationViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ObservationViewSet):
     """Observations on /api/v1/, with the batch actions."""
 
+    serializer_class = V1ObservationSerializer
+    source_organization_header = True
 
+
+@_PROVENANCE_ORG_SCHEMA
 class V1ProcedureOccurrenceViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ProcedureOccurrenceViewSet):
     """Procedures on /api/v1/, with the batch actions."""
+
+    source_organization_header = True
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -7441,12 +9629,11 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 if episode is None or not can_access_patient(self.request.user, episode.person_id):
                     raise PermissionDenied('Access denied.')
                 # Creating an episode event is a clinical write, and can_access_patient
-                # is only the read predicate — the analyst role satisfies it but is not
-                # in _WRITE_ROLES. Without this an analyst could append treatment-line
-                # events to any episode they are allowed to read.
+                # is only the read predicate. Without the write check a reader could
+                # append treatment-line events to any episode they are allowed to read.
                 if not can_write_patient(self.request.user, episode.person_id):
                     raise PermissionDenied(
-                        'Analysts have read-only access. Contact a doctor or org admin to update patient data.'
+                        'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'
                     )
         serializer.save()
 
@@ -7797,7 +9984,18 @@ def concept_detail(request, concept_id):
     concept = Concept.objects.filter(concept_id=concept_id).first()
     if concept is None:
         return Response({'detail': 'Concept not found.'}, status=status.HTTP_404_NOT_FOUND)
-    return _set_release_etag(request, Response(_serialize_concept(concept, _vocab_version_map())))
+    from omop_core.services.loinc_metadata import loinc_metadata_for_concepts
+    payload = _serialize_concept(concept, _vocab_version_map())
+    payload['loinc'] = loinc_metadata_for_concepts([concept]).get(concept.pk)
+    response = Response(payload)
+    if payload['loinc'] is None:
+        return _set_release_etag(request, response)
+    snapshot = _measurement_concept_snapshot()
+    etag = _measurement_concept_etag(snapshot)
+    if etag and _etag_matches(request.META.get('HTTP_IF_NONE_MATCH', ''), etag):
+        from django.http import HttpResponseNotModified
+        return _set_measurement_concept_etag(HttpResponseNotModified(), etag)
+    return _set_measurement_concept_etag(response, etag)
 
 
 @api_view(['GET'])
@@ -7872,10 +10070,18 @@ def concept_graph_batch(request):
 # GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab+Test
 # =============================================================================
 
-class ConceptPagination(PageNumberPagination):
-    page_size = 25
+from omop_core.api.concepts import ConceptPagination  # noqa: E402  (packaged config)
+from omop_core.api.views import (  # noqa: E402
+    TherapyHistoryCompletenessViewSet as _PackagedTherapyHistoryCompletenessViewSet,
+    TherapyLineViewSet as _PackagedTherapyLineViewSet,
+)
+
+
+class MeasurementConceptPagination(CursorPagination):
+    page_size = 500
     page_size_query_param = 'page_size'
-    max_page_size = 100
+    max_page_size = 1000
+    ordering = 'concept_id'
 
 
 # Query params accepted as exact-match filters by both concept endpoints.
@@ -7887,36 +10093,21 @@ _CONCEPT_FILTER_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id', 'sta
 _CONCEPT_SELECTIVE_PARAMS = ('vocabulary_id', 'domain_id', 'concept_class_id')
 
 
-def _apply_concept_filters(queryset, query_params):
-    for param in _CONCEPT_FILTER_PARAMS:
-        value = query_params.get(param)
-        if value:
-            queryset = queryset.filter(**{param: value})
-    return queryset
+# The concept search pipeline is packaged (omop_core.api.concepts) so an
+# embedding host's drug/regimen search cannot drift from the curator's.
+from omop_core.api.concepts import (  # noqa: E402
+    CONCEPT_FILTER_PARAMS as _CONCEPT_FILTER_PARAMS,
+    ConceptPagination as _PackagedConceptPagination,
+    apply_concept_filters as _apply_concept_filters,
+    concept_match_ordering as _concept_match_ordering,
+    concept_name_search_filter as _concept_name_search_filter,
+    destination_concepts as _destination_concepts,
+    serialize_concept_base as _serialize_concept_base,
+)
 
 
-def _concept_name_search_filter(query):
-    """Match a concept name by its literal text or its meaningful tokens.
-
-    A literal ``icontains`` remains the fast path and preserves exact phrase
-    semantics.  The token fallback makes a curator's ordinary punctuation and
-    spacing variations useful too: ``Non hod`` can find ``Non-Hodgkin``.  Each
-    token is still at least part of the submitted three-character query, so we
-    avoid introducing an unbounded one-character search.
-    """
-    tokens = re.findall(r'[^\W_]+', query, flags=re.UNICODE)
-    if len(tokens) < 2:
-        return Q(concept_name__icontains=query)
-
-    token_match = Q()
-    for token in tokens:
-        token_match &= Q(concept_name__icontains=token)
-    return Q(concept_name__icontains=query) | token_match
-
-
-def _serialize_concept(concept, versions=None):
-    from omop_core.services.concept_unit_info import concept_unit_fields
-    payload = {
+def _serialize_concept_base(concept, versions=None):
+    return {
         'concept_id': concept.concept_id,
         'concept_name': concept.concept_name,
         'vocabulary_id': concept.vocabulary_id,
@@ -7927,16 +10118,57 @@ def _serialize_concept(concept, versions=None):
         'standard_concept': concept.standard_concept,
         'invalid_reason': concept.invalid_reason,
     }
+
+
+def _serialize_concept(concept, versions=None):
+    from omop_core.services.concept_unit_info import concept_unit_fields
+    payload = _serialize_concept_base(concept, versions)
     payload.update(concept_unit_fields(concept))
     return payload
 
 
-def _paginated_concept_response(queryset, request):
-    # Order by the pk: concept_name has only a GIN trigram index (usable for
-    # icontains, not ORDER BY), so sorting by name would force a full sort of
-    # the matched set on every page request.
+def _measurement_concept_snapshot():
+    from omop_core.models import LoincRelease
+    from omop_core.services.vocab_release import get_latest_release
+
+    vocabulary_release = get_latest_release()
+    loinc_release = LoincRelease.objects.order_by('-loaded_at', '-release_version').first()
+    return {
+        'vocabulary_release_id': vocabulary_release.pk if vocabulary_release else None,
+        'athena_version': vocabulary_release.athena_version if vocabulary_release else None,
+        'loinc_release_version': loinc_release.release_version if loinc_release else None,
+    }
+
+
+def _measurement_concept_etag(snapshot):
+    # Without a published vocabulary release, concept-graph changes have no
+    # trustworthy staleness signal. Serve the catalogue, but do not emit an
+    # ETag that could stay unchanged across an Athena reload.
+    if snapshot['vocabulary_release_id'] is None:
+        return None
+    raw = json.dumps(snapshot, sort_keys=True, separators=(',', ':'))
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return f'"measurement-concepts-{digest}"'
+
+
+def _set_measurement_concept_etag(response, etag):
+    if etag:
+        response['ETag'] = etag
+        response['Cache-Control'] = 'public, max-age=300'
+    return response
+
+
+def _truthy_param(query_params, name):
+    return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
+
+
+def _paginated_concept_response(queryset, request, ordering=('concept_id',)):
+    # Default to the pk: concept_name has only a GIN trigram index (usable for
+    # icontains, not ORDER BY), so sorting a *listing* by name would force a full
+    # sort of a vocabulary on every page request. A search passes its own
+    # ordering, over a matched set small enough to sort.
     paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by('concept_id'), request)
+    page = paginator.paginate_queryset(queryset.order_by(*ordering), request)
     versions = _vocab_version_map()
     response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
     return _set_release_etag(request, response)
@@ -7966,7 +10198,12 @@ def concept_search(request):
         domain_id         optional exact-match filter (e.g. Measurement)
         concept_class_id  optional exact-match filter (e.g. Lab Test)
         standard_concept  optional exact-match filter (S or C)
+        include_retired       'true' to also return concepts with an invalid_reason
+        include_non_standard  'true' to also return non-standard concepts
         page / page_size  pagination (page_size capped at 100)
+
+    By default only concepts usable as a destination are returned: active, and
+    either standard or authored on this instance (#1465).
 
     Response 200: paginated {count, next, previous, results: [concept, ...]}
     """
@@ -7980,21 +10217,31 @@ def concept_search(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    # Every branch of this OR has to be indexable, or the planner abandons the
+    # indexes for all of them and filters each row of the vocabulary instead
+    # (#1466): the name by ix_concept_name_upper_trgm, the code by
+    # ix_concept_code_upper, the id by the pk.
     search_filter = _concept_name_search_filter(query) | Q(concept_code__iexact=query)
     # Numeric vocabulary codes and OMOP IDs share the same search box. Keep
     # both interpretations, but never cast an arbitrary-length code to a DB ID.
+    concept_id = None
     numeric_id = query.lstrip('0') or '0'
     if numeric_id.isascii() and numeric_id.isdecimal() and len(numeric_id) <= 10:
-        concept_id = int(numeric_id)
-        if concept_id <= 2_147_483_647:
+        if int(numeric_id) <= 2_147_483_647:
+            concept_id = int(numeric_id)
             search_filter |= Q(concept_id=concept_id)
     queryset = _apply_concept_filters(
-        Concept.objects.filter(search_filter),
+        _destination_concepts(Concept.objects.filter(search_filter), request.query_params),
         request.query_params,
     )
     # Show a curator what kind of input a Measurement mapping expects when the
     # available OMOP/LOINC data lets us classify it safely.
-    response = _paginated_concept_response(queryset, request)
+    response = _paginated_concept_response(
+        queryset, request, ordering=_concept_match_ordering(query, concept_id),
+    )
+    if response.status_code == status.HTTP_304_NOT_MODIFIED:
+        # A revalidation hit carries no body to annotate (#1457).
+        return response
     for item in response.data.get('results', []):
         # The display-name conventions and curated unit map are LOINC-specific;
         # do not infer an input type for another vocabulary from them.
@@ -8072,6 +10319,36 @@ def concept_list(request):
 
     queryset = _apply_concept_filters(Concept.objects.all(), request.query_params)
     return _paginated_concept_response(queryset, request)
+
+
+@api_view(['GET'])
+@permission_classes([ScopedTokenPermission])
+def measurement_concept_catalog(request):
+    """Active standard Measurement concepts with relationship-backed LOINC metadata."""
+    from django.http import HttpResponseNotModified
+    from omop_core.services.loinc_metadata import loinc_metadata_for_concepts
+
+    snapshot = _measurement_concept_snapshot()
+    etag = _measurement_concept_etag(snapshot)
+    if etag and _etag_matches(request.META.get('HTTP_IF_NONE_MATCH', ''), etag):
+        return _set_measurement_concept_etag(HttpResponseNotModified(), etag)
+
+    queryset = Concept.objects.filter(
+        domain_id='Measurement',
+        standard_concept='S',
+    ).filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    paginator = MeasurementConceptPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    versions = _vocab_version_map()
+    loinc_metadata = loinc_metadata_for_concepts(page)
+    results = []
+    for concept in page:
+        payload = _serialize_concept_base(concept, versions)
+        payload['loinc'] = loinc_metadata.get(concept.pk)
+        results.append(payload)
+    response = paginator.get_paginated_response(results)
+    response.data['snapshot'] = snapshot
+    return _set_measurement_concept_etag(response, etag)
 
 
 @api_view(['GET'])
@@ -8300,30 +10577,10 @@ def therapy_regimen_list(request):
         regimen = TherapyRegimen.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': regimen.code, 'title': regimen.title, 'concept_id': regimen.concept_id}, status=status.HTTP_201_CREATED)
 
-    qs = TherapyRegimen.objects.all().order_by('title')
-
-    disease_code = request.query_params.get('disease')
-    round_code = request.query_params.get('round')
-    search = request.query_params.get('search', '').strip()
-
-    if disease_code or round_code:
-        dtr_qs = DiseaseTherapyRegimen.objects.all()
-        if disease_code:
-            from omop_core.services.treatment_catalog import disease_filter
-            dtr_qs = dtr_qs.filter(disease_filter(disease_code))
-        if round_code:
-            dtr_qs = dtr_qs.filter(round__code=round_code)
-        regimen_ids = dtr_qs.values_list('regimen_id', flat=True)
-        qs = qs.filter(id__in=regimen_ids)
-
-    if search:
-        qs = qs.filter(title__icontains=search)
-
-    values = qs.values('code', 'title', 'concept_id')
-    # A disease/round picker needs the complete available list. Search remains
-    # bounded, but alphabetical truncation must not hide valid supportive care.
-    items = list(values if round_code and not search else values[:50])
-    return Response(items)
+    # Reads are packaged (omop_core.api.regimens) so an embedding host cannot
+    # drift from this list; curation writes stay here.
+    from omop_core.api.regimens import regimen_list_payload
+    return Response(regimen_list_payload(request.query_params))
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
@@ -8360,39 +10617,8 @@ def therapy_regimen_detail(request, code):
         regimen.save()
         # Fall through to return the updated detail
 
-    component_links = TherapyRegimenComponent.objects.filter(
-        regimen=regimen,
-    ).select_related('component', 'component__concept').prefetch_related(
-        Prefetch(
-            'component__component_classes',
-            queryset=TherapyComponentClassLink.objects.select_related('therapy_class'),
-        )
-    )
-
-    components = []
-    for link in component_links:
-        comp = link.component
-        concept = comp.concept
-        classes = [
-            {'code': cl.therapy_class.code, 'title': cl.therapy_class.title, 'concept_id': cl.therapy_class.concept_id}
-            for cl in comp.component_classes.all()
-        ]
-        components.append({
-            'code': comp.code,
-            'title': comp.title,
-            'concept_id': comp.concept_id,
-            'concept_name': concept.concept_name if concept else comp.title,
-            'concept_code': concept.concept_code if concept else comp.code,
-            'vocabulary_id': concept.vocabulary_id if concept else None,
-            'classes': classes,
-        })
-
-    return Response({
-        'code': regimen.code,
-        'title': regimen.title,
-        'concept_id': regimen.concept_id,
-        'components': components,
-    })
+    from omop_core.api.regimens import regimen_detail_payload
+    return Response(regimen_detail_payload(regimen.code))
 
 
 @api_view(['GET', 'POST'])
@@ -8419,7 +10645,7 @@ def therapy_component_list(request):
         comp = TherapyComponent.objects.create(code=code, title=title, concept_id=concept_id)
         return Response({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id}, status=status.HTTP_201_CREATED)
 
-    qs = TherapyComponent.objects.all().order_by('title')
+    qs = TherapyComponent.objects.all().select_related('concept').order_by('title')
     search = request.query_params.get('search', '').strip()
     if search:
         qs = qs.filter(title__icontains=search)
@@ -8432,12 +10658,84 @@ def therapy_component_list(request):
     )
     items = []
     for comp in qs:
+        concept = comp.concept
         classes = [
             {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
             for link in comp.component_classes.all()
         ]
-        items.append({'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes})
+        item = {'code': comp.code, 'title': comp.title, 'concept_id': comp.concept_id, 'classes': classes}
+        if concept:
+            item['standard_concept'] = concept.standard_concept
+            item['invalid_reason'] = concept.invalid_reason
+        else:
+            item['standard_concept'] = None
+            item['invalid_reason'] = None
+        items.append(item)
     return Response(items)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def therapy_component_detail(request, code):
+    """Single therapy component with concept status.
+
+    GET /api/v1/therapy-components/<code>/
+    PATCH /api/v1/therapy-components/<code>/  {title?, concept_id?}
+    DELETE /api/v1/therapy-components/<code>/
+    """
+    try:
+        comp = TherapyComponent.objects.select_related('concept').get(code=code)
+    except TherapyComponent.DoesNotExist:
+        return Response({'detail': f'Component not found: {code}'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method in ('DELETE', 'PATCH'):
+        denied = _require_mapping_admin(request)
+        if denied:
+            return denied
+
+    if request.method == 'DELETE':
+        comp.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    if request.method == 'PATCH':
+        changed = False
+        if 'title' in request.data:
+            new_title = request.data['title']
+            if isinstance(new_title, str) and not new_title.strip():
+                return Response({'detail': 'title must not be empty'}, status=status.HTTP_400_BAD_REQUEST)
+            comp.title = new_title.strip() if isinstance(new_title, str) else new_title
+            changed = True
+        if 'concept_id' in request.data:
+            concept_id, err = _validate_concept_id(request.data['concept_id'])
+            if err:
+                return err
+            if concept_id is not None:
+                from omop_core.models import Concept
+                if not Concept.objects.filter(concept_id=concept_id).exists():
+                    return Response(
+                        {'detail': f'Concept {concept_id} does not exist'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            comp.concept_id = concept_id
+            changed = True
+        if changed:
+            comp.save()
+            comp = TherapyComponent.objects.select_related('concept').get(pk=comp.pk)
+
+    concept = comp.concept
+    classes = [
+        {'code': link.therapy_class.code, 'title': link.therapy_class.title, 'concept_id': link.therapy_class.concept_id}
+        for link in TherapyComponentClassLink.objects.filter(component=comp).select_related('therapy_class')
+    ]
+    data = {
+        'code': comp.code,
+        'title': comp.title,
+        'concept_id': comp.concept_id,
+        'standard_concept': concept.standard_concept if concept else None,
+        'invalid_reason': concept.invalid_reason if concept else None,
+        'classes': classes,
+    }
+    return Response(data)
 
 
 @api_view(['GET', 'POST'])
@@ -8475,9 +10773,9 @@ def mapping_stats(request):
 
     GET /api/v1/mapping-stats/
     Returns counts for field mappings, code mappings, and therapy reference data.
-    Restricted to staff or org_admin users.
+    Every professional role reads it (#2416).
     """
-    if not has_org_admin_access(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
@@ -8491,7 +10789,18 @@ def mapping_stats(request):
     code_proposed = SourceCodeConceptMapping.objects.filter(status='proposed').count()
     code_total = code_approved + code_proposed
 
+    from omop_core.models import RelevanceSignal
+    # Decisions are per (disease, concept) pair, so count pairs, not period rows.
+    signal_pairs = dict(
+        RelevanceSignal.objects.values('status')
+        .annotate(n=Count(Concat('disease', Value(':'), Cast('concept_id', CharField())), distinct=True))
+        .values_list('status', 'n'))
+
+    disease_category_total = DiseaseCategoryMapping.objects.count()
+    chronic_overrides_total = ChronicConditionOverride.objects.count()
+
     return Response({
+        'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
         'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
         'therapy': {
@@ -8499,6 +10808,12 @@ def mapping_stats(request):
             'components': TherapyComponent.objects.count(),
             'classes': TherapyClass.objects.count(),
             'disease_links': DiseaseTherapyRegimen.objects.count(),
+        },
+        'disease_category': {
+            'total': disease_category_total,
+        },
+        'chronic_overrides': {
+            'total': chronic_overrides_total,
         },
     })
 
@@ -8656,6 +10971,313 @@ def disease_therapy_regimen_detail(request, pk):
         return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
     obj.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# Disease Category Mapping
+# =============================================================================
+
+
+def _valid_category_codes() -> set[str]:
+    """Return valid category codes from the DB table, falling back to the enum."""
+    from omop_core.services import disease_profiles
+    try:
+        return disease_profiles.category_codes()
+    except Exception:
+        return {c.value for c in DiseaseCategory}
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def disease_category_list(request):
+    """List or create disease category choices.
+
+    GET  /api/v1/disease-categories/
+    POST /api/v1/disease-categories/  {"code": "DLBCL", "label": "Diffuse Large B-Cell Lymphoma"}
+    """
+    if request.method == 'GET':
+        rows = DiseaseCategoryChoice.objects.all()
+        if not rows.exists():
+            # Fallback: return enum choices when the table is empty (pre-migration)
+            return Response([
+                {'value': c.value, 'label': c.label} for c in DiseaseCategory
+            ])
+        return Response([
+            {'value': r.code, 'label': r.label} for r in rows
+        ])
+    # POST
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    code = (request.data.get('code') or '').strip()
+    label = (request.data.get('label') or '').strip()
+    if not code or not label:
+        return Response(
+            {'detail': 'code and label are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if DiseaseCategoryChoice.objects.filter(code__iexact=code).exists():
+        return Response(
+            {'detail': f'A category with code "{code}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    try:
+        obj = DiseaseCategoryChoice.objects.create(code=code, label=label)
+    except IntegrityError:
+        return Response(
+            {'detail': f'A category with code "{code}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response(
+        {'value': obj.code, 'label': obj.label},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def disease_category_detail(request, code):
+    """Delete a disease category choice.
+
+    DELETE /api/v1/disease-categories/<code>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = DiseaseCategoryChoice.objects.get(code=code)
+    except DiseaseCategoryChoice.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    # Don't allow deleting a category that has mappings pointing to it.
+    in_use = DiseaseCategoryMapping.objects.filter(category=code).count()
+    if in_use:
+        return Response(
+            {'detail': f'Cannot delete: {in_use} mapping(s) use this category'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    # Nor one whose extension still has fields: they would be scoped to a
+    # disease that no longer exists (#2331). Make them base, or move them.
+    from omop_core.models import FieldDiseaseMembership
+    from omop_core.services import disease_profiles
+    members = sorted(disease_profiles.extension_fields(code) & disease_profiles.field_names())
+    if members:
+        named = ', '.join(members[:5]) + (', …' if len(members) > 5 else '')
+        return Response(
+            {'detail': f'Cannot delete: {len(members)} field(s) belong to this disease ({named})'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    with transaction.atomic():
+        # Rows left under the name of a field that no longer exists go with
+        # the category: nothing can clear them, and they scope nothing.
+        FieldDiseaseMembership.objects.filter(disease=code).delete()
+        obj.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def disease_category_mapping_list(request):
+    """List or create disease-to-category mappings.
+
+    GET  /api/v1/disease-category-mappings/?search=myeloma
+    POST /api/v1/disease-category-mappings/  {"disease_name": "...", "category": "MM"}
+    """
+    if request.method == 'GET':
+        qs = DiseaseCategoryMapping.objects.all()
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(disease_name__icontains=search)
+        category_param = request.query_params.get('category', '').strip()
+        if category_param:
+            qs = qs.filter(category__iexact=category_param)
+        return Response([
+            {'id': m.id, 'disease_name': m.disease_name, 'category': m.category}
+            for m in qs
+        ])
+    # POST
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    disease_name = (request.data.get('disease_name') or '').strip()
+    category = (request.data.get('category') or '').strip()
+    if not disease_name or not category:
+        return Response(
+            {'detail': 'disease_name and category are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    valid_categories = _valid_category_codes()
+    if category not in valid_categories:
+        return Response(
+            {'detail': f'category must be one of {sorted(valid_categories)}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if DiseaseCategoryMapping.objects.filter(disease_name__iexact=disease_name).exists():
+        return Response(
+            {'detail': f'A mapping for "{disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    try:
+        obj = DiseaseCategoryMapping.objects.create(disease_name=disease_name, category=category)
+    except IntegrityError:
+        return Response(
+            {'detail': f'A mapping for "{disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response(
+        {'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def disease_category_mapping_detail(request, pk):
+    """Update or delete a disease-category mapping.
+
+    PATCH  /api/v1/disease-category-mappings/<pk>/  {"category": "Other"}
+    DELETE /api/v1/disease-category-mappings/<pk>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = DiseaseCategoryMapping.objects.get(pk=pk)
+    except DiseaseCategoryMapping.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    # PATCH
+    category = request.data.get('category')
+    disease_name = request.data.get('disease_name')
+    if category is not None:
+        category = category.strip()
+        valid_categories = _valid_category_codes()
+        if category not in valid_categories:
+            return Response(
+                {'detail': f'category must be one of {sorted(valid_categories)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        obj.category = category
+    if disease_name is not None:
+        disease_name = disease_name.strip()
+        if not disease_name:
+            return Response({'detail': 'disease_name cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
+        dup = DiseaseCategoryMapping.objects.filter(disease_name__iexact=disease_name).exclude(pk=pk)
+        if dup.exists():
+            return Response(
+                {'detail': f'A mapping for "{disease_name}" already exists'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        obj.disease_name = disease_name
+    try:
+        obj.save()
+    except IntegrityError:
+        return Response(
+            {'detail': f'A mapping for "{obj.disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response({'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category})
+
+
+def _override_json(o):
+    return {'id': o.id, 'code': o.code, 'is_chronic': o.is_chronic, 'label': o.label, 'notes': o.notes}
+
+
+def _override_fields(data, obj=None):
+    """Validated column values from a request body, or (None, error Response).
+    Only the keys sent are returned, so a PATCH leaves the rest alone."""
+    from omop_core.services.chronic_conditions import normalize_icd10cm
+    if not hasattr(data, 'get'):
+        return None, Response({'detail': 'Expected a JSON object'}, status=status.HTTP_400_BAD_REQUEST)
+    out = {}
+    if obj is None or 'code' in data:
+        code = normalize_icd10cm(data.get('code') if isinstance(data.get('code'), str) else None)
+        if not code:
+            return None, Response({'detail': 'code must be an ICD-10-CM code such as E03.9'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        out['code'] = code
+    if obj is None or 'is_chronic' in data:
+        if not isinstance(data.get('is_chronic'), bool):
+            return None, Response({'detail': 'is_chronic must be true or false'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        out['is_chronic'] = data['is_chronic']
+    for key, limit in (('label', 200), ('notes', 5000)):
+        if key in data:
+            value = data[key]
+            if value is None:
+                value = ''
+            if not isinstance(value, str) or len(value) > limit:
+                return None, Response({'detail': f'{key} must be text of at most {limit} characters'},
+                                      status=status.HTTP_400_BAD_REQUEST)
+            out[key] = value.strip()
+    return out, None
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def chronic_condition_override_list(request):
+    """List or create chronic-condition overrides (#2566).
+
+    GET  /api/v1/chronic-condition-overrides/?search=M85
+    POST /api/v1/chronic-condition-overrides/  {"code": "M85.8", "is_chronic": true, "label": "Osteopenia"}
+    """
+    if request.method == 'GET':
+        qs = ChronicConditionOverride.objects.all()
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(code__icontains=search) | Q(label__icontains=search))
+        return Response([_override_json(o) for o in qs])
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    fields, error = _override_fields(request.data)
+    if error:
+        return error
+    if ChronicConditionOverride.objects.filter(code=fields['code']).exists():
+        return Response({'detail': f'An override for {fields["code"]} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    try:
+        obj = ChronicConditionOverride.objects.create(**fields)
+    except IntegrityError:
+        return Response({'detail': f'An override for {fields["code"]} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    return Response(_override_json(obj), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def chronic_condition_override_detail(request, pk):
+    """Change or delete a chronic-condition override.
+
+    PATCH  /api/v1/chronic-condition-overrides/<pk>/  {"is_chronic": false}
+    DELETE /api/v1/chronic-condition-overrides/<pk>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = ChronicConditionOverride.objects.get(pk=pk)
+    except ChronicConditionOverride.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    fields, error = _override_fields(request.data, obj)
+    if error:
+        return error
+    code = fields.get('code')
+    if code and ChronicConditionOverride.objects.filter(code=code).exclude(pk=pk).exists():
+        return Response({'detail': f'An override for {code} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    for key, value in fields.items():
+        setattr(obj, key, value)
+    try:
+        obj.save()
+    except IntegrityError:
+        return Response({'detail': f'An override for {obj.code} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    return Response(_override_json(obj))
 
 
 # =============================================================================
@@ -9273,11 +11895,21 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             return self._unsupported_if_none_match(none_match, instance)
         if tokens is None:
             # Serialize from the instance this request wrote rather than
-            # re-reading the row. A `refresh_from_db` here is a SECOND read,
-            # and a writer landing between the two would have the returned
-            # `ETag` describe THEIR version while the body is ours — a
-            # client spending that tag as `If-Match` would then be told the
-            # precondition held while overwriting content it never read.
+            # re-reading the row. A `refresh_from_db` of the WHOLE row here
+            # is a second read, and a writer landing between the two would
+            # have the returned `ETag` describe THEIR version while the body
+            # is ours — a client spending that tag as `If-Match` would then
+            # be told the precondition held while overwriting content it
+            # never read.
+            #
+            # The serializer does re-read the columns this request did NOT
+            # write, and that is compatible rather than an exception — it is
+            # the complement of the hazard above, which is about re-reading
+            # what we just wrote. A column the save skipped is one whose
+            # in-memory value is this request's stale copy, so reporting it
+            # would describe a version that never existed; `updated_at` and
+            # the ETag still come from this request's own write, which is
+            # what keeps the tag honest.
             serializer = self.get_serializer(instance, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
@@ -9458,7 +12090,7 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             #
             # `select_for_update` is a no-op on SQLite, which `settings.py`
             # falls back to when DATABASE_URL is unset. Every deployment and
-            # CI run is PostgreSQL, and CLAUDE.md sends local work there too,
+            # CI run is PostgreSQL, and AGENTS.md sends local work there too,
             # so the guarantee holds everywhere it is claimed — but on that
             # dev fallback the precondition degrades to best-effort, and the
             # concurrency tests skip rather than pretend to prove otherwise.
@@ -9536,9 +12168,33 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             )
             prefs.preferences = {}
             prefs.save(update_fields=['preferences', 'updated_at'])
+            # This path takes no lock, so an offer landing between the read
+            # and the save leaves `prefs` holding the flag as it was. The
+            # narrow save keeps the database right and the response would
+            # still describe it wrongly — same staleness the serializer's
+            # `update` guards, and this write does not go through it.
+            #
+            # Whole row, one SELECT, for the reason written out at length in
+            # that serializer: the body and the ETag must describe ONE
+            # version. Re-reading just the flag puts a concurrent writer's
+            # value beside this request's `updated_at`, and the client's next
+            # conditional write then 412s having changed nothing. This branch
+            # had exactly that until review caught the invariant stated in one
+            # place and applied in one of the two that needed it.
+            #
+            # Same window the serializer's re-read carries: a row deleted
+            # between the save and this line raises `DoesNotExist`. Only a
+            # `Person` cascade can do that — there is no DELETE route — and
+            # the alternative, resurrecting a row somebody asked to delete, is
+            # worse.
+            prefs.refresh_from_db()
             return self._with_etag(Response(self.get_serializer(prefs).data), prefs)
 
-        # Same lock, same reason as `upsert`. A clear is a write.
+        # Same lock, same reason as `upsert`. A clear is a write. Nothing to
+        # re-read below: the row was read under the lock, so no other writer
+        # can have moved the flag while this one holds it — on PostgreSQL. On
+        # the SQLite dev fallback `select_for_update` is a no-op and this
+        # degrades to best-effort, like every other precondition in this file.
         with transaction.atomic():
             prefs = (
                 TrialSearchPreferences.objects
@@ -10116,22 +12772,78 @@ class VocabSnapshotView(APIView):
 # Field Concept Mapping (staff and organization-admin concept assignment interface)
 # =============================================================================
 
-def _can_manage_field_mappings(user):
-    """Whether a user may access the mapping curation pages.
+def _can_view_mappings(user):
+    """Whether a user may open the mapping pages (#2416).
 
-    Any professional role (org_admin, doctor, analyst) can view and propose
-    mappings.  Approval requires a higher privilege — see _can_approve_mappings.
+    The hub, Code Mapping (both tabs, the accuracy pages, suggest-run logs),
+    field mappings with their synonyms, choices and custom fields, therapy
+    and disease-category reference, relevance signals and source systems.
+    Staff and every professional role: org_admin, doctor and analyst. A
+    doctor reads; see ``_can_manage_mappings`` for who writes.
     """
-    return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
+    return bool(getattr(user, 'is_staff', False) or has_mapping_read_access(user))
+
+
+def _can_manage_mappings(user):
+    """Whether a user may create or change a mapping (#2398, #2416).
+
+    Creating, editing, proposing and uploading code and field mappings,
+    synonyms and choices, Suggest, Lock, Done, priority, axis variants, LOINC
+    axes, SNOMED attributes, concept minting and source-system facility
+    review. Staff, org admins and analysts; a doctor needs an analyst grant
+    as well, since roles are additive and mapping is the analyst's. Approval
+    is narrower still, ``_can_approve_mappings``, and so is adding a field to
+    PatientRecord, which creates an approved mapping (#721).
+    """
+    return bool(getattr(user, 'is_staff', False) or has_mapping_write_access(user))
+
+
+def _can_read_mappings(request):
+    """Whether the caller may read the code-mapping table (#2340).
+
+    A human needs a professional role, as for every mapping page. A service
+    credential is a machine with no role, so it is admitted on the safe verbs
+    only, and only with ``system/*.read``: mapping rows are curated reference
+    data, the same class as the vocabulary releases that scope already reads
+    (#344). Nothing a machine can do here changes a mapping -- POST, PATCH and
+    DELETE still require a professional session -- and a service token that
+    does hold a role is still held to the scope, not the role.
+    """
+    if is_service_token(request):
+        return has_system_read_grant(request)
+    return _can_view_mappings(request.user)
+
+
+def _without_source_samples(mappings):
+    """Blank the per-patient samples on a page of mappings for a machine reader.
+
+    ``attach_source_samples`` draws ``example_quantity``, ``sample_quantities``
+    and ``based_on`` from PatientSourceCode rows: a few real result values and
+    order labels per code, shown to curators as evidence. A service credential
+    reads the table, not the evidence, so it gets the row without them.
+    """
+    for mapping in mappings:
+        mapping._source_samples = {'quantities': [], 'based_on': [], 'units': []}
+        # A machine reads the table, not who proposed what (#2726).
+        mapping._hide_proposer = True
+    return mappings
 
 
 def _can_approve_mappings(user):
     """Whether a user may set a mapping's status to 'approved'.
 
-    Only staff and org-admin users can approve.  Doctors and analysts may
-    propose or reject mappings but cannot approve them.
+    Only staff and org-admin users can approve.  An analyst may propose or
+    reject code mappings and a doctor field mappings, but neither approves.
     """
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
+
+
+def _can_administer_code_mapping(user, mapping):
+    """Whether *user* may mutate this mapping's organization-owned state."""
+    return bool(
+        mapping.organization_id is None
+        or get_admin_orgs(user).filter(pk=mapping.organization_id).exists()
+    )
 
 
 LOCAL_CONCEPT_ID_MIN = 2_000_000_000
@@ -10145,8 +12857,12 @@ def _is_local_vocabulary_id(vocabulary_id):
 # Standard vocabularies a curator re-points a proposed mapping into. These get
 # destination tabs: a mapping whose destination an SME moved to a LOINC concept
 # has to be visible somewhere, or their own output disappears on them.
+# Vocabularies the dialog offers to scope a destination search to. Each holds
+# standard concepts. ICD10CM was listed and holds none -- every ICD-10-CM concept
+# is non-standard and maps *to* SNOMED -- so scoping to it could only ever offer
+# a same-system, non-standard destination (#1465).
 _STANDARD_DESTINATION_VOCABULARIES = (
-    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'ICD10CM', 'HemOnc',
+    'SNOMED', 'LOINC', 'RxNorm', 'RxNorm Extension', 'HemOnc',
 )
 
 
@@ -10158,6 +12874,17 @@ def _mapping_author(mapping):
     above every human's.
     """
     return _user_display(getattr(mapping, 'created_by', None) if mapping else None)
+
+
+def _proposer_id(mapping):
+    """The curator the two-person rule keeps from approving ``mapping``, or None.
+
+    None when the rule is off, so a client compares it with the signed-in
+    account and never needs to know the setting (#2726).
+    """
+    if mapping is None or not mapping_approval.enabled() or getattr(mapping, '_hide_proposer', False):
+        return None
+    return mapping.proposed_by_id
 
 
 def _user_display(user):
@@ -10176,7 +12903,39 @@ def _concept_unit_fields(concept):
     return concept_unit_fields(concept)
 
 
-def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, destination_count=None):
+def _destination_unit_fields(mapping):
+    """The mapping's curated destination unit, as the list shows it.
+
+    '' for both when the mapping has none. The column has no database
+    constraint, so an id whose concept is not loaded reads as no unit rather
+    than failing the page.
+    """
+    unit = None
+    if mapping is not None and mapping.destination_unit_concept_id:
+        try:
+            unit = mapping.destination_unit_concept
+        except Concept.DoesNotExist:
+            unit = None
+    return {
+        'destination_unit_code': unit.concept_code if unit else '',
+        'destination_unit_name': unit.concept_name if unit else '',
+    }
+
+
+def _vote_fields(mapping):
+    """The row's current vote tally, for a list that asked for it (#2678).
+
+    Only a queryset annotated by ``mapping_votes.with_vote_counts`` carries
+    one, so a single-row response has no ``votes`` key and costs no query;
+    the list re-reads after a save.
+    """
+    from omop_core.services.mapping_votes import row_tally
+    tally = row_tally(mapping) if mapping is not None else None
+    return {} if tally is None else {'votes': tally}
+
+
+def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
+                                destination_count=None, include_source_evidence=False):
     """One row of the Code Mapping list: a source code and where it lands.
 
     Keys read in the direction of the mapping. The source side never falls back
@@ -10185,16 +12944,54 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
     code system reports '', which is a real state: paper labs and clinicians'
     notes carry no code system at all.
     """
-    if source_metadata is None:
+    if source_retirement is None:
         from omop_core.services.source_retirement import mapping_source_retirement
-        source_metadata = mapping_source_retirement([mapping]).get(mapping.pk) if mapping else {
+        source_retirement = mapping_source_retirement([mapping]).get(mapping.pk) if mapping else {
             'source_retired': None, 'source_retirement_evidence': [],
         }
+    from omop_core.services.source_system_context import source_system_context
+    system_context = source_system_context(mapping)
     # A mapping can legitimately have no destination yet: a code seen at ingest
     # whose concept is not loaded is a review-queue row, not an error.
+    from omop_core.services.mapping_source_units import source_units
+    units = source_units(mapping)
+    if mapping is not None and not hasattr(mapping, '_source_samples'):
+        from omop_core.services.mapping_samples import attach_source_samples
+        attach_source_samples([mapping])
+    samples = getattr(mapping, '_source_samples', None)
+    if not units and samples is not None:
+        units = samples['units']
+    based_on = samples['based_on'] if samples is not None else []
+    quantities = samples['quantities'] if samples is not None else []
+    quantity = '; '.join(quantities)
+    source_evidence = None
+    if include_source_evidence:
+        evidence_metadata = dict(mapping.source_metadata or {}) if mapping else {}
+        facility_evidence = evidence_metadata.pop('facilities', [])
+        source_evidence = {
+            'organization': ({
+                'id': mapping.organization_id,
+                'slug': mapping.organization.slug,
+                'name': mapping.organization.name,
+            } if mapping and mapping.organization_id else None),
+            'occurrence_count': mapping.occurrence_count if mapping else 0,
+            'group_occurrence_count': (
+                mapping.source_group_occurrence_count if mapping else None
+            ),
+            'first_seen': mapping.first_seen if mapping else None,
+            'last_seen': mapping.last_seen if mapping else None,
+            'metadata': evidence_metadata,
+            'facilities': facility_evidence if isinstance(facility_evidence, list) else [],
+            'system_context': system_context,
+            'units': mapping.source_unit_evidence if mapping else [],
+        }
     if concept is None:
-        return {
-            **source_metadata,
+        payload = {
+            **source_retirement,
+            'source_units': units,
+            'based_on': based_on,
+            'example_quantity': quantity,
+            'sample_quantities': quantities,
             'destination_concept_id': None,
             'destination_concept_name': '',
             'destination_concept_code': '',
@@ -10208,23 +13005,37 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
             'mapping_id': mapping.id if mapping else None,
             'domain_id': mapping.domain_id if mapping else '',
             'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+            'source_system_context': system_context,
             'source_code': mapping.source_code if mapping else '',
             'source_code_description': mapping.source_code_description if mapping else '',
+            'category': mapping.category if mapping else '',
+            'measure_class': mapping.measure_class if mapping else '',
+            'metric_key': mapping.metric_key if mapping else '',
+            'organization_id': mapping.organization_id if mapping else None,
+            'organization_slug': mapping.organization.slug if mapping and mapping.organization_id else '',
+            'organization_name': mapping.organization.name if mapping and mapping.organization_id else '',
             'source_concept_id': mapping.source_concept_id if mapping else None,
             'umls_source_name': mapping.umls_source_name if mapping else '',
             'source': mapping.source if mapping else '',
             'status': mapping.status if mapping else 'unmapped',
             'notes': mapping.notes if mapping else '',
+            'has_curator_note': bool(mapping and mapping.curator_note_at and mapping.notes.strip()),
             'origin': mapping.origin if mapping else '',
             'origin_system': mapping.origin_system if mapping else '',
             'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
             'suggest_strategy': mapping.suggest_strategy if mapping else '',
+            'decision_surface': mapping.decision_surface if mapping else '',
+            'decision_confidence': mapping.decision_confidence if mapping else None,
+            'suggestion_confidence': mapping.suggestion_confidence if mapping else None,
             'umls_cui': mapping.umls_cui if mapping else '',
             'created_by': _mapping_author(mapping),
             # Who signed it off, which survives every later edit -- unlike
             # created_by/updated_by, which say only who last touched the row.
             'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
             'reviewed_at': mapping.reviewed_at if mapping else None,
+            # Who proposed the destination, only while the two-person rule is on:
+            # the page disables Approve for that curator (#2726).
+            'proposed_by_id': _proposer_id(mapping),
             'occurrence_count': mapping.occurrence_count if mapping else 0,
             'destination_count': destination_count if destination_count is not None else 0,
             'first_seen': mapping.first_seen if mapping else None,
@@ -10240,9 +13051,22 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
             'concept_vocabulary_id': '',
             'domain': '',
             'concept_class_id': '',
+            'destination_unit_concept_id': mapping.destination_unit_concept_id if mapping else None,
+            **_destination_unit_fields(mapping),
+            'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
+            'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
         }
-    return {
-        **source_metadata,
+        payload.update(_axis_fields(mapping))
+        payload.update(_vote_fields(mapping))
+        if include_source_evidence:
+            payload['source_evidence'] = source_evidence
+        return payload
+    payload = {
+        **source_retirement,
+        'source_units': units,
+        'based_on': based_on,
+        'example_quantity': quantity,
+        'sample_quantities': quantities,
         # Destination
         'destination_concept_id': concept.concept_id,
         'destination_concept_name': concept.concept_name,
@@ -10265,8 +13089,19 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         # the table came to be picked twice by two different rules.
         'domain_id': mapping.domain_id if mapping else '',
         'source_vocabulary_id': mapping.source_vocabulary_id if mapping else '',
+        'source_system_context': system_context,
         'source_code': mapping.source_code if mapping else '',
         'source_code_description': mapping.source_code_description if mapping else '',
+        # What a wearable mapping says about the source metric: its category
+        # (Activity, Sleep, ...), how the source produces the value (Direct
+        # measurement, ...) and the vendor-neutral key the other vocabularies'
+        # codes for the same metric share. '' elsewhere.
+        'category': mapping.category if mapping else '',
+        'measure_class': mapping.measure_class if mapping else '',
+        'metric_key': mapping.metric_key if mapping else '',
+        'organization_id': mapping.organization_id if mapping else None,
+        'organization_slug': mapping.organization.slug if mapping and mapping.organization_id else '',
+        'organization_name': mapping.organization.name if mapping and mapping.organization_id else '',
         # The concept for the source code itself, when that vocabulary is
         # loaded. Null is the normal case and means nothing is wrong.
         'source_concept_id': mapping.source_concept_id if mapping else None,
@@ -10275,16 +13110,23 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         # Review state and provenance
         'status': mapping.status if mapping else 'unmapped',
         'notes': mapping.notes if mapping else '',
+        # True when a curator wrote the note; Suggest's rationale is not one.
+        'has_curator_note': bool(mapping and mapping.curator_note_at and mapping.notes.strip()),
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
         'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
+        'suggested_action': mapping.suggested_action if mapping else '',
         'suggest_strategy': mapping.suggest_strategy if mapping else '',
+        'decision_surface': mapping.decision_surface if mapping else '',
+        'decision_confidence': mapping.decision_confidence if mapping else None,
+        'suggestion_confidence': mapping.suggestion_confidence if mapping else None,
         'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
         # Who signed it off, which survives every later edit -- unlike
         # created_by/updated_by, which say only who last touched the row.
         'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
         'reviewed_at': mapping.reviewed_at if mapping else None,
+        'proposed_by_id': _proposer_id(mapping),
         'occurrence_count': mapping.occurrence_count if mapping else 0,
         'destination_count': destination_count if destination_count is not None else 0,
         'first_seen': mapping.first_seen if mapping else None,
@@ -10304,7 +13146,39 @@ def _serialize_code_mapping_row(concept, mapping=None, source_metadata=None, des
         # Unit info for LOINC Measurement concepts — helps curators assess
         # mapping quality without opening a concept search.
         **_concept_unit_fields(concept),
+        'destination_unit_concept_id': mapping.destination_unit_concept_id if mapping else None,
+        **_destination_unit_fields(mapping),
+        # Edit lock
+        'locked_by_username': _user_display(mapping.locked_by) if mapping and mapping.locked_by_id else None,
+        'locked_at': (mapping.locked_at.isoformat() if mapping and mapping.locked_at else None),
     }
+    payload.update(_axis_fields(mapping))
+    payload.update(_vote_fields(mapping))
+    if include_source_evidence:
+        payload['source_evidence'] = source_evidence
+    return payload
+
+
+def _axis_fields(mapping):
+    """LOINC axis state every queue row carries: the curator's axis entries,
+    how many axis variants the code's units imply (the queue's blue
+    "n axis values" flag), and each variant's destination when present."""
+    from omop_core.mapping import axis_variants
+    result = {
+        'axis_variant_count': mapping.axis_variant_count if mapping else 0,
+        'loinc_axes': (mapping.loinc_axes or {}) if mapping else {},
+        'snomed_attributes': (mapping.snomed_attributes or {}) if mapping else {},
+    }
+    if mapping and mapping.axis_variant_count >= axis_variants.FLAG_THRESHOLD:
+        # Use .all() to honour the prefetch cache when the queryset was built
+        # with prefetch_related('axis_variants__target_concept').  A single-row
+        # call (detail endpoint) without the prefetch still works — just not
+        # batched.
+        result['axis_variants'] = [
+            axis_variants.serialize(v)
+            for v in mapping.axis_variants.all()
+        ]
+    return result
 
 
 def _clean_required(data, field_name):
@@ -10314,11 +13188,33 @@ def _clean_required(data, field_name):
     return value
 
 
+def _refuse_no_match_destination(data):
+    """400 when any destination key names concept 0 ("No matching concept").
+
+    By value, so "00" counts, and on PATCH as well as POST: a PATCH reads 0 as
+    falsy and would otherwise keep the old destination and report success.
+    """
+    for key in ('destination_concept_id', 'target_concept_id', 'concept_id'):
+        value = data.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            is_zero = int(str(value).strip()) == 0
+        except ValueError:
+            continue
+        if is_zero:
+            raise serializers.ValidationError({'target_concept_id': (
+                'Concept 0 means "No matching concept" and cannot be a destination. '
+                'Leave the destination empty to keep the code unmapped.'
+            )})
+
+
 def _parse_destination_concept_id(data):
     # destination_concept_id is the current name; the other two are the
     # pre-#834 spellings, kept so existing callers keep working.
     raw = (data.get('destination_concept_id') or data.get('target_concept_id')
            or data.get('concept_id'))
+    _refuse_no_match_destination(data)
     try:
         concept_id = int(raw)
     except (TypeError, ValueError):
@@ -10396,21 +13292,189 @@ def _mirror_to_concept_relationship(mapping):
     )
 
 
-def _upsert_source_code_mapping(concept, data, user, mapping=None):
+def _mapping_patient_scope(request):
+    """Validate an optional patient scope before a mapping can update facts."""
+    if 'patient_id' not in request.data:
+        return None
+    raw = request.data['patient_id']
+    if isinstance(raw, bool) or not str(raw).isdecimal() or int(raw) <= 0:
+        raise serializers.ValidationError({'patient_id': 'A valid patient ID is required.'})
+    person_id = int(raw)
+    from omop_core.authorization import can_write_patient
+    if not Person.objects.filter(person_id=person_id).exists():
+        raise serializers.ValidationError({'patient_id': 'Patient not found.'})
+    if not can_write_patient(request.user, person_id):
+        raise PermissionDenied('You cannot update this patient.')
+    return person_id
+
+
+_DECISION_SURFACES = {choice for choice, _label in SourceCodeConceptMapping.DECISION_SURFACE_CHOICES}
+
+
+def _decision_surface(data, person_id):
+    """Which curation surface a save came from (#2382).
+
+    The patient page is known by the person the save is scoped to
+    (``_mapping_patient_scope``, the one reading of ``patient_id``), whatever
+    the payload says; the two mapping tabs name themselves in
+    ``decision_surface`` (the Concept to Code endpoints and group actions set
+    it server-side). An unknown value is a 400 rather than a quietly blank
+    analytics column; an absent one stays blank, for callers that predate the
+    field.
+    """
+    if person_id is not None:
+        return 'patientcode'
+    surface = str(data.get('decision_surface') or '').strip()
+    if surface and surface not in _DECISION_SURFACES:
+        raise serializers.ValidationError({'decision_surface': (
+            f"Unknown surface {surface!r}. Expected one of: {', '.join(sorted(_DECISION_SURFACES))}."
+        )})
+    return surface
+
+
+def _decision_confidence(data, mapping, concept, previous_concept_id):
+    """The ranker's confidence in the destination being saved (#2382).
+
+    The dialog knows it when the destination came out of a Suggest run it
+    ran, and sends it as ``decision_confidence`` (``null`` when the curator
+    chose by search instead). Without that key the row's own live confidence
+    stands, but only while the destination is the one it scored.
+    """
+    destination_stands = (
+        mapping is not None and concept is not None and concept.concept_id == previous_concept_id
+    )
+    if 'decision_confidence' in data:
+        raw = data.get('decision_confidence')
+        if raw in (None, ''):
+            # The dialog's run did not score this concept (UMLS settled it, the
+            # rankers declined, or the curator searched). While the stored
+            # destination stands, the row's live score is still the ranker's
+            # belief about exactly that concept.
+            return mapping.suggestion_confidence if destination_stands else None
+        try:
+            # float(True) is 1.0: a boolean is not a score.
+            confidence = None if isinstance(raw, bool) else float(raw)
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is None or not 0.0 <= confidence <= 1.0:
+            raise serializers.ValidationError({
+                'decision_confidence': 'Confidence must be a number between 0 and 1.',
+            })
+        return confidence
+    return mapping.suggestion_confidence if destination_stands else None
+
+
+def _saved_confidence(data, *, source_vocabulary_id, source_code, omop_table, concept, source_description):
+    """What a save does to the mapping's ``suggestion_confidence``: ``(set, value)``.
+
+    Provisional data reads this number as evidence, so the server stores only a
+    confidence it produced: the dialog sends the ``suggestion_confidence_token``
+    the score endpoint (Calc) or a Suggest run signed for this source, table,
+    destination and description (``confidence_token``). A token that is forged,
+    expired or for another source, destination or description is a 400, never a
+    silent store. A bare ``suggestion_confidence`` number is ignored; ``null``
+    clears it. Left out entirely, the rules in the caller stand (kept while the
+    destination and source stand, cleared when either moves).
+    """
+    from omop_core.mapping import confidence_token
+    token = data.get('suggestion_confidence_token')
+    if token not in (None, ''):
+        with public_errors(ValueError, field='suggestion_confidence_token'):
+            return True, confidence_token.verify(
+                token, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+                omop_table=omop_table, destination_concept_id=concept.concept_id if concept else None,
+                source_description=source_description,
+            )
+    if 'suggestion_confidence' in data and data.get('suggestion_confidence') in (None, ''):
+        return True, None
+    return False, None
+
+
+def _table_label(omop_table):
+    """``drug_exposure`` -> ``Drug Exposure``, for a message a curator reads."""
+    return (omop_table or '').replace('_', ' ').title() or 'no table'
+
+
+def _existing_mapping_conflict(existing, requested_table):
+    """The 400 body for a create that collides with a stored mapping (#2347).
+
+    ``source_code`` carries the sentence the dialog shows; ``existing_mapping``
+    is what it needs to offer "move that mapping here": the row's id, the table
+    and domain it is filed under now, and the table the curator asked for.
+    Values are strings because DRF renders every leaf of a ValidationError as
+    one.
+    """
+    destination = (
+        f" -> {existing.target_concept.concept_name}" if existing.target_concept_id else ''
+    )
+    filed = _table_label(existing.omop_table)
+    requested = _table_label(requested_table)
+    verb = 'is already mapped' if existing.target_concept_id else 'is already in the queue, unmapped'
+    message = (
+        f"'{existing.source_code}' {verb} ({existing.status}{destination}), "
+        f"and that mapping's destination table is {filed}"
+    )
+    if requested_table and requested_table != existing.omop_table:
+        message += (
+            f", not {requested}. Move the existing mapping to {requested} to use it "
+            f"here, or edit it where it is."
+        )
+    else:
+        message += '. Edit that mapping instead of creating a second one.'
+    return {
+        'source_code': message,
+        'existing_mapping': {
+            'id': str(existing.pk),
+            'omop_table': existing.omop_table or '',
+            'domain_id': existing.domain_id or '',
+            'status': existing.status,
+            'target_concept_id': str(existing.target_concept_id or ''),
+            'target_concept_name': (
+                existing.target_concept.concept_name if existing.target_concept_id else ''
+            ),
+            'requested_omop_table': requested_table or '',
+        },
+    }
+
+
+def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None,
+                                record_decision=True, curator_note=False,
+                                machine_proposal=False):
     """Create or update one mapping. Returns (mapping, repoint_result).
 
-    ``repoint_result`` is non-None when the save moved an approved mapping's
-    destination, in which case the clinical rows already stored have been
-    re-pointed. Approving is the moment a curation decision reaches the data;
-    doing it in the same request is what makes the dialog's Update & Approve
-    button mean what it says.
+    ``curator_note`` is True when ``data['notes']`` is what a person typed
+    (the mapping dialog's save). A note that changes then stamps
+    ``curator_note_at``; every other caller passes text a machine composed,
+    which is not a curator's note (#2423).
+
+    ``record_decision`` is True for a curator's save, which stamps the row's
+    ``decision_surface`` and ``decision_confidence`` (#2382). A machine write
+    through this function (reverse Suggest's auto-propose) passes False so a
+    curator's last decision is not overwritten with a blank.
+
+    ``machine_proposal`` is True when the destination being saved came from a
+    ranker rather than the person's own pick (reverse Suggest's auto-propose,
+    a Concept to Code proposal made from a saved ranker preview): it names no
+    proposer, so the person who accepted it may approve it (#2726).
+
+    ``repoint_result`` is ``{'queued': True, 'from_concept_ids': [...]}`` when
+    the approval left stored rows to move **and** no ``person_id`` was
+    supplied; the rows move in a background job (``repoint_jobs``).  When ``person_id`` is
+    set (a patient-page save), rows are not re-pointed immediately; old
+    concept IDs are stored in ``deferred_repoint_concept_ids`` for
+    Generate OMOP to apply later.
     """
+    # Another curator has claimed the destination concept (#2390): review only.
+    if concept is not None:
+        check_concept_lock(concept.pk, user)
     # Blank is legal and meaningful: a paper lab test name or a phrase from a
     # note has no code system, and requiring one would make those unmappable.
     source_vocabulary_id = str(
         data.get('source_vocabulary_id',
                  '' if mapping is None else mapping.source_vocabulary_id) or ''
     ).strip()
+    if mapping is None or 'source_vocabulary_id' in data:
+        source_vocabulary_id = source_vocabularies.canonical_source_vocabulary(source_vocabulary_id)
     if source_vocabulary_id.startswith('HK-'):
         raise serializers.ValidationError({'source_vocabulary_id': (
             'HK-* vocabularies are minting destinations, not source code '
@@ -10421,7 +13485,28 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     else:
         source_code = mapping.source_code
 
-    if mapping and (source_vocabulary_id, source_code) != (mapping.source_vocabulary_id, mapping.source_code) and mapping.destination_candidates.exists():
+    organization = mapping.organization if mapping is not None else None
+    if 'organization_id' in data:
+        raw_organization_id = data.get('organization_id')
+        if raw_organization_id in (None, ''):
+            organization = None
+        else:
+            try:
+                organization = Organization.objects.get(pk=int(raw_organization_id))
+            except (TypeError, ValueError, Organization.DoesNotExist):
+                raise serializers.ValidationError({
+                    'organization_id': 'Organization not found.'
+                })
+            if not get_admin_orgs(user).filter(pk=organization.pk).exists():
+                raise serializers.ValidationError({
+                    'organization_id': 'You do not administer this organization.'
+                })
+
+    if mapping and (
+        source_vocabulary_id, source_code, organization.pk if organization else None,
+    ) != (
+        mapping.source_vocabulary_id, mapping.source_code, mapping.organization_id,
+    ) and mapping.destination_candidates.exists():
         raise serializers.ValidationError({'source_code': (
             'Imported destinations belong to this source code. Create a new mapping for a different source.'
         )})
@@ -10443,9 +13528,33 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # silently un-approved, and the re-point skipped while its destination
     # moved -- the silent-approval failure, through the POST door.
     if mapping is None and data.get('mapping_id'):
-        mapping = SourceCodeConceptMapping.objects.filter(id=data['mapping_id']).first()
+        mapping = SourceCodeConceptMapping.objects.select_for_update().filter(id=data['mapping_id']).first()
         if mapping is None:
             raise serializers.ValidationError({'mapping_id': 'Mapping not found.'})
+        if 'source_vocabulary_id' not in data:
+            source_vocabulary_id = mapping.source_vocabulary_id
+        if 'source_code' not in data:
+            source_code = mapping.source_code
+        if 'organization_id' not in data:
+            organization = mapping.organization
+
+    if organization is not None and not source_vocabularies.hospital_vendor(
+        source_vocabulary_id
+    ):
+        raise serializers.ValidationError({
+            'organization_id': (
+                'Organization scope is only supported for Epic and Cerner '
+                'hospital-local source systems.'
+            ),
+        })
+
+    if (
+        mapping is not None and mapping.organization_id
+        and not get_admin_orgs(user).filter(pk=mapping.organization_id).exists()
+    ):
+        raise serializers.ValidationError({
+            'organization_id': 'You do not administer this mapping organization.'
+        })
 
     # Validate what the caller actually sent before deciding what to store, so
     # a typo'd status is still a 400 rather than being silently swallowed by
@@ -10455,11 +13564,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     if requested_status and requested_status not in valid_statuses:
         raise serializers.ValidationError({'status': f"Status must be one of: {', '.join(sorted(valid_statuses))}."})
 
-    # A new mapping is always proposed. Creating and approving in one act
-    # removes the review step the Unmapped queue exists to provide, and it is
-    # also what let a create write clinical data -- now approval is the only
-    # transition that does, which is a far easier property to reason about.
-    status_value = 'proposed' if mapping is None else (requested_status or mapping.status)
+    # Default new mappings to proposed, but honour an explicit status from the
+    # caller (admins can create a mapping as approved or rejected directly).
+    status_value = requested_status or ('proposed' if mapping is None else mapping.status)
 
     # Check before changing mappings, scoring suggestions, or repointing facts.
     # Rejected rows may still be dismissed, and Athena rows do not conflict
@@ -10478,7 +13585,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         if status_value == 'approved':
             raise serializers.ValidationError({
                 'status': 'Only org admins and staff can approve mappings. '
-                          'Doctors and analysts may propose mappings for review.'
+                          'Analysts may propose mappings for review.'
             })
         if mapping is not None and mapping.status == 'approved' and status_value != 'approved':
             raise serializers.ValidationError({
@@ -10517,11 +13624,52 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     was_approved = mapping is not None and mapping.status == 'approved'
     was_proposed = mapping is not None and mapping.status == 'proposed'
     previous_concept_id = mapping.target_concept_id if mapping else None
+    previous_table = normalize_omop_table(mapping.omop_table) if mapping else ''
+    pending_repoints = list(mapping.pending_repoint_concept_ids) if mapping else []
+    deferred_repoints = list(mapping.deferred_repoint_concept_ids) if mapping else []
+    identity_moved = mapping is not None and (
+        source_vocabulary_id != mapping.source_vocabulary_id
+        or source_code != mapping.source_code
+        or (organization.pk if organization else None) != mapping.organization_id
+    )
+    table_moved = mapping is not None and (
+        domain_id != mapping.domain_id
+        or bool(omop_table and omop_table != mapping.omop_table)
+    )
+    # A background job is re-pointing rows in the mapping's table right now, so
+    # neither the source identity nor the table may change under it. Rows only
+    # *waiting* for Generate OMOP (a patient-page approval always leaves the
+    # unresolved concept 0 here) are found by this source code in whatever table
+    # the mapping names at that time, so moving the table is allowed -- it is
+    # how a mapping filed under the wrong table is put where its rows are
+    # (#2347). Changing the code itself would orphan them either way.
+    if (pending_repoints and (identity_moved or table_moved)) or (deferred_repoints and identity_moved):
+        raise serializers.ValidationError({'detail': (
+            'This source has clinical rows still moving to its destination, in a '
+            'background job or waiting for Generate OMOP. Change its source '
+            'identity or clinical table once they have moved.'
+        )})
+    if (mapping is not None and status_value != 'approved'
+            and previous_concept_id is not None
+            and previous_concept_id != (concept.pk if concept else None)
+            and previous_concept_id not in pending_repoints):
+        pending_repoints.append(previous_concept_id)
 
     # Only fields the caller actually sent. A PATCH that approves by sending
     # status alone must not blank omop_table -- the re-point would then find no
     # table, move nothing, and still report success.
-    values = {'updated_by': user}
+    values = {'updated_by': user,
+              'pending_repoint_concept_ids': [] if status_value == 'approved' else pending_repoints,
+              'deferred_repoint_concept_ids': (
+                  [] if status_value == 'approved' and person_id is None else deferred_repoints
+              )}
+    # A curator touching the row has answered any machine-proposed group action.
+    # Leaving this set after choosing a destination would keep advertising
+    # "Reject suggested" over the curator's newer decision.
+    if mapping is not None:
+        values['suggested_action'] = ''
+    if mapping is None or 'organization_id' in data:
+        values['organization'] = organization
     if mapping is None or 'domain_id' in data:
         values['domain_id'] = domain_id
     if mapping is None or 'source_vocabulary_id' in data:
@@ -10556,7 +13704,12 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     # provenance if a deployment missed the data migration.  Do not make a
     # curator's current review depend on that historical repair: capture the
     # target that was on the proposed row and version it atomically here.
-    is_suggestion = mapping is not None and mapping.origin_system.lower().startswith('suggest')
+    # A row the model proposed keeps that history even after a curator's edit
+    # re-stamps its provenance (below): suggested_target_concept is the record.
+    is_suggestion = mapping is not None and (
+        mapping.origin_system.lower().startswith('suggest')
+        or mapping.suggested_target_concept_id is not None
+    )
     if was_proposed and is_suggestion and not mapping.suggestion_outcome:
         original_target_id = mapping.suggested_target_concept_id or mapping.target_concept_id
         if not mapping.suggestion_model_version:
@@ -10594,14 +13747,146 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
         and concept is not None
         and previous_concept_id != concept.concept_id
     )
+    # A curator who picks a different destination has decided it, even when
+    # they cannot approve (admin-only). From here the row is not a suggestion:
+    # Suggest's Replace re-answers only rows with blank or suggest* provenance,
+    # so this stamp is what keeps their pick from being overwritten (#1469).
+    # Approval stamps the approver as provenance instead (below).
+    if (
+        mapping is not None and concept is not None
+        and concept.concept_id != previous_concept_id
+        and status_value != 'approved'
+    ):
+        values['origin_system'] = CURATOR_PROVENANCE
+    # What this decision was made on, and where (#2382). Recorded before the
+    # live confidence below is cleared, so an override still keeps what the
+    # ranker believed about the destination the curator is saving.
+    if record_decision:
+        values['decision_surface'] = _decision_surface(data, person_id)
+        values['decision_confidence'] = _decision_confidence(
+            data, mapping, concept, previous_concept_id,
+        )
+    # The ranker's confidence was in the destination it chose, for the source it was
+    # shown: neither a moved destination nor a re-pointed source (code, system or
+    # table) keeps it.
+    if mapping is not None and (
+        (concept is not None and concept.concept_id != previous_concept_id)
+        or source_vocabulary_id != mapping.source_vocabulary_id
+        or source_code != mapping.source_code
+        or (omop_table and omop_table != mapping.omop_table)
+    ):
+        values['suggestion_confidence'] = None
+    # A confidence the server signed for this source and destination (a Calc, or
+    # a Suggest run's score for the destination chosen) is the number to keep,
+    # whether the destination moved or not; null clears it.
+    keep, saved_confidence = _saved_confidence(
+        data, source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+        omop_table=omop_table, concept=concept,
+        source_description=(data['source_code_description'] if 'source_code_description' in data
+                            else mapping.source_code_description if mapping else ''),
+    )
+    if keep:
+        values['suggestion_confidence'] = saved_confidence
     if status_value == 'approved' and (not was_approved or destination_moved):
         values['reviewer'] = user
         values['reviewed_at'] = timezone.now()
+        if (mapping is not None and mapping.source == 'Athena'
+                and mapping.origin_system in {'athena-multiple', CURATOR_PROVENANCE}
+                and concept is not None
+                and mapping.destination_candidates.filter(target_concept_id=concept.pk, origins__contains=['Athena']).exists()):
+            # Choosing one of the verified Athena destinations completes the
+            # pending choice and moves this mapping to ATHENA-MAPPED.
+            values['origin_system'] = 'athena'
+        elif mapping is not None and not mapping.origin_system.startswith('athena'):
+            # The approver now owns the mapping, so provenance names them.
+            # Athena rows keep theirs: it decides the ATHENA-MAPPED section and
+            # how identity rows resolve. Model-quality history does not read
+            # this column -- suggested_target_concept/suggestion_outcome do.
+            values['origin_system'] = (
+                _user_display(user)[:50] or CURATOR_PROVENANCE
+            )
     elif was_approved and status_value != 'approved':
         values['reviewer'] = None
         values['reviewed_at'] = None
+    # The two-person rule (#2726): whoever proposed the destination now on this
+    # row may not approve it. A curator's save that creates the row, moves its
+    # destination or re-opens it from rejected is a proposal and names them; a
+    # note fix or an un-approval keeps the proposer already on the row; a
+    # machine write that moves the destination takes the name off, since the
+    # destination is no longer anyone's pick. Checked before anything is saved.
+    proposer_id = mapping.proposed_by_id if mapping is not None else None
+    human_save = record_decision and mapping_approval.is_person(user) and not machine_proposal
+    destination_changed = concept is not None and concept.pk != previous_concept_id
+    if human_save and (
+        mapping is None or destination_changed
+        or (status_value == 'proposed' and mapping.status == 'rejected')
+    ):
+        proposer_id = user.pk
+    elif destination_changed and not human_save:
+        # A machine moved the destination. A new row has no proposer; on an
+        # existing one the person who started the run keeps what they had
+        # proposed (a re-point must not launder their own proposal), and
+        # anyone else's proposal is no longer the destination in force.
+        proposer_id = (
+            proposer_id if (mapping is not None and mapping_approval.is_person(user)
+                            and proposer_id == user.pk) else None
+        )
+    values['proposed_by_id'] = proposer_id
+    if status_value == 'approved' and (not was_approved or destination_moved):
+        mapping_approval.check_can_approve(user, proposer_id)
     if 'notes' in data:
         values['notes'] = str(data.get('notes') or '').strip()
+        # The dialog sends the note back on every save, so only a changed
+        # text is the curator's; an unchanged machine note stays a machine's.
+        # A machine that replaces the text takes the mark off with it.
+        if not values['notes']:
+            values['curator_note_at'] = None
+        elif values['notes'] != (mapping.notes.strip() if mapping else ''):
+            values['curator_note_at'] = timezone.now() if curator_note else None
+    if 'destination_unit_concept_id' in data:
+        raw_unit_id = data.get('destination_unit_concept_id')
+        if raw_unit_id in (None, '', 0):
+            values['destination_unit_concept'] = None
+        else:
+            try:
+                unit_concept = Concept.objects.get(concept_id=int(raw_unit_id))
+                values['destination_unit_concept'] = unit_concept
+            except (Concept.DoesNotExist, ValueError, TypeError):
+                raise serializers.ValidationError({
+                    'destination_unit_concept_id': 'Unit concept not found.'
+                })
+    # What a wearable mapping says about the source metric. Category and
+    # measure class are each blank or one of an allowed list; the metric key is
+    # blank or lowercase snake case.
+    for field, clean in (
+        ('category', source_vocabularies.clean_wearable_category),
+        ('measure_class', source_vocabularies.clean_wearable_measure_class),
+        ('metric_key', source_vocabularies.clean_metric_key),
+    ):
+        if field in data:
+            try:
+                values[field] = clean(data.get(field))
+            except ValueError as exc:
+                raise serializers.ValidationError({field: str(exc)})
+    if mapping is None:
+        # One mapping per (organization, source system, code), whatever table
+        # it lands in. The patient page lists a code under the clinical table
+        # its rows sit in, so a code whose mapping a curator filed under another
+        # table looks unmapped there, and saving it hit the unique constraint
+        # with nothing to go on (#2347). Name the mapping that holds the code
+        # and the table it is filed under, and hand back its id so the dialog
+        # can offer to move that mapping to the table the curator is in.
+        existing = (
+            SourceCodeConceptMapping.objects
+            .filter(organization=organization, source_vocabulary_id=source_vocabulary_id,
+                    source_code=source_code)
+            .select_related('target_concept')
+            .first()
+        )
+        if existing is not None:
+            raise serializers.ValidationError(
+                _existing_mapping_conflict(existing, omop_table)
+            )
     try:
         if mapping is None:
             if concept is None:
@@ -10626,7 +13911,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             mapping.save()
     except IntegrityError:
         raise serializers.ValidationError({
-            'source_code': 'This source vocabulary/code pair is already mapped.'
+            'source_code': 'This organization/source vocabulary/code is already mapped.'
         })
 
     # What should move the stored rows is a human signing off on what a code
@@ -10651,36 +13936,105 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
             'none yet — its code was seen at ingest but its concept is not loaded.'
         )})
 
+    # A proposal that is rejected, or now points somewhere else, takes back the
+    # provisional rows it wrote: they return to unresolved, and a later Generate
+    # OMOP run writes new ones for whatever proposal stands then (#2530). Before
+    # any relocation below, in the table each row sits in now: a relocation that
+    # is only queued, or between tables that cannot be relocated, would leave
+    # them where the mapping no longer points. A patient-page save reverts that
+    # patient and leaves the rest to Generate OMOP, as an approval does.
+    if (status_value != 'approved'
+            and previous_concept_id not in (None, NO_MATCHING_CONCEPT_ID)
+            and (status_value == 'rejected' or concept is None
+                 or concept.pk != previous_concept_id)):
+        listed_under = normalize_omop_table(data.get('rows_omop_table')) if person_id is not None else ''
+        for revert_table in {previous_table, normalize_omop_table(mapping.omop_table), listed_under}:
+            if revert_table in CLINICAL_TABLES:
+                revert_provisional_rows(
+                    mapping=mapping, concept_id=previous_concept_id,
+                    person_id=person_id, omop_table=revert_table)
+
+    # The curator re-filed the code under another table: the rows ingest put
+    # in the old one follow it, or the patient page keeps listing the code as
+    # Unmapped there with no mapping that could ever match (#2386). One
+    # patient's rows move in the request; every patient's move after commit.
+    # The rows arrive with the concept they had and the move records those
+    # concepts for the re-point below, which puts them on the destination.
+    # Only measurement and observation rows move; see table_relocation.
+    mapping.relocation = None
+    new_table = normalize_omop_table(mapping.omop_table)
+    if table_moved and previous_table and new_table and previous_table != new_table:
+        if not relocatable(previous_table, new_table):
+            mapping.relocation = {
+                'queued': False, 'from_table': previous_table, 'to_table': new_table,
+                'skipped': 'Stored rows move only between measurement and observation.',
+            }
+        elif person_id is not None:
+            outcome = relocate_clinical_rows(
+                mapping=mapping, from_table=previous_table, to_table=new_table, person_id=person_id,
+            )
+            outcome.pop('person_ids', None)
+            mapping.relocation = {'queued': False, 'from_table': previous_table,
+                                  'to_table': new_table, **outcome}
+            # The move recorded the concepts it carried over; the re-point reads them.
+            deferred_repoints = list(mapping.deferred_repoint_concept_ids)
+        else:
+            from omop_core.services.relocation_jobs import queue_relocation
+            mapping.relocation = queue_relocation(mapping, previous_table, new_table)
+    # The patient page opened this code from the table its rows sit in and
+    # sends that table as rows_omop_table. A mapping filed under another table
+    # -- created fresh for an Observation-domain concept against measurement
+    # rows, say -- leaves the code Unmapped there and its Proposed group empty
+    # (#2393), so that patient's rows follow the mapping too.
+    rows_table = normalize_omop_table(data.get('rows_omop_table')) if person_id is not None else ''
+    if rows_table and rows_table not in CLINICAL_TABLES:
+        raise serializers.ValidationError({'rows_omop_table': (
+            f"Unknown OMOP table {rows_table!r}. Expected one of: {', '.join(sorted(CLINICAL_TABLES))}."
+        )})
+    # Gate on what the block above moved, not on whether it recorded anything:
+    # a mapping misfiled under a third table records a skip there while the
+    # rows, listed elsewhere, still have to follow.
+    moved_from = previous_table if (
+        table_moved and previous_table and new_table and previous_table != new_table
+        and relocatable(previous_table, new_table)
+    ) else ''
+    if rows_table and new_table and rows_table != new_table and rows_table != moved_from:
+        if not relocatable(rows_table, new_table):
+            mapping.relocation = {
+                'queued': False, 'from_table': rows_table, 'to_table': new_table,
+                'skipped': 'Stored rows move only between measurement and observation.',
+            }
+        else:
+            outcome = relocate_clinical_rows(
+                mapping=mapping, from_table=rows_table, to_table=new_table, person_id=person_id,
+            )
+            outcome.pop('person_ids', None)
+            mapping.relocation = {'queued': False, 'from_table': rows_table, 'to_table': new_table, **outcome}
+            deferred_repoints = list(mapping.deferred_repoint_concept_ids)
+
     repoint = None
     if status_value == 'approved' and concept is not None:
-        sources = set()
+        sources = set(pending_repoints) | set(deferred_repoints)
         if not was_approved:
             sources.add(NO_MATCHING_CONCEPT_ID)
         if previous_concept_id is not None and previous_concept_id != concept.concept_id:
             sources.add(previous_concept_id)
         sources.discard(concept.concept_id)
 
-        affected_persons = set()
-        for old_concept_id in sorted(sources):
-            outcome = repoint_clinical_rows(
-                mapping=mapping,
-                old_concept_id=old_concept_id,
-                new_concept_id=concept.concept_id,
-                # The concept-0 sweep reaches rows this mapping's own import
-                # never wrote, so it matches the code only -- see
-                # _source_value_match.
-                match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
-            )
-            affected_persons |= outcome.pop('person_ids', set())
-            if repoint is None:
-                repoint = outcome
-            else:
-                for key, value in outcome.items():
-                    repoint[key] += value
-        if repoint is not None:
-            # Distinct patients, not the sum of each sweep's total: a person
-            # with rows in both would otherwise be reported twice.
-            repoint['persons_marked_stale'] = len(affected_persons)
+        # A patient-page save skips the repoint entirely. The curator
+        # uses Generate OMOP from the patients list to apply the mapping,
+        # which calls resolve_person_source_codes per patient.  Retain old
+        # destinations so that path (and the Code-Mapping-page full repoint)
+        # can move them later.
+        if person_id is not None:
+            if sources:
+                mapping.deferred_repoint_concept_ids = sorted(sources)
+                mapping.save(update_fields=['deferred_repoint_concept_ids'])
+        else:
+            # Moving every stored row is minutes on a common code, so the save
+            # only records what must move and a job moves it after commit.
+            from omop_core.services.repoint_jobs import queue_repoint
+            repoint = queue_repoint(mapping, sources)
 
     # Mirror to concept_relationship when both concepts exist.
     if status_value == 'approved' and mapping.source_concept_id and concept:
@@ -10689,48 +14043,550 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None):
     return mapping, repoint
 
 
+#: A rollup entry can stand for thousands of codes; nobody reads past a few
+#: hundred, and the members come back ordered by Seen so the cut falls on
+#: the ones that matter least.
+MAX_GROUP_MEMBERS = 500
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_group(request):
+    """The vendor codes behind one rollup entry.
+
+    The grouped queue shows one row per label; this is what expanding it
+    fetches. Kept out of the browse payload because a label can stand for
+    thousands of codes -- ``albumin`` for 2,557 -- and a page of 100 entries
+    would otherwise carry every member of every one of them.
+
+    Scoped by section for the same reason the entry was: a label whose codes
+    are split across Unmapped and Mapped is two entries, and expanding either
+    must not show the other's rows.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
+    from omop_core.services.mapping_browse import section_filters, visible_rows
+    from omop_core.services.mapping_destinations import with_destination_counts
+    from omop_core.services.mapping_rollup import group_members
+    from omop_core.services.source_retirement import mapping_source_retirement
+
+    label = request.query_params.get('label')
+    if not label:
+        return Response({'detail': 'label is required.'}, status=status.HTTP_400_BAD_REQUEST)
+    filters = section_filters(request.query_params)
+    section = request.query_params.get('section', 'Unmapped')
+    if section not in filters:
+        return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
+        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+    ).prefetch_related('axis_variants__target_concept'))
+    # Same tab, search and provenance narrowing browse applied before it
+    # counted the entry. Without this, an entry reading "3 codes" under a
+    # provenance filter expands into all 2,557 -- including the rows the filter
+    # existed to hide -- and a cross-tab search expands into one tab only.
+    rows = list(with_destination_counts(
+        filters[section](group_members(visible_rows(mappings, request.query_params, section=section), label))
+    ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
+    truncated = len(rows) > MAX_GROUP_MEMBERS
+    rows = rows[:MAX_GROUP_MEMBERS]
+    from omop_core.services.mapping_samples import attach_source_samples
+    attach_source_samples(rows)
+    metadata = mapping_source_retirement(rows)
+    return Response({
+        'label': label,
+        'section': section,
+        'results': [_serialize_code_mapping_row(
+            row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
+            for row in rows],
+        # A group can be larger than anyone will read. Saying so beats a silent
+        # cut, and the members are ordered by Seen so the ones shown are the
+        # ones that matter.
+        'truncated': truncated,
+    })
+
+
+def _group_job_rows(data):
+    """Still-proposed members of one label on one vendor tab/filter scope."""
+    from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
+    from omop_core.services.mapping_browse import section_filters, visible_rows
+    from omop_core.services.mapping_rollup import group_members
+
+    label = str(data.get('label') or '')
+    raw_source = data.get('source')
+    source = str(raw_source or '')
+    if not label or raw_source is None or source == '__overall__':
+        raise serializers.ValidationError({
+            'detail': 'label and a specific source tab are required.'
+        })
+    # A search deliberately reaches across tabs for browsing. A group decision
+    # never does: Epic and Cerner albumin are two decisions.
+    filters = {key: data.get(key) for key in (
+        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'queue_sections')}
+    filters['search'] = ''
+    mappings = without_icd10_athena_duplicates(
+        SourceCodeConceptMapping.objects.select_related('organization')
+    )
+    section = data.get('section', 'Unmapped') if data.get('queue_sections') == '1' else 'Unmapped'
+    rows = visible_rows(mappings, filters, section=section)
+    if data.get('queue_sections') == '1':
+        sections = section_filters(filters)
+        if section not in sections:
+            raise serializers.ValidationError({'section': 'Unknown mapping section.'})
+        rows = sections[section](rows)
+    return group_members(rows, label).filter(status='proposed').order_by('pk')
+
+
+def _lock_group_job(request, *, mode, action='', destination=None):
+    """Preflight and lock a complete batch before dispatching any mutation."""
+    if not _can_manage_mappings(request.user):
+        return None, Response({'detail': 'Organization admin access required.'}, status=403)
+    if action == 'approve' and not _can_approve_mappings(request.user):
+        return None, Response({'detail': 'Only org admins and staff can approve mappings.'}, status=403)
+    try:
+        with transaction.atomic():
+            rows = list(_group_job_rows(request.data).select_for_update(of=('self',)))
+            if not rows:
+                raise serializers.ValidationError({'detail': 'No still-proposed members remain in this group.'})
+            forbidden = [row.pk for row in rows if not _can_administer_code_mapping(request.user, row)]
+            if forbidden:
+                return None, Response({
+                    'detail': 'You do not administer every organization in this group.',
+                    'mapping_ids': forbidden,
+                }, status=403)
+            cutoff = timezone.now() - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
+            conflicts = [row.pk for row in rows if (
+                row.locked_by_id not in (None, request.user.pk)
+                and row.locked_at and row.locked_at > cutoff
+            )]
+            if conflicts:
+                return None, Response({
+                    'detail': 'Some mappings are locked by another user.',
+                    'locked_mapping_ids': conflicts,
+                }, status=status.HTTP_409_CONFLICT)
+            ids = [row.pk for row in rows]
+            selected_targets = {str(row.pk): row.target_concept_id for row in rows}
+            SourceCodeConceptMapping.objects.filter(pk__in=ids).update(
+                locked_by=request.user, locked_at=timezone.now(),
+            )
+            run = SuggestRun.objects.create(
+                source_vocabulary_id=str(request.data.get('source') or ''),
+                total=len(ids), created_by=request.user,
+                selection={
+                    'mode': mode, 'action': action,
+                    'label': request.data.get('label'), 'members': len(ids),
+                },
+            )
+    except serializers.ValidationError as exc:
+        return None, Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+    return (run, ids, selected_targets), None
+
+
+def _dispatch_group_job(run, ids, actor, params):
+    """Dispatch, releasing the preflight locks if the queue itself rejects it."""
+    try:
+        get_suggest_dispatcher().dispatch(run, params)
+    except Exception as exc:  # noqa: BLE001 - a queue outage is an API result
+        SourceCodeConceptMapping.objects.filter(pk__in=ids, locked_by=actor).update(
+            locked_by=None, locked_at=None,
+        )
+        SuggestRun.objects.filter(pk=run.pk).update(
+            state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now(),
+        )
+        return Response(
+            {'detail': 'Could not queue the group job; no mappings were changed.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return None
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_group_action(request):
+    """Queue one approve/reject decision for every eligible label member."""
+    action = str(request.data.get('action') or '')
+    if action not in ('approve', 'reject'):
+        return Response({'action': 'Use approve or reject.'}, status=400)
+    destination_id = request.data.get('destination_concept_id')
+    if action == 'approve':
+        try:
+            destination_id = int(destination_id)
+            destination = Concept.objects.get(pk=destination_id)
+        except (TypeError, ValueError, Concept.DoesNotExist):
+            return Response({'destination_concept_id': 'Choose a valid destination concept.'}, status=400)
+    else:
+        destination = None
+    locked, error = _lock_group_job(
+        request, mode='group-action', action=action, destination=destination,
+    )
+    if error:
+        return error
+    run, ids, selected_targets = locked
+    # A concept another curator holds (#2390) is refused before the job is
+    # dispatched: approve names one destination, reject touches each member's.
+    try:
+        check_concept_locks(
+            [destination_id] if action == 'approve'
+            else [cid for cid in selected_targets.values() if cid is not None],
+            request.user,
+        )
+    except ConceptLocked as exc:
+        SourceCodeConceptMapping.objects.filter(id__in=ids, locked_by=request.user).update(
+            locked_by=None, locked_at=None)
+        SuggestRun.objects.filter(pk=run.pk).update(
+            state=SuggestRun.FAILURE, error=str(exc.detail['detail'])[:2000], finished_at=timezone.now())
+        return Response(exc.detail, status=exc.status_code)
+    params = {
+        'mode': 'group-action', 'action': action,
+        'destination_concept_id': destination_id, 'actor_id': request.user.pk,
+        '_locked_mapping_ids': ids,
+        '_selected_target_ids': selected_targets,
+    }
+    dispatch_error = _dispatch_group_job(run, ids, request.user, params)
+    if dispatch_error:
+        return dispatch_error
+    run.refresh_from_db()
+    return Response(_serialize_suggest_run(run), status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_group_suggest(request):
+    """Rank a label once, then copy the proposal to its eligible members."""
+    strategies = request.data.get('strategies') or list(DEFAULT_STRATEGIES)
+    if not isinstance(strategies, list) or any(item not in ALL_STRATEGIES for item in strategies):
+        return Response({'strategies': 'Choose valid Suggest strategies.'}, status=400)
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL)
+    if ranking_model not in RANKING_MODELS:
+        return Response({'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'}, status=400)
+    locked, error = _lock_group_job(request, mode='group-suggest')
+    if error:
+        return error
+    run, ids, selected_targets = locked
+    params = {
+        'mode': 'group-suggest', 'actor_id': request.user.pk,
+        '_locked_mapping_ids': ids, 'strategies': strategies,
+        '_selected_target_ids': selected_targets,
+        'lexical_limit': CANDIDATE_LIMIT, 'ranking_model': ranking_model,
+    }
+    dispatch_error = _dispatch_group_job(run, ids, request.user, params)
+    if dispatch_error:
+        return dispatch_error
+    run.refresh_from_db()
+    return Response(_serialize_suggest_run(run, include_activity=True), status=202)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_upload(request):
+    """Atomically add/update source-code queue metadata from a small CSV."""
+    if not _can_manage_mappings(request.user):
+        return Response(
+            {'detail': 'Code Mapping access required.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    upload = request.FILES.get('file')
+    if upload is None:
+        return Response({'detail': 'CSV file is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from omop_core.services.code_mapping_upload import (
+        CodeMappingUploadError, import_upload, serialize_receipt,
+    )
+    try:
+        receipt, duplicate = import_upload(
+            upload=upload,
+            vocabulary=request.data.get('source_vocabulary_id'),
+            provenance=request.data.get('provenance') or request.user.email,
+            actor=request.user,
+            can_approve=_can_approve_mappings(request.user),
+        )
+    except CodeMappingUploadError as exc:
+        return Response(
+            {'detail': exc.detail, 'errors': exc.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return Response(
+        serialize_receipt(receipt, duplicate=duplicate),
+        status=status.HTTP_200_OK if duplicate else status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_unit_search(request):
+    """Search UCUM unit concepts by code or name.
+
+    Returns exact and close (trigram) matches so the mapping dialog can offer
+    a unit picker with match-quality indicators.
+    """
+    q = (request.query_params.get('q') or '').strip()
+    if not q:
+        return Response({'results': []})
+    from django.contrib.postgres.search import TrigramSimilarity
+    base = Concept.objects.filter(
+        vocabulary_id='UCUM', standard_concept='S', invalid_reason__isnull=True,
+    )
+    results = []
+    seen = set()
+    # Exact match on concept_code.
+    exact = base.filter(concept_code__iexact=q).first()
+    if exact:
+        results.append({
+            'concept_id': exact.concept_id,
+            'concept_code': exact.concept_code,
+            'concept_name': exact.concept_name,
+            'match': 'exact',
+        })
+        seen.add(exact.concept_id)
+    # Close matches by trigram similarity on concept_code and concept_name.
+    close = (
+        base.annotate(
+            sim=TrigramSimilarity('concept_code', q) + TrigramSimilarity('concept_name', q),
+        )
+        .filter(sim__gt=0.15)
+        .exclude(concept_id__in=seen)
+        .order_by('-sim')[:10]
+    )
+    for c in close:
+        results.append({
+            'concept_id': c.concept_id,
+            'concept_code': c.concept_code,
+            'concept_name': c.concept_name,
+            'match': 'close',
+        })
+    return Response({'results': results})
+
+
+CODE_MAPPING_MAX_PAGE_SIZE = 1000
+_CODE_MAPPING_CURSOR_SALT = 'code-mapping-cursor'
+# A cursor is bound to the query it was issued for, except the parts a client
+# may change between pages without changing which rows the read consists of.
+_CODE_MAPPING_CURSOR_FREE_PARAMS = frozenset({'cursor', 'limit', 'include_total'})
+
+
+def _parse_rfc3339_instant(raw):
+    """An RFC 3339 instant with its offset, or None.
+
+    A bare date or a datetime without an offset is refused rather than read
+    as UTC (#2513): the boundary of a warehouse's nightly delta must not
+    depend on which side assumed the zone. A ``+hh:mm`` offset sent
+    unencoded arrives as a space, and is tolerated.
+    """
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+    text = raw.strip().upper()
+    try:
+        # parse_datetime returns None for text that is not a datetime at all,
+        # but raises ValueError for one that is shaped like it and is not a
+        # real instant (a 30th of February, an hour 24).
+        parsed = parse_datetime(text) or parse_datetime(text.replace(' ', '+'))
+    except ValueError:
+        return None
+    if parsed is None or timezone.is_naive(parsed):
+        return None
+    return parsed
+
+
+class _CodeMappingPage:
+    """One page of the plain code-mapping list (#2451, #2513).
+
+    Two ways through the table. ``page=N`` is the offset paging the curation
+    UI uses, in (vocabulary, code, id) order. ``sort=updated_at``, or a
+    ``cursor``, is the read a warehouse makes: rows in ``(updated_at, id)``
+    order, the ``Link`` next URL carrying an opaque cursor that names the last
+    row and the query it was issued for. A row written or re-saved while a
+    client pages gets a later ``updated_at`` than any it has read, so it is
+    delivered later in the same run, and a deleted one leaves no gap to skip
+    over: a full read misses no row that existed throughout. A row stamped
+    inside a long writer transaction can commit after the cursor has passed
+    its ``updated_at``; the next delta delivers it, provided its
+    ``updated_since`` margin covers the longest such transaction. The cursor is signed
+    with ``SECRET_KEY`` and bound to the filters, so a token replayed against
+    another ``updated_since`` or ``status`` is a 400, not a silently wrong
+    page. ``X-Total-Count`` is one count of the filtered table, so a cursor
+    read gets it only with ``include_total=true``. ``limit`` is honoured on
+    both, up to ``CODE_MAPPING_MAX_PAGE_SIZE``; HealthTree's table is 863k
+    rows, and at 100 a page that is 8,600 requests.
+    """
+
+    SOURCE_ORDER = ('source_vocabulary_id', 'source_code', 'id')
+
+    def __init__(self, request, mappings):
+        from rest_framework.pagination import PageNumberPagination
+        from rest_framework.utils.urls import replace_query_param
+        from omop_core.services.mapping_browse import PAGE_SIZE
+        from omop_core.services.mapping_destinations import with_destination_counts
+        params = request.query_params
+        limit = self._int(params, 'limit', PAGE_SIZE, 1, CODE_MAPPING_MAX_PAGE_SIZE)
+        sort = params.get('sort') or None
+        if sort not in (None, 'updated_at'):
+            raise ValidationError({'sort': 'Only updated_at is accepted.'})
+        cursor = params.get('cursor') or None
+        include_total = self._flag(params, 'include_total')
+        mappings = with_destination_counts(mappings)
+        self.headers = {'X-Page-Size': str(limit)}
+        self.links = []
+        if cursor is None and sort is None:
+            paginator = PageNumberPagination()
+            paginator.page_size = limit
+            self.rows = list(paginator.paginate_queryset(mappings.order_by(*self.SOURCE_ORDER), request))
+            self.headers['X-Total-Count'] = str(paginator.page.paginator.count)
+            self.headers['X-Page'] = str(paginator.page.number)
+            for relation, url in (('next', paginator.get_next_link()), ('prev', paginator.get_previous_link())):
+                if url:
+                    self.links.append((relation, url))
+            return
+        if 'page' in params:
+            raise ValidationError({'page': 'A cursor read has no pages; follow the Link header.'})
+        binding = self._binding(params)
+        window = mappings.order_by('updated_at', 'id')
+        if cursor is not None:
+            updated_at, last_id = self._unsign(cursor, binding)
+            # The >= is redundant to the OR, and is what lets the planner start
+            # inside ix_sccm_updated_at: an OR alone is only a Filter, which
+            # walks the index from its first entry on every page.
+            window = window.filter(updated_at__gte=updated_at).filter(
+                Q(updated_at__gt=updated_at) | Q(updated_at=updated_at, id__gt=last_id))
+        if include_total:
+            # One full count of the filtered table, on request only.
+            self.headers['X-Total-Count'] = str(mappings.order_by().count())
+        rows = list(window[:limit + 1])
+        self.rows = rows[:limit]
+        if len(rows) > limit:
+            last = self.rows[-1]
+            url = replace_query_param(request.build_absolute_uri(), 'cursor', self._sign(last, binding))
+            self.links.append(('next', url))
+
+    @staticmethod
+    def _binding(params):
+        from urllib.parse import urlencode
+        items = sorted(
+            (key, value)
+            for key in params if key not in _CODE_MAPPING_CURSOR_FREE_PARAMS
+            for value in params.getlist(key)
+        )
+        return hashlib.sha256(urlencode(items).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _sign(row, binding):
+        from django.core import signing
+        return signing.dumps([row.updated_at.isoformat(), row.pk, binding], salt=_CODE_MAPPING_CURSOR_SALT)
+
+    @staticmethod
+    def _unsign(cursor, binding):
+        from django.core import signing
+        try:
+            updated_at, last_id, issued_for = signing.loads(cursor, salt=_CODE_MAPPING_CURSOR_SALT)
+            updated_at = _dt.datetime.fromisoformat(updated_at)
+        except (signing.BadSignature, ValueError, TypeError):
+            raise ValidationError({'cursor': 'Not a cursor this list issued.'})
+        if issued_for != binding:
+            raise ValidationError({'cursor': 'This cursor was issued for a different query; start again without it.'})
+        return updated_at, last_id
+
+    @staticmethod
+    def _flag(params, name):
+        # Stricter than _truthy_param on purpose: a machine caller's typo
+        # ("include_total=yes") must be refused, not silently drop the count.
+        raw = (params.get(name) or '').strip().lower()
+        if raw in ('', 'false', '0'):
+            return False
+        if raw in ('true', '1'):
+            return True
+        raise ValidationError({name: 'true or false.'})
+
+    @staticmethod
+    def _int(params, name, default, low, high):
+        raw = params.get(name)
+        if raw in (None, ''):
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is None or value < low or (high is not None and value > high):
+            bound = f'between {low} and {high}' if high is not None else f'at least {low}'
+            raise ValidationError({name: f'An integer {bound} is required.'})
+        return value
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):
     """GET: list curated source-code-to-OMOP-concept mappings. POST: create one."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
+        from omop_core.services.mapping_source_units import SourceUnits
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'created_by', 'reviewer')
+            'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+        ).prefetch_related(
+            'axis_variants__target_concept',
+        ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
+        if not is_service_token(request):
+            # The confirmed votes on each row's current destination (#2678),
+            # as subqueries on the page's own query. For curators: a machine
+            # reads the table, not what people thought of it.
+            from omop_core.services.mapping_votes import with_vote_counts
+            mappings = with_vote_counts(mappings)
+        if request.query_params.get('duplicates_only') == '1':
+            from omop_core.services.mapping_browse import mapping_duplicates
+            source = request.query_params.get('source')
+            if source is None:
+                return Response({'source': 'A source tab is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'duplicate_summaries': mapping_duplicates(mappings, source, compact=True)})
         if request.query_params.get('browse') == '1':
             from omop_core.services.mapping_browse import browse_mappings
-            return Response(browse_mappings(mappings, request.query_params, _serialize_code_mapping_row))
+            serialize = _serialize_code_mapping_row
+            if is_service_token(request):
+                def serialize(concept, mapping, *args, **kwargs):
+                    _without_source_samples([mapping])
+                    return _serialize_code_mapping_row(concept, mapping, *args, **kwargs)
+            return Response(browse_mappings(mappings, request.query_params, serialize))
         source_filter = request.query_params.get('source')
         if source_filter is not None:
             mappings = mappings.filter(source_vocabulary_id=source_filter)
         search = request.query_params.get('search')
         if search:
-            q = search.strip()
-            search_filter = (
-                Q(target_concept__concept_name__icontains=q)
-                | Q(target_concept__concept_code__icontains=q)
-                | Q(source_code__icontains=q)
-                | Q(source_vocabulary_id__icontains=q)
-            )
-            if q.isdigit():
-                search_filter |= Q(target_concept_id=int(q))
-            mappings = mappings.filter(search_filter)
+            from omop_core.services.mapping_browse import search_filter
+            mappings = mappings.filter(search_filter(search.strip()))
         status_filter = request.query_params.get('status')
         if status_filter:
             mappings = mappings.filter(status=status_filter)
-        from rest_framework.pagination import PageNumberPagination
-        from omop_core.services.mapping_browse import PAGE_SIZE
-        from omop_core.services.mapping_destinations import with_destination_counts
-        paginator = PageNumberPagination()
-        paginator.page_size = PAGE_SIZE
-        mappings = paginator.paginate_queryset(
-            with_destination_counts(mappings).order_by('source_vocabulary_id', 'source_code', 'id'), request,
-        )
+        organization_filter = request.query_params.get('organization')
+        if organization_filter == '__none__':
+            mappings = mappings.filter(organization__isnull=True)
+        elif organization_filter:
+            mappings = mappings.filter(organization__slug=organization_filter)
+        updated_since = request.query_params.get('updated_since')
+        if updated_since:
+            since = _parse_rfc3339_instant(updated_since)
+            if since is None:
+                return Response(
+                    {'updated_since': ['An RFC 3339 instant with its offset is required, '
+                                       'such as 2026-11-13T00:00:00Z; a bare date is not.']},
+                    status=status.HTTP_400_BAD_REQUEST)
+            mappings = mappings.filter(updated_at__gte=since)
+        try:
+            page = _CodeMappingPage(request, mappings)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
         from omop_core.services.source_retirement import mapping_source_retirement
+        from omop_core.services.mapping_samples import attach_source_samples
+        mappings = page.rows
+        if is_service_token(request):
+            # A machine never sees the per-patient samples, so skip the window
+            # query over the inventory rather than run it and blank the result.
+            _without_source_samples(mappings)
+        else:
+            attach_source_samples(mappings)
         source_metadata = mapping_source_retirement(mappings)
         rows = [
             _serialize_code_mapping_row(
@@ -10740,30 +14596,28 @@ def code_mapping_list(request):
             for mapping in mappings
         ]
         # Preserve the legacy array shape while exposing navigation and totals.
-        response = Response(rows, headers={
-            'X-Total-Count': str(paginator.page.paginator.count),
-            'X-Page': str(paginator.page.number),
-            'X-Page-Size': str(PAGE_SIZE),
-        })
-        links = []
-        for relation, url in (('next', paginator.get_next_link()), ('prev', paginator.get_previous_link())):
-            if url:
-                links.append(f'<{url}>; rel="{relation}"')
+        response = Response(rows, headers=page.headers)
+        links = [f'<{url}>; rel="{relation}"' for relation, url in page.links]
         if links:
             response['Link'] = ', '.join(links)
         return response
 
     with transaction.atomic():
+        person_id = _mapping_patient_scope(request)
         concept = _get_destination_concept(request.data)
-        mapping, repoint = _upsert_source_code_mapping(concept, request.data, request.user)
+        mapping, repoint = _upsert_source_code_mapping(
+            concept, request.data, request.user, person_id=person_id,
+            curator_note=not is_machine_request(request))
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
+    payload['relocation'] = getattr(mapping, 'relocation', None)
     return Response(payload, status=status.HTTP_201_CREATED)
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def code_mapping_detail(request, mapping_id):
     """Edit or delete one mapping.
 
@@ -10772,24 +14626,43 @@ def code_mapping_detail(request, mapping_id):
     diagnosis both meaning multiple myeloma), which made the old
     concept-keyed URL ambiguous about which row it addressed.
 
-    A PATCH that approves a re-pointed mapping also rewrites the clinical rows
-    already stored, and reports what it did under ``repoint`` so the dialog can
-    show progress rather than appearing to hang.
+    A PATCH that approves a re-pointed mapping returns once the mapping is
+    written; the clinical rows already stored move in a background job, which
+    ``repoint`` reports as queued.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
-    mapping = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'created_by', 'reviewer').first()
+    mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
+        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
+    if request.method != 'GET':
+        mappings = mappings.select_for_update(of=('self',))
+    mapping = mappings.first()
     if mapping is None:
         return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
 
     if request.method == 'GET':
         from omop_core.services.mapping_destinations import destination_options
         options = destination_options(mapping)
-        payload = _serialize_code_mapping_row(mapping.target_concept, mapping, destination_count=len(options))
+        # The source evidence is the stored metadata as the code arrived, often
+        # a FHIR fragment, and is for curators; a machine reads the row alone.
+        machine = is_service_token(request)
+        if machine:
+            _without_source_samples([mapping])
+        payload = _serialize_code_mapping_row(
+            mapping.target_concept, mapping, destination_count=len(options),
+            include_source_evidence=not machine,
+        )
         payload['destination_options'] = options
         return Response(payload)
+
+    if not _can_administer_code_mapping(request.user, mapping):
+        return Response(
+            {'detail': 'You do not administer this mapping organization.'},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     if request.method == 'DELETE':
         if mapping.status == 'approved' and not _can_approve_mappings(request.user):
@@ -10797,22 +14670,140 @@ def code_mapping_detail(request, mapping_id):
                 {'detail': 'Only org admins and staff can delete approved mappings.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        try:
+            _check_mapping_lock(mapping, request.user)
+        except MappingLocked as exc:
+            return exc.as_response()
+        # Unmapped rows represent real patient data — removing them from the
+        # queue hides a code that exists in clinical tables.
+        if mapping.target_concept_id is None:
+            return Response(
+                {'detail': 'Cannot delete an unmapped source code.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Mapped row: repoint clinical rows back to concept 0, then delete.
+        repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=mapping.target_concept_id,
+            new_concept_id=0,
+        )
         mapping.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     # PATCH — approval check is inside _upsert_source_code_mapping.
+    try:
+        _check_mapping_lock(mapping, request.user)
+    except MappingLocked as exc:
+        return exc.as_response()
     data = request.data
+    _refuse_no_match_destination(data)
     concept = (
         _get_destination_concept(data)
         if (data.get('destination_concept_id') or data.get('target_concept_id') or data.get('concept_id'))
         else mapping.target_concept
     )
+    person_id = _mapping_patient_scope(request)
     with transaction.atomic():
-        mapping, repoint = _upsert_source_code_mapping(concept, data, request.user, mapping=mapping)
+        mapping, repoint = _upsert_source_code_mapping(
+            concept, data, request.user, mapping=mapping, person_id=person_id,
+            curator_note=not is_machine_request(request))
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
+    payload['relocation'] = getattr(mapping, 'relocation', None)
     return Response(payload)
+
+
+# ── Mapping edit locks ──────────────────────────────────────────────────
+
+def _is_lock_active(mapping):
+    """True when *mapping* carries a non-expired edit lock."""
+    if mapping.locked_by_id is None:
+        return False
+    timeout = timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES)
+    return mapping.locked_at and (timezone.now() - mapping.locked_at) < timeout
+
+
+def _check_mapping_lock(mapping, user):
+    """Raise 423 if *mapping* is locked by another active user.
+
+    Returns silently when the mapping is unlocked, expired, or held by *user*.
+    """
+    if not _is_lock_active(mapping):
+        return
+    if mapping.locked_by_id == user.pk:
+        return
+    raise MappingLocked(mapping)
+
+
+class MappingLocked(Exception):
+    """Raised when a mapping is locked by another user."""
+
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def as_response(self):
+        return Response(
+            {
+                'detail': 'Mapping is locked by another user.',
+                'locked_by': _user_display(self.mapping.locked_by),
+                'locked_at': self.mapping.locked_at.isoformat() if self.mapping.locked_at else None,
+            },
+            status=423,
+        )
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def code_mapping_lock(request, mapping_id):
+    """Acquire or release an edit lock on a mapping.
+
+    POST: acquire (or refresh) the lock.  Idempotent for the same user.
+    DELETE: release the lock.  Only the holder or staff may release.
+    """
+    if not _can_manage_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+
+    with transaction.atomic():
+        mapping = (
+            SourceCodeConceptMapping.objects
+            .select_for_update(of=('self',))
+            .filter(id=mapping_id)
+            .select_related('locked_by')
+            .first()
+        )
+        if mapping is None:
+            return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _can_administer_code_mapping(request.user, mapping):
+            return Response(
+                {'detail': 'You do not administer this mapping organization.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if request.method == 'POST':
+            try:
+                _check_mapping_lock(mapping, request.user)
+            except MappingLocked as exc:
+                return exc.as_response()
+            mapping.locked_by = request.user
+            mapping.locked_at = timezone.now()
+            mapping.save(update_fields=['locked_by', 'locked_at'])
+            return Response({
+                'locked_by': _user_display(request.user),
+                'locked_at': mapping.locked_at.isoformat(),
+            })
+
+        # DELETE — release
+        if mapping.locked_by_id is not None and mapping.locked_by_id != request.user.pk and not request.user.is_staff:
+            return Response(
+                {'detail': 'Only the lock holder or staff can release a lock.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        mapping.locked_by = None
+        mapping.locked_at = None
+        mapping.save(update_fields=['locked_by', 'locked_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(['POST'])
@@ -10836,7 +14827,7 @@ def code_mapping_suggest(request):
     nothing on the tabs with an actual backlog.  ``manage.py
     enqueue_unmapped_source_codes`` does that scan as a batch job.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     # New path: source_vocabulary_id. Legacy path: destination_vocabulary_id.
@@ -10912,20 +14903,27 @@ def code_mapping_suggest(request):
                 {'strategies': 'At least one strategy must be selected.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Vectors reorders what retrieval found; it finds nothing itself. On its
-        # own it would run to completion and report "no candidate concept" for
-        # every code, which reads as a broken tab rather than a bad selection.
-        if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC} & set(raw_strategies):
+        # At least one retrieval strategy is needed. Vectors is now a retrieval
+        # strategy (pgvector cosine search). UMLS and Lexical are the other two.
+        if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC} & set(raw_strategies):
             return Response(
                 {'strategies': (
-                    'Vectors reranks the candidates retrieval found, so it '
-                    'cannot run alone. Select UMLS, Lexical or Semantic retrieval as well.'
+                    'At least one retrieval strategy (UMLS, Lexical, or Vectors) '
+                    'must be selected.'
                 )},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         strategies = raw_strategies
     else:
         strategies = list(DEFAULT_STRATEGIES)
+
+    # Ranking model selection.
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL).strip()
+    if ranking_model not in RANKING_MODELS:
+        return Response(
+            {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     # Replace mode re-answers rows a previous run already answered, rather than
     # deleting them. Deleting was right while the candidate set came from a scan
@@ -10940,10 +14938,35 @@ def code_mapping_suggest(request):
 
     # Counted before the run starts so the page has a denominator to show from
     # the first poll, rather than a bar that fills against a moving total.
-    expected = len(suggestable_mappings(
+    batch_rows = suggestable_mappings(
         list(tables), source_vocabulary_id=source_vocab,
         min_occurrences=min_occurrences, limit=limit, resuggest=replace,
-    ))
+    )
+    batch_ids = [m.pk for m in batch_rows]
+    expected = len(batch_ids)
+
+    # Lock the batch: reject if any row is locked by another user.
+    if batch_ids:
+        conflicting = list(
+            SourceCodeConceptMapping.objects
+            .filter(id__in=batch_ids)
+            .exclude(locked_by__isnull=True)
+            .exclude(locked_by=request.user)
+            .filter(locked_at__gt=timezone.now() - timedelta(minutes=settings.MAPPING_LOCK_TIMEOUT_MINUTES))
+            .values_list('id', flat=True)
+        )
+        if conflicting:
+            return Response(
+                {
+                    'detail': 'Some mappings are locked by another user.',
+                    'locked_mapping_ids': conflicting,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        # Lock all batch rows for this suggest run.
+        SourceCodeConceptMapping.objects.filter(id__in=batch_ids).update(
+            locked_by=request.user, locked_at=timezone.now(),
+        )
 
     from omop_core.services.suggest_jobs import selection_summary
     params = {
@@ -10955,11 +14978,14 @@ def code_mapping_suggest(request):
         'strategies': strategies,
         'lexical_limit': lexical_limit,
         'resuggest': replace,
+        'ranking_model': ranking_model,
+        '_locked_mapping_ids': batch_ids,  # for lock release on completion
     }
     run = SuggestRun.objects.create(
         source_vocabulary_id=source_vocab,
         total=expected,
         model_version=SUGGESTION_MODEL_VERSION,
+        ranking_model=ranking_model,
         selection=selection_summary(params),
         created_by=request.user if request.user.is_authenticated else None,
     )
@@ -10985,6 +15011,7 @@ def _serialize_suggest_run(run, *, include_activity=False):
         'strategy_counts': run.strategy_counts or {},
         'landed_in': run.landed_in or {},
         'model_version': run.model_version,
+        'ranking_model': run.ranking_model or 'anthropic',
         'error': run.error,
         'created_at': run.created_at,
         'finished_at': run.finished_at,
@@ -10994,19 +15021,38 @@ def _serialize_suggest_run(run, *, include_activity=False):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_latest_suggest_run(request):
-    """Recover the latest saved run link after navigation or a page reload."""
-    if not _can_manage_field_mappings(request.user):
+    """Recover the latest saved run link after navigation or a page reload.
+
+    Optional query params:
+      source  – filter by source_vocabulary_id so the page restores the
+                right tab's run after navigation.
+      include_activity – ``1`` to inline the full activity array, so the
+                         page can seed its candidates panel without a
+                         second round-trip.
+    """
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
-    run = SuggestRun.objects.exclude(selection__contains={'mode': 'individual'}).only('id').order_by('-created_at', '-id').first()
-    return Response({'run_id': str(run.id) if run else None})
+    qs = SuggestRun.objects.filter(direction='forward').exclude(
+        selection__contains={'mode': 'individual'},
+    )
+    source = request.query_params.get('source')
+    if source:
+        qs = qs.filter(source_vocabulary_id=source)
+    include_activity = request.query_params.get('include_activity') == '1'
+    if not include_activity:
+        qs = qs.only('id')
+    run = qs.order_by('-created_at', '-id').first()
+    if run is None:
+        return Response({'run_id': None})
+    return Response(_serialize_suggest_run(run, include_activity=include_activity))
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest_run(request, run_id):
     """Progress of one queued Suggest run."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
     run = SuggestRun.objects.filter(pk=run_id).first()
@@ -11020,20 +15066,58 @@ def code_mapping_suggest_run(request, run_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest_one(request):
-    if not _can_manage_field_mappings(request.user):
+    return _suggest_one(request)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_score(request):
+    """Score a chosen destination for a source: the dialog's Calc (#2668).
+
+    Takes suggest-one's body plus ``destination_concept_id`` and runs the same
+    retrieval and ranking with that concept guaranteed in the pool. The result
+    event carries ``scored``: ``{confidence, ranked, note}``, with ``confidence``
+    ``null`` (never a guess) when no ranker scored it. Writes nothing: the
+    curator's save stores the number.
+    """
+    if not _can_manage_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    raw = request.data.get('destination_concept_id')
+    try:
+        destination_id = None if isinstance(raw, bool) else int(raw)
+    except (TypeError, ValueError):
+        destination_id = None
+    if not destination_id or destination_id < 0:
+        return Response({'destination_concept_id': 'Choose a destination concept to score.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    destination = Concept.objects.filter(concept_id=destination_id).first()
+    if destination is None:
+        return Response({'destination_concept_id': 'Concept not found.'}, status=status.HTTP_400_BAD_REQUEST)
+    # Injected into the pool, the destination skips the retrieval filters, so the
+    # same test provisional data applies at read time is made here: a valid
+    # standard concept in the domain of the table the rows go to.
+    from omop_core.mapping.code_resolution import _usable_destination
+    if not _usable_destination(destination, normalize_omop_table(request.data.get('omop_table'))):
+        return Response({'destination_concept_id': (
+            f'{destination.concept_name} cannot be scored here: only a valid standard concept in the '
+            f'domain of the source\'s table is scored.'
+        )}, status=status.HTTP_400_BAD_REQUEST)
+    return _suggest_one(request, score_concept_id=destination_id)
+
+
+def _suggest_one(request, score_concept_id=None):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     source_code = str(request.data.get('source_code') or '').strip()
     omop_table = normalize_omop_table(request.data.get('omop_table'))
     strategies = request.data.get('strategies') or list(DEFAULT_STRATEGIES)
     if not source_code or not omop_table or not isinstance(strategies, list) or any(s not in ALL_STRATEGIES for s in strategies):
         return Response({'detail': 'source_code, omop_table, and valid strategies are required.'}, status=status.HTTP_400_BAD_REQUEST)
-    # Same rule as the batch endpoint: vectors reranks what retrieval found and
-    # retrieves nothing itself, so on its own it answers "no candidate concept"
-    # every time, which reads as a broken dialog rather than a bad selection.
-    if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_SEMANTIC} & set(strategies):
+    # At least one retrieval strategy is needed.
+    if not {STRATEGY_UMLS, STRATEGY_LEXICAL, STRATEGY_VECTORS, STRATEGY_SEMANTIC} & set(strategies):
         return Response({'strategies': (
-            'Vectors reranks the candidates retrieval found, so it cannot run '
-            'alone. Select UMLS, Lexical or Semantic retrieval as well.'
+            'At least one retrieval strategy (UMLS, Lexical, or Vectors) '
+            'must be selected.'
         )}, status=status.HTTP_400_BAD_REQUEST)
     try:
         lexical_limit = int(request.data.get('lexical_limit') or CANDIDATE_LIMIT)
@@ -11042,26 +15126,132 @@ def code_mapping_suggest_one(request):
     if not 1 <= lexical_limit <= LEXICAL_LIMIT_MAX:
         return Response({'lexical_limit': f'Must be between 1 and {LEXICAL_LIMIT_MAX}.'},
                         status=status.HTTP_400_BAD_REQUEST)
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL).strip()
+    if ranking_model not in RANKING_MODELS:
+        return Response(
+            {'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    source_vocabulary_id = str(request.data.get('source_vocabulary_id') or '')
+    # Check lock: if another user holds the lock, reject suggest-one.
+    existing = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id, source_code=source_code,
+    ).select_related('locked_by').first()
+    if existing:
+        try:
+            _check_mapping_lock(existing, request.user)
+        except MappingLocked as exc:
+            return exc.as_response()
+
+    # The curator's LOINC axis entries: the dialog's unsaved ones, else the
+    # row's. A variant's axis values override both -- suggesting for the
+    # mmol/L variant of a code means suggesting a substance concentration.
+    from omop_core.mapping import axis_variants as axis_variants_module, loinc_axes as axes_module
+    # The row the dialog shows. Hospital codes have one mapping per
+    # organization, so the dialog names its row; without that, only an
+    # unambiguous match is used -- never another hospital's axes or variants.
+    same_code = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id, source_code=source_code[:SOURCE_CODE_MAX],
+        omop_table=omop_table,
+    )
+    raw_mapping_id = request.data.get('mapping_id')
+    if raw_mapping_id not in (None, ''):
+        try:
+            axes_mapping = same_code.filter(pk=int(raw_mapping_id)).first()
+        except (TypeError, ValueError):
+            return Response({'mapping_id': 'Must be a mapping id.'}, status=status.HTTP_400_BAD_REQUEST)
+    else:
+        candidates = list(same_code[:2])
+        axes_mapping = candidates[0] if len(candidates) == 1 else None
+    try:
+        axis_overrides = (
+            axes_module.clean_overrides(request.data.get('loinc_axes'))
+            if 'loinc_axes' in request.data
+            else (axes_mapping.loinc_axes or {}) if axes_mapping else {}
+        )
+    except ValueError as exc:
+        return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    axis_key = str(request.data.get('axis_key') or '')
+    # One scan of the code's unit evidence serves the variant's axis values
+    # and observed_units below.
+    unit_evidence = (axis_variants_module.unit_counts(axes_mapping)
+                     if axes_mapping and (axis_key or omop_table == 'measurement') else None)
+    if axis_key:
+        # What the units imply now, so a row stored before the axis values it
+        # carries were derived (a % variant with no property set) is suggested
+        # with the current constraints; a stored variant the evidence no
+        # longer shows keeps its own.
+        detected = ({v['axis_key']: v for v in axis_variants_module.detect(axes_mapping, unit_evidence, notes=False)[0]}
+                    if axes_mapping else {})
+        values = (detected.get(axis_key) or {}).get('axis_values')
+        if values is None:
+            variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
+            values = variant.axis_values if variant is not None else None
+        if values is None:
+            return Response({'axis_key': 'This code has no such axis variant.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        axis_overrides = {**axis_overrides, **values}
+    from omop_core.mapping import snomed_attributes as snomed_module
+    try:
+        snomed_overrides = (
+            snomed_module.clean_overrides(request.data.get('snomed_attributes'))
+            if 'snomed_attributes' in request.data
+            else (axes_mapping.snomed_attributes or {}) if axes_mapping else {}
+        )
+    except ValueError as exc:
+        return Response({'snomed_attributes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
     params = {
         'source_code': source_code,
-        'source_vocabulary_id': str(request.data.get('source_vocabulary_id') or ''),
+        'source_vocabulary_id': source_vocabulary_id,
         'omop_table': omop_table,
-        'source_description': str(request.data.get('source_code_description') or ''),
+        'axis_overrides': axis_overrides,
+        'snomed_overrides': snomed_overrides,
+        'observed_units': (
+            axis_variants_module.observed_units(axes_mapping, unit_evidence)
+            if axes_mapping and omop_table == 'measurement' else None
+        ),
+        # A score is about the text the stored row says: for an existing mapping the
+        # description and metadata come from the row, whatever the body sends, so a
+        # curator cannot choose the text a score is about. (A new row's are the body's;
+        # the token binds its description, not its metadata.)
+        'source_description': (
+            axes_mapping.source_code_description
+            if score_concept_id is not None and axes_mapping is not None
+            else str(request.data.get('source_code_description') or '')),
+        # The dialog's Source Metadata, else this table's mapping's own:
+        # ranker context only.
+        'row_metadata': (
+            axes_mapping.source_metadata
+            if score_concept_id is not None and axes_mapping is not None
+            else request.data.get('source_metadata')
+            if isinstance(request.data.get('source_metadata'), dict)
+            and request.data.get('source_metadata')
+            else SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code[:SOURCE_CODE_MAX], omop_table=omop_table,
+            ).values_list('source_metadata', flat=True).first()
+        ),
         'strategies': strategies,
         'lexical_limit': lexical_limit,
+        'ranking_model': ranking_model,
+        **({'score_concept_id': score_concept_id} if score_concept_id is not None else {}),
     }
     if request.data.get('async') is True:
         from omop_core.services.suggest_jobs import get_dispatcher
         run = SuggestRun.objects.create(
             source_vocabulary_id=params['source_vocabulary_id'], total=1,
-            model_version=SUGGESTION_MODEL_VERSION, created_by=request.user,
+            model_version=SUGGESTION_MODEL_VERSION, ranking_model=ranking_model,
+            created_by=request.user,
             selection={
                 'mode': 'individual', 'dry_run': True, 'limit': 1,
-                'order': 'The source code currently open in the mapping dialog.',
+                'order': ('The destination currently chosen in the mapping dialog, scored.'
+                          if score_concept_id is not None
+                          else 'The source code currently open in the mapping dialog.'),
                 'strategies': strategies, 'source_vocabulary_id': params['source_vocabulary_id'],
             },
         )
-        get_dispatcher().dispatch(run, {'preview': params})
+        get_dispatcher().dispatch(run, {'preview': params, 'ranking_model': ranking_model})
         run.refresh_from_db()
         return Response(_serialize_suggest_run(run, include_activity=True), status=status.HTTP_202_ACCEPTED)
     return Response(suggest_one_mapping(**params))
@@ -11076,7 +15266,7 @@ def code_mapping_check_umls(request):
     rather than a text search, so it confirms the exact code a curator entered.
     An OMOP source concept is returned when that vocabulary is loaded too.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     source_code = str(request.data.get('source_code') or '').strip()
@@ -11127,7 +15317,7 @@ def code_mapping_reference(request):
     concepts, and deriving the list from what happens to be loaded would block
     a curator from recording a mapping they can already make correctly.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
 
@@ -11165,11 +15355,15 @@ def _suggestion_accuracy_from_counts(counts):
     }
 
 
-def _suggestion_accuracy_payload(queryset, model_version=None):
-    if model_version:
-        queryset = queryset.filter(suggestion_model_version=model_version)
-    counts = dict(queryset.values_list('suggestion_outcome').annotate(total=Count('id')))
-    return _suggestion_accuracy_from_counts(counts)
+def _suggestion_accuracy_groups():
+    """Current suggestions and archived reviews, in one bounded grouped query."""
+    def groups(model):
+        return model.objects.filter(suggestion_model_version__gt='').order_by().values(
+            'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
+        ).annotate(total=Count('id'))
+
+    # ALL matters: equal groups in the two tables are independent reviews.
+    return groups(SourceCodeConceptMapping).union(groups(MappingSuggestionReview), all=True)
 
 
 def _suggestion_version_key(version):
@@ -11179,27 +15373,18 @@ def _suggestion_version_key(version):
         return (0,)
 
 
-def _suggestion_versions(queryset):
-    return sorted(queryset.exclude(suggestion_model_version='').values_list(
-        'suggestion_model_version', flat=True).distinct(), key=_suggestion_version_key, reverse=True)
-
-
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_accuracy(request):
     """Suggestion quality, grouped by incoming source vocabulary and overall."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     from collections import Counter, defaultdict
     from omop_core.services.mapping_browse import canonical_source
 
-    # One small grouped query replaces several round trips for every tab.
-    grouped = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='').order_by().values(
-        'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
-    ).annotate(total=Count('id'))
     sources = defaultdict(lambda: defaultdict(Counter))
     overall_versions = defaultdict(Counter)
-    for group in grouped:
+    for group in _suggestion_accuracy_groups():
         source = canonical_source(group['source_vocabulary_id'])
         version, outcome, total = (group['suggestion_model_version'], group['suggestion_outcome'], group['total'])
         sources[source][version][outcome] += total
@@ -11244,17 +15429,116 @@ def code_mapping_accuracy(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_accuracy_dashboard(request):
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-    base = SourceCodeConceptMapping.objects.filter(suggestion_model_version__gt='')
-    versions = _suggestion_versions(base)
+    from collections import Counter, defaultdict
+    counts = defaultdict(Counter)
+    totals = Counter()
+    for group in _suggestion_accuracy_groups():
+        outcome, total = group['suggestion_outcome'], group['total']
+        counts[group['suggestion_model_version']][outcome] += total
+        totals[outcome] += total
+    versions = sorted(counts, key=_suggestion_version_key, reverse=True)
     return Response({
         'models': [
-            {'model_version': version, **_suggestion_accuracy_payload(base, version)}
+            {'model_version': version, **_suggestion_accuracy_from_counts(counts[version])}
             for version in versions
         ],
-        'overall': _suggestion_accuracy_payload(base) if versions else None,
+        'overall': _suggestion_accuracy_from_counts(totals) if versions else None,
     })
+
+
+# Confidence bands the Mapping Accuracy Analytics page reports (#2383), in
+# display order after the Overall row. A decision no ranker scored
+# (decision_confidence null) counts in the Overall row only.
+DECISION_CONFIDENCE_BANDS = (
+    ('90-100', '90–100% confidence'),
+    ('80-90', '80–90%'),
+    ('70-80', '70–80%'),
+    ('below-70', 'Below 70%'),
+)
+DECISION_SURFACE_SECTIONS = (
+    ('overall', 'Overall'),
+    ('concept2code', 'Concept to Code'),
+    ('code2concept', 'Code to Concept'),
+    ('patientcode', 'Patient source codes'),
+)
+
+
+def _decision_band_case():
+    return Case(
+        When(decision_confidence__isnull=True, then=Value('')),
+        When(decision_confidence__gte=0.9, then=Value('90-100')),
+        When(decision_confidence__gte=0.8, then=Value('80-90')),
+        When(decision_confidence__gte=0.7, then=Value('70-80')),
+        default=Value('below-70'), output_field=CharField(),
+    )
+
+
+def _decision_accuracy_row(key, label, statuses, outcomes):
+    """One analytics row: the curator's statuses, and the ranker's record on
+    the same mappings scored as the accuracy dashboard scores a model."""
+    scored = _suggestion_accuracy_from_counts(outcomes)
+    return {
+        'key': key, 'label': label,
+        'total': sum(statuses.values()),
+        'approved': statuses.get('approved', 0),
+        'proposed': statuses.get('proposed', 0),
+        'rejected': statuses.get('rejected', 0),
+        # The denominator of the three scores: decisions that began as a
+        # ranker's suggestion and have a first disposition.
+        'scored': scored['reviewed'],
+        'precision': scored['precision'], 'recall': scored['recall'], 'f1': scored['f1'],
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_accuracy_analytics(request):
+    """Curator decisions by surface and by the ranker's confidence (#2383).
+
+    Reads the decision columns (#2382): every mapping a curator has saved,
+    sectioned by the surface of that save and banded by the confidence the
+    ranker had in the destination at the time. Precision, recall and F1 use
+    ``suggestion_outcome`` on the same rows, as the accuracy dashboard does:
+    accepted is a true positive, overridden or rejected a false positive, and
+    an override is also the miss recall counts; ``scored`` is their
+    denominator, since not every decision began as a suggestion. ``status``
+    is the row's current state and the outcome its first disposition, both
+    read as they stand at the time of the request. One grouped query.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from collections import Counter
+
+    def empty():
+        return {key: {'statuses': Counter(), 'outcomes': Counter()}
+                for key in ('overall', *[band for band, _label in DECISION_CONFIDENCE_BANDS])}
+    sections = {surface: empty() for surface, _label in DECISION_SURFACE_SECTIONS}
+    groups = (
+        SourceCodeConceptMapping.objects.exclude(decision_surface='').order_by()
+        .annotate(band=_decision_band_case())
+        .values('decision_surface', 'band', 'status', 'suggestion_outcome')
+        .annotate(total=Count('id'))
+    )
+    for group in groups:
+        for section in (sections['overall'], sections.get(group['decision_surface'])):
+            if section is None:
+                continue
+            rows = [section['overall']] + ([section[group['band']]] if group['band'] else [])
+            for row in rows:
+                row['statuses'][group['status']] += group['total']
+                if group['suggestion_outcome']:
+                    row['outcomes'][group['suggestion_outcome']] += group['total']
+    labels = dict(DECISION_CONFIDENCE_BANDS)
+    return Response({'sections': [
+        {
+            'key': surface, 'label': label,
+            'rows': [_decision_accuracy_row(key, labels.get(key, 'Overall'), rows['statuses'], rows['outcomes'])
+                     for key, rows in sections[surface].items()],
+        }
+        for surface, label in DECISION_SURFACE_SECTIONS
+    ]})
 
 
 # HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The
@@ -11283,14 +15567,17 @@ def _merge_vocab_counts(counts):
     for sub in source_vocabularies.WEARABLE_SOURCE_VOCABULARIES - {'OpenWearables'}:
         if sub in counts:
             counts['OpenWearables'] = counts.get('OpenWearables', 0) + counts.pop(sub)
-    # ICD-10-CM → ICD-10 (curators see one vocabulary).
-    for sub, canonical in source_vocabularies.ICD10CM_MERGE.items():
-        if sub in counts:
-            counts[canonical] = counts.get(canonical, 0) + counts.pop(sub)
     # FHIR OID aliases → canonical OMOP vocabulary.
     for oid, canonical in source_vocabularies.VOCABULARY_OID_ALIASES.items():
         if oid in counts:
             counts[canonical] = counts.get(canonical, 0) + counts.pop(oid)
+    # Tenant-specific Epic/Cerner resolver keys → vendor tabs. Iterate over a
+    # snapshot because several hundred hospital systems can be present.
+    for source, count in list(counts.items()):
+        vendor = source_vocabularies.hospital_vendor(source)
+        if vendor and source != vendor:
+            counts[vendor] = counts.get(vendor, 0) + count
+            counts.pop(source)
 
 
 def _source_vocabulary_tabs():
@@ -11356,6 +15643,10 @@ def _source_vocabulary_tabs():
 
 
 def _code_mapping_reference_payload():
+    deployed_commit = (os.environ.get('RENDER_GIT_COMMIT') or '').strip()
+    if not re.fullmatch(r'[0-9a-fA-F]{7,64}', deployed_commit):
+        deployed_commit = ''
+
     known = {
         v.vocabulary_id: v.vocabulary_name
         for v in Vocabulary.objects.filter(
@@ -11372,6 +15663,9 @@ def _code_mapping_reference_payload():
     ]
 
     return {
+        # Render injects the deployed Git commit. Keep it out of local UI when
+        # absent, and expose the full value for the marker tooltip/label.
+        'release_commit': deployed_commit,
         'domains': [
             {'domain_id': domain_id, 'label': label}
             for domain_id, label in source_vocabularies.DOMAIN_CHOICES
@@ -11383,6 +15677,12 @@ def _code_mapping_reference_payload():
             domain_id: source_vocabularies.source_systems_for(domain_id)
             for domain_id, _label in source_vocabularies.DOMAIN_CHOICES
         },
+        # Only these publisher vocabularies have a separately loaded source
+        # catalog. Hospital-local Epic/Cerner systems must not probe this API.
+        'source_catalog_vocabularies': list(
+            SourceVocabulary.objects.order_by('vocabulary_id')
+            .values_list('vocabulary_id', flat=True)
+        ),
         # Tab order: the standard vocabularies a curator re-points into first,
         # then the HK-* buckets imports fill.
         'destination_vocabularies': [
@@ -11399,6 +15699,15 @@ def _code_mapping_reference_payload():
         # Source vocabulary tabs for the Code Mapping page. Ordered: non-standard
         # first (the work queue), then uncoded, then standard (reference).
         'source_vocabulary_tabs': _source_vocabulary_tabs(),
+        # The Category and Measure Class a wearable mapping may carry, and
+        # the source vocabularies they apply to (the Wearables tab). The
+        # dialog offers the fields from these, so the lists live here only.
+        'wearable_metric_categories': list(source_vocabularies.WEARABLE_METRIC_CATEGORIES),
+        'wearable_measure_classes': list(source_vocabularies.WEARABLE_MEASURE_CLASSES),
+        'wearable_source_vocabularies': sorted(source_vocabularies.WEARABLE_SOURCE_VOCABULARIES),
+        'wearable_source_systems': wearable_export.source_systems(),
+        # Whether the proposer may not approve (#2726): the pages disable the controls that would be refused.
+        'separate_approver': mapping_approval.enabled(),
         'suggest_max_per_run': get_suggest_dispatcher().max_codes,
     }
 
@@ -11413,7 +15722,7 @@ def code_mapping_vocabularies(request):
     wrapper that asserts on django.http.HttpRequest and 500 on every call --
     an alias kept for compatibility that raises is worse than no alias.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
 
@@ -11426,13 +15735,17 @@ def code_mapping_lookup(request):
     Request body::
 
         {
+          "organization_id": 41,
           "codes": [
-            {"source_vocabulary_id": "CPT4", "source_code": "99213",
-             "omop_table": "procedure"},
-            {"source_vocabulary_id": "SNOMED", "source_code": "386789000",
-             "omop_table": "condition"}
+            {"source_vocabulary_id": "urn:oid:1.2.840.114350.1.13.99999.7.10.688867.4150",
+             "source_code": "10627", "source_text": "Glucose flowsheet",
+             "omop_table": "measurement"}
           ]
         }
+
+    ``organization_id`` is batch-wide. An organization-bound OAuth service
+    obtains it from its credential and may omit the field; a machine credential
+    without that binding must send it explicitly for Epic/Cerner local codes.
 
     Response::
 
@@ -11444,6 +15757,20 @@ def code_mapping_lookup(request):
           "resolved": 1,
           "unresolved": 1
         }
+
+    An entry carrying ``source_unit`` for a code with an approved LOINC axis
+    variant in that unit (one hospital code reported in both mg/dL and
+    mmol/L) resolves to the variant's concept, keyed ``"vocab|code|unit"`` and
+    carrying ``axis_variant_id``: the same code means a different LOINC per
+    unit, so one key per code cannot hold both answers. The answer is also
+    under ``"vocab|code"`` when no unrouted entry for that code holds it.
+
+    An entry with an empty ``source_vocabulary_id`` is a **text term**: the
+    wording a document extractor found, sent as ``source_code``, with
+    ``source_unit``, ``quantity`` and ``specimen`` as its context (#1944). It
+    resolves through the same curated mappings, variants and Suggest engine
+    under the Uncoded vocabulary, keyed ``"|term"``; see
+    :mod:`omop_core.mapping.text_terms` for what differs.
     """
     codes = request.data.get('codes')
     if not codes or not isinstance(codes, list):
@@ -11459,39 +15786,107 @@ def code_mapping_lookup(request):
             status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
+    raw_organization_id = request.data.get('organization_id')
+    request_organization = resolve_explicit_organization(
+        request, raw_organization_id,
+        present=raw_organization_id not in (None, ''),
+    )
+
     # This is an ingest operation, not the UI's list/browse read path.  The
     # canonical resolver records an encounter for a proposed code, so prevent
     # intermediaries from caching a response whose Seen count is stateful.
     # The source system is server-owned: a client must not be able to forge a
     # different importer name in SCCM provenance.
     source_system = 'code-mapping-api'
+    from omop_core.mapping import text_terms
     lookup_entries = []
+    specimens = []
     for entry in codes:
         if not isinstance(entry, dict):
             return Response({'detail': 'Each code entry must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
         vocab = str(entry.get('source_vocabulary_id') or '').strip()
         code = str(entry.get('source_code') or '').strip()
         table = normalize_omop_table(entry.get('omop_table'))
-        if not vocab or not code or table not in CLINICAL_TABLES:
+        if not vocab:
+            # A text term: the document's wording is the key.
+            code = text_terms.normalize_term(code)
+        if not code or table not in CLINICAL_TABLES:
             return Response(
-                {'detail': 'Each entry needs source_vocabulary_id, source_code, and a supported omop_table.'},
+                {'detail': 'Each entry needs source_code (a code, or the term itself when '
+                           'source_vocabulary_id is empty) and a supported omop_table.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         lookup_entries.append((vocab, code, table, str(entry.get('source_text') or '').strip()))
+        specimens.append(str(entry.get('specimen') or '').strip())
+
+    if request_organization is None and any(
+        source_vocabularies.hospital_vendor(vocab)
+        for vocab, _code, _table, _source_text in lookup_entries
+    ):
+        return Response(
+            {
+                'organization_id': (
+                    'Epic and Cerner hospital-local codes require organization '
+                    'context from the service credential or request body.'
+                ),
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Parse optional unit/quantity fields per entry (parallel to lookup_entries).
+    unit_inputs = []
+    for entry in codes:
+        src_unit = str(entry.get('source_unit') or '').strip()
+        raw_qty = entry.get('quantity')
+        qty = None
+        if raw_qty is not None:
+            if isinstance(raw_qty, bool):
+                return Response(
+                    {'detail': 'quantity must be a number.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                qty = float(raw_qty)
+            except (TypeError, ValueError):
+                return Response(
+                    {'detail': 'quantity must be a number.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        unit_inputs.append((src_unit, qty))
 
     # Build response preserving request order.
     result = {}
+    resolved_entries = {}   # key -> (concept, mapping)
     resolved = 0
     unresolved = 0
-    for vocab, code, table, source_text in lookup_entries:
-        key = f'{vocab}|{code}'
-        concept, mapping = resolve_source_code(
+    from omop_core.mapping.code_resolution import resolve_source_code_variant
+    entry_keys = []
+    routed_keys = {}   # "vocab|code|unit" -> "vocab|code"
+    text_keys = set()   # terms whose evidence may now imply axis variants
+    for idx, (vocab, code, table, source_text) in enumerate(lookup_entries):
+        is_term = vocab == text_terms.TEXT_VOCABULARY
+        metadata = text_terms.metadata_for(
+            unit_inputs[idx][0], unit_inputs[idx][1], specimens[idx]) if is_term else None
+        concept, mapping, variant = resolve_source_code_variant(
             source_vocabulary_id=vocab,
             source_code=code,
             source_text=source_text,
             omop_table=table,
             source_system=source_system,
+            organization=request_organization,
+            source_unit=unit_inputs[idx][0] or None,
+            metadata=metadata,
+            # One ask per code per batch: a provisional sighting (#2123).
+            provisional=True,
+            mint=not is_term,
         )
+        # A code with LOINC axis variants means a different concept per unit,
+        # so a routed entry is keyed by its unit too: "vocab|code|unit". Every
+        # other entry keeps the "vocab|code" key existing callers read.
+        key = f'{vocab}|{code}|{unit_inputs[idx][0]}' if variant is not None else f'{vocab}|{code}'
+        entry_keys.append(key)
+        if variant is not None:
+            routed_keys[key] = f'{vocab}|{code}'
         if concept is not None:
             result[key] = {
                 'status': mapping.status if mapping else 'direct',
@@ -11503,13 +15898,18 @@ def code_mapping_lookup(request):
                 'domain_id': mapping.domain_id if mapping else concept.domain_id,
                 'omop_table': mapping.omop_table if mapping else table,
                 'mapping_id': mapping.id if mapping else None,
+                'organization_id': mapping.organization_id if mapping else None,
+                **({'axis_variant_id': variant.pk, 'axis_values': variant.axis_values}
+                   if variant is not None else {}),
             }
+            resolved_entries[key] = (concept, mapping)
             resolved += 1
         else:
             result[key] = {
                 'status': mapping.status if mapping else 'unresolved',
                 'resolved': False,
                 'mapping_id': mapping.id if mapping else None,
+                'organization_id': mapping.organization_id if mapping else None,
                 'occurrence_count': mapping.occurrence_count if mapping else 0,
                 'first_seen': mapping.first_seen if mapping else None,
                 'last_seen': mapping.last_seen if mapping else None,
@@ -11517,11 +15917,82 @@ def code_mapping_lookup(request):
                 # resolved flag, never a provisional target, to write OMOP.
                 'proposed_target_concept_id': mapping.target_concept_id if mapping else None,
             }
+            if mapping and mapping.status == 'approved':
+                # The identity is standard, but the requested fact table may
+                # be incompatible (e.g. a Device imported as a drug).
+                result[key].update(
+                    domain_id=mapping.domain_id,
+                    omop_table=mapping.omop_table,
+                    unresolved_reason='destination_domain_or_validity_mismatch',
+                )
             unresolved += 1
+        if is_term:
+            units_seen = text_terms.annotate(
+                result[key], mapping=mapping, concept=concept, term=code, omop_table=table,
+                metadata=metadata, unit=unit_inputs[idx][0] or None)
+            if mapping is not None and (units_seen >= 2 or mapping.axis_variant_count):
+                text_keys.add((vocab, code))
+
+    # ── Unit conversion (only when at least one entry carried source_unit) ──
+    has_unit_request = any(src_unit for src_unit, _ in unit_inputs)
+    if has_unit_request and resolved_entries:
+        from omop_core.services.canonical_units import resolve_mapping_conversion
+
+        # Batch-fetch destination_unit_concept for resolved mappings
+        mapping_ids = [
+            m.id for _c, m in resolved_entries.values() if m is not None
+        ]
+        unit_concepts = {}
+        if mapping_ids:
+            for sccm in (
+                SourceCodeConceptMapping.objects
+                .filter(id__in=mapping_ids, destination_unit_concept__isnull=False)
+                .select_related('destination_unit_concept')
+            ):
+                unit_concepts[sccm.id] = sccm.destination_unit_concept
+
+        for idx, (vocab, code, _table, _source_text) in enumerate(lookup_entries):
+            key = entry_keys[idx]
+            src_unit, qty = unit_inputs[idx]
+            if not src_unit:
+                continue
+            if key not in resolved_entries:
+                continue
+            concept, mapping = resolved_entries[key]
+            # The mapping's destination unit was chosen for the mapping's own
+            # LOINC; a variant's concept has another property, so it takes
+            # that concept's canonical unit instead.
+            dest_unit_concept = (unit_concepts.get(mapping.id)
+                                 if mapping and key not in routed_keys else None)
+            conversion = resolve_mapping_conversion(
+                concept,
+                destination_unit_concept=dest_unit_concept,
+                source_unit=src_unit,
+                quantity=qty,
+            )
+            result[key]['unit_conversion'] = conversion
+
+    # A client written before variants reads "vocab|code" whatever unit it
+    # sent. Mirror a routed answer there unless an entry that was not routed
+    # already answers it, so that key never goes missing.
+    for routed, base in routed_keys.items():
+        if base not in result and routed in result:
+            result[base] = result[routed]
+
+    # A term now seen in two units may be two LOINC tests; the queue flags it
+    # as it does a hospital code. Evidence only: never fails the lookup.
+    if text_keys:
+        try:
+            from omop_core.mapping.axis_variants import refresh_codes
+            refresh_codes(text_keys)
+        except Exception:  # noqa: BLE001
+            logger.warning('Axis variant refresh after a text-term lookup failed.', exc_info=True)
+
     response = Response({
         'mappings': result,
         'resolved': resolved,
         'unresolved': unresolved,
+        'matcher_version': text_terms.matcher_version(),
     })
     response['Cache-Control'] = 'no-store'
     return response
@@ -11533,17 +16004,23 @@ def custom_patient_field_list(request):
     """List runtime PatientRecord fields or atomically add one with its mapping.
 
     Definitions are visible to every signed-in user because Patient Info needs
-    them to render values.  Creation remains limited to mapping administrators.
+    them to render values.  Creating one is an approval: the field arrives with
+    an approved mapping, so only staff and org admins may (#721). An analyst
+    proposes and remaps existing fields and is refused here, as on any other
+    approval.
     """
     from .serializers import CustomPatientFieldCreateSerializer, CustomPatientFieldSerializer
 
     if request.method == 'GET':
+        from omop_core.services import disease_profiles
         fields = CustomPatientField.objects.select_related('mapping__concept').filter(
             mapping__status='approved',
         )
-        return Response(CustomPatientFieldSerializer(fields, many=True).data)
+        return Response(CustomPatientFieldSerializer(
+            fields, many=True, context={'field_diseases': disease_profiles.memberships()},
+        ).data)
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_approve_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = CustomPatientFieldCreateSerializer(
@@ -11558,8 +16035,10 @@ def custom_patient_field_list(request):
 @permission_classes([IsAuthenticated])
 def field_mapping_list(request):
     """GET: list all field descriptors.  POST: create a new mapping."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         from omop_core.mapping.field import get_all_field_descriptors
@@ -11572,6 +16051,15 @@ def field_mapping_list(request):
         if search:
             q = search.lower()
             descriptors = [d for d in descriptors if q in d['field_name'].lower()]
+        # ?disease=MM&set=extension|profile: one disease's fields (#2331).
+        # A blank value is no filter, as it is for category and search.
+        named = [value for value in request.query_params.getlist('disease') if value.strip()]
+        if named:
+            from omop_core.services import disease_field_sets
+            with public_errors(disease_field_sets.SetError, field='detail'):
+                descriptors = disease_field_sets.disease_set(
+                    descriptors, named,
+                    request.query_params.get('set') or disease_field_sets.SET_PROFILE)
         return Response(descriptors)
 
     # POST — create a mapping.  Non-admin users cannot create as approved.
@@ -11588,12 +16076,112 @@ def field_mapping_list(request):
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def field_mapping_export(request):
+    """A disease's fields and their concepts as CSV, for offline review (#2331).
+
+    GET /api/v1/field-mappings/export/?disease=MM&set=profile|extension
+
+    ``profile`` (the default) is the full record: the base record plus the
+    disease's extension. ``extension`` is the disease-specific fields alone.
+    ``Other``, or no disease, is the base record. Reference data: the file
+    holds no patient value and no reviewer's name, and whoever may read the
+    mapping pages may download it.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from django.http import HttpResponse
+    from omop_core.services import disease_field_sets
+    with public_errors(disease_field_sets.SetError, field='detail'):
+        filename, text = disease_field_sets.csv_export(
+            request.query_params.getlist('disease'),
+            request.query_params.get('set') or disease_field_sets.SET_PROFILE)
+    response = HttpResponse(text, content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def wearable_mapping_export(request):
+    """Every mapping on the Wearables tab as one file, for use outside the app.
+
+    GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx&destination=omop|cdisc-bc&sources=Apple,Garmin
+
+    ``csv`` (the default) is one line per mapping; ``docx`` is a Word document
+    with a table per category. Both hold the whole tab, whatever section or
+    page a row is on, without the rejected rows. ``destination`` picks what each
+    code is mapped to in the file: the OMOP concept (the default) or the CDISC
+    Biomedical Concept that concept is linked to. The parameter is not
+    ``format``: DRF reads that one itself and answers 404 for a name it has no
+    renderer for. ``sources`` limits the file to some source code systems, as
+    ids separated by commas or repeated (``Apple,Garmin``); absent is every
+    system, and an id that is not a system on the tab is a 400. Reference data: no
+    patient value, reviewer or note, and whoever may read the mapping pages may
+    download it.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from django.http import HttpResponse
+    from omop_core.services import wearable_mapping_export as export
+    with public_errors(export.FormatError, field='detail'):
+        filename, content_type, body = export.export_file(
+            request.query_params.get('file_format') or export.FORMAT_CSV,
+            destination=request.query_params.get('destination') or export.DEST_OMOP,
+            sources=','.join(request.query_params.getlist('sources')))
+    response = HttpResponse(body, content_type=content_type)
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def field_scope(request, field_name):
+    """Whose record a field is part of, read or set by the field's name (#2331).
+
+    GET /api/v1/field-mappings/<field_name>/diseases/
+    PUT /api/v1/field-mappings/<field_name>/diseases/  {"diseases": ["MM", "FL"]}
+
+    An empty list makes the field part of the base record. Scope is keyed by
+    name, so this needs no mapping row: a field with no concept yet is scoped
+    without creating an empty proposed mapping for it. Reading follows mapping
+    read access and writing mapping write access, as a placement edit does.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from omop_core.models import FieldDiseaseMembership
+    from omop_core.services import disease_profiles
+
+    # A name with rows but no field (the field was removed) is still
+    # reachable, so its rows can be read and cleared.
+    held = FieldDiseaseMembership.objects.filter(field_name=field_name)
+    if field_name not in disease_profiles.field_names() and not held.exists():
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PUT':
+        diseases = request.data.get('diseases') if isinstance(request.data, dict) else None
+        if not isinstance(diseases, list) or not all(isinstance(code, str) for code in diseases):
+            return Response({'diseases': 'Send a list of Disease Category codes; an empty list is the base record.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        with public_errors(disease_profiles.ScopeError, field='diseases'):
+            disease_profiles.set_field_diseases(field_name, diseases, user=request.user)
+    diseases = sorted(held.values_list('disease', flat=True))
+    return Response({'field_name': field_name, 'scope': disease_profiles.scope_of(diseases),
+                     'diseases': diseases})
+
+
 @api_view(['GET', 'PATCH', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def field_mapping_detail(request, pk):
     """GET/PATCH/DELETE a single FieldConceptMapping."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
     try:
@@ -11647,11 +16235,12 @@ def propose_all_mappings(request):
     suggestion code cannot be resolved (concept not in DB) are silently skipped.
     Returns the count of newly created mappings.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping, Concept
     from omop_core.mapping.field import get_all_field_descriptors
+    from omop_core.services.field_mapping_provenance import suggestion_provenance
 
     descriptors = get_all_field_descriptors()
     tab_filter = str(request.data.get('tab') or request.query_params.get('tab') or '').strip()
@@ -11705,7 +16294,7 @@ def propose_all_mappings(request):
             continue  # concept not in vocabulary DB — skip
 
         to_create.append(FieldConceptMapping(
-            provenance='system_generated',
+            provenance=suggestion_provenance('propose-all'),
             field_name=p['field_name'],
             concept=concept,
             vocabulary_id=p['vocabulary_id'],
@@ -11733,8 +16322,10 @@ def propose_all_mappings(request):
 @permission_classes([IsAuthenticated])
 def field_synonyms(request, field_name):
     """GET: merged custom + OMOP synonyms.  POST: create a custom synonym."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldSynonym, FieldConceptMapping, ConceptSynonym
 
@@ -11778,7 +16369,7 @@ def field_synonyms(request, field_name):
 @permission_classes([IsAuthenticated])
 def field_synonym_detail(request, pk):
     """DELETE a custom synonym."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldSynonym
@@ -11799,7 +16390,7 @@ def field_synonyms_batch(request):
     GET /api/v1/field-synonyms/batch/?fields=field1,field2,...
     Returns {field_name: [synonym_text, ...]} with max 5 per field.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     fields_param = request.query_params.get('fields', '')
@@ -11869,7 +16460,7 @@ def field_choice_list(request):
             qs = qs.filter(field_name=field_name)
         return Response(FieldChoiceSerializer(qs, many=True).data)
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
@@ -11892,7 +16483,7 @@ def field_choice_detail(request, pk):
     if request.method == 'GET':
         return Response(FieldChoiceSerializer(choice).data)
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
@@ -11910,11 +16501,11 @@ def field_choice_detail(request, pk):
 @api_view(['POST', 'DELETE'])
 @permission_classes([IsAuthenticated])
 def field_choice_codes(request, choice_pk):
-    """POST: add a code to a choice.  DELETE: remove all codes (use detail for single)."""
+    """POST: add a code. DELETE: remove code_id, or all codes when omitted."""
 
-    from omop_core.models import FieldChoice, FieldChoiceCode
+    from omop_core.models import FieldChoice
     from .serializers import FieldChoiceCodeSerializer
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     try:
         choice = FieldChoice.objects.get(pk=choice_pk)
@@ -11927,7 +16518,20 @@ def field_choice_codes(request, choice_pk):
         serializer.save(choice=choice)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    # DELETE — remove all codes for this choice
+    # Scope an individual removal to its choice, without replacing sibling
+    # codes (including any another curator added after the editor loaded).
+    code_id = request.query_params.get('code_id')
+    if code_id is not None:
+        try:
+            code_id = serializers.IntegerField(min_value=1).run_validation(code_id)
+        except ValidationError as exc:
+            raise ValidationError({'code_id': exc.detail})
+        deleted, _ = choice.codes.filter(pk=code_id).delete()
+        if not deleted:
+            return Response({'detail': 'Code not found for this choice.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # Preserve the existing explicit remove-all-codes operation.
     choice.codes.all().delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -12006,34 +16610,19 @@ def field_formula_detail(request, pk):
     return Response(serializer.data)
 
 
-class TherapyLineViewSet(viewsets.ViewSet):
-    """Author a line of therapy.
+class _TherapyHostPolicy:
+    """PROMOP's policy for the packaged therapy writes (``omop_core.api``).
 
-    ``POST /api/v1/therapy-lines/``
-
-    Every therapy field on ``PatientRecord`` is derived: a line of therapy is a
-    set of DrugExposures grouped by an Episode through EpisodeEvent, and
-    ``first_line_therapy``, ``therapy_lines_count``, the intents, the outcomes
-    and ``treatment_refractory_status`` are all inferred back out of that
-    grouping. None of them is a column an editor can write, which is why the
-    treatment tab is read-only.
-
-    Writing one directly means three POSTs -- the exposures, the episode, the
-    links -- carrying ``episode_concept=32531``, an
-    ``episode_type_concept``, an ``episode_object_concept`` and a
-    client-supplied ``episode_id``. That is CDM knowledge a browser should not
-    hold, and getting any of it wrong produces a line that stores cleanly and
-    infers wrongly.
-
-    So the caller sends what a clinician knows and the server does the rest,
-    through the same ``upsert_therapy_line_episode`` every other path uses, so
-    the tagging cannot drift. One transaction; the record is re-derived once at
-    the end rather than per row.
+    The clinical write and its payload are packaged so an embedding host serves
+    the same contract. What stays here is host policy: which roles may write, the
+    organization check object-level permissions do not apply on create, and the
+    record payload this product's client expects. Shared by authoring and the
+    history-completeness statement, which must never be gated more loosely.
     """
 
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
 
-    def _check_person_write_permission(self, request, person):
+    def patient_write_denied(self, request, person):
         # Same create-time check the single-row clinical writes use: object-level
         # permissions do not fire on create, so the queryset scoping that
         # protects reads is not protecting this.
@@ -12056,166 +16645,39 @@ class TherapyLineViewSet(viewsets.ViewSet):
                     )
         return None
 
-    def create(self, request):
-        from omop_core.services.episode_service import author_therapy_line
+    def patient_info_payload(self, record):
+        return PatientRecordSerializer(record).data
 
-        serializer = TherapyLineWriteSerializer(data=request.data)
+
+class TherapyLineViewSet(_TherapyHostPolicy, _PackagedTherapyLineViewSet):
+    """Author a line of therapy, under PROMOP's own permissions."""
+
+    def _check_person_write_permission(self, request, person):
+        """Kept as the name other patient-portal code calls."""
+        return self.patient_write_denied(request, person)
+
+    # The class permission refuses system/etl.write because the editor POST is a patient write
+    @action(detail=False, methods=['post'], url_path='bulk_upsert',
+            permission_classes=[EtlWritePermission])
+    def bulk_upsert(self, request: Request) -> Response:
+        """Upsert one person's lines of therapy from an ETL feed."""
+        serializer = TherapyLineImportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        person = data['person']
-
-        denied = self._check_person_write_permission(request, person)
-        if denied is not None:
-            return denied
-
-        try:
-            with transaction.atomic():
-                # The exposures fire post_save, and each one would re-derive the
-                # whole record. Derive once, after the episode exists -- before
-                # it, the exposures are ungrouped and inference would read a line
-                # that is half-written.
-                with suppress_patient_record_refresh():
-                    result = author_therapy_line(
-                        person,
-                        line_number=data['line_number'],
-                        drugs=data.get('drugs') or (),
-                        start_date=data.get('start_date'),
-                        end_date=data.get('end_date'),
-                        regimen_concept_id=data.get('regimen_concept_id'),
-                        outcome=data.get('outcome') or None,
-                        intent=data.get('intent') or None,
-                        discontinuation_reason=data.get('discontinuation_reason') or None,
-                        source_value=data.get('source_value') or None,
-                    )
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if result.episode is None:
-            # upsert_therapy_line_episode returns no episode when the Treatment
-            # Regimen concept is absent, which means the vocabulary is not
-            # loaded. Reporting 201 over a line that was not grouped would be a
-            # lie -- nothing would have been inferred from it.
-            return Response(
-                {'detail': (
-                    'Treatment Regimen concept (32531) is not loaded, so the '
-                    'therapy line could not be grouped. Load the Episode '
-                    'vocabulary and retry.'
-                )},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        person.refresh_from_db()
-        record = refresh_patient_record(person)
-        return Response(
-            {
-                'episode_id': result.episode.episode_id,
-                'line_number': data['line_number'],
-                'created': result.created,
-                'drug_exposure_ids': result.drug_exposure_ids,
-                'drugs_created': result.drugs_created,
-                'patient_info': PatientRecordSerializer(record).data,
-            },
-            status=status.HTTP_201_CREATED,
+        person = serializer.validated_data['person']
+        _authorize_person_write(request, person)
+        return import_therapy_lines(
+            person, serializer.validated_data['lines'],
+            _provenance_context(request, header=True), _skip_refresh_requested(request),
         )
 
-    def partial_update(self, request, pk=None):
-        from omop_core.services.episode_service import author_therapy_line
 
-        try:
-            episode_id = int(pk)
-        except (TypeError, ValueError):
-            return Response(
-                {'detail': 'Invalid therapy line episode_id.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+class TherapyHistoryCompletenessViewSet(_TherapyHostPolicy, _PackagedTherapyHistoryCompletenessViewSet):
+    """The patient's statement that the treatment list is complete (#1924)."""
 
-        episode = Episode.objects.filter(episode_id=episode_id).select_related('person').first()
-        if episode is None:
-            return Response(
-                {'detail': 'Therapy line not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-        if episode.episode_number is None:
-            return Response(
-                {'detail': 'Therapy line has no episode_number to edit.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        requested_line = request.data.get('line_number')
-        if requested_line is not None:
-            try:
-                requested_line = int(requested_line)
-            except (TypeError, ValueError):
-                return Response(
-                    {'detail': 'line_number must be an integer.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if requested_line != episode.episode_number:
-                return Response(
-                    {'detail': 'Editing a therapy line cannot change its line_number.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        payload = dict(request.data)
-        payload['person'] = episode.person_id
-        payload['line_number'] = episode.episode_number
-        payload.setdefault(
-            'start_date',
-            episode.episode_start_date.isoformat() if episode.episode_start_date else None,
-        )
-        payload.setdefault(
-            'end_date',
-            episode.episode_end_date.isoformat() if episode.episode_end_date else None,
-        )
-
-        serializer = TherapyLineWriteSerializer(data=payload)
-        serializer.is_valid(raise_exception=True)
-        data = serializer.validated_data
-        person = episode.person
-
-        denied = self._check_person_write_permission(request, person)
-        if denied is not None:
-            return denied
-
-        try:
-            with transaction.atomic():
-                with suppress_patient_record_refresh():
-                    result = author_therapy_line(
-                        person,
-                        line_number=episode.episode_number,
-                        drugs=data.get('drugs') or (),
-                        start_date=data.get('start_date'),
-                        end_date=data.get('end_date'),
-                        regimen_concept_id=data.get('regimen_concept_id'),
-                        outcome=data.get('outcome') or None,
-                        intent=data.get('intent') or None,
-                        discontinuation_reason=data.get('discontinuation_reason') or None,
-                        source_value=data.get('source_value') or None,
-                        replace=True,
-                    )
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        if result.episode is None:
-            return Response(
-                {'detail': (
-                    'Treatment Regimen concept (32531) is not loaded, so the '
-                    'therapy line could not be grouped. Load the Episode '
-                    'vocabulary and retry.'
-                )},
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        person.refresh_from_db()
-        record = refresh_patient_record(person)
-        return Response(
-            {
-                'episode_id': result.episode.episode_id,
-                'line_number': episode.episode_number,
-                'created': result.created,
-                'drug_exposure_ids': result.drug_exposure_ids,
-                'drugs_created': result.drugs_created,
-                'patient_info': PatientRecordSerializer(record).data,
-            },
-            status=status.HTTP_200_OK,
-        )
+    def attestation_source(self, request):
+        # Who is speaking is read off the request, never the body.
+        if is_service_token(request):
+            return 'host'
+        if getattr(request.user, 'is_staff', False):
+            return 'clinician'
+        return 'patient'

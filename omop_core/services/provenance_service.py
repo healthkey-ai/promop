@@ -86,10 +86,12 @@ def _build_provenance(
         derivation_version = None
         derived_at = None
 
-    if entry.lookup_strategy == "genomics":
+    if field_name == 'sct_date':
+        source_rows = _lookup_sct(person)
+    elif entry.lookup_strategy == "genomics":
         source_rows = _lookup_genomics(person, field_name)
     elif entry.selection_rule == "composite" and entry.constituent_fields:
-        source_rows = _lookup_composite(person, entry)
+        source_rows = _lookup_composite(person, entry, registry)
     else:
         source_rows = _lookup_simple(person, entry)
 
@@ -155,6 +157,64 @@ def _lookup_genomics(person: Person, field_name: str) -> list[dict]:
     return result
 
 
+def _lookup_sct(person: Person) -> list[dict]:
+    """Use derivation's SCT winner; retained history is not a recency contest."""
+    from datetime import date
+    from types import SimpleNamespace
+    from django.db.models import Q
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.clinical_input_contract import RECIPES, select_sct_source
+    from omop_core.services.omop_projection import without_cleared_history
+    from omop_core.services.write_descriptor import mapping_target_for
+
+    mapping = (FieldConceptMapping.objects.filter(field_name='sct_date', status='approved')
+               .exclude(value_kind='json').values(
+                   'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
+               ).first())
+    canonical = RECIPES['sct_date'][0]
+    filters = Q(observation_source_value=canonical)
+    target = mapping_target_for(mapping['omop_table']) if mapping else None
+    source = (mapping['source_value'] or mapping['concept__concept_code']) if mapping else None
+    if target == 'observation':
+        filters |= Q(observation_concept_id=mapping['concept_id'], observation_source_value=source)
+    observations = list(Observation.objects.filter(person=person, is_erroneous=False, confidence__isnull=True)
+                        .filter(filters).select_related('observation_concept')
+                        .order_by('-observation_date', '-observation_id'))
+    measurements = []
+    if target == 'measurement':
+        measurements = list(Measurement.objects.filter(
+            person=person, is_erroneous=False, confidence__isnull=True,
+            measurement_concept_id=mapping['concept_id'],
+            measurement_source_value=source,
+        ).select_related('measurement_concept').order_by('-measurement_date', '-measurement_id'))
+    snapshot = SimpleNamespace(
+        observations=without_cleared_history(observations, 'observation'),
+        measurements=without_cleared_history(measurements, 'measurement'),
+        clinical_input_observations=[row for row in observations if row.observation_source_value == canonical],
+    )
+    selected_key = select_sct_source(snapshot, mapping).selected_key
+    history = [('observation', row) for row in observations] + [('measurement', row) for row in measurements]
+    # Cross-table tie-breaks order the display only; they never decide authority.
+    history.sort(key=lambda item: (getattr(item[1], f'{item[0]}_date') or date.min,
+                                   item[0], item[1].pk), reverse=True)
+    rows = history[:20]
+    selected = next((item for item in history if (item[0], item[1].pk) == selected_key), None)
+    if selected is not None and selected not in rows:
+        rows[-1] = selected
+    result = []
+    for table, row in rows:
+        result.append({
+            'table': table.title(), 'id': row.pk,
+            'concept_id': getattr(row, f'{table}_concept_id'),
+            'concept_name': getattr(row, f'{table}_concept').concept_name,
+            'source_value': getattr(row, f'{table}_source_value'),
+            'value': row.value_as_number if row.value_as_number is not None else row.value_as_string,
+            'unit': row.unit_source_value, 'date': str(getattr(row, f'{table}_date')),
+            'selected': (table, row.pk) == selected_key,
+        })
+    return result
+
+
 def _lookup_simple(person: Person, entry: FieldProvenance) -> list[dict]:
     """Query the appropriate OMOP table and return candidate rows."""
     table = entry.omop_table.split(",")[0].strip()
@@ -180,7 +240,7 @@ def _lookup_measurement(person: Person, entry: FieldProvenance) -> list[dict]:
     from django.db.models import Q
 
     qs = (
-        Measurement.objects.filter(person=person, value_as_number__isnull=False)
+        Measurement.objects.filter(person=person, value_as_number__isnull=False, confidence__isnull=True)
         .select_related("measurement_concept")
         .order_by("-measurement_date")
     )
@@ -232,12 +292,15 @@ def _lookup_observation(person: Person, entry: FieldProvenance) -> list[dict]:
     from django.db.models import Q
 
     qs = (
-        Observation.objects.filter(person=person)
+        Observation.objects.filter(person=person, confidence__isnull=True)
         .select_related("observation_concept")
-        .order_by("-observation_date")
+        .order_by("-observation_date", "-observation_id")
     )
 
     filters = Q()
+    if entry.source_values:
+        filters |= Q(observation_source_value__in=entry.source_values)
+        qs = qs.filter(is_erroneous=False)
     if entry.concept_codes:
         filters |= Q(observation_concept__concept_code__in=entry.concept_codes)
         filters |= Q(observation_source_value__in=entry.concept_codes)
@@ -275,7 +338,7 @@ def _lookup_condition(person: Person, entry: FieldProvenance) -> list[dict]:
     # Order so the "selected" row (latest or earliest) is always at index 0.
     order = "condition_start_date" if entry.selection_rule == "earliest" else "-condition_start_date"
     qs = (
-        ConditionOccurrence.objects.filter(person=person)
+        ConditionOccurrence.objects.filter(person=person, confidence__isnull=True)
         .select_related("condition_concept")
         .order_by(order)
     )
@@ -300,7 +363,7 @@ def _lookup_condition(person: Person, entry: FieldProvenance) -> list[dict]:
 def _lookup_drug_exposure(person: Person, entry: FieldProvenance) -> list[dict]:
     """Return DrugExposure rows."""
     qs = (
-        DrugExposure.objects.filter(person=person)
+        DrugExposure.objects.filter(person=person, confidence__isnull=True)
         .select_related("drug_concept")
         .order_by("drug_exposure_start_date")
     )
@@ -324,7 +387,7 @@ def _lookup_drug_exposure(person: Person, entry: FieldProvenance) -> list[dict]:
 def _lookup_procedure(person: Person, entry: FieldProvenance) -> list[dict]:
     """Return ProcedureOccurrence rows."""
     qs = (
-        ProcedureOccurrence.objects.filter(person=person)
+        ProcedureOccurrence.objects.filter(person=person, confidence__isnull=True)
         .select_related("procedure_concept")
         .order_by("-procedure_date")
     )
@@ -365,9 +428,15 @@ def _lookup_death(person: Person) -> list[dict]:
         return []
 
 
-def _lookup_composite(person: Person, entry: FieldProvenance) -> list[dict]:
-    """For composite fields, collect source rows from all constituent fields."""
-    registry = get_registry()
+def _lookup_composite(
+    person: Person, entry: FieldProvenance, registry: dict[str, FieldProvenance] | None = None,
+) -> list[dict]:
+    """For composite fields, collect source rows from all constituent fields.
+
+    ``registry`` is the caller's, so one request resolves the lab entries once.
+    """
+    if registry is None:
+        registry = get_registry()
     all_rows: list[dict] = []
     for sub_field in entry.constituent_fields:
         sub_entry = registry.get(sub_field)

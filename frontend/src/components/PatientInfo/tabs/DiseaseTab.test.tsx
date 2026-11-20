@@ -573,14 +573,16 @@ describe('DiseaseTab — descriptor-driven', () => {
     expect(screen.queryByTestId('reason-tnbc_status')).not.toBeInTheDocument();
   });
 
-  it('recognizes the now-stored B symptoms field', () => {
+  it('recognizes the now-stored B symptom fields', () => {
     // #646. "Derived from OMOP data" would send a reader looking for a value
     // that was never recorded anywhere.
     render(<DiseaseTab {...baseProps} diseaseType="lymphoma" formData={{}} />);
 
-    expect(screen.getByTestId('reason-b_symptoms')).not.toHaveTextContent(
-      /not stored on the patient record yet/i,
-    );
+    for (const name of ['b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss']) {
+      expect(screen.getByTestId(`reason-${name}`)).not.toHaveTextContent(
+        /not stored on the patient record yet/i,
+      );
+    }
   });
 
   it('offers no editable control for an absent field', () => {

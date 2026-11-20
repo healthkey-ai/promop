@@ -12,18 +12,23 @@ because organisation cleanup deletes `Person` with raw SQL, where Django's
 `on_delete` does not apply and the database's own constraints are enforced.
 """
 
+from django.apps import apps
 from django.db import connection
 
 # Every PROlog table that ends up referencing a Person, leaf-first.
 #
 # Each entry is a DELETE with one `{persons}` placeholder for a subquery (or a
-# list) yielding person ids. `surveyanswer` and `surveyconsent` hang off the
-# response; `surveyadministration` off the invitation; the rest name the person
-# directly.
+# list) yielding person ids. `surveyanswer`, `surveyconsent`, `surveylinkedcontact`
+# and `surveycaptureconsent` hang off the response; `surveyadministration` off
+# the invitation; the rest name the person directly.
 _STATEMENTS = (
     "DELETE FROM prolog_surveys_surveyanswer WHERE response_id IN "
     "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
     "DELETE FROM prolog_surveys_surveyconsent WHERE response_id IN "
+    "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
+    "DELETE FROM prolog_surveys_surveylinkedcontact WHERE response_id IN "
+    "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
+    "DELETE FROM prolog_surveys_surveycaptureconsent WHERE response_id IN "
     "(SELECT id FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons}))",
     "DELETE FROM prolog_surveys_surveyresponse WHERE participant_id IN ({persons})",
     # After the responses: a response points at an administration, not the
@@ -52,6 +57,11 @@ def delete_prolog_data_for_persons(person_ids) -> None:
     """Delete the PROlog rows for these people. Safe to call when there are none."""
     ids = list(person_ids)
     if not ids:
+        return
+    if not apps.is_installed('prolog_surveys'):
+        # An embedder that does not install PROMOP's survey app (CancerBot) has
+        # none of these tables, so the raw SQL below would fail on the first
+        # statement and take patient deletion with it. Nothing to delete there.
         return
     with connection.cursor() as cursor:
         for sql in prolog_delete_statements('SELECT unnest(%s::bigint[])'):

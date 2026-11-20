@@ -135,6 +135,49 @@ def test_filtered_delete_uses_the_same_new_filters_as_the_list(staff):
     assert not PatientRecord.objects.filter(pk=remove.pk).exists()
 
 
+def test_name_email_search_and_org_all_include_unassigned(staff):
+    _, client = staff
+    org = OrganizationFactory()
+    assigned = PatientRecordFactory(organization=org, email='contact@example.test')
+    assigned.person.given_name = 'Ada'
+    assigned.person.family_name = 'Lovelace'
+    assigned.person.save(update_fields=['given_name', 'family_name'])
+    unassigned = PatientRecordFactory(organization=None, email='other@example.test')
+    unassigned.person.given_name = 'Grace'
+    unassigned.person.family_name = 'Hopper'
+    unassigned.person.save(update_fields=['given_name', 'family_name'])
+    portal_identity = Identity.objects.create_user(email='login@example.test')
+    PatientUser.objects.create(identity=portal_identity, person=assigned.person)
+
+    def ids(**params):
+        response = client.get('/api/patient-info/', {'page': 1, 'org': 'all', **params})
+        assert response.status_code == 200, response.data
+        return {row['person_id'] for row in response.data['results']}
+
+    assert ids() == {assigned.person_id, unassigned.person_id}
+    assert ids(search='ada lovelace') == {assigned.person_id}
+    assert ids(search='CONTACT@EXAMPLE.TEST') == {assigned.person_id}
+    assert ids(search='login@example.test') == {assigned.person_id}
+    assert ids(search='grace hopper') == {unassigned.person_id}
+    assert ids(org=org.slug) == {assigned.person_id}
+    assert ids(org='__unassigned__') == {unassigned.person_id}
+
+
+def test_search_does_not_reveal_suppressed_demographics(staff):
+    actor, client = staff
+    record = PatientRecordFactory(email='private@example.test', suppress_demographics_for_others=True)
+    record.person.given_name = 'Private'
+    record.person.family_name = 'Patient'
+    record.person.save(update_fields=['given_name', 'family_name'])
+    for search in ('Private Patient', 'private@example.test'):
+        response = client.get('/api/patient-info/', {'page': 1, 'search': search})
+        assert response.status_code == 200, response.data
+        assert response.data['count'] == 0
+    PatientUser.objects.create(identity=actor, person=record.person)
+    response = client.get('/api/patient-info/', {'page': 1, 'search': 'Private Patient'})
+    assert response.data['count'] == 1
+
+
 @pytest.mark.parametrize('params', [{'ecog': 'bad'}, {'freshness': 'bad'}, {'data_gap': 'bad'}, {'ordering': 'secret_column'}])
 def test_invalid_filters_fail_explicitly(staff, params):
     response = staff[1].get('/api/patient-info/', {'page': 1, **params})

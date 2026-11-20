@@ -59,8 +59,8 @@ _L = {
     'b2m':        '1952-1',   # Beta-2 microglobulin [Mass/vol] in Serum
     'serum_m':    '51435-6',  # Protein M-spike [Mass/vol] in Serum
     'urine_m':    '32730-5',  # Protein M-spike [Mass/time] in 24h Urine
-    'kflc':       '33944-8',  # Kappa free light chains [Mass/vol] in Serum
-    'lflc':       '33945-5',  # Lambda free light chains [Mass/vol] in Serum
+    'kflc':       '36916-5',  # Kappa light chains.free [Mass/volume] in Serum (3034860)
+    'lflc':       '33944-0',  # Lambda light chains.free [Mass/volume] in Serum or Plasma (3047169)
     'bmpc':       '11118-7',  # Plasma cells/100 cells in Bone marrow
     'ef':         '8806-2',   # Left ventricular Ejection fraction by US
     'ecog':       '89247-1',  # ECOG Performance Status score

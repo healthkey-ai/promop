@@ -19,6 +19,8 @@ interface Props {
   unknownField?: boolean;
   descriptor?: FieldDescriptor;
   onChange: (name: string, value: unknown) => void;
+  /** Date precision for date fields (e.g. date_of_birth). */
+  precision?: 'day' | 'month' | 'year' | null;
   /** Event date for this edit, shared across the tab. */
   date?: string;
   onDateChange?: (date: string) => void;
@@ -51,6 +53,7 @@ export default function ClinicalField({
   options,
   vocabSource,
   unknownField,
+  precision,
   date,
   onDateChange,
   showReason = true,
@@ -91,6 +94,7 @@ export default function ClinicalField({
           options={choices}
           onChange={onChange}
           readOnly
+          precision={precision}
         />
         {showReason && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
@@ -111,6 +115,7 @@ export default function ClinicalField({
         options={choices}
         vocabSource={vocabSource}
         onChange={onChange}
+        precision={precision}
       />
       {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
         <div className="mt-1 flex items-center gap-2">

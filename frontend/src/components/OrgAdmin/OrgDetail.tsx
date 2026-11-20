@@ -2,6 +2,9 @@ import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Trash2, X } from 'lucide-react';
 import api from '@/api/axios';
+import { Link } from 'react-router-dom';
+import RoleHint from '@/components/Roles/RoleHint';
+import { ROLE_LABELS, ROLES_PAGE_PATH } from '@/utils/roleDescriptions';
 
 const DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai';
 
@@ -18,6 +21,7 @@ interface Org {
   is_active: boolean;
   allows_public_aggregated_data: boolean;
   allows_patient_signup: boolean;
+  can_manage_access: boolean;
   created_at: string;
 }
 
@@ -170,11 +174,12 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [orgRes, trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
-        api.get<Org>(`${base}/`),
-        api.get<Trust[]>(`${base}/trusts/`),
-        api.get<Invitation[]>(`${base}/invitations/`),
-        api.get<AccessGrant[]>(`${base}/access/`),
+      const orgRes = await api.get<Org>(`${base}/`);
+      const canManageAccess = orgRes.data.can_manage_access;
+      const [trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
+        canManageAccess ? api.get<Trust[]>(`${base}/trusts/`) : Promise.resolve({ data: [] as Trust[] }),
+        canManageAccess ? api.get<Invitation[]>(`${base}/invitations/`) : Promise.resolve({ data: [] as Invitation[] }),
+        canManageAccess ? api.get<AccessGrant[]>(`${base}/access/`) : Promise.resolve({ data: [] as AccessGrant[] }),
         api.get<OrgStatsData[]>('/stats/org-disease/').catch(() => ({ data: [] as OrgStatsData[] })),
         api.get<Org[]>('/orgs/').catch(() => ({ data: [] as Org[] })),
       ]);
@@ -360,6 +365,31 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     }
   };
 
+  // Roles are additive (#2416): a user holds one row per role, and the Role
+  // select swaps a row's role. Adding the other professional role is its own
+  // call (#2457), offered on a row whose user does not hold it yet.
+  const heldRoles = (email: string) =>
+    new Set(accessGrants.filter(g => g.email === email).map(g => g.role));
+  const addableRole = (g: AccessGrant): 'doctor' | 'analyst' | null => {
+    if (g.role !== 'doctor' && g.role !== 'analyst') return null;
+    const held = heldRoles(g.email);
+    if (held.has('org_admin')) return null;
+    if (!held.has('analyst')) return 'analyst';
+    if (!held.has('doctor')) return 'doctor';
+    return null;
+  };
+  const handleAddRole = async (email: string, role: 'doctor' | 'analyst') => {
+    setAccessError(null);
+    try {
+      const res = await api.post<AccessGrant>(`${base}/access/`, { email, role });
+      setAccessGrants(prev => [...prev, res.data]);
+    } catch (err: unknown) {
+      console.error('Failed to add role:', err);
+      const serverMessage = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setAccessError(serverMessage ?? 'Failed to add the role. Please try again.');
+    }
+  };
+
   const handleUpdateGrant = async (grantId: number, patch: { role?: string; is_premium?: boolean }) => {
     setAccessGrants(prev => prev.map(g => g.id === grantId ? { ...g, ...patch } : g));
     try {
@@ -367,7 +397,10 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setAccessGrants(prev => prev.map(g => g.id === grantId ? res.data : g));
     } catch (err) {
       console.error('Failed to update access grant:', err);
-      setAccessError('Failed to update access grant. Please try again.');
+      // A 409 says the user already holds that role in another row (#2416);
+      // the server's sentence is the instruction, not "try again".
+      const serverMessage = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setAccessError(serverMessage ?? 'Failed to update access grant. Please try again.');
       fetchAll();
     }
   };
@@ -379,9 +412,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     { key: 'settings', label: 'Settings' },
     { key: 'stats', label: 'Stats' },
     { key: 'vocabulary', label: 'Vocabulary' },
-    { key: 'trusts', label: 'Access Rules' },
-    { key: 'admins', label: 'Access Grants' },
-    { key: 'invitations', label: 'Invitations' },
+    ...(org.can_manage_access ? [
+      { key: 'trusts' as const, label: 'Access Rules' },
+      { key: 'admins' as const, label: 'Access Grants' },
+      { key: 'invitations' as const, label: 'Invitations' },
+    ] : []),
   ];
   const vocabularyQuery = vocabularySearch.trim().toLowerCase();
   const vocabularyRows = [...(vocabularyData?.concepts ?? [])]
@@ -478,7 +513,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
               onChange={(e) => handlePatientSignupToggle(e.target.checked)}
               className="h-4 w-4 rounded border-gray-300 text-blue-600"
             />
-            <span className="text-sm text-gray-700">Allow direct patient signup</span>
+            <span className="text-sm text-gray-700">Allow public demo access</span>
           </label>
           <button
             onClick={handleSaveSettings}
@@ -506,34 +541,37 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           {!orgStats ? (
             <p className="text-sm text-gray-500">No patient data available for this organization.</p>
           ) : (
-            <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="text-left px-4 py-2 font-medium text-gray-600">Disease</th>
-                  <th className="text-right px-4 py-2 font-medium text-gray-600">Patients</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orgStats.disease_counts.map(dc => (
-                  <tr key={dc.disease_slug} className="border-t border-gray-100">
-                    <td className="px-4 py-2 text-gray-800">{dc.label}</td>
-                    <td className="px-4 py-2 text-right text-gray-800">{dc.count}</td>
+            <>
+              <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="text-left px-4 py-2 font-medium text-gray-600">Disease</th>
+                    <th className="text-right px-4 py-2 font-medium text-gray-600">Patients</th>
                   </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="border-t border-gray-200 bg-gray-50">
-                  <td className="px-4 py-2 font-medium text-gray-700">Owned</td>
-                  <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.owned_count}</td>
-                </tr>
-                {orgStats.accessible_count !== orgStats.owned_count && (
-                  <tr className="bg-gray-50">
-                    <td className="px-4 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
-                    <td className="px-4 py-2 text-right text-sm text-gray-500">{orgStats.accessible_count}</td>
+                </thead>
+                <tbody>
+                  {orgStats.disease_counts.map(dc => (
+                    <tr key={dc.disease_slug} className="border-t border-gray-100">
+                      <td className="px-4 py-2 text-gray-800">{dc.label}</td>
+                      <td className="px-4 py-2 text-right text-gray-800">{dc.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-gray-200 bg-gray-50">
+                    <td className="px-4 py-2 font-medium text-gray-700">Owned</td>
+                    <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.owned_count}</td>
                   </tr>
-                )}
-              </tfoot>
-            </table>
+                  {orgStats.accessible_count !== orgStats.owned_count && (
+                    <tr className="bg-gray-50">
+                      <td className="px-4 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
+                      <td className="px-4 py-2 text-right text-sm text-gray-500">{orgStats.accessible_count}</td>
+                    </tr>
+                  )}
+                </tfoot>
+              </table>
+              <p className="mt-2 text-xs text-gray-500">A patient with more than one cancer is counted under each.</p>
+            </>
           )}
         </div>
       )}
@@ -646,7 +684,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       )}
 
       {/* Access Rules (Trusts) */}
-      {activeSection === 'trusts' && (
+      {org.can_manage_access && activeSection === 'trusts' && (
         <div className="space-y-4">
           <h2 className="font-medium text-gray-900">Trusted Domains & Orgs</h2>
           {trusts.length === 0 ? (
@@ -730,9 +768,12 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       )}
 
       {/* Access grants */}
-      {activeSection === 'admins' && (
+      {org.can_manage_access && activeSection === 'admins' && (
         <div className="space-y-4">
-          <h2 className="font-medium text-gray-900">Access Grants</h2>
+          <div className="flex items-baseline justify-between">
+            <h2 className="font-medium text-gray-900">Access Grants</h2>
+            <Link to={ROLES_PAGE_PATH} className="text-sm text-blue-600 hover:text-blue-800">What each role can do</Link>
+          </div>
           {accessError && <p className="text-sm text-red-500">{accessError}</p>}
           {accessGrants.length === 0 ? (
             <p className="text-sm text-gray-500">No access grants.</p>
@@ -759,16 +800,19 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                       </td>
                       <td className="px-4 py-3">
                         {g.role === 'org_admin' ? (
-                          <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
+                          <RoleHint role="org_admin" className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium" />
                         ) : (
-                          <select
-                            value={g.role}
-                            onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
-                            className="border border-gray-300 rounded px-2 py-1 text-xs"
-                          >
-                            <option value="doctor">Doctor</option>
-                            <option value="analyst">Analyst</option>
-                          </select>
+                          <>
+                            <select
+                              value={g.role}
+                              onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
+                              className="border border-gray-300 rounded px-2 py-1 text-xs"
+                            >
+                              <option value="doctor">{ROLE_LABELS.doctor}</option>
+                              <option value="analyst">{ROLE_LABELS.analyst}</option>
+                            </select>
+                            <RoleHint role={g.role} hideLabel className="ml-1" />
+                          </>
                         )}
                       </td>
                       <td className="px-4 py-3 text-gray-700">
@@ -800,7 +844,18 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                           </label>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        {addableRole(g) && (
+                          <button
+                            type="button"
+                            onClick={() => handleAddRole(g.email, addableRole(g)!)}
+                            className="mr-3 text-xs text-blue-600 hover:text-blue-800"
+                            aria-label={`Also grant the ${addableRole(g)} role to ${g.email}`}
+                            title={`Also grant the ${addableRole(g)} role to ${g.email}`}
+                          >
+                            + {ROLE_LABELS[addableRole(g)!]}
+                          </button>
+                        )}
                         <button
                           onClick={() => handleRevokeAccess(g.id)}
                           className="text-red-400 hover:text-red-600"
@@ -818,7 +873,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
           {/* Invite form */}
           <div className="space-y-2 max-w-sm">
-            <h3 className="text-sm font-medium text-gray-700">Invite user</h3>
+            <h3 className="text-sm font-medium text-gray-700">Invite user <Link to={ROLES_PAGE_PATH} className="ml-2 text-xs font-normal text-blue-600 hover:text-blue-800">What each role can do</Link></h3>
             {inviteError && <p className="text-sm text-red-500">{inviteError}</p>}
             {inviteSuccess && <p className="text-sm text-green-600">{inviteSuccess}</p>}
             <input
@@ -845,10 +900,10 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 }}
                 className="border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
-                <option value="org_admin">Org Admin</option>
-                <option value="doctor">Doctor</option>
-                <option value="analyst">Analyst</option>
-                <option value="patient">Patient</option>
+                <option value="org_admin">{ROLE_LABELS.org_admin}</option>
+                <option value="doctor">{ROLE_LABELS.doctor}</option>
+                <option value="analyst">{ROLE_LABELS.analyst}</option>
+                <option value="patient">{ROLE_LABELS.patient}</option>
               </select>
               <button
                 onClick={handleInvite}
@@ -933,7 +988,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       )}
 
       {/* Invitations */}
-      {activeSection === 'invitations' && (
+      {org.can_manage_access && activeSection === 'invitations' && (
         <div className="space-y-3">
           <h2 className="font-medium text-gray-900">Invitations</h2>
           {cancelError && <p className="text-sm text-red-500">{cancelError}</p>}
@@ -945,7 +1000,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 <li key={inv.id} className="flex items-center justify-between px-4 py-2">
                   <span className="text-sm">
                     <span className="font-medium">{inv.email}</span>
-                    <span className="text-gray-400 ml-2">({inv.role})</span>
+                    <span className="text-gray-400 ml-2">(<RoleHint role={inv.role} />)</span>
                     {inv.role === 'patient' && inv.person_id && (
                       <span className="text-gray-400 ml-1">#{inv.person_id}</span>
                     )}

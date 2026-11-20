@@ -57,8 +57,6 @@ paths = [
   '''.*\.(test|itest)\.tsx?$''',
   '''.*/__tests__/.*''',
   '''omop_core/data/.*\.json$''',
-  '''docs/genomics_handoff\.md$''',
-  '''docs/field_value_mapping_inventory\.json$''',
 ]
 
 # This genomic marker identifier appears as a catalog key and in its handoff
@@ -69,12 +67,25 @@ targetRules = ["generic-api-key"]
 regexTarget = "secret"
 regexes = ['''^bcl2_amplification$''']
 
-# The clinical assay identifier in the field-value inventories is not a secret.
-# Limit the exception to this exact value, rule and two inventory files, including its history.
+# The clinical assay identifier in the field-mapping inventory is not a secret.
+# Scoped to this exact value and this one rule. Two path spellings are listed:
+#   docs/field-mapping-inventory/*.json   where the value lives today. It fires
+#     nothing at present: the inventory nests the value
+#     ("source_key": {"type": "string", "value": "..."}), and generic-api-key needs
+#     the keyword adjacent to the value. The entry is here because the generator
+#     previously emitted the flat "source_key": "<value>" shape, which does fire —
+#     that is what produced the history findings below.
+#   docs/field_value_mapping_inventory.json, docs/cancerbot_field_value_reference.json
+#     the pre-rename files, carrying the flat shape. Load-bearing today for a local
+#     history-mode `gitleaks detect`; CI never sees them (`--no-git`, fetch-depth: 1).
+# Drop the second group only once those commits are no longer reachable.
 [[allowlists]]
-description = "Dako 22C3 pharmDx assay identifier in the field-value inventory"
+description = "Dako 22C3 pharmDx assay identifier in the field-mapping inventory"
 targetRules = ["generic-api-key"]
 condition = "AND"
-paths = ['''(^|/)docs/(field_value_mapping_inventory|cancerbot_field_value_reference)\.json$''']
+paths = [
+  '''(^|/)docs/field-mapping-inventory/[^/]+\.json$''',
+  '''(^|/)docs/(field_value_mapping_inventory|cancerbot_field_value_reference)\.json$''',
+]
 regexTarget = "secret"
 regexes = ['''^dako_22c3_pharm_dx$''']

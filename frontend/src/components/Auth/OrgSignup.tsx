@@ -22,6 +22,7 @@ export default function OrgSignup() {
   const [familyName, setFamilyName] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [verificationRequired, setVerificationRequired] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -58,8 +59,9 @@ export default function OrgSignup() {
         given_name: givenName,
         family_name: familyName,
       });
-      // Backend auto-logs in via session cookie — redirect directly to patient home.
-      window.location.href = `/org/${slug}/`;
+      // Account created — email verification required before login.
+      setVerificationRequired(true);
+      return;
     } catch (err: unknown) {
       let msg = "Signup failed. Please try again.";
       if (err && typeof err === "object" && "response" in err) {
@@ -93,6 +95,28 @@ export default function OrgSignup() {
       <div className="flex min-h-screen items-center justify-center bg-muted/40">
         <div className="w-full max-w-md space-y-4 rounded-lg bg-background p-8 shadow-lg text-center">
           <p className="text-sm text-destructive">{orgError}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (verificationRequired) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/40">
+        <div className="w-full max-w-md space-y-6 rounded-lg bg-background p-8 shadow-lg text-center">
+          <PageTitle className="text-2xl font-bold text-foreground">
+            Check your email
+          </PageTitle>
+          <p className="text-sm text-muted-foreground">
+            We sent a verification link to your email address.
+            Please click the link to verify your account before signing in.
+          </p>
+          <Link
+            to={`/org/${slug}/login`}
+            className="inline-block text-sm font-medium text-primary hover:text-primary/80"
+          >
+            Go to sign in
+          </Link>
         </div>
       </div>
     );

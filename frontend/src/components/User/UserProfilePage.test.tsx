@@ -58,4 +58,15 @@ describe('UserProfilePage', () => {
     expect(screen.getByText('All organizations')).toBeInTheDocument();
     expect(screen.queryByText(/superuser/i)).not.toBeInTheDocument();
   });
+
+  it('explains each role with a link to the roles page, staff excepted (#2473)', () => {
+    showProfile({ effective_roles: [
+      { role: 'staff', scope: 'platform', source: 'staff_flag', expires_at: null },
+      { role: 'doctor', scope: 'organization', org_name: 'Clinic', source: 'org_grant', expires_at: null },
+    ] });
+    const roles = within(screen.getByRole('region', { name: 'Active roles' }));
+    expect(roles.getByText('Staff')).toBeInTheDocument();
+    expect(roles.getByRole('link', { name: 'What the Doctor role can do' })).toHaveAttribute('href', '/roles');
+    expect(roles.queryByRole('link', { name: /Staff/ })).not.toBeInTheDocument();
+  });
 });

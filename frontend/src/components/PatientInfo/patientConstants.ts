@@ -16,7 +16,6 @@ export const RACE_OPTIONS = [
   'Unknown',
 ];
 export const ETHNICITY_OPTIONS = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Unknown'];
-export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Mantle Cell Lymphoma', 'Lung Cancer', 'Colon Cancer', 'Other'];
 export const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
 export const HISTOLOGIC_TYPE_OPTIONS = [
   'Unknown',
@@ -34,6 +33,21 @@ export const HISTOLOGIC_TYPE_OPTIONS = [
   'Inflammatory carcinoma',
 ];
 export const ECOG_OPTIONS = ['0', '1', '2', '3', '4', '5'];
+// How the cancer is managed now, how it is today, and where care mainly happens,
+// in the words a patient recognises (questionnaire answers write the same values).
+export const DISEASE_MANAGEMENT_OPTIONS = [
+  'Watch and wait, never treated', 'Receiving first treatment', 'Monitored after first treatment',
+  'Receiving treatment after relapse', 'Monitored after relapse', 'Maintenance treatment',
+  'No regular follow-up or treatment', 'Other', 'Not sure',
+];
+export const DISEASE_STATUS_OPTIONS = [
+  'Awaiting scan results after treatment', 'In remission', 'Relapsed or progressed', 'Transformed',
+  'Stable', 'Other', 'Not sure',
+];
+export const CARE_SETTING_OPTIONS = [
+  'Specialist cancer centre or university hospital', 'General or community hospital', 'Local clinic',
+  'Other', 'Not sure',
+];
 export const KARNOFSKY_OPTIONS = ['100', '90', '80', '70', '60', '50', '40', '30', '20', '10', '0'];
 export const YES_NO_OPTIONS = ['Yes', 'No', 'Unknown'];
 export const POSITIVE_NEGATIVE_OPTIONS = ['Positive', 'Negative', 'Unknown'];

@@ -25,8 +25,10 @@ def staff(db):
 
 @pytest.fixture
 def client(staff):
+    # A real session login, not force_authenticate: administration now requires
+    # an interactive staff session, and forcing bypasses every authenticator.
     client = APIClient()
-    client.force_authenticate(user=staff)
+    client.force_login(staff)
     return client
 
 
@@ -96,7 +98,8 @@ def test_rotation_disable_expiry_and_revocation_do_not_fall_back_to_environment(
             authenticate('unimported-env-key')
 
 
-@pytest.mark.parametrize('identity_kind', ['anonymous', 'patient', 'org-admin', 'service', 'oauth-machine'])
+@pytest.mark.parametrize('identity_kind', ['anonymous', 'patient', 'org-admin', 'service',
+                                           'oauth-machine', 'oauth-delegated'])
 def test_non_staff_and_machine_credentials_cannot_manage_tokens(db, identity_kind):
     client = APIClient()
     if identity_kind != 'anonymous':
@@ -104,14 +107,18 @@ def test_non_staff_and_machine_credentials_cannot_manage_tokens(db, identity_kin
         if identity_kind == 'service':
             identity.is_staff = True  # Still forbidden, even if forcibly misconfigured.
             client.force_authenticate(user=identity, token='service-token')
-        elif identity_kind == 'oauth-machine':
+        elif identity_kind in ('oauth-machine', 'oauth-delegated'):
             from oauth2_provider.models import Application, AccessToken
+            # Staff on purpose: the delegated case is a third-party SMART app
+            # holding a staff user's own grant, so every other gate passes.
             identity.is_staff = True
             identity.save()
-            app = Application.objects.create(name='Machine', user=identity,
-                authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS)
+            grant = (Application.GRANT_CLIENT_CREDENTIALS if identity_kind == 'oauth-machine'
+                     else Application.GRANT_AUTHORIZATION_CODE)
+            app = Application.objects.create(name=identity_kind, user=identity,
+                authorization_grant_type=grant)
             token = AccessToken.objects.create(application=app, user=identity, scope='patient/*.write',
-                expires=timezone.now() + timedelta(hours=1), token='machine-token')
+                expires=timezone.now() + timedelta(hours=1), token=identity_kind + '-token')
             client.force_authenticate(user=identity, token=token)
         else:
             if identity_kind == 'org-admin':

@@ -6,6 +6,7 @@ import secrets
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import BaseCommand, CommandError
 
+from patient_portal.service_applications import ALLOWED_SCOPES
 from patient_portal.service_tokens import service_credentials
 
 
@@ -24,6 +25,14 @@ class Command(BaseCommand):
             service_id, separator, scope = specification.partition("=")
             if not separator or service_id in grants:
                 raise CommandError("Use a unique service ID=scopes for each --service.")
+            if not scope.split() or set(scope.split()) - ALLOWED_SCOPES:
+                # Both cases make import_service_tokens refuse the whole file —
+                # after it has been written and possibly distributed. A scopeless
+                # grant also generates a secret that could never authorize
+                # anything.
+                raise CommandError(
+                    f"Service {service_id} needs supported scopes: "
+                    f"{' '.join(sorted(ALLOWED_SCOPES))}.")
             grants[service_id] = {"token": secrets.token_urlsafe(48), "scopes": scope}
         try:
             service_credentials(grants)

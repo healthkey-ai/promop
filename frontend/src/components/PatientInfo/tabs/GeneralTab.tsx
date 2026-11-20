@@ -1,15 +1,16 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
+import { useCategoryObjects, useAllDiseaseMappings } from '@/hooks/useDiseaseCategories';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
+import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
 import {
   COUNTRY_OPTIONS, US_STATES,
-  ECOG_OPTIONS, KARNOFSKY_OPTIONS,
-  DISEASE_OPTIONS,
+  ECOG_OPTIONS, KARNOFSKY_OPTIONS, DISEASE_MANAGEMENT_OPTIONS, DISEASE_STATUS_OPTIONS, CARE_SETTING_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
@@ -19,6 +20,9 @@ interface Props {
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
   patientMode?: boolean;
+  /** Precise coordinates are matched from the host's own address data; a federated
+   *  host that withholds them must not be offered inputs whose save it refuses. */
+  showCoordinates?: boolean;
 }
 
 /**
@@ -42,6 +46,7 @@ interface Props {
 export default function GeneralTab({
   formData, onChange, editedName, onNameChange, onZipcodeChange,
   patientMode = false,
+  showCoordinates = true,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -52,7 +57,28 @@ export default function GeneralTab({
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
-  const { source: diseaseSource }     = useVocabulary('disease', 'title');
+  const { categories }               = useCategoryObjects();
+  const { categoryForDisease, diseasesByCategory } = useAllDiseaseMappings();
+
+  // Derive the selected category from the current disease value.
+  const currentDisease = (formData?.disease as string) ?? '';
+  const derivedCategory = useMemo(
+    () => (currentDisease ? categoryForDisease(currentDisease) : null),
+    [currentDisease, categoryForDisease],
+  );
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+
+  // Sync the local category state when the derived category becomes available.
+  useEffect(() => {
+    if (derivedCategory && selectedCategory === null) {
+      setSelectedCategory(derivedCategory);
+    }
+  }, [derivedCategory, selectedCategory]);
+
+  const categoryDiseaseOptions = useMemo(
+    () => (selectedCategory ? diseasesByCategory[selectedCategory] ?? [] : []),
+    [selectedCategory, diseasesByCategory],
+  );
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -71,6 +97,9 @@ export default function GeneralTab({
   ) => {
     const descriptor = descriptors[name];
     const dated = descriptor?.writable && descriptor.projection?.omop_table === 'measurement';
+    const prec = name === 'date_of_birth'
+      ? ((formData?.date_of_birth_precision as string) ?? 'day')
+      : undefined;
     return (
       <ClinicalField
         label={label}
@@ -81,6 +110,7 @@ export default function GeneralTab({
         options={extra.options}
         vocabSource={extra.vocabSource}
         onChange={onChange}
+        precision={prec as 'day' | 'month' | 'year' | undefined}
         date={dated ? date : undefined}
         onDateChange={dated ? setDate : undefined}
       />
@@ -104,6 +134,35 @@ export default function GeneralTab({
             <Input value={editedName} onChange={(e) => onNameChange(e.target.value)} />
           </div>
 
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
+            <SelectControl
+              value={(formData?.date_of_birth_precision as string) ?? 'day'}
+              options={[
+                { value: 'day', label: 'Full date' },
+                { value: 'month', label: 'Month & year' },
+                { value: 'year', label: 'Year only' },
+              ]}
+              onChange={(v) => {
+                const newPrec = v ?? 'day';
+                onChange('date_of_birth_precision', newPrec);
+                const current = formData?.date_of_birth as string | undefined;
+                const year = current?.substring(0, 4);
+                if (year && /^\d{4}$/.test(year)) {
+                  if (newPrec === 'year') {
+                    onChange('date_of_birth', `${year}-01-01`);
+                  } else if (newPrec === 'month') {
+                    const month = current?.substring(5, 7) || '01';
+                    onChange('date_of_birth', `${year}-${month}-01`);
+                  }
+                  // 'day': keep the existing full date as-is
+                } else {
+                  onChange('date_of_birth', null);
+                }
+              }}
+            />
+          </div>
+
           {field('Date of Birth', 'date_of_birth', 'date')}
 
           <div className="space-y-1.5">
@@ -119,8 +178,37 @@ export default function GeneralTab({
           {field('Email', 'email', 'email')}
           {field('Phone Number', 'phone_number', 'text')}
 
-          <div className="sm:col-span-2">
-            {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
+          <div className="space-y-1.5 sm:col-start-1">
+            <label className="text-sm font-medium text-portal-text-primary">Disease Category</label>
+            <SelectControl
+              value={selectedCategory ?? ''}
+              options={categories.map((c) => ({ value: c.value, label: c.label }))}
+              onChange={(v: unknown) => {
+                const cat = (v as string) || null;
+                setSelectedCategory(cat);
+                if (cat && currentDisease) {
+                  const newDiseases = diseasesByCategory[cat] ?? [];
+                  if (!newDiseases.some((d: string) => d.toLowerCase() === currentDisease.toLowerCase())) {
+                    onChange('disease', null);
+                  }
+                }
+                if (!cat) {
+                  onChange('disease', null);
+                }
+              }}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Disease</label>
+            <SelectControl
+              value={(formData?.disease as string) ?? ''}
+              options={categoryDiseaseOptions.map((d) => ({ value: d, label: d }))}
+              disabled={!selectedCategory}
+              placeholder={selectedCategory ? 'Select…' : 'Select a category first'}
+              allowClear
+              onChange={(v: unknown) => onChange('disease', (v as string) || null)}
+            />
           </div>
 
           <div className="sm:col-span-2">
@@ -151,9 +239,10 @@ export default function GeneralTab({
 
           {/* Normally filled in by the zip lookup above, but writable: trial
               matching measures distance to sites from these, so a wrong pair is
-              worth being able to correct by hand. */}
-          {field('Latitude', 'latitude', 'number')}
-          {field('Longitude', 'longitude', 'number')}
+              worth being able to correct by hand. A federated host that does not
+              send precise location passes showCoordinates={false}. */}
+          {showCoordinates && field('Latitude', 'latitude', 'number')}
+          {showCoordinates && field('Longitude', 'longitude', 'number')}
         </div>
       </Section>
 
@@ -179,6 +268,9 @@ export default function GeneralTab({
           {field('ECOG Performance Status', 'ecog_performance_status', 'select', { options: ECOG_OPTIONS, vocabSource: ecogSource })}
           {field('ECOG Assessment Date', 'ecog_assessment_date', 'date')}
           {field('Karnofsky Performance Score', 'karnofsky_performance_score', 'select', { options: KARNOFSKY_OPTIONS, vocabSource: karnofskySource })}
+          {field('Disease Management', 'disease_management', 'select', { options: DISEASE_MANAGEMENT_OPTIONS })}
+          {field('Disease Status Today', 'disease_status', 'select', { options: DISEASE_STATUS_OPTIONS })}
+          {field('Main Care Setting', 'care_setting', 'select', { options: CARE_SETTING_OPTIONS })}
         </div>
       </Section>
 
@@ -196,11 +288,8 @@ export default function GeneralTab({
       <Section title="Infection Status" description="Viral infection history.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           {field('HIV Positive', 'hiv_status', 'boolean')}
-          {field('No HIV', 'no_hiv_status', 'boolean')}
           {field('Hepatitis B Positive', 'hepatitis_b_status', 'boolean')}
-          {field('No Hepatitis B', 'no_hepatitis_b_status', 'boolean')}
           {field('Hepatitis C Positive', 'hepatitis_c_status', 'boolean')}
-          {field('No Hepatitis C', 'no_hepatitis_c_status', 'boolean')}
         </div>
       </Section>
 

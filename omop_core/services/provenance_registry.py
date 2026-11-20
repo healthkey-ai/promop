@@ -43,15 +43,20 @@ class FieldProvenance:
 
 
 def _auto_register_loinc_labs() -> dict[str, FieldProvenance]:
-    """Build registry entries from _LOINC_LAB_FIELDS and _SOURCE_VALUE_LAB_FIELDS."""
+    """Build the lab entries from the resolved LOINC routing and _SOURCE_VALUE_LAB_FIELDS.
+
+    The codes come from the curation tables (approved FieldConceptMapping rows
+    and their approved SourceCodeConceptMapping aliases), so provenance finds
+    the rows a curator's alias code derived; see ``resolve_lab_code_fields``.
+    """
     from omop_core.services.patient_record_service import (
-        _LOINC_LAB_FIELDS,
         _SOURCE_VALUE_LAB_FIELDS,
+        resolve_lab_code_fields,
     )
 
     # Invert: field_name → set of LOINC codes
     field_to_codes: dict[str, list[str]] = {}
-    for code, (field_name, _cast) in _LOINC_LAB_FIELDS.items():
+    for code, (field_name, _cast) in resolve_lab_code_fields().items():
         field_to_codes.setdefault(field_name, []).append(code)
 
     # Invert: field_name → set of source values
@@ -74,7 +79,7 @@ def _auto_register_loinc_labs() -> dict[str, FieldProvenance]:
 
 
 # ---------------------------------------------------------------------------
-# Manual entries for fields NOT covered by _LOINC_LAB_FIELDS
+# Manual entries for fields NOT covered by the lab routing
 # ---------------------------------------------------------------------------
 
 _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
@@ -440,11 +445,27 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         description="SCT history from FHIR extensions / Observation",
     ),
     "sct_date": FieldProvenance(
-        omop_table="Observation",
-        lookup_strategy="snomed",
+        omop_table="Observation,Measurement",
+        lookup_strategy="source_value",
+        source_values=["mm-sct-date"],
         extractor="_get_sct_cytogenetic_data",
         selection_rule="latest",
-        description="SCT date from FHIR extensions / Observation",
+        description="SCT date from native/SDK history with approved custom-source priority",
+    ),
+    "prothrombin_time_uln": FieldProvenance(
+        omop_table="Observation", lookup_strategy="source_value",
+        source_values=["cb:pt-uln"], extractor="clinical_input_contract.values_from_snapshot",
+        selection_rule="latest", description="Reported PT ratio to laboratory ULN, not INR or seconds",
+    ),
+    "activated_partial_thromboplastin_time_uln": FieldProvenance(
+        omop_table="Observation", lookup_strategy="source_value",
+        source_values=["cb:aptt-uln"], extractor="clinical_input_contract.values_from_snapshot",
+        selection_rule="latest", description="Reported aPTT ratio to laboratory ULN, not seconds",
+    ),
+    "able_to_swallow_tablets_capsules": FieldProvenance(
+        omop_table="Observation", lookup_strategy="source_value",
+        source_values=["cb:swallow-tablets"], extractor="clinical_input_contract.values_from_snapshot",
+        selection_rule="latest", description="Explicit reported swallowing ability; absent is unknown",
     ),
     "sct_eligibility": FieldProvenance(
         omop_table="Observation",
@@ -552,20 +573,28 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
 }
 
 
-_REGISTRY_CACHE: dict[str, FieldProvenance] | None = None
+_STATIC_REGISTRY_CACHE: dict[str, FieldProvenance] | None = None
 
 
 def get_registry() -> dict[str, FieldProvenance]:
-    """Return the complete field→provenance registry, lazily built and cached."""
-    global _REGISTRY_CACHE
-    if _REGISTRY_CACHE is None:
-        _REGISTRY_CACHE = _auto_register_loinc_labs()
-        _REGISTRY_CACHE.update(_MANUAL_ENTRIES)
+    """Return the complete field→provenance registry.
+
+    The manual and genomics entries are built once per process. The lab
+    entries are resolved from the curation tables on every call (two indexed
+    queries), so a curator's approval or alias is visible without a restart;
+    database mappings are never cached process-wide.
+    """
+    global _STATIC_REGISTRY_CACHE
+    if _STATIC_REGISTRY_CACHE is None:
+        static = dict(_MANUAL_ENTRIES)
         from omop_core.services.genomics_catalog import patient_fields
         for name, marker in patient_fields().items():
-            _REGISTRY_CACHE[name] = FieldProvenance(
+            static[name] = FieldProvenance(
                 omop_table="Measurement,Observation", lookup_strategy="genomics",
                 extractor="_get_genetic_mutations", selection_rule="all",
                 description=f"{marker['label']} finding parents and linked components; derived values have no stored assertion.",
             )
-    return _REGISTRY_CACHE
+        _STATIC_REGISTRY_CACHE = static
+    registry = _auto_register_loinc_labs()
+    registry.update(_STATIC_REGISTRY_CACHE)
+    return registry

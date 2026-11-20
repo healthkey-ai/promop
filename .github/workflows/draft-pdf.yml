@@ -4,6 +4,9 @@ on:
       - main
       - dev
 
+permissions:
+  contents: read
+
 jobs:
   paper:
     runs-on: ubuntu-latest

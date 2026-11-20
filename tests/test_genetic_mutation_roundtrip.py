@@ -60,5 +60,6 @@ def test_patient_patch_writes_gene_mutation_to_omop_and_returns_projection():
     assert record.genetic_mutations == [{
         'id': row.pk, 'marker_key': 'brca1', 'gene': 'BRCA1', 'variant': 'c.68_69delAG', 'test_date': '2024-01-15',
         'origin': 'germline', 'interpretation': 'pathogenic', 'status': 'present', 'provenance': 'asserted',
+        'genomic_feature': 'BRCA1', 'feature_type': 'Gene',
     }]
     assert response.data['genetic_mutations'] == record.genetic_mutations

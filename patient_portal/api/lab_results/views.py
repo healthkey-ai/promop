@@ -1,3 +1,6 @@
+from omop_core.services.canonical_units import (
+    measurement_normalized, measurement_stored_unit, normalize, policies, stored_unit,
+)
 from collections import defaultdict
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
@@ -278,6 +281,7 @@ class ResultsSummaryView(APIView):
             m.measurement_type_concept_id,
             m.unit_concept_id,
             m.unit_source_value,
+            m.value_source_value,
             m.visit_occurrence_id,
             m.measurement_source_value,
             ROW_NUMBER() OVER (
@@ -300,7 +304,7 @@ class ResultsSummaryView(APIView):
     )
     SELECT r.*,
            tc.concept_name AS type_concept_name,
-           uc.concept_code AS unit_concept_code
+           uc.concept_code AS unit_concept_code, uc.vocabulary_id AS unit_vocabulary_id
     FROM ranked r
     LEFT JOIN concept tc ON tc.concept_id = r.measurement_type_concept_id
     LEFT JOIN concept uc ON uc.concept_id = r.unit_concept_id
@@ -331,6 +335,7 @@ class ResultsSummaryView(APIView):
                 visit_ids.add(row['visit_occurrence_id'])
         provenance = _load_visit_provenance(visit_ids)
 
+        preferences = policies()
         cards = []
         for summary in page_summaries:
             cid = summary['effective_concept_id']
@@ -338,9 +343,12 @@ class ResultsSummaryView(APIView):
 
             values = []
             for row in meas_rows:
-                unit_str = row['unit_source_value']
-                if not unit_str and row['unit_concept_code']:
-                    unit_str = row['unit_concept_code']
+                unit_str = stored_unit(
+                    value=row['value_as_number'], unit_source_value=row['unit_source_value'],
+                    unit_concept_code=row['unit_concept_code'],
+                    unit_vocabulary_id=row['unit_vocabulary_id'],
+                    value_source_value=row['value_source_value'],
+                )
 
                 type_label = None
                 if row['measurement_type_concept_id']:
@@ -359,6 +367,8 @@ class ResultsSummaryView(APIView):
                         report_filename = prov.get('report_filename')
 
                 values.append({
+                    'normalized': normalize(preferences.get(cid), row['value_as_number'],
+                        unit_str, row['range_low'], row['range_high']),
                     'measurement_id': row['measurement_id'],
                     'value': row['value_as_number'],
                     'value_string': row['value_as_string'],
@@ -450,11 +460,10 @@ class ValuesView(APIView):
 
         provenance = self._load_provenance(page)
         ownership_map = self._load_ownership(page, provenance)
+        preferences = policies()
         values = []
         for m in page:
-            unit_str = m.unit_source_value
-            if not unit_str and m.unit_concept:
-                unit_str = m.unit_concept.concept_code
+            unit_str = measurement_stored_unit(m)
 
             type_label = None
             if m.measurement_type_concept_id:
@@ -465,6 +474,7 @@ class ValuesView(APIView):
             prov = provenance.get(m.visit_occurrence_id, {})
             uploads = ownership_map.get(m.measurement_id, [])
             values.append({
+                'normalized': measurement_normalized(m, preferences),
                 'measurement_id': m.measurement_id,
                 'value': m.value_as_number,
                 'value_string': m.value_as_string,
@@ -598,9 +608,7 @@ class MeasurementDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        unit_str = m.unit_source_value
-        if not unit_str and m.unit_concept:
-            unit_str = m.unit_concept.concept_code
+        unit_str = measurement_stored_unit(m)
 
         type_label = None
         if m.measurement_type_concept_id:
@@ -609,6 +617,7 @@ class MeasurementDetailView(APIView):
                 type_label = m.measurement_type_concept.concept_name
 
         data = {
+            'normalized': measurement_normalized(m, policies()),
             'measurement_id': m.measurement_id,
             'value': m.value_as_number,
             'value_string': m.value_as_string,

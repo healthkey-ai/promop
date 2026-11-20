@@ -3,6 +3,7 @@ from datetime import date
 import pytest
 
 from omop_oncology.models import Episode, EpisodeEvent
+from omop_core.models import Concept
 from omop_core.services.patient_record_service import _get_treatment_data
 from tests.factories import (
     ConceptFactory, DrugExposureFactory, MeasurementFactory, ObservationFactory,
@@ -10,6 +11,11 @@ from tests.factories import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def _drug_event_field():
+    return Concept.objects.filter(pk=1147094).first() or ConceptFactory(
+        concept_id=1147094, concept_name='drug_exposure.drug_exposure_id')
 
 
 def _therapy_episode(person, episode_id, line, start, end):
@@ -31,7 +37,7 @@ def _therapy_episode(person, episode_id, line, start, end):
     )
     EpisodeEvent.objects.create(
         episode_id=episode.episode_id, event_id=exposure.drug_exposure_id,
-        episode_event_field_concept=ConceptFactory(concept_name='Episode event field'),
+        episode_event_field_concept=_drug_event_field(),
     )
     return episode
 
@@ -93,7 +99,7 @@ def test_episode_treatment_data_populates_start_dates_and_line_count():
     episode_concept = ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc_vocab)
     episode_object_concept = ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc_vocab)
     episode_type_concept = ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc_vocab)
-    episode_event_field_concept = ConceptFactory(concept_name='Episode event field')
+    episode_event_field_concept = _drug_event_field()
     first_regimen = ConceptFactory(
         concept_id=35804232,
         concept_name='Cyclophosphamide and Docetaxel (TC)',
@@ -168,7 +174,7 @@ def test_episode_treatment_data_counts_non_contiguous_episode_numbers_as_distinc
     episode_concept = ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc_vocab)
     episode_object_concept = ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc_vocab)
     episode_type_concept = ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc_vocab)
-    episode_event_field_concept = ConceptFactory(concept_name='Episode event field')
+    episode_event_field_concept = _drug_event_field()
     first_regimen = ConceptFactory(
         concept_id=35804232,
         concept_name='Cyclophosphamide and Docetaxel (TC)',
@@ -239,7 +245,7 @@ def test_episode_treatment_data_derives_per_line_outcomes_from_lot_observations(
     episode_concept = ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc_vocab)
     episode_object_concept = ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc_vocab)
     episode_type_concept = ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc_vocab)
-    episode_event_field_concept = ConceptFactory(concept_name='Episode event field')
+    episode_event_field_concept = _drug_event_field()
     first_regimen = ConceptFactory(
         concept_id=35804232,
         concept_name='Cyclophosphamide and Docetaxel (TC)',

@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 from omop_core.services.concept_unit_info import (
     concept_unit_fields,
+    suggested_unit,
     get_loinc_to_unit,
+    get_loinc_example_units,
     measurement_input_type,
 )
 
@@ -73,15 +75,40 @@ class TestConceptUnitFields:
 
 
 @pytest.mark.django_db
+class TestSuggestedUnit:
+    """The same answer concept_unit_fields gives, from the three columns."""
+
+    def test_loinc_measurement_code(self):
+        # Glucose is curated in LAB_FIELD_TO_LOINC with mg/dL.
+        assert suggested_unit("LOINC", "Measurement", "2345-7") == "mg/dL"
+        assert concept_unit_fields(_make_concept(concept_code="2345-7"))["suggested_unit"] == "mg/dL"
+
+    def test_unknown_code(self):
+        assert suggested_unit("LOINC", "Measurement", "99999-9") == ""
+
+    @pytest.mark.parametrize(("vocabulary", "domain", "code"), [
+        ("SNOMED", "Measurement", "2345-7"),
+        ("LOINC", "Observation", "2345-7"),
+        ("LOINC", "Measurement", ""),
+        ("LOINC", "Measurement", None),
+        (None, None, None),
+    ])
+    def test_anything_else_suggests_nothing(self, vocabulary, domain, code):
+        assert suggested_unit(vocabulary, domain, code) == ""
+
+
+@pytest.mark.django_db
 class TestGetLoincToUnitDBFallback:
     """Verify that get_loinc_to_unit() picks up LoincCodeClass.example_units."""
 
     def setup_method(self):
         # Clear the lru_cache so each test gets a fresh lookup.
         get_loinc_to_unit.cache_clear()
+        get_loinc_example_units.cache_clear()
 
     def teardown_method(self):
         get_loinc_to_unit.cache_clear()
+        get_loinc_example_units.cache_clear()
 
     def test_db_units_included(self):
         from omop_core.models import LoincClass, LoincCodeClass
@@ -125,4 +152,4 @@ class TestGetLoincToUnitDBFallback:
         )
         c = _make_concept(concept_code='99992-0', concept_name='Some analyte')
         result = concept_unit_fields(c)
-        assert result == {'measurement_type': 'quantitative', 'suggested_unit': 'ng/mL'}
+        assert result == {'measurement_type': 'quantitative', 'suggested_unit': 'ng/mL', 'example_units': ['ng/mL']}

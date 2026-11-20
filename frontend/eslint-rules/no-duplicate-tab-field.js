@@ -53,6 +53,13 @@ const KNOWN_DUPLICATES = new Map();
  */
 export const __resetTabFieldState = () => fieldsByFile.clear();
 
+/**
+ * What the last run saw on each tab. The PDF download's layout test reads it to
+ * check its own extraction against this rule's: two readers of the same tabs
+ * that disagree means one of them has gone blind.
+ */
+export const __tabFieldsByFile = () => fieldsByFile;
+
 const known = (field, a, b) => {
   const pair = KNOWN_DUPLICATES.get(field);
   return Boolean(pair && pair.includes(a) && pair.includes(b));

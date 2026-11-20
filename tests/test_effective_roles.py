@@ -15,7 +15,7 @@ pytestmark = pytest.mark.django_db
 
 
 def user(email='person@example.test', **kwargs):
-    return Identity.objects.create_user(email=email, password=None, **kwargs)
+    return Identity.objects.create_user(email=email, password=None, email_verified_at=timezone.now(), **kwargs)
 
 
 def test_patient_and_professional_roles_are_both_reported_with_scope():
@@ -42,7 +42,8 @@ def test_trust_admin_role_matches_authority_and_stays_scoped(trust_type):
     source, target, unrelated = OrganizationFactory(), OrganizationFactory(), OrganizationFactory()
     if trust_type == 'organization':
         expiry = timezone.now() + timedelta(days=1)
-        GroupAccess.objects.create(identity=actor, org=source, role='analyst', expires_at=expiry)
+        # A doctor's grant carries through the trust; an analyst's does not (#2398).
+        GroupAccess.objects.create(identity=actor, org=source, role='doctor', expires_at=expiry)
         OrgTrust.objects.create(granting_org=target, trusted_org=source)
     else:
         OrgTrust.objects.create(granting_org=target, trusted_domain='example.test')
@@ -64,6 +65,17 @@ def test_trust_admin_role_matches_authority_and_stays_scoped(trust_type):
     assert client.get(f'/api/orgs/{target.slug}/').status_code == 200
     assert client.get(f'/api/orgs/{unrelated.slug}/').status_code in {403, 404}
     assert client.post('/api/orgs/', {'name': 'Cannot create', 'slug': 'cannot-create'}, format='json').status_code == 403
+
+
+def test_an_analyst_inherits_no_admin_role_through_an_organization_trust():
+    actor = user()
+    source, target = OrganizationFactory(), OrganizationFactory()
+    GroupAccess.objects.create(identity=actor, org=source, role='analyst')
+    OrgTrust.objects.create(granting_org=target, trusted_org=source)
+    data = UserSerializer(actor).data
+    assert not [r for r in data['effective_roles'] if r['role'] == 'org_admin']
+    assert set(get_admin_orgs(actor)) == set()
+    assert data['is_org_admin'] is False
 
 
 def test_pending_invitation_cannot_enable_a_professional_role():
@@ -152,3 +164,15 @@ def test_organization_trust_does_not_expand_recursively():
     assert set(get_admin_orgs(actor)) == {target}
     assert {r['org_slug'] for r in UserSerializer(actor).data['effective_roles']
             if r['role'] == 'org_admin'} == {target.slug}
+
+
+def test_unverified_email_does_not_expose_pending_invitations_or_trust_roles():
+    actor = Identity.objects.create_user(email='unverified@example.test')
+    org = OrganizationFactory()
+    OrgTrust.objects.create(granting_org=org, trusted_domain='example.test')
+    OrgInvitation.objects.create(org=org, email=actor.email, role='org_admin',
+        token='c'*64, expires_at=timezone.now()+timedelta(days=1))
+    data = UserSerializer(actor).data
+    assert data['org_accesses'] == []
+    assert data['effective_roles'] == []
+    assert not data['is_org_admin']

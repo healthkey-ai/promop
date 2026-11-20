@@ -107,17 +107,19 @@ class Command(BaseCommand):
             row.status = 'approved'
             row.reviewed_at = now
             row.reviewer = reviewer
+            row.proposed_by = None   # a machine's destination now (#2726)
             new_origin = (
                 f'{row.origin_system}; auto-approved from ICD10CM'
                 if row.origin_system
                 else 'auto-approved from ICD10CM'
             )
             row.origin_system = new_origin[:_ORIGIN_MAX_LEN]
+            row.updated_at = now  # bulk_update skips auto_now; a delta reader needs it (#2451)
             rows_to_update.append(row)
 
         update_fields = [
             'target_concept', 'destination_vocabulary_id',
-            'status', 'reviewed_at', 'reviewer', 'origin_system',
+            'status', 'reviewed_at', 'reviewer', 'proposed_by', 'origin_system', 'updated_at',
         ]
         with transaction.atomic():
             SourceCodeConceptMapping.objects.bulk_update(

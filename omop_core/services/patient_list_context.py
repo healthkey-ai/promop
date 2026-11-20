@@ -1,12 +1,14 @@
 """Read-only cohort summaries and filters; never refresh PatientRecord on a list."""
 from datetime import date, timedelta
 
-from django.db.models import BooleanField, Case, F, IntegerField, OuterRef, Q, Subquery, TextField, Value, When
+from django.db.models import BooleanField, Case, Count, Exists, F, IntegerField, OuterRef, Q, Subquery, TextField, Value, When
 from django.db.models.functions import Coalesce, Greatest, Lower, Trim
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from omop_core.models import Measurement, Observation
+from omop_core.models import Measurement, Observation, PatientSourceCode, SourceCodeConceptMapping
+from omop_core.mapping.code_resolution import CLINICAL_TABLES
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
 from patient_portal.models import PatientUser
 
 
@@ -18,20 +20,88 @@ ORDER_FIELDS = {
     'lines': 'therapy_lines_count', 'status': 'list_disease_status',
     'freshness': 'latest_result_date', 'gaps': 'key_gap_count',
     'organization': 'organization__name',
+    'unmapped_source_codes': 'unmapped_source_code_count',
 }
 
 
+def _source_destination(source_column, table, *, vocabulary=False):
+    """Resolve a destination without loading codes or issuing per-patient queries."""
+    mappings = SourceCodeConceptMapping.objects.filter(
+        source_code=OuterRef(source_column),
+    ).filter(Q(organization__isnull=True) |
+             Q(organization_id=OuterRef('person__patient_record__organization_id')))
+    mappings = mappings.filter(omop_table=OuterRef('omop_table') if vocabulary else table)
+    priority = []
+    if vocabulary:
+        mappings = mappings.filter(
+            Q(source_vocabulary_id=OuterRef('source_vocabulary_id')) |
+            Q(source_vocabulary_id=OuterRef('_canonical_vocabulary')),
+        ).annotate(_vocabulary_priority=Case(
+            When(source_vocabulary_id=OuterRef('_canonical_vocabulary'), then=0),
+            default=1, output_field=IntegerField(),
+        ))
+        priority.append('_vocabulary_priority')
+    else:
+        # Older clinical rows carry no source vocabulary; match the Source Code
+        # tab's deterministic vocabulary/id fallback.
+        priority.append('source_vocabulary_id')
+    # NULL organization is global; a hospital's own mapping takes precedence.
+    mappings = mappings.order_by(F('organization_id').desc(nulls_last=True), *priority, 'id')
+    return Subquery(mappings.values('target_concept_id')[:1], output_field=IntegerField())
+
+
+def annotate_unmapped_source_codes(queryset):
+    """Count inventory entries, falling back only when a person has no inventory.
+
+    Proposed destinations are mapped for this count, regardless of approval.
+    Repeated clinical occurrences count once per source code and clinical table.
+    """
+    inventory = PatientSourceCode.objects.filter(person_id=OuterRef('person_id'))
+    inventory = inventory.annotate(_canonical_vocabulary=Case(*(
+        When(source_vocabulary_id=alias, then=Value(canonical))
+        for alias, canonical in VOCABULARY_OID_ALIASES.items()
+    ), default=Trim('source_vocabulary_id'), output_field=TextField()))
+    missing = inventory.annotate(_destination=Coalesce(_source_destination(
+        'source_value', None, vocabulary=True,
+    ), Value(0))).filter(_destination=0)
+    inventory_count = Coalesce(Subquery(
+        missing.order_by().values('person_id').annotate(total=Count('pk')).values('total'),
+        output_field=IntegerField(),
+    ), Value(0))
+    fallback = Value(0)
+    for table, (model, _, source_column) in CLINICAL_TABLES.items():
+        rows = model.objects.filter(person_id=OuterRef('person_id')).exclude(
+            **{source_column: ''},
+        ).exclude(**{source_column + '__isnull': True})
+        rows = rows.annotate(_destination=Coalesce(
+            _source_destination(source_column, table), Value(0),
+        )).filter(_destination=0)
+        fallback = fallback + Coalesce(Subquery(
+            rows.order_by().values('person_id').annotate(total=Count(source_column, distinct=True)).values('total'),
+            output_field=IntegerField(),
+        ), Value(0))
+    return queryset.annotate(unmapped_source_code_count=Case(
+        When(Exists(inventory), then=inventory_count), default=fallback,
+        output_field=IntegerField(),
+    ))
+
 def annotate_context(queryset):
-    """One SQL query with indexed latest-result lookups, independent of page size."""
+    """One SQL query with indexed latest-result lookups, independent of page size.
+
+    Freshness counts real results only: a provisional row is a guess from a
+    proposed mapping, and must not make a stale chart look recently updated.
+    """
     today = timezone.localdate()
     measurements = Measurement.objects.filter(
-        person_id=OuterRef('person_id'), is_erroneous=False, measurement_date__lte=today,
+        person_id=OuterRef('person_id'), is_erroneous=False, confidence__isnull=True,
+        measurement_date__lte=today,
     ).exclude(value_source_value='PatientRecord:cleared').filter(
         Q(value_as_number__isnull=False) | Q(value_as_concept__isnull=False) |
         (Q(value_as_string__isnull=False) & ~Q(value_as_string='')),
     ).order_by('-measurement_date', '-measurement_id')
     observations = Observation.objects.filter(
-        person_id=OuterRef('person_id'), is_erroneous=False, observation_date__lte=today,
+        person_id=OuterRef('person_id'), is_erroneous=False, confidence__isnull=True,
+        observation_date__lte=today,
     ).exclude(value_source_value='PatientRecord:cleared').filter(
         Q(value_as_number__isnull=False) | Q(value_as_concept__isnull=False) |
         (Q(value_as_string__isnull=False) & ~Q(value_as_string='')),
@@ -61,19 +131,27 @@ def annotate_context(queryset):
             (Q(phone_number__isnull=False) & ~Q(phone_number='')),
             then=True), default=False, output_field=BooleanField()),
     )
-    return queryset.annotate(key_gap_count=sum(
+    return annotate_unmapped_source_codes(queryset).annotate(key_gap_count=sum(
         (Case(When(**{f'gap_{key}': True}, then=1), default=0, output_field=IntegerField()) for key in GAPS),
         Value(0),
     ))
 
 
-def visible_demographics(actor):
-    """Use the same opt-out semantics as the patient detail serializer."""
+def visible_demographics(actor, withheld=False):
+    """Use the same opt-out semantics as the patient detail serializer.
+
+    ``withheld`` is the reader with no curation access (#2460), whose rows
+    are de-identified: only their own record's demographics are visible, so
+    a name search, a location filter or a name or age ordering cannot act
+    as an oracle over what the serializer withholds.
+    """
     own = PatientUser.objects.filter(identity=actor).values('person_id') if actor and actor.is_authenticated else []
+    if withheld:
+        return Q(person_id__in=own)
     return Q(suppress_demographics_for_others=False) | Q(person_id__in=own)
 
 
-def filter_context(queryset, params, actor):
+def filter_context(queryset, params, actor, withheld=False):
     queryset = annotate_context(queryset)
     status = params.get('clinical_status', '').strip()
     if status and status != 'all':
@@ -117,7 +195,7 @@ def filter_context(queryset, params, actor):
                 query |= Q(**{f'{field}__icontains': term})
             queryset = queryset.filter(query)
             if param == 'location':
-                queryset = queryset.filter(visible_demographics(actor))
+                queryset = queryset.filter(visible_demographics(actor, withheld))
     contact = params.get('contact', 'all')
     if contact in {'available', 'missing'}:
         queryset = queryset.filter(contact_available=contact == 'available')
@@ -126,7 +204,7 @@ def filter_context(queryset, params, actor):
     return queryset
 
 
-def order_context(queryset, ordering, actor=None):
+def order_context(queryset, ordering, actor=None, withheld=False):
     key = ordering.lstrip('-')
     if key not in ORDER_FIELDS:
         raise ValidationError({'ordering': 'Unknown patient list ordering.'})
@@ -136,7 +214,7 @@ def order_context(queryset, ordering, actor=None):
         descending = not descending
     expression = F(ORDER_FIELDS[key])
     if key in {'age', 'name'}:
-        expression = Case(When(visible_demographics(actor), then=expression), default=Value(None))
+        expression = Case(When(visible_demographics(actor, withheld), then=expression), default=Value(None))
     return queryset.order_by(expression.desc(nulls_last=True) if descending else expression.asc(nulls_last=True), 'person_id')
 
 

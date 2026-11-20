@@ -9,6 +9,9 @@ interface OrgAccess {
   access_via?: Array<"invitation" | "explicit_grant" | "invitation_pending" | "trusted_domain" | "organization_trust" | "domain_trust">;
   pending_role?: string;
   group_name?: string | null;
+  /** The org is a public demo org: it lists its sample patients to any
+   *  grant there, an analyst's included (#1392, #2416). */
+  org_allows_patient_signup?: boolean;
 }
 
 export interface EffectiveRole {
@@ -45,6 +48,9 @@ export interface User {
   // refuses every /api/ request except change-password until the password is
   // reset, and the SPA shows a blocking change-password screen.
   must_change_password?: boolean;
+  // False until a self-signed-up account follows its emailed link. Access that
+  // depends on the address (a trusted email domain) is off meanwhile.
+  email_verified?: boolean;
 }
 
 export const useAuth = () => {

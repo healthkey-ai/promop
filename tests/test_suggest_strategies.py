@@ -7,6 +7,8 @@ Covers:
 - Pipeline orchestration (UMLS winner, progressive retrieval, strategy filtering)
 - API endpoint parameter validation
 """
+import os
+
 import pytest
 
 from django.db import connection
@@ -21,6 +23,7 @@ from omop_core.models import (
 from omop_core.services.mapping_suggestions import (
     ALL_STRATEGIES,
     CANDIDATE_LIMIT,
+    DEFAULT_RANKING_MODEL,
     SUGGESTION_MODEL_VERSION,
     SUGGESTION_PROVENANCE,
     STRATEGY_LEXICAL,
@@ -32,6 +35,9 @@ from omop_core.services.mapping_suggestions import (
     umls_candidates,
     vector_rerank,
 )
+# The version stamp now includes the ranking model, so tests that set
+# last_suggest_attempt must use this compound value.
+_ATTEMPT_STAMP = f'{SUGGESTION_MODEL_VERSION}-{DEFAULT_RANKING_MODEL}'
 from omop_core.services.mapping_suggestions import suggest_mappings
 from omop_core.services.suggest_jobs import (
     FakeDispatcher as FakeSuggestDispatcher,
@@ -46,6 +52,13 @@ from tests.factories import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def test_live_ranking_credentials_are_disabled_by_default(settings):
+    assert settings.ANTHROPIC_API_KEY == ''
+    assert settings.JEV_API_KEY == ''
+    assert os.environ['ANTHROPIC_API_KEY'] == ''
+    assert os.environ['JEV_API_KEY'] == ''
 
 
 # ---------------------------------------------------------------------------
@@ -255,12 +268,7 @@ class TestVocabToUmlsRootMapping:
     """Verify the VOCAB_TO_UMLS_ROOT constant is internally consistent."""
 
     def test_reverse_mapping_roundtrips(self):
-        # ICD10 shares the ICD10CM SAB, so the reverse map prefers ICD10CM.
-        # Skip aliases that share a SAB with a canonical vocab.
-        sab_aliases = {'ICD10'}  # ICD10 → ICD10CM SAB (alias of ICD10CM)
         for omop_vocab, umls_sab in VOCAB_TO_UMLS_ROOT.items():
-            if omop_vocab in sab_aliases:
-                continue
             assert _UMLS_ROOT_TO_VOCAB[umls_sab] == omop_vocab
 
     def test_all_strategies_constant(self):
@@ -377,11 +385,11 @@ class TestSuggestableMappings:
         queue_row('SIGNED OFF', status='approved')
         assert suggestable_mappings('measurement') == []
 
-    def test_rejected_is_equally_a_decision(self):
-        """Re-proposing put it back at the front of the queue on every run,
-        where it spent a model call and created nothing."""
+    def test_rejected_without_destination_is_eligible(self):
+        """A rejected row with no destination is back in the queue: the
+        rejection was of a specific proposal, not the code itself."""
         queue_row('TURNED DOWN', status='rejected')
-        assert suggestable_mappings('measurement') == []
+        assert [m.source_code for m in suggestable_mappings('measurement')] == ['TURNED DOWN']
 
     def test_a_row_that_already_has_a_destination_is_skipped(self, measurement_concept):
         queue_row('HAS ONE', target_concept=measurement_concept)
@@ -416,25 +424,24 @@ class TestSuggestableMappings:
                  suggestable_mappings('measurement', source_vocabulary_id='LOINC')]
         assert codes == ['MINE']
 
-    def test_the_icd10_tab_covers_its_merged_alias(self):
-        """HT-One sends ICD-10-CM-format codes under ICD10; Athena loads the
-        concepts under ICD10CM. Both are one tab."""
-        queue_row('A00.0', source_vocabulary_id='ICD10', omop_table='condition')
+    def test_icd10cm_tab_returns_its_own_rows(self):
+        """After migration 0266, all ICD10 rows are ICD10CM."""
+        queue_row('A00.0', source_vocabulary_id='ICD10CM', omop_table='condition')
         queue_row('A00.1', source_vocabulary_id='ICD10CM', omop_table='condition')
         codes = {m.source_code for m in
-                 suggestable_mappings('condition', source_vocabulary_id='ICD10')}
+                 suggestable_mappings('condition', source_vocabulary_id='ICD10CM')}
         assert codes == {'A00.0', 'A00.1'}
 
     def test_a_declined_code_stays_eligible(self):
         """It has no destination, so it is still work to do."""
         queue_row('DECLINED', origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         assert len(suggestable_mappings('measurement')) == 1
 
     def test_gaps_follow_seen_even_when_this_model_already_tried_them(self):
         queue_row('DECLINED BUT BUSY', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('NEVER TRIED', occurrence_count=12)
         codes = [m.source_code for m in suggestable_mappings('measurement')]
         assert codes == ['DECLINED BUT BUSY', 'NEVER TRIED']
@@ -442,7 +449,7 @@ class TestSuggestableMappings:
     def test_a_declined_code_comes_round_again_once_the_tab_is_drained(self):
         queue_row('DECLINED', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         assert [m.source_code for m in suggestable_mappings('measurement')] == ['DECLINED']
 
     def test_seen_outranks_model_version_for_gaps(self):
@@ -450,7 +457,7 @@ class TestSuggestableMappings:
                   last_suggest_attempt='v0.1')
         queue_row('THIS VERSION', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         codes = [m.source_code for m in suggestable_mappings('measurement')]
         assert codes == ['THIS VERSION', 'OLD GUESS']
 
@@ -499,12 +506,12 @@ class TestSuggestableMappings:
     def test_gaps_by_seen_then_untried_replacements(self, measurement_concept):
         queue_row('GAP TRIED', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('GAP UNTRIED', occurrence_count=10)
         queue_row('ANSWERED TRIED', occurrence_count=900,
                   origin_system=SUGGESTION_PROVENANCE,
                   target_concept=measurement_concept,
-                  last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                  last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('ANSWERED UNTRIED', occurrence_count=10,
                   origin_system=SUGGESTION_PROVENANCE,
                   target_concept=measurement_concept)
@@ -532,7 +539,7 @@ class TestSuggestableMappings:
             'measurement', resuggest=True, min_occurrences=1, limit=4,
         )
         assert [m.source_code for m in rows] == [
-            'GAP BUSY', 'GAP QUIET', 'GAP UNCOUNTED', 'ANSWER BUSY',
+            'GAP BUSY', 'GAP QUIET', 'ANSWER BUSY', 'ANSWER QUIET',
         ]
 
 
@@ -595,35 +602,34 @@ class TestSuggestAPIStrategies:
             self._post(min_occurrences=99999)
         assert fake.calls[0][1]['lexical_limit'] == CANDIDATE_LIMIT
 
-    def test_vectors_alone_is_rejected(self):
-        """It reranks what retrieval found and retrieves nothing itself, so on
-        its own it reports "no candidate concept" for every code -- which reads
-        as a broken tab rather than a bad selection."""
-        resp = self._post(strategies=['vectors'])
-        assert resp.status_code == 400
-        assert 'cannot run alone' in str(resp.data)
+    def test_vectors_alone_is_accepted(self):
+        """Vectors is now a retrieval strategy (cosine search), so it can run
+        independently."""
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
+            resp = self._post(strategies=['vectors'], min_occurrences=99999)
+        assert resp.status_code == 202
+        assert fake.calls[0][1]['strategies'] == ['vectors']
 
-    def test_vectors_alone_is_rejected_by_suggest_one_too(self):
-        resp = self.client.post(
-            '/api/v1/code-mappings/suggest-one/',
-            data={'source_code': 'X', 'omop_table': 'measurement',
-                  'strategies': ['vectors']},
-            format='json',
-        )
-        assert resp.status_code == 400
-        assert 'cannot run alone' in str(resp.data)
+    def test_vectors_alone_is_accepted_by_suggest_one_too(self):
+        with use_suggest_dispatcher(FakeSuggestDispatcher()):
+            resp = self.client.post(
+                '/api/v1/code-mappings/suggest-one/',
+                data={'source_code': 'X', 'omop_table': 'measurement',
+                      'strategies': ['vectors'], 'async': True},
+                format='json',
+            )
+        assert resp.status_code == 202
 
-    def test_vectors_with_a_retriever_is_accepted(self):
+    def test_vectors_with_lexical_is_accepted(self):
         assert self._post(
             strategies=['lexical', 'vectors'], min_occurrences=99999,
         ).status_code == 202
 
-    @pytest.mark.parametrize('strategies', [['semantic'], ['semantic', 'vectors']])
-    def test_semantic_is_an_independent_retriever(self, strategies):
+    def test_semantic_is_an_independent_retriever(self):
         with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
-            response = self._post(strategies=strategies, min_occurrences=99999)
+            response = self._post(strategies=['vectors'], min_occurrences=99999)
         assert response.status_code == 202
-        assert fake.calls[0][1]['strategies'] == strategies
+        assert fake.calls[0][1]['strategies'] == ['vectors']
 
     def test_individual_preview_queues_and_never_changes_the_mapping(self, monkeypatch, measurement_concept):
         from omop_core.models import SuggestRun
@@ -634,9 +640,14 @@ class TestSuggestAPIStrategies:
         hit = {
             'concept_id': measurement_concept.pk, 'concept_name': measurement_concept.concept_name,
             'concept_code': measurement_concept.concept_code, 'vocabulary_id': 'LOINC',
+            'concept_class_id': measurement_concept.concept_class_id,
+            'domain_id': measurement_concept.domain_id,
             'retrieval': 'umls', 'umls_score': 1,
         }
         monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *args: ([hit], 'C123'))
+        # Since #1420 the ranker weighs every candidate; no model runs here.
+        monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                            lambda source_value, candidates, *a, **k: (candidates[0], 'ranked', []))
         def lexical(*args, **kwargs):
             run = SuggestRun.objects.exclude(pk=batch.pk).get()
             response = self.client.get(f'/api/v1/code-mappings/suggest-runs/{run.pk}/?include_activity=1')
@@ -654,7 +665,7 @@ class TestSuggestAPIStrategies:
         execute_run(*dispatcher.calls[0])
         run = SuggestRun.objects.get(pk=response.data['run_id'])
         assert run.state == 'success'
-        assert [event['strategy'] for event in run.activity if event['stage'] == 'candidates'] == ['umls', 'lexical', 'semantic']
+        assert [event['strategy'] for event in run.activity if event['stage'] == 'candidates'] == ['umls', 'lexical', 'vectors']
         assert run.activity[-1]['suggested']['concept_id'] == measurement_concept.pk
         assert run.activity[-1]['dry_run'] is True
         assert run.destinations == 0
@@ -681,14 +692,30 @@ class TestSuggestAPIStrategies:
         response = self.client.post(
             '/api/v1/code-mappings/suggest-one/',
             data={'source_code': 'LOCAL-123', 'omop_table': 'measurement',
-                  'strategies': ['semantic']}, format='json',
+                  'strategies': ['vectors']}, format='json',
         )
         assert response.status_code == 200
 
     def test_default_strategies_include_semantic(self):
         with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
             self._post(min_occurrences=99999)
-        assert fake.calls[0][1]['strategies'] == ['umls', 'lexical', 'semantic']
+        assert fake.calls[0][1]['strategies'] == ['umls', 'lexical', 'vectors']
+
+    def test_ranking_model_defaults_to_anthropic(self):
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
+            self._post(min_occurrences=99999)
+        assert fake.calls[0][1]['ranking_model'] == 'anthropic'
+
+    def test_ranking_model_jev_is_accepted(self):
+        with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
+            resp = self._post(min_occurrences=99999, ranking_model='jev')
+        assert resp.status_code == 202
+        assert fake.calls[0][1]['ranking_model'] == 'jev'
+
+    def test_invalid_ranking_model_is_rejected(self):
+        resp = self._post(min_occurrences=99999, ranking_model='invalid')
+        assert resp.status_code == 400
+        assert 'ranking_model' in resp.data
 
     def test_replace_requires_a_vocabulary(self):
         resp = self.client.post(
@@ -738,7 +765,7 @@ class TestSuggestRunLifecycle:
     def test_log_snapshots_order_live_source_and_chosen_destination(self, monkeypatch, measurement_concept):
         from omop_core.models import SuggestRun
         busy = queue_row('BUSY', occurrence_count=900, origin_system='HT-One',
-                         last_suggest_attempt=SUGGESTION_MODEL_VERSION)
+                         last_suggest_attempt=_ATTEMPT_STAMP)
         queue_row('QUIET', occurrence_count=1)
         chosen = {
             'concept_id': measurement_concept.pk,
@@ -782,9 +809,13 @@ class TestSuggestRunLifecycle:
             'concept_id': measurement_concept.pk,
             'concept_name': measurement_concept.concept_name,
             'concept_code': measurement_concept.concept_code,
-            'vocabulary_id': 'LOINC', 'retrieval': 'umls', 'umls_score': 1,
+            'vocabulary_id': 'LOINC', 'concept_class_id': measurement_concept.concept_class_id,
+            'domain_id': measurement_concept.domain_id, 'retrieval': 'umls', 'umls_score': 1,
         }
         monkeypatch.setattr('omop_core.mapping.suggestions.umls_candidates', lambda *args: ([hit], 'C123'))
+        # Since #1420 the ranker weighs every candidate; no model runs here.
+        monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                            lambda source_value, candidates, *a, **k: (candidates[0], 'ranked', []))
 
         def lexical(*args, **kwargs):
             events = SuggestRun.objects.latest('created_at').activity
@@ -797,15 +828,15 @@ class TestSuggestRunLifecycle:
         def semantic(*args, **kwargs):
             events = SuggestRun.objects.latest('created_at').activity
             assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical']
-            return [{**hit, 'retrieval': 'semantic', 'semantic_score': 0.9, 'vector_distance': 0.1}]
+            return [{**hit, 'retrieval': 'vectors', 'semantic_score': 0.9, 'vector_distance': 0.1}]
 
         monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lexical)
         monkeypatch.setattr('omop_core.mapping.suggestions.semantic_candidates', semantic)
         with use_suggest_dispatcher(InlineSuggestDispatcher()):
-            response = self._post(strategies=['umls', 'lexical', 'semantic'], include_activity=True)
+            response = self._post(strategies=['umls', 'lexical', 'vectors'], include_activity=True)
         assert response.data['state'] == 'success'
         events = response.data['activity']
-        assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical', 'semantic']
+        assert [event['strategy'] for event in events if event['stage'] == 'candidates'] == ['umls', 'lexical', 'vectors']
         ranked = next(event for event in events if event['stage'] == 'ranked')
         assert ranked['suggested']['concept_id'] == measurement_concept.pk
         assert ranked['candidates'][0]['vector_distance'] == 0.1
@@ -915,9 +946,13 @@ class TestSuggestRunLifecycle:
         latest = SuggestRun.objects.create(state='success', activity=[{'message': 'Saved log'}])
         response = self.client.get(path)
         assert response.status_code == 200
-        assert response.data == {'run_id': str(latest.id)}
+        assert response.data['run_id'] == str(latest.id)
+        assert 'activity' not in response.data, 'activity excluded without include_activity'
         log = self.client.get(f'/api/v1/code-mappings/suggest-runs/{latest.id}/?include_activity=1')
         assert log.data['activity'] == [{'message': 'Saved log'}]
+        with_activity = self.client.get(f'{path}?include_activity=1')
+        assert with_activity.data['run_id'] == str(latest.id)
+        assert with_activity.data['activity'] == [{'message': 'Saved log'}]
         self.client.force_authenticate(user=None)
         assert self.client.get(path).status_code in (401, 403)
 
@@ -1153,6 +1188,15 @@ class TestPipelineIntegration:
         assert row.origin_system == SUGGESTION_PROVENANCE
         assert row.suggestion_model_version == SUGGESTION_MODEL_VERSION
 
+    def test_a_destination_supersedes_a_seeded_noise_rejection(self, glucose_bridge):
+        row = queue_row(
+            '2345-7', source_vocabulary_id='LOINC', suggested_action='reject',
+        )
+        suggest_mappings('measurement', min_occurrences=10, strategies=['umls'])
+        row.refresh_from_db()
+        assert row.target_concept_id == glucose_bridge.concept_id
+        assert row.suggested_action == ''
+
     def test_a_declined_row_keeps_the_provenance_that_raised_it(self):
         """Nothing was proposed, so nothing here is a suggestion. Stamping the
         provenance anyway would erase the ingest channel *and* enrol the code in
@@ -1167,7 +1211,7 @@ class TestPipelineIntegration:
         assert row.target_concept_id is None
         assert row.origin_system == 'hk-labs'
         assert row.suggestion_model_version == ''
-        assert row.last_suggest_attempt == SUGGESTION_MODEL_VERSION, (
+        assert row.last_suggest_attempt == _ATTEMPT_STAMP, (
             'but it must still record that it tried, or it retries for ever'
         )
 
@@ -1273,7 +1317,7 @@ class TestSourceEnrichment:
 
         mapping = SourceCodeConceptMapping.objects.get(source_code='2345-7')
         assert mapping.notes == 'waiting on lab confirmation'
-        assert mapping.last_suggest_attempt == SUGGESTION_MODEL_VERSION, (
+        assert mapping.last_suggest_attempt == _ATTEMPT_STAMP, (
             'the run still records that it tried'
         )
 
@@ -1324,32 +1368,33 @@ class TestSourceEnrichment:
 
 
 # ---------------------------------------------------------------------------
-# ICD10 vocabulary → UMLS ICD10CM SAB lookup (#1028)
+# ICD10CM vocabulary → UMLS ICD10CM SAB lookup (#1028)
 # ---------------------------------------------------------------------------
 
-class TestICD10UmlsLookup:
-    """Verify that ICD10 (HT-One) codes resolve through the ICD10CM UMLS SAB."""
+class TestICD10CMUmlsLookup:
+    """Verify that ICD10CM codes resolve through the ICD10CM UMLS SAB."""
 
-    def test_icd10_vocab_maps_to_icd10cm_sab(self):
-        assert VOCAB_TO_UMLS_ROOT.get('ICD10') == 'ICD10CM'
+    def test_icd10cm_vocab_maps_to_icd10cm_sab(self):
+        assert VOCAB_TO_UMLS_ROOT.get('ICD10CM') == 'ICD10CM'
 
-    def test_icd10_code_finds_umls_candidates(
+    def test_icd10_no_longer_in_umls_root(self):
+        """After migration 0266, ICD10 rows no longer exist."""
+        assert VOCAB_TO_UMLS_ROOT.get('ICD10') is None
+
+    def test_icd10cm_code_finds_umls_candidates(
         self, umls_release, condition_domain, snomed_vocab, concept_class,
     ):
-        """An ICD10 code should find UMLS candidates via the ICD10CM SAB."""
-        # Create ICD10 vocab (the source row's vocabulary)
-        icd10_vocab = VocabularyFactory(vocabulary_id='ICD10', vocabulary_name='ICD10')
+        """An ICD10CM code should find UMLS candidates via the ICD10CM SAB."""
+        icd10cm_vocab = VocabularyFactory(vocabulary_id='ICD10CM', vocabulary_name='ICD-10-CM')
 
         cui = UmlsConcept.objects.create(
             cui='C0008031', preferred_name='Cholera',
             release=umls_release,
         )
-        # UMLS source code under ICD10CM SAB (same code format)
         UmlsSourceCode.objects.create(
             concept=cui, root_source='ICD10CM', code='A00.0',
             term_type='PT', name='Cholera due to Vibrio cholerae 01, biovar cholerae',
         )
-        # Sibling: SNOMED concept
         UmlsSourceCode.objects.create(
             concept=cui, root_source='SNOMEDCT_US', code='63650001',
             term_type='PT', name='Cholera',
@@ -1361,8 +1406,7 @@ class TestICD10UmlsLookup:
             standard_concept='S',
         )
 
-        # Look up with vocabulary_id='ICD10' — should work via ICD10CM SAB
-        candidates, cui_str = umls_candidates('A00.0', 'ICD10', 'Condition')
+        candidates, cui_str = umls_candidates('A00.0', 'ICD10CM', 'Condition')
         assert len(candidates) == 1
         assert candidates[0]['concept_id'] == 63650001
         assert cui_str == 'C0008031'
@@ -1371,7 +1415,11 @@ class TestICD10UmlsLookup:
 @pytest.mark.parametrize('cui_count', [3, 6])
 def test_suggest_persists_all_bridge_cuis_without_varchar_overflow(
     cui_count, umls_release, condition_domain, snomed_vocab, icd10cm_vocab, concept_class,
+    monkeypatch,
 ):
+    # Since #1420 the ranker weighs every candidate; no model runs here.
+    monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                        lambda source_value, candidates, *a, **k: (candidates[0], 'ranked', []))
     target = ConceptFactory(
         concept_id=777001, concept_code='44054006', concept_name='Test destination',
         vocabulary=snomed_vocab, domain=condition_domain, concept_class=concept_class,
@@ -1391,7 +1439,7 @@ def test_suggest_persists_all_bridge_cuis_without_varchar_overflow(
     assert len(mapping.umls_cui) > 20
 
 
-@pytest.mark.parametrize('source', ['ICD10', 'ICD10CM', 'ICD10PCS', 'urn:oid:2.16.840.1.113883.6.90'])
+@pytest.mark.parametrize('source', ['ICD10CM', 'ICD10PCS', 'urn:oid:2.16.840.1.113883.6.90'])
 @pytest.mark.parametrize('destination_domain', ['Observation', 'Procedure', 'Drug', 'Device'])
 def test_icd_retrieves_other_standard_domains_without_umls(source, destination_domain):
     from omop_core.mapping.suggestions import retrieval_pool

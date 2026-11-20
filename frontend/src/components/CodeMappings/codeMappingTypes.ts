@@ -1,0 +1,538 @@
+/**
+ * Shared types, constants, and helpers used by both CodeMappingPage and
+ * EditMappingDialog. Extracted to avoid circular imports and duplication.
+ */
+
+import type { SourceEvidence, SourceSystemContext, SourceUnitEvidence } from "./SourceEvidencePanel";
+
+// ── Row & form types ────────────────────────────────────────────────
+
+/** Where a curator saved a mapping from (#2382). */
+export type MappingSurface = "code2concept" | "concept2code" | "patientcode";
+
+export interface CodeMappingRow {
+  mapping_id: number | null;
+  domain_id?: string;
+  source_vocabulary_id: string;
+  source_system_context?: SourceSystemContext;
+  source_code: string;
+  source_code_description: string;
+  /** Wearable metric category (Activity, Sleep, ...); '' on other mappings. */
+  category?: string;
+  /** How the source produces a wearable metric's value; '' on other mappings. */
+  measure_class?: string;
+  /** Vendor-neutral key of the wearable metric, shared across its source codes. */
+  metric_key?: string;
+  /** Confirmed public votes on the row's current destination (#2678); on list rows only. */
+  votes?: import("./voteCounts").VoteCounts;
+  organization_id?: number | null;
+  organization_slug?: string;
+  organization_name?: string;
+  source_concept_id?: number | null;
+  source_retired?: boolean | null;
+  source_retirement_evidence?: string[];
+  umls_source_name?: string;
+  /** Null while the row has no destination; never 0. */
+  destination_concept_id: number | null;
+  destination_concept_name: string;
+  destination_concept_code: string;
+  destination_vocabulary_id: string;
+  destination_concept_class_id: string;
+  destination_omop_table: string;
+  destination_domain_id?: string;
+  standard_concept?: string | null;
+  destination_invalid_reason?: string | null;
+  status: "proposed" | "approved" | "rejected" | "unmapped";
+  notes: string;
+  /** A curator wrote the note; Suggest's rationale in the same field is not one. */
+  has_curator_note?: boolean;
+  origin: string;
+  origin_system: string;
+  /** The surface of the last curator save and the ranker's confidence in its destination (#2382). */
+  decision_surface?: MappingSurface | "";
+  decision_confidence?: number | null;
+  /** The ranker's confidence (0-1) in the destination; stays when the mapping is approved (#2668). */
+  suggestion_confidence?: number | null;
+  suggest_strategy: string;
+  suggested_action?: string;
+  umls_cui: string;
+  created_by: string;
+  reviewer?: string;
+  reviewed_at?: string | null;
+  /** Who proposed the destination, while the two-person rule is on (#2726); null otherwise. */
+  proposed_by_id?: number | null;
+  occurrence_count: number;
+  destination_count: number;
+  has_mapping: boolean;
+  mapping_origin?: "athena" | "healthkey";
+  measurement_type?: "qualitative" | "quantitative";
+  suggested_unit?: string;
+  example_units?: string[];
+  locked_by_username?: string | null;
+  locked_at?: string | null;
+  source_evidence?: SourceEvidence;
+  source_unit?: string;
+  source_units?: string[];
+  /** Source FHIR basedOn displays, falling back to references. */
+  based_on?: string[];
+  example_quantity?: string;
+  sample_quantities?: string[];
+  source_code_id?: number;
+  extracted_source_unit?: string;
+  extracted_example_quantity?: string;
+  source_unit_override?: string | null;
+  example_quantity_override?: string | null;
+  source_metadata?: Record<string, unknown>;
+  destination_unit_concept_id?: number | null;
+  /** The curated destination unit's UCUM code and name; '' when the mapping has none. */
+  destination_unit_code?: string;
+  destination_unit_name?: string;
+  /** 0, or how many LOINC axis sets this code's units imply (>= 2). */
+  axis_variant_count?: number;
+  /** Per-variant destinations, present when axis_variant_count >= 2. */
+  axis_variants?: import("./loincAxes").AxisVariant[];
+  /** Curator LOINC axis overrides: a value settles an axis, null lifts it. */
+  loinc_axes?: Partial<Record<"component" | "property" | "time_aspect" | "system" | "scale_type" | "method_type", string | null>>;
+  /** Curator SNOMED settings: key absent = inferred, null = do not constrain / no side. */
+  snomed_attributes?: { reference_concept_id?: number; hierarchy?: string | null; laterality?: string | null };
+}
+
+export interface ConceptResult {
+  concept_id: number;
+  concept_name: string;
+  concept_code: string;
+  vocabulary_id: string;
+  domain_id: string;
+  concept_class_id: string;
+  standard_concept: string | null;
+  invalid_reason?: string | null;
+  measurement_type?: "qualitative" | "quantitative";
+  suggested_unit?: string;
+  example_units?: string[];
+}
+
+export interface SearchScope {
+  retired: boolean;
+  nonStandard: boolean;
+}
+
+export const DEFAULT_SEARCH_SCOPE: SearchScope = { retired: false, nonStandard: false };
+
+export interface DestinationOption extends Omit<ConceptResult, "concept_id"> {
+  concept_id: number | null;
+  selectable: boolean;
+  origins: string[];
+  selected: boolean;
+}
+
+export interface VocabularyRef {
+  vocabulary_id: string;
+  vocabulary_name: string;
+  is_local?: boolean;
+}
+
+export interface DomainRef {
+  domain_id: string;
+  label: string;
+}
+
+export interface SourceCodeSystemRef {
+  vocabulary_id: string;
+  label: string;
+}
+
+export interface SourceVocabularyTab {
+  vocabulary_id: string;
+  label: string;
+  is_standard: boolean;
+}
+
+export interface Reference {
+  suggest_max_per_run?: number;
+  release_commit?: string;
+  domains: DomainRef[];
+  source_code_systems_by_domain: Record<string, SourceCodeSystemRef[]>;
+  source_catalog_vocabularies?: string[];
+  destination_vocabularies: VocabularyRef[];
+  omop_tables: Record<string, string>;
+  source_vocabulary_tabs?: SourceVocabularyTab[];
+  /** The values a wearable mapping's Category and Measure Class may take. */
+  wearable_metric_categories?: string[];
+  wearable_measure_classes?: string[];
+  /** The source vocabularies of the Wearables tab, which those and the metric key apply to. */
+  wearable_source_vocabularies?: string[];
+  /** The systems a wearable download or share can be limited to, in tab order. */
+  wearable_source_systems?: WearableSourceSystem[];
+  /** Whether the proposer may not approve their own proposal (#2726). */
+  separate_approver?: boolean;
+}
+
+export interface WearableSourceSystem {
+  id: string;
+  label: string;
+}
+
+/** An approval queued the move of stored clinical rows; a job does it. */
+export interface RepointResult {
+  queued: boolean;
+  from_concept_ids: number[];
+}
+
+/** What to tell the curator after a save that queued a re-point, if anything. */
+export function repointBanner(sourceCode: string, repoint: RepointResult | null): string | null {
+  return repoint?.queued
+    ? `${sourceCode}: saved. Patient records with this code are being updated to the new concept in the background.`
+    : null;
+}
+
+export interface MappingForm {
+  domain_id: string;
+  source_vocabulary_id: string;
+  source_code: string;
+  source_code_description: string;
+  source_concept_id: string;
+  destination_concept_id: string;
+  destination_concept_name: string;
+  destination_concept_code: string;
+  destination_vocabulary_id: string;
+  destination_concept_class_id: string;
+  standard_concept: string;
+  destination_invalid_reason: string;
+  omop_table: string;
+  measurement_type: string;
+  suggested_unit: string;
+  example_units: string[];
+  status: "proposed" | "approved" | "rejected";
+  notes: string;
+  source_unit: string;
+  source_metadata_notes: string;
+  destination_unit_concept_id: string;
+  destination_unit_concept_code: string;
+  destination_unit_concept_name: string;
+  unit_match_type: "exact" | "close" | "none" | "";
+  /** The confidence (0-1) the mapping carries. ``undefined`` means the row this form was
+   *  built from did not say, so a save leaves the stored value alone; ``null`` clears it. */
+  suggestion_confidence?: number | null;
+  /** The server's signed token for that number, when this dialog got one from Calc or a
+   *  Suggest run. A save stores a confidence only through it (#2668). */
+  suggestion_confidence_token?: string | null;
+}
+
+// ── Constants ───────────────────────────────────────────────────────
+
+export const emptyForm: MappingForm = {
+  domain_id: "",
+  source_vocabulary_id: "",
+  source_code: "",
+  source_code_description: "",
+  source_concept_id: "",
+  destination_concept_id: "",
+  destination_concept_name: "",
+  destination_concept_code: "",
+  destination_vocabulary_id: "",
+  destination_concept_class_id: "",
+  standard_concept: "",
+  destination_invalid_reason: "",
+  omop_table: "",
+  measurement_type: "",
+  suggested_unit: "",
+  example_units: [],
+  status: "proposed",
+  notes: "",
+  source_unit: "",
+  source_metadata_notes: "",
+  destination_unit_concept_id: "",
+  destination_unit_concept_code: "",
+  destination_unit_concept_name: "",
+  unit_match_type: "",
+};
+
+export const emptyReference: Reference = {
+  domains: [],
+  source_code_systems_by_domain: {},
+  source_catalog_vocabularies: [],
+  destination_vocabularies: [],
+  omop_tables: {},
+};
+
+export const statusClass: Record<string, string> = {
+  proposed: "bg-amber-100 text-amber-800",
+  approved: "bg-green-100 text-green-800",
+  rejected: "bg-red-100 text-red-800",
+  unmapped: "bg-amber-100 text-amber-800",
+};
+
+export const strategyLabel: Record<string, string> = {
+  umls: "UMLS",
+  vectors: "Vectors",
+  lexical: "Lexical",
+  semantic: "Vectors",  // legacy alias
+  metadata: "Source metadata",  // legacy: rows suggested between #1783 and #1787
+};
+
+/** Pipeline order, which is also the order the checkboxes read in. */
+export const STRATEGY_LABELS = {
+  umls: "UMLS",
+  lexical: "Lexical",
+  vectors: "Vectors",
+} as const;
+
+/**
+ * OMOP domain -> the clinical table its facts land in. Only a fallback: the
+ * reference endpoint is authoritative, and hardcoding the mapping in the
+ * frontend is what this table exists to avoid. It covers the window before
+ * the first fetch resolves.
+ */
+export const DOMAIN_TO_TABLE: Record<string, string> = {
+  Condition: "condition",
+  Drug: "drug_exposure",
+  Measurement: "measurement",
+  Observation: "observation",
+  Procedure: "procedure",
+};
+
+// Long enough that a word typed at normal speed is one request, short enough
+// that the pause is not felt once the curator stops.
+export const CONCEPT_SEARCH_DEBOUNCE_MS = 250;
+export const SUGGEST_POLL_INTERVAL_MS = 1000;
+// Consecutive, not cumulative: a run lasting minutes may lose the odd poll.
+export const SUGGEST_POLL_MAX_FAILURES = 5;
+// Allow the worker's default 15-minute limit plus time waiting in the queue.
+export const SUGGEST_POLL_TIMEOUT_MS = 20 * 60 * 1000;
+
+/** Tooltip copy, verbatim from the design (plan section 3.1). */
+export const TIP = {
+  domain:
+    "What kind of fact this is. Chosen first: it decides which code systems are offered and which OMOP table the fact lands in.",
+  source_code_system:
+    "The external code system the value arrived in -- NDC or ATC for drugs, ICD-10-CM or SNOMED for conditions. Leave as None for uncoded data; a parsed paper lab or a phrase from a note has no code system, which is normal.",
+  source_code_value:
+    "Exactly what appears in the source data -- the code if there is one, otherwise the raw text.",
+  source_description:
+    "Human-readable description of the source code, where the source supplies one.",
+  category:
+    "The kind of wearable metric this is -- Activity, Sleep, Nutrition and so on. It groups and sorts the Wearables tab.",
+  metric_key:
+    "The vendor-neutral key of this metric, e.g. resting_hr: the same for the Apple, Garmin, OpenWearables, HL7 PHR and Health Connect codes that report it, which is what ties them together. Lowercase snake case.",
+  measure_class:
+    "How the source produces the value: a direct sensor reading, an aggregate over an interval, an algorithmic estimate, a vendor's own score, environmental context, or something the user or device logged. It describes this source metric, not the destination concept: two sources of one concept can differ.",
+  destination_concept_id:
+    "The OMOP concept this source code means. Type an id directly or pick one from the search above.",
+  destination_concept_name:
+    "Name of the destination concept. Editable only for a HealthKey-minted concept; Athena concepts are named by Athena.",
+  destination_concept_code:
+    "The destination concept's own code in its vocabulary, e.g. 33358-3.",
+  destination_vocabulary_id:
+    "Vocabulary the destination concept belongs to -- SNOMED, LOINC, or an HK-* vocabulary when we minted it.",
+  destination_concept_class:
+    "The concept's class within its vocabulary, e.g. Clinical Finding, Lab Test.",
+  standard_concept:
+    "'S' means a standard Athena concept. Blank means non-standard; a retired concept is called out separately.",
+  destination_table:
+    "The OMOP clinical table the fact is stored in. Follows from Domain.",
+  search:
+    "Search OMOP concepts by name or code. Suggest seeds the search from the source description.",
+  search_include_retired:
+    "Retired concepts are hidden because they should not be new destinations. Turn this on only to find the retired concept a mapping already points at.",
+  search_include_non_standard:
+    "Only standard concepts (and HealthKey's own HK-* concepts) are offered, since OMOP analytics read standard concepts. Turn this on to see non-standard ones, such as ICD-10 or source-vocabulary codes.",
+  search_vocabulary:
+    "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
+  status:
+    "Proposed is awaiting review. Approving also re-points the clinical rows already stored. Rejected hides the row behind a filter. Only org admins and staff can approve mappings -- doctors and analysts may propose mappings for review.",
+  status_new:
+    "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed -- approval is what rewrites the clinical rows already stored.",
+  notes: "Why this decision was made, for the next curator who opens the row.",
+  ranker: "Which AI model ranks the candidates. Anthropic uses Claude, Jev uses the Typesafe SystemOne API. Both runs both concurrently and picks the higher-confidence winner.",
+} as const;
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+export function omopTableFor(reference: Reference, domainId: string): string {
+  if (!domainId) return "";
+  return reference.omop_tables[domainId] || DOMAIN_TO_TABLE[domainId] || "";
+}
+
+export function retirementDetail(row: CodeMappingRow | null): string {
+  return row?.source_retirement_evidence?.join("; ")
+    || (row?.source_retired === false ? "No retirement indication in the loaded source metadata."
+      : "No source retirement metadata available. Missing metadata does not mean the code is retired.");
+}
+
+/**
+ * The sign-off half of the provenance line: " . approved by ada@x on 2026-08-31".
+ *
+ * Empty until a mapping has actually been approved.
+ */
+export function approvalNote(row: CodeMappingRow): string {
+  if (row.status !== "approved") return "";
+  if (!row.reviewer && !row.reviewed_at) return "";
+  const who = row.reviewer ? ` by ${row.reviewer}` : "";
+  const when = row.reviewed_at
+    ? ` on ${new Date(row.reviewed_at).toLocaleDateString()}`
+    : "";
+  return ` \u00b7 approved${who}${when}`;
+}
+
+export function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
+  const domainId = row.domain_id || row.destination_domain_id || "";
+  return {
+    domain_id: domainId,
+    source_vocabulary_id: row.source_vocabulary_id,
+    source_code: row.source_code,
+    source_code_description: row.source_code_description || "",
+    source_concept_id: row.source_concept_id ? String(row.source_concept_id) : "",
+    // Concept 0 is "No matching concept": a missing destination, shown empty.
+    destination_concept_id: row.destination_concept_id ? String(row.destination_concept_id) : "",
+    destination_concept_name: row.destination_concept_name,
+    destination_concept_code: row.destination_concept_code || "",
+    destination_vocabulary_id: row.destination_vocabulary_id,
+    destination_concept_class_id: row.destination_concept_class_id || "",
+    standard_concept: row.standard_concept || "",
+    destination_invalid_reason: row.destination_invalid_reason || "",
+    omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
+    measurement_type: row.measurement_type || "",
+    suggested_unit: row.suggested_unit || "",
+    example_units: row.example_units || [],
+    status: row.status === "unmapped" ? "proposed" : row.status,
+    notes: row.notes || "",
+    source_unit: row.source_unit || "",
+    source_metadata_notes: row.source_metadata && Object.keys(row.source_metadata).length
+      ? Object.entries(row.source_metadata).map(([k, v]) => `${k}: ${v}`).join("\n")
+      : "",
+    destination_unit_concept_id: row.destination_unit_concept_id ? String(row.destination_unit_concept_id) : "",
+    destination_unit_concept_code: row.destination_unit_code || "",
+    destination_unit_concept_name: row.destination_unit_name || "",
+    unit_match_type: "",
+    suggestion_confidence: row.destination_concept_id ? row.suggestion_confidence : null,
+  };
+}
+
+/** A confidence (0-1) as the whole percent the dialog shows, or "" when there is none. */
+export function confidencePercent(confidence: number | null | undefined): string {
+  return typeof confidence === "number" && Number.isFinite(confidence)
+    ? String(Math.round(confidence * 100))
+    : "";
+}
+
+/**
+ * Follow a queued Suggest run to its end, as the dialog and the page both do.
+ * Returns the finished run, or null once ``shouldContinue`` says the caller moved on.
+ * Throws when the run does not finish in time or the polls keep failing.
+ */
+export async function pollSuggestRun(
+  started: SuggestRunProgress,
+  poll: (runId: string) => Promise<SuggestRunProgress>,
+  shouldContinue: () => boolean,
+): Promise<SuggestRunProgress | null> {
+  let current = started;
+  const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+  let failures = 0;
+  while (shouldContinue()) {
+    if (current.state !== "queued" && current.state !== "running") return current;
+    if (Date.now() > deadline) throw new Error("Suggestion timed out");
+    await new Promise((resolve) => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+    if (!shouldContinue()) return null;
+    try {
+      current = await poll(started.run_id);
+      failures = 0;
+    } catch (fetchError) {
+      if (++failures > SUGGEST_POLL_MAX_FAILURES) throw fetchError;
+    }
+  }
+  return null;
+}
+
+/** Progress of one queued Suggest run, as /suggest-runs/<id>/ reports it. */
+export type SuggestRunProgress = {
+  activity?: CandidateActivity[];
+  run_id: string;
+  state: "queued" | "running" | "success" | "failure";
+  total: number;
+  retrieved: number;
+  done: number;
+  /** New destinations written -- what the run achieved, and the headline number. */
+  destinations: number;
+  /** Codes still awaiting a suggestion on this tab once the run finished. */
+  remaining: number;
+  strategy_counts: Record<string, number>;
+  landed_in: Record<string, number>;
+  error: string;
+  ranking_model?: string;
+};
+
+/**
+ * Extract the best usable UCUM unit string from source evidence units.
+ * Picks the highest-count non-suppressed unit, preferring normalized > code > display.
+ * Returns "" when no usable unit exists.
+ */
+export function dominantSourceUnit(units: SourceUnitEvidence[] | undefined): string {
+  if (!units || units.length === 0) return "";
+  const eligible = units.filter((u) => !u.suppressed);
+  if (eligible.length === 0) return "";
+  // Already sorted by count descending from the backend, but be explicit.
+  const best = eligible.reduce((a, b) => (b.count > a.count ? b : a));
+  return best.normalized || best.code || best.display || "";
+}
+
+// Re-export the CandidateActivity type from SuggestCandidates for convenience.
+import type { CandidateActivity } from "./SuggestCandidates";
+export type { CandidateActivity };
+
+/**
+ * The confidence a Suggest run in this dialog gave the concept the curator is
+ * saving, or null when the run never scored it (chosen by search, or no ranker).
+ * The ranked/result events list every scored candidate as `alternatives`.
+ */
+export function rankedConfidence(activity: CandidateActivity[], conceptId: string): number | null {
+  const id = Number(conceptId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const alternatives = activity[index].alternatives;
+    if (!alternatives?.length) continue;
+    // The same rule SuggestCandidates shows for the winner: a dual-ranker run
+    // lists both rankers' scores for a concept and the higher one is the
+    // candidate's confidence; a score the server would refuse (NaN, out of
+    // range) reads as unscored, not as a 400.
+    const scores = alternatives
+      .filter(alt => alt.concept_id === id && Number.isFinite(alt.confidence) && alt.confidence >= 0 && alt.confidence <= 1)
+      .map(alt => alt.confidence);
+    return scores.length ? Math.max(...scores) : null;
+  }
+  return null;
+}
+
+/** A confidence and the server's signed token for it (#2668). */
+export interface ConfidenceScore {
+  confidence: number;
+  token: string;
+}
+
+/**
+ * The score a run signed for this concept, or null. The server signs only the score of
+ * the concept a ranker chose, so a candidate the curator picks from the table usually has
+ * none: it then stores no confidence, and Calc computes it.
+ */
+export function signedScore(activity: CandidateActivity[], conceptId: string): ConfidenceScore | null {
+  const id = Number(conceptId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const alternatives = activity[index].alternatives;
+    if (!alternatives?.length) continue;
+    const signed = alternatives.find(alt => alt.concept_id === id && alt.confidence_token
+      && Number.isFinite(alt.confidence) && alt.confidence >= 0 && alt.confidence <= 1);
+    return signed ? { confidence: signed.confidence, token: signed.confidence_token as string } : null;
+  }
+  return null;
+}
+
+/** Whether the signed-in curator proposed this mapping's destination, and so may not approve it (#2726). */
+export function isOwnProposal(
+  row: { proposed_by_id?: number | null } | null | undefined,
+  userId: number | string | null | undefined,
+): boolean {
+  return row?.proposed_by_id != null && userId != null && String(row.proposed_by_id) === String(userId);
+}
+
+export const OWN_PROPOSAL_NOTE = "You proposed this mapping, so another approver must approve it.";
+export const NEW_DESTINATION_NOTE = "Choosing a destination proposes it, so another approver must approve it.";

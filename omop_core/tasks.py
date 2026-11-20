@@ -2,16 +2,133 @@
 
 from typing import Any
 
-from celery import shared_task
+import requests
+from celery import Task, shared_task
+from celery.signals import worker_ready, worker_shutting_down
+from django.conf import settings
+from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
+from omop_core.services import axis_variant_jobs as _axis_variant_jobs
 
 
-@shared_task(name='omop_core.precompute_suggest_embeddings')
-def precompute_suggest_embeddings_task():
-    from omop_core.services.embedding_jobs import run_suggest_embeddings
+@worker_shutting_down.connect
+def requeue_running_refresh_on_shutdown(**_kwargs):
+    """Move a running axis variant refresh back to queued so the next worker resumes it instantly."""
+    import logging
 
-    run_suggest_embeddings()
+    from django.db import connections
+
+    from omop_core.services.axis_variant_jobs import requeue_on_shutdown
+
+    try:
+        requeue_on_shutdown()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            'Could not requeue axis variant refresh on shutdown; '
+            'the stale sweep will catch it.')
+    finally:
+        connections.close_all()
+
+
+@worker_ready.connect
+def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
+    """Publish durable migration-created jobs from a worker that knows the tasks.
+
+    Hospital-code imports and axis variant refreshes (#2021) are written by
+    migrations as database rows. An older worker would discard their task
+    messages as unregistered during a rolling deployment, so the worker that
+    registers the tasks is the one that publishes them.
+    """
+    import logging
+    import threading
+
+    from django.db import connections
+
+    from omop_core.services.axis_variant_jobs import dispatch_queued_refreshes
+    from omop_core.services.hospital_code_seed import dispatch_queued_imports
+
+    log = logging.getLogger(__name__)
+
+    def dispatch(first=False, imports=True):
+        # The boot pass republishes refresh requests an older worker may have
+        # dropped; the rechecks only publish what nothing has published yet.
+        passes = [('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))]
+        if imports:
+            passes.insert(0, ('hospital-code import', dispatch_queued_imports))
+        try:
+            for label, publish in passes:
+                try:
+                    publish()
+                except (OperationalError, ProgrammingError):
+                    log.exception('%s dispatch deferred until the database is ready.', label)
+                except Exception:
+                    # Never make the worker unavailable because the broker job cannot
+                    # be published. The queued database row remains retryable.
+                    log.exception('Could not dispatch %s.', label)
+        finally:
+            # A timer thread's connection is its own and would otherwise stay
+            # open until the dead thread is collected.
+            connections.close_all()
+
+    dispatch(first=True)
+    # Render can bring the worker up while the web service is still running its
+    # release migration. Recheck without blocking worker readiness; once a task
+    # id is recorded these passes are no-ops.
+    for delay in (60, 180):
+        timer = threading.Timer(delay, dispatch)
+        timer.daemon = True
+        timer.start()
+    # Only the refresh sweep repeats: a hospital-code import stranded in
+    # ``running`` is told from a live one by the advisory lock alone, which a
+    # live import takes only once its download is validated, so a repeating
+    # pass would requeue a live import over itself.
+    keep_rechecking(lambda: dispatch(imports=False), RECHECK_INTERVAL)
+
+
+#: How often a live worker looks for a request that lost its worker (#2048).
+#: Under the 15 minute stale cutoff, so a stranded request waits at most about
+#: one cutoff more; far above a sweep's cost, which is a few small queries.
+RECHECK_INTERVAL = 5 * 60
+
+
+def keep_rechecking(dispatch, interval, stop=None):
+    """Run ``dispatch`` every ``interval`` seconds until ``stop`` is set.
+
+    The boot pass and its two early rechecks only see what is stranded within
+    three minutes of a boot. A walk is killed when its instance is shut down
+    *after* the replacement worker is up, which is the order Cloud Run uses,
+    so its heartbeat goes stale with no boot to follow (#2048): on the
+    HealthTree instance the #2043 rebuild sat ``running`` for over an hour
+    with a dead worker. The lost message is no help either: Redis redelivers
+    it only after the visibility timeout, to a task that claims nothing but a
+    ``queued`` row. So a live worker keeps looking, on one daemon thread that
+    never holds the worker open at shutdown. A pass that raises is logged and
+    the next still runs. Returns the thread; ``stop`` is for tests.
+    """
+    import logging
+    import threading
+
+    log = logging.getLogger(__name__)
+    stop = stop if stop is not None else threading.Event()
+
+    def loop():
+        while not stop.wait(interval):
+            try:
+                dispatch()
+            except Exception:
+                log.exception('The queued-job recheck failed; it runs again in %ss.', interval)
+
+    thread = threading.Thread(target=loop, name='queued-job-recheck', daemon=True)
+    thread.start()
+    return thread
+
+
+@shared_task(name='omop_core.build_concept_embeddings')
+def build_concept_embeddings_task():
+    from omop_core.services.embedding_jobs import run_build_concept_embeddings
+
+    run_build_concept_embeddings()
 
 
 @shared_task(name='omop_core.refresh_patient_record')
@@ -50,8 +167,55 @@ def project_field_to_omop_task(mapping_pk: int) -> dict[str, Any]:
     return {'mapping_pk': mapping_pk}
 
 
-@shared_task(name='omop_core.suggest_mappings')
-def suggest_mappings_task(run_id: str, params: dict[str, Any]) -> dict[str, Any]:
+@shared_task(name='omop_core.repoint_mapping_rows', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3)
+def repoint_mapping_rows_task(mapping_id: int) -> dict[str, Any]:
+    """Move stored clinical rows onto an approved mapping's destination.
+
+    Dispatched by a mapping save, which returns as soon as the mapping is
+    written. Idempotent: the work lives on the mapping row, so a duplicate run
+    finds nothing left to move. A failure is retried; past that, the
+    destinations stay queued for ``manage.py run_queued_repoints``.
+    """
+    from omop_core.services.repoint_jobs import run_repoint
+
+    return {'mapping_id': mapping_id, **run_repoint(mapping_id)}
+
+
+@shared_task(name='omop_core.relocate_mapping_rows', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3)
+def relocate_mapping_rows_task(mapping_id: int, from_table: str, to_table: str) -> dict[str, Any]:
+    """Move a code's stored rows to the table its mapping now names (#2386).
+
+    Dispatched by a mapping save that changed the table. Idempotent: a repeat
+    finds no rows left in the old table.
+    """
+    from omop_core.services.relocation_jobs import run_relocation
+
+    return {'mapping_id': mapping_id, **run_relocation(mapping_id, from_table, to_table)}
+
+
+@shared_task(name='omop_core.bulk_resolve_source_codes')
+def bulk_resolve_source_codes_task(run_id: str, person_ids: list[int] | None = None) -> dict[str, Any]:
+    """Run a bulk source-code resolution across multiple patients."""
+    from omop_core.services.resolve_jobs import run_bulk_resolve
+
+    run_bulk_resolve(run_id, person_ids)
+    from omop_core.models import SourceCodeResolveRun
+    run = SourceCodeResolveRun.objects.filter(pk=run_id).first()
+    if run is None:
+        return {'run_id': run_id, 'state': 'missing'}
+    return {
+        'run_id': run_id,
+        'state': run.state,
+        'done': run.done,
+        'total': run.total,
+        'resolved': run.resolved,
+    }
+
+
+@shared_task(bind=True, name='omop_core.suggest_mappings')
+def suggest_mappings_task(self, run_id: str, params: dict[str, Any]) -> dict[str, Any]:
     """Run one queued Code Mapping Suggest job.
 
     Failures are recorded on the SuggestRun row rather than raised: the page
@@ -60,6 +224,16 @@ def suggest_mappings_task(run_id: str, params: dict[str, Any]) -> dict[str, Any]
     """
     from omop_core.services.suggest_jobs import execute_run
     from omop_core.models import SuggestRun
+
+    if params.get('direction') == 'reverse' and (self.request.delivery_info or {}).get('redelivered'):
+        # A worker lost after claiming the run cannot clear RUNNING itself.
+        # Preserve its preview and offer a fresh search instead of acknowledging
+        # the redelivery while leaving the curator polling forever.
+        from django.utils import timezone
+        SuggestRun.objects.filter(pk=run_id, direction='reverse', state=SuggestRun.RUNNING).update(
+            state=SuggestRun.FAILURE, finished_at=timezone.now(),
+            error='Source-code search was interrupted. Partial candidates remain available; retry the search.',
+        )
 
     execute_run(run_id, params)
     run = SuggestRun.objects.filter(pk=run_id).first()
@@ -72,3 +246,194 @@ def suggest_mappings_task(run_id: str, params: dict[str, Any]) -> dict[str, Any]
         'total': run.total,
         'destinations': run.destinations,
     }
+
+
+@shared_task(
+    name='omop_core.sync_loinc_release',
+    # Retry only what a retry can fix. A missing credential or a malformed
+    # archive is permanent, and retrying it three times over an hour just
+    # delays the error reaching a log. Network faults are worth another go.
+    autoretry_for=(requests.RequestException,),
+    # Total retry span stays well inside CELERY_TASK_TIME_LIMIT (900s default)
+    # per attempt; a hard TimeLimitExceeded is not caught by autoretry_for and
+    # would land mid-load, which the single transaction in sync_release()
+    # rolls back rather than leaving half-applied.
+    retry_backoff=60, retry_backoff_max=300, retry_jitter=True, max_retries=3,
+)
+def sync_loinc_release_task():
+    from omop_core.services.loinc_release import sync_release
+
+    sync_release()
+
+
+@shared_task(
+    bind=True,
+    name='omop_core.sync_athena_vocabulary',
+    # A full first load scans the governed Athena export and publishes table
+    # checksums. Render pre-deploy cannot accommodate that work; the dedicated
+    # worker task can, and its transaction makes worker-loss redelivery safe.
+    time_limit=6 * 60 * 60,
+)
+def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
+    from django.core.management import call_command
+    from django.utils import timezone
+
+    from omop_core.models import AthenaVocabularySync
+
+    sync = AthenaVocabularySync.objects.get(pk=sync_id)
+    # Claim only an active receipt. A finished one is done; a receipt the
+    # web boot retired as stale ("Worker lost") has been replaced by a newer
+    # one, and the broker redelivering its message (acks_late, after the
+    # visibility timeout, or an unconsumed message once a worker returns)
+    # must not revive it, rerun the load, or erase its reason. Redelivery
+    # of a receipt still 'running' is the legitimate lost-worker retry.
+    claimed = AthenaVocabularySync.objects.filter(
+        pk=sync_id, outcome__in=('queued', 'running'),
+    ).update(
+        outcome='running', started_at=timezone.now(), completed_at=None,
+        failure_reason='', task_id=self.request.id or sync.task_id,
+    )
+    if not claimed:
+        return {'sync_id': sync_id, 'outcome': sync.outcome, 'skipped': True}
+    try:
+        call_command(
+            'sync_athena_vocabulary', source=sync.source_url, apply=True,
+            sync_id=sync_id,
+        )
+    except Exception as exc:
+        # The command records failures reached inside its handler. Keep the
+        # durable state correct for failures before that catch as well (option
+        # parsing, command discovery, or a future refactor).
+        AthenaVocabularySync.objects.filter(pk=sync_id, outcome='running').update(
+            outcome='failed', failure_reason=str(exc), completed_at=timezone.now(),
+        )
+        raise
+    sync.refresh_from_db()
+    return {'sync_id': sync_id, 'outcome': sync.outcome}
+
+
+@shared_task(
+    bind=True,
+    name='omop_core.import_hospital_code_seed',
+    time_limit=6 * 60 * 60,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def import_hospital_code_seed_task(self, import_id: int) -> dict[str, Any]:
+    """Download and install one checksum-pinned hospital-code seed.
+
+    A Render deploy can replace a worker while this multi-minute import is in
+    progress.  Acknowledge only after completion and ask the broker to
+    redeliver on worker loss; ``execute_import`` is deliberately idempotent.
+    """
+    from omop_core.models import HospitalCodeImport
+    from omop_core.services.hospital_code_seed import (
+        HospitalCodeDownloadError,
+        execute_import,
+    )
+
+    try:
+        return execute_import(import_id)
+    except HospitalCodeDownloadError as exc:
+        if self.request.retries >= 3:
+            raise
+        HospitalCodeImport.objects.filter(pk=import_id).update(
+            outcome='queued', failure_reason=str(exc), completed_at=None,
+        )
+        raise self.retry(exc=exc, countdown=min(60 * (2 ** self.request.retries), 300))
+
+
+@shared_task(
+    bind=True,
+    name='omop_core.refresh_axis_variants',
+    # One request walks every multi-unit code on the instance. HealthTree's did
+    # not finish inside the Cloud Run migrate job's hour (#2021); give it the
+    # Athena sync's limit, which the Redis visibility timeout (25200s) exceeds.
+    # The soft limit fires first, inside run_refresh's try, so an overrun is
+    # recorded as failed instead of leaving the row running forever.
+    time_limit=_axis_variant_jobs.TIME_LIMIT,
+    soft_time_limit=_axis_variant_jobs.SOFT_TIME_LIMIT,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def refresh_axis_variants_task(self, request_id: int) -> dict[str, Any]:
+    """Perform one durable axis variant refresh request.
+
+    The request row is claimed atomically, so a redelivery or a duplicate
+    publish from the worker-ready sweep runs nothing twice. A failure is
+    recorded on the row and raised, so Celery reports FAILURE as well.
+    """
+    return _axis_variant_jobs.run_refresh(request_id)
+
+
+@shared_task(name='omop_core.send_vote_confirmation', ignore_result=True)
+def send_vote_confirmation_task(submission_id: int) -> None:
+    """Email the confirmation link for one pending vote submission (#2678).
+
+    The id is the only argument: the token is made inside
+    ``send_confirmation``, so none is ever in this task's arguments, the
+    broker, or anything that reports them. It never raises and is never
+    retried. A failed send deletes the submission, and the voter submits
+    again; a retry could mail a stranger twice.
+    """
+    from omop_core.services.mapping_votes import send_confirmation
+
+    send_confirmation(submission_id)
+
+
+class _SweepTask(Task):
+    """A sweep task that marks its run FAILED once its retries are spent."""
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        from omop_core.services.provisional_sweep import fail_run
+
+        run_id = args[0] if args else kwargs.get('run_id')
+        if run_id:
+            fail_run(run_id, f'The sweep task failed: {exc}')
+
+
+# Below CELERY_TASK_TIME_LIMIT, so SoftTimeLimitExceeded can fire and the chunk
+# can save its progress before the hard limit kills it.
+_SOFT_TIME_LIMIT = max(60, int(settings.CELERY_TASK_TIME_LIMIT) - 60)
+
+
+@shared_task(base=_SweepTask, name='omop_core.provisional_sweep', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3, soft_time_limit=_SOFT_TIME_LIMIT)
+def provisional_sweep_task(run_id: str, after: int = 0, mapping_id: int | None = None,
+                           limit: int = 200) -> dict[str, Any]:
+    """Make provisional rows for one chunk of persons, then queue the next (#2662).
+
+    The cursor (the last person id finished) travels in the arguments, so a
+    task killed at its time limit retries the same chunk, which is idempotent.
+    """
+    from omop_core.services.provisional_sweep import run_sweep
+
+    next_after = run_sweep(run_id, after=after, mapping_id=mapping_id, limit=limit)
+    if next_after is not None:
+        provisional_sweep_task.delay(run_id, next_after, mapping_id, limit)
+    return {'run_id': run_id, 'after': after, 'next_after': next_after}
+
+
+@shared_task(name='omop_core.provisional_resolve_person', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3, soft_time_limit=_SOFT_TIME_LIMIT)
+def provisional_resolve_person_task(person_id: int) -> dict[str, Any]:
+    """Resolve one person's unresolved rows against the current proposals (#2662).
+
+    A person another worker is resolving raises ``PersonBusy`` and is retried.
+    """
+    from omop_core.services.provisional_sweep import run_person_resolve
+
+    result = run_person_resolve(person_id) or {}
+    return {'person_id': person_id, 'provisional': result.get('provisional', 0)}
+
+
+@shared_task(name='omop_core.provisional_warm_index', soft_time_limit=_SOFT_TIME_LIMIT)
+def provisional_warm_index_task() -> None:
+    """Build and cache the qualifying-proposal index the ingest check reads (#2662).
+
+    A request never builds it (it loads every proposal); the check queues this
+    when it finds none.
+    """
+    from omop_core.services.provisional_sweep import warm_index
+
+    warm_index()

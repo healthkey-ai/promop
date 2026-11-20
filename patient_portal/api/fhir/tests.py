@@ -1,6 +1,7 @@
 """Tests for POST /api/fhir/sync/ — identity-resolved FHIR ingest."""
 from copy import deepcopy
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -980,6 +981,94 @@ class CuratedMappingResolutionTest(TestCase):
         resp = self.client.post('/api/fhir/sync/', {'bundle': bundle}, format='json')
         row = Measurement.objects.get(person_id=resp.json()['person_id'])
         self.assertEqual(row.measurement_concept_id, target.concept_id)
+
+    def test_epic_and_cerner_local_codes_enter_separate_vendor_queues(self):
+        from omop_core.models import SourceCodeConceptMapping
+
+        cases = [
+            ('urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45', 'LOCAL-EPIC', 'EPIC'),
+            ('http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+             'LOCAL-EPIC', 'EPIC'),
+            ('https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72',
+             '674310', 'CERNER'),
+        ]
+        for system, code, expected in cases:
+            with self.subTest(system=system):
+                resp = self.client.post('/api/fhir/sync/', {
+                    'bundle': self._bundle(system, code, text=f'{expected} albumin'),
+                }, format='json')
+                self.assertEqual(resp.status_code, 201, resp.content)
+                mapping = SourceCodeConceptMapping.objects.get(
+                    source_vocabulary_id=system, source_code=code)
+                self.assertEqual(mapping.source_code_description, f'{expected} albumin')
+
+        # The same opaque Epic code in two systems must remain two resolver
+        # rows. The supplied corpus has 34,755 vendor/code keys with multiple
+        # labels, including genuine semantic conflicts.
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(
+            source_code='LOCAL-EPIC').count(), 2)
+        self.assertTrue(Measurement.objects.filter(unit_source_value='g/dL').exists())
+
+    def test_hospital_context_is_attached_to_shared_epic_flowsheet_code(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.pk import next_pk
+
+        organization = Organization.objects.create(
+            name='FHIR Hospital', slug='fhir-hospital',
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=organization)
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+
+        with patch(
+            'patient_portal.api.fhir.sync.get_request_org',
+            return_value=organization,
+        ):
+            response = self.client.post('/api/fhir/sync/', {
+                'person_id': person.person_id,
+                'bundle': self._bundle(system, 'SHARED-10627', text='Local albumin'),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=organization,
+            source_vocabulary_id=system,
+            source_code='SHARED-10627',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local albumin')
+
+    def test_hospital_code_does_not_use_cross_vocabulary_concept_collision(self):
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services.pk import next_pk
+
+        organization = Organization.objects.create(
+            name='FHIR Collision Hospital', slug='fhir-collision-hospital',
+        )
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, organization=organization)
+        collision = self._concept(
+            3046999, '10627', 'LOINC', 'Unrelated global concept',
+        )
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+
+        with patch(
+            'patient_portal.api.fhir.sync.get_request_org',
+            return_value=organization,
+        ):
+            response = self.client.post('/api/fhir/sync/', {
+                'person_id': person.person_id,
+                'bundle': self._bundle(system, '10627', text='Local collision code'),
+            }, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=organization,
+            source_vocabulary_id=system,
+            source_code='10627',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local collision code')
+        measurement = Measurement.objects.get(person=person)
+        self.assertNotEqual(measurement.measurement_concept_id, collision.concept_id)
 
     def test_reimport_after_a_curator_moves_the_concept_does_not_duplicate(self):
         """The trap this design exists to avoid.

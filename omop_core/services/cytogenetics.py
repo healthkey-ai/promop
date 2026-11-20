@@ -221,7 +221,12 @@ def project_selections(person, value, projection):
         return False
     with transaction.atomic():
         Person.objects.select_for_update().get(pk=person.pk)
-        rows = list(Observation.objects.filter(person=person, is_erroneous=False).filter(
+        from omop_core.services.cancer_details import projection_scope
+        scope = projection_scope(person, FIELD, Observation)
+        own = Q(**scope) | Q(observation_event_id__isnull=True, obs_event_field_concept_id__isnull=True)
+        rows = list(Observation.objects.filter(
+            person=person, is_erroneous=False, confidence__isnull=True,
+        ).filter(own).filter(
             Q(observation_source_value__startswith=SOURCE_PREFIX)
             | Q(observation_source_value=LEGACY_SOURCE)))
         previous = values_from_rows(rows)
@@ -243,8 +248,8 @@ def project_selections(person, value, projection):
                                         legacy_recipe, acknowledge_existing=True, after_pk=boundary):
                 raise ValueError('Cytogenetic legacy projection failed')
             after_pk = Observation.objects.filter(
-                person=person, is_erroneous=False, observation_date=today,
-                observation_source_value=LEGACY_SOURCE,
+                person=person, is_erroneous=False, confidence__isnull=True, observation_date=today,
+                observation_source_value=LEGACY_SOURCE, **scope,
             ).order_by('-observation_id').values_list('pk', flat=True).first()
             removed = set()  # The replacement aggregate clears the previous set.
         # All selected markers get today's affirmative row. Removed markers get

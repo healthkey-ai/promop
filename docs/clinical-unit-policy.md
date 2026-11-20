@@ -23,7 +23,10 @@ boundary for every measurement—not just white blood cell counts.
 4. **Conversions are explicit and allowlisted.** A projection may convert only
    recognized source-unit expressions. Missing or unrecognized units fail closed:
    the derived value is omitted and a warning is recorded. Source data remains
-   available for repair.
+   available for repair. An exception has to be named in the projection's own
+   section: `serum_creatinine_mg_dl` reads an absent unit — including
+   `unit_concept_id = 0` — as mg/dL, the unit every canonical creatinine value
+   has been recorded in.
 5. **Unit changes require a migration plan.** Adding a canonical unit or changing
    a conversion must include source-unit tests, boundary/range tests, documented
    backwards compatibility, and a repair/backfill plan for affected derived data.
@@ -65,12 +68,15 @@ source units, target canonical units, conversion formula, organization-setting
 behavior, and unknown-unit behavior. Add tests for each supported conversion,
 both organization settings where applicable, and a fail-closed unknown-unit case.
 
-## ANC and platelets (#640)
+## ANC, ALC, AMC and platelets (#640, #2282)
 
-[LOINC 751-8](https://loinc.org/751-8) and
-[LOINC 777-3](https://loinc.org/777-3) identify absolute neutrophil and platelet
-counts. Their canonical PatientRecord fields are always `10*3/uL`, numerically
-equal to `10*9/L`, regardless of organization preferences.
+[LOINC 751-8](https://loinc.org/751-8), [731-0](https://loinc.org/731-0),
+[742-7](https://loinc.org/742-7) and [777-3](https://loinc.org/777-3) identify
+absolute neutrophil, lymphocyte, monocyte and platelet counts. Their canonical
+PatientRecord fields are always `10*3/uL`, numerically equal to `10*9/L`,
+regardless of organization preferences. Lymphocyte and monocyte counts joined
+this rule in derivation version 24; before that they took the lab's number
+as-is, so a cells/µL result read 1,000× too high.
 
 | Source scale | Conversion to thousands/µL |
 | --- | --- |
@@ -86,13 +92,20 @@ an absent source unit may use a UCUM unit concept. An explicit unsupported unit
 does not silently fall back to a different scale.
 
 The newest non-erroneous matching result is selected across LOINC, source-code,
-supported source-display and historic concept-name paths. A newer empty result
+supported source-display and historic concept-name paths, including LOINCs a
+curator routed to the field through an approved field mapping or source-code
+alias. A newer empty result
 or one with an unknown unit suppresses older results. Approved scalar mapping
 readback also converts source units. Pending user edits remain preserved.
 
-`absolute_neutrophile_count` retains the canonical numeric value and now carries
-`absolute_neutrophile_count_units=10*3/uL`. `platelet_count` is an integer column,
-so it carries cells/µL with `platelet_count_units=CELLS/UL`; for example,
+For compatibility with readers of the legacy column, `absolute_neutrophile_count`
+now carries cells/µL with `absolute_neutrophile_count_units=CELLS/UL` (#1567).
+This supersedes the version 7 choice to copy the thousands/µL number into
+that field. Legacy `absolute_lymphocyte_count` likewise carries cells/µL from
+`alc_thousand_per_ul`; `hemoglobin_level` mirrors `hemoglobin_g_dl` in g/dL.
+The two legacy fields are read-only aliases in the editor. `platelet_count`
+is an integer column that also carries cells/µL
+with `platelet_count_units=CELLS/UL`; for example,
 150.5 thousands/µL becomes 150,500 cells/µL. Nonintegral cells/µL or integer
 overflow leaves that legacy pair unset while the canonical decimal field remains
 subject to its existing range and precision checks. Unit-choice labels now show
@@ -102,6 +115,16 @@ FHIR upload and the import command share this projection path. They preserve
 the source numeric value; UCUM `valueQuantity.code` is retained when a unit
 display is absent. Re-imports persist unit-only corrections as well as numeric
 changes. The read model performs conversion; source Measurements are not scaled.
+
+Migration 0265 converts existing legacy ANC values from authoritative
+`anc_thousand_per_ul` values and aligns legacy ALC and hemoglobin values where
+their canonical fields exist. Rows with no canonical value or a pending user
+edit to the legacy alias are left untouched for source review. A later explicit
+canonical edit supersedes the pending alias edit. The migration updates
+PatientRecord compatibility columns;
+it does not rewrite raw OMOP Measurements.
+An uncoded hemoglobin result in another recorded unit remains in the legacy
+column with that unit; it is not treated as a g/dL canonical result.
 
 ### ANC and platelet rollout (#640)
 
@@ -154,3 +177,31 @@ not a count of distinct affected people across both markers. Custom approved
 question overrides were excluded. Recheck source evidence and affected cohorts
 before applying a staging backfill; the numbers alone cannot establish a missing
 unit or authorize a source-data repair.
+
+## Serum creatinine (#2438)
+
+`serum_creatinine_mg_dl` and its `creatinine_mg_dl` alias are always mg/dL; the
+organization setting does not change them. Source LOINCs are [2160-0](https://loinc.org/2160-0)
+and [38483-4](https://loinc.org/38483-4), plus the display names
+`Creatinine [Mass/volume] in Serum or Plasma`, `Serum Creatinine` and `Creatinine`.
+
+| Source unit | Read as |
+| --- | --- |
+| `mg/dL` (any known spelling) | the number |
+| `umol/L` and its spellings (`µmol/L`, `micromoles/liter`, `micromol/L`) | number ÷ 88.42, half-up to 0.01 |
+| `mg/L`, `mmol/L`, bare `mg` — known but not convertible | unknown |
+| unreadable text, with a UCUM `unit_concept` | the concept's unit |
+| no unit at all, including `unit_concept_id = 0` | mg/dL |
+
+Conversion is `mg/dL = µmol/L / 88.42`, quantised half-up to the two decimals of
+the canonical column. The newest result owns the field across every source
+spelling: an unreadable newest unit makes the field an explicit unknown, and an
+older result is not resurrected. The unknown is explicit rather than omitted so
+an approved `FieldConceptMapping` cannot refill the field with the raw number.
+
+## Instance-selected LOINC units
+
+Lab result views and the additive normalized measurement API support an
+instance-wide canonical unit per LOINC concept. See
+[canonical units architecture](canonical_units_architecture.md) for configuration,
+validated conversions, source preservation and the fixed-unit integration boundary.

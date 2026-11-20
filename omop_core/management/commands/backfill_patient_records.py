@@ -11,7 +11,8 @@ Usage:
     # Re-derive every record regardless of version
     python manage.py backfill_patient_records --all
 
-    # Preview without modifying
+    # Preview without modifying (counts only; preview_rederivation shows the
+    # value changes per record and field)
     python manage.py backfill_patient_records --dry-run
 
     # Control batch size (default 100)
@@ -22,10 +23,12 @@ import logging
 
 from django.core.management.base import BaseCommand
 
-from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import (
     DERIVATION_VERSION,
     refresh_patient_record,
+)
+from omop_core.services.rederivation_preview import (
+    describe_failure, failure_detail, stale_record_cohort,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,18 +76,8 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         organization = options["organization"]
 
-        if backfill_all:
-            qs = PatientRecord.objects.select_related("person").all()
-            label = "all"
-        else:
-            qs = PatientRecord.objects.select_related("person").filter(
-                derivation_version__lt=target,
-            )
-            label = f"derivation_version < {target}"
-
-        if organization:
-            qs = qs.filter(organization__slug=organization)
-            label += f" in organization {organization}"
+        qs, label = stale_record_cohort(target, backfill_all, organization)
+        qs = qs.select_related("person")
 
         total = qs.count()
         if total == 0:
@@ -96,6 +89,9 @@ class Command(BaseCommand):
                 self.style.WARNING(
                     f"[dry-run] {total} record(s) matching {label} would be re-derived."
                 )
+            )
+            self.stdout.write(
+                "Run preview_rederivation with the same options to see the value changes."
             )
             return
 
@@ -110,11 +106,15 @@ class Command(BaseCommand):
                 success += 1
                 if success % batch_size == 0:
                     self.stdout.write(f"  ... {success}/{total}")
-            except Exception:
+            except Exception as exc:
                 errors += 1
-                logger.exception(
-                    "Failed to refresh PatientRecord for person_id=%s",
+                # No exc_info and no message: a constraint violation's message
+                # quotes the patient's whole row ("Failing row contains ..."),
+                # and an ERROR log line reaches Sentry.
+                logger.error(
+                    "Failed to refresh PatientRecord for person_id=%s: %s",
                     record.person_id,
+                    failure_detail(describe_failure(record.person_id, exc)),
                 )
 
         self.stdout.write(

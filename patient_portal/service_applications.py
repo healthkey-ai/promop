@@ -8,19 +8,39 @@ from django.utils import timezone
 from rest_framework.exceptions import AuthenticationFailed
 
 from patient_portal.models import ServiceAccessToken, ServiceApplication
-from patient_portal.service_tokens import ServiceCredential
-
-ALLOWED_SCOPES = frozenset({
-    'patient/*.read', 'patient/*.write', 'user/*.read', 'user/*.write',
-    'system/*.read', 'system/etl.write',
-})
+# ALLOWED_SCOPES lives in service_tokens so patient_portal.models can enforce it
+# as a field validator without importing this module (which imports the models).
+# Re-exported here for the callers that already import it from this module.
+from patient_portal.service_tokens import (  # noqa: F401
+    ALLOWED_SCOPES as ALLOWED_SCOPES,
+    ServiceCredential,
+)
 
 
 def token_digest(secret):
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+# A service credential is a static bearer secret with no refresh step, so its
+# lifetime is the whole of its exposure. Bounding only an explicitly supplied
+# expiry would refuse a 366-day token while handing out a permanent one, which
+# is what omitting the field used to do — and omitting it is the default path
+# through the Org Admin form.
+MAX_TOKEN_LIFETIME = timedelta(days=365)
+
+
 def issue_token(application, label, *, actor=None, expires_at=None):
+    # Both halves of the bound live here, so the ceiling holds for a caller that
+    # does not go through the serializer. The serializer still rejects an
+    # out-of-bounds value rather than silently clamping it, because a person who
+    # typed a date deserves to be told it was refused.
+    ceiling = timezone.now() + MAX_TOKEN_LIFETIME
+    if expires_at is not None and timezone.is_naive(expires_at):
+        # DRF hands over an aware datetime; a shell or management-command caller
+        # may not, and comparing the two raises TypeError. Interpret it in the
+        # configured timezone rather than failing on the clamp.
+        expires_at = timezone.make_aware(expires_at)
+    expires_at = ceiling if expires_at is None else min(expires_at, ceiling)
     secret = secrets.token_urlsafe(48)
     record = ServiceAccessToken.objects.create(
         application=application, label=label, digest=token_digest(secret),

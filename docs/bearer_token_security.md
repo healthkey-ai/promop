@@ -27,7 +27,8 @@ classes deliberately placed on these #1144 surfaces:
 The capability is valid only for `POST`, `PUT`, and `PATCH`. Ordinary scoped
 permissions do not recognize it. In particular, the clinical `bulk_delete`
 actions use the ordinary permission even though they are implemented as POST,
-so the ETL capability cannot delete through them. Defaults remain read-only and
+so the ETL capability cannot delete through them. Retracting rows needs the
+separate `system/etl.delete` grant. Defaults remain read-only and
 production is not broadened.
 
 ## Why this is not a SMART scope plus an HTTP-method grant
@@ -53,8 +54,9 @@ compromise of one consumer compromises the credential.
 | Threat | Control |
 | --- | --- |
 | A holder calls an unrelated write endpoint | Only ETL-marked permissions accept `system/etl.write` |
-| A holder deletes through HTTP DELETE | The ETL capability never accepts DELETE |
-| A holder calls a POST-based bulk delete | Bulk-delete actions retain ordinary scoped permission and reject the ETL capability |
+| A holder deletes through HTTP DELETE | `system/etl.write` never accepts DELETE |
+| A holder calls a POST-based bulk delete | Bulk-delete actions accept only ordinary scoped permission or `system/etl.delete` |
+| An ETL must retract clinical rows | A credential is granted `system/etl.delete` separately; it reaches only clinical row DELETE and `bulk_delete` |
 | A holder reaches staff or organization administration | The identity remains non-staff and has no org-admin grant |
 | Configuration is missing | The default is only `patient/*.read` |
 | Configuration is empty or malformed | Unknown or absent scopes fail closed |
@@ -108,7 +110,9 @@ For a request authenticated by `ServiceTokenAuthentication`:
 4. An explicitly ETL-enabled permission may additionally accept
    `system/etl.write`, but only for POST, PUT, or PATCH.
 5. Destructive overrides such as POST-based bulk delete retain the ordinary
-   permission, so the custom capability is rejected before endpoint code runs.
+   permission, so `system/etl.write` is rejected before endpoint code runs.
+6. `system/etl.delete` is a separate grant (#1947). It is accepted only on the
+   five clinical resources: row level DELETE and the POST `bulk_delete`.
 
 OAuth2, partner, and session authorization behavior is unchanged. The custom
 ETL capability is accepted only for the legacy service-token authentication

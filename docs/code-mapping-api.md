@@ -67,6 +67,121 @@ source value according to your normal unmapped-data policy and do not write the
 }
 ```
 
+### Text terms from documents
+
+A document extractor has wording, not a code: "Hemoglobin 10.2 g/dL". Send
+the wording as the code with an **empty** `source_vocabulary_id` (the Uncoded
+vocabulary), and whatever context the document gives:
+
+```json
+{
+  "codes": [
+    {
+      "source_vocabulary_id": "",
+      "source_code": "Hemoglobin",
+      "omop_table": "measurement",
+      "source_unit": "g/dL",
+      "quantity": 10.2,
+      "specimen": "blood"
+    }
+  ]
+}
+```
+
+A term goes through the same resolver as every code, so there is one matcher,
+not two: a curated mapping for the term wins; a term with an approved **axis
+variant** in that unit resolves to the variant's LOINC, keyed `"|term|unit"`
+like a hospital code; a new term is offered to Suggest, whose candidates are
+filtered by the LOINC axes the unit, value and specimen settle (a term in
+mmol/L is never offered a mass-concentration code); and the term is queued
+for curators under the **Uncoded** tab with the unit and context stored as
+evidence. Once a curator approves it, every later document resolves.
+
+Entries are keyed `"|term"` after whitespace is collapsed and the term cut to
+100 characters, and matched case-insensitively, so "M-Protein, Serum" and
+"M-PROTEIN,  SERUM" are one queue row. Terms are global, not per
+organization.
+
+What a text entry adds to the answer:
+
+```json
+{
+  "status": "proposed",
+  "resolved": false,
+  "match": "ambiguous",
+  "candidates": [
+    {"concept_id": 3020491, "concept_name": "Glucose [Moles/volume] in Serum or Plasma",
+     "concept_code": "14749-6", "vocabulary_id": "LOINC", "domain_id": "Measurement",
+     "lexical_score": 0.42, "axes_matched": 2,
+     "loinc_axes": {"component": "Glucose", "property": "SCnc", "time_aspect": "Pt",
+                    "system": "Ser/Plas", "scale_type": "Qn", "method_type": ""}}
+  ]
+}
+```
+
+| `match` | Meaning |
+|---|---|
+| `resolved` | A curated mapping (or its variant for this unit) answered; `resolved` is `true`. |
+| `ambiguous` | Nothing curated yet. `candidates` are the axis-filtered options, best first, for a reviewer. |
+| `unresolved` | Nothing curated and nothing retrieved. |
+
+Only `resolved: true` permits a write. `candidates` are review aids, like
+`proposed_target_concept_id`. A term nothing matched is queued with **no**
+destination: no placeholder concept is minted for a document phrasing.
+
+The response carries `matcher_version`; record it on each run so a later
+re-run is explainable. A term seen in a second unit is flagged with axis
+variants in the queue, exactly as a hospital code is, and a curator can give
+each unit its own LOINC.
+
+### Axis variants and Suggest
+
+`GET /api/v1/code-mappings/<id>/loinc-axes/` lists a code's axis variants;
+`POST .../axis-variants/` points one at a destination (`approve: true`
+re-points its stored rows). `POST .../axis-variants/suggest/` (#2012) takes
+`{strategies?, ranking_model?, loinc_axes?, replace?}` and suggests a standard
+LOINC for every variant without a destination (every proposed one with
+`replace`), storing each as proposed; approved variants are never touched.
+Each variant is suggested as the code would be with that variant's axis
+values added to the curator's entries, so the mmol/L variant of a glucose
+code is only ever offered a substance concentration. A winner that is not a
+standard LOINC in the mapping's domain is dropped and reported in `note`. The
+response is the axes payload plus `suggestions`, one per variant considered.
+At most five variants are suggested per call. The Edit Mapping dialog calls
+this from its Suggest button when the code has two or more variants, and the
+Concept to Code preview calls it for each flagged candidate.
+
+Flags refresh after each source-code upload for the codes it touched. The bulk
+refresh of every multi-unit code on the instance is a worker job (#2021):
+`manage.py refresh_axis_variants --rebuild-evidence` or migration `0307` has the
+walk first rewrite each code's stored unit evidence from the instance's own
+patient data (#2043).
+`manage.py refresh_axis_variants --queue` or migration `0303` records an
+`axis_variant_refresh` request and the Celery worker performs it, with `keys`,
+`done`, `refreshed` and a `progress_at` heartbeat on the row as it goes. A
+deploy that replaces the worker mid-walk kills the task; the next sweep, at
+worker boot or on a live worker's five-minute recheck (#2048), sees the stale
+heartbeat, requeues the request and resumes it after its `cursor` (#2023). It never runs inside `migrate`:
+on the HealthTree instance it outlived the Cloud Run migrate job's hour, and
+no deploy reached traffic until the walk was moved off the release step. A
+worker publishes any request still queued when it starts, so a request a
+pre-upgrade worker dropped as an unknown task is picked up by the next one.
+
+A source with LOINC axis evidence has no SNOMED evidence: an axis the records
+or a curator settled, units that imply several axis sets (variants), or a lab
+signal (a LOINC code or coding, a laboratory category). `GET
+.../snomed-attributes/` answers `applies: false` with the reason in
+`loinc_evidence`, and the dialog hides the SNOMED section (#2014).
+
+Record units settle the shared axes before the metadata's one sample does:
+every record in a mass-concentration unit settles Property `MCnc`, and
+records carrying any unit settle Scale `Qn`, even when the stored metadata
+holds only a reference-range unit. When the units imply several axis sets the
+panel leads with the variants, their units and destinations, and folds the
+shared axes under them.
+
+The term is never written to a log.
+
 The endpoint is an ingest encounter operation, not a cacheable reference GET:
 responses include `Cache-Control: no-store`. Send one entry for each distinct
 code encounter that should count toward review priority. Clients must avoid
@@ -75,6 +190,411 @@ is another recorded encounter.
 
 The Code Mapping UI list and curator CRUD endpoints are different APIs. Browsing
 or searching those endpoints never changes `Seen`.
+
+## Reading the whole table
+
+A downstream warehouse (HealthTree's dbt models, for one) treats the mapping
+table as a source table rather than asking code by code. The list and detail
+endpoints serve that read to a service credential carrying `system/*.read`
+(#2340), the same scope that reads the vocabulary releases: mapping rows are
+curated reference data, not patient data, and that scope still reaches no
+patient endpoint.
+
+```http
+GET /api/v1/code-mappings/?status=approved
+Authorization: Bearer <service credential>
+```
+
+The response is a bare JSON array of mapping rows, `limit` to a page
+(default 100, at most 1000; outside that range is a 400). Pagination is in
+the headers: `X-Page-Size`, a `Link` header whose `rel="next"` URL is
+absolute (`https://` behind a proxy that passes `X-Forwarded-Proto`, as
+Render and Cloud Run do), and `X-Total-Count` where noted below. Follow the
+`Link` header until it carries no `rel="next"`.
+
+Two ways to page (#2451, #2513):
+
+- `page=N`, the default: offset pages in (vocabulary, code, id) order, with
+  `X-Page`, `X-Total-Count` on every page and a `rel="prev"` link. A row
+  written or deleted while you page shifts every later page, so rows can be
+  skipped or repeated. Fine for a look, not for a full read.
+- `sort=updated_at`: a cursor read in `(updated_at, id)` order, the shape a
+  warehouse export takes. Start with `sort=updated_at` and your filters; each
+  `rel="next"` URL carries `cursor=<token>`, and there is no `rel="prev"`.
+  A row written or re-saved mid-read gets a later `updated_at` than any you
+  have read, so it is delivered later in the same run (a re-saved row twice:
+  once as it was, once as it is), and a deleted one leaves no gap. A full
+  read therefore sees every row that existed throughout. `page` with a
+  cursor or `sort` is a 400, and `sort` accepts nothing but `updated_at`.
+
+The cursor is a token signed by the server that names the last row
+delivered and the query it was issued for; treat it as a string you only ever
+receive from a `Link` header, never one you build. Reusing it with a
+different `updated_since`, `sort` or filter is a 400 ("issued for a different
+query"), as is a token the server did not issue. `limit` and `include_total`
+may change between pages. The signing key is the deployment's `SECRET_KEY`,
+so a cursor survives a key rotation only while the old key is in
+`SECRET_KEY_FALLBACKS`; a 400 on a `Link` URL you did not alter means start
+the run again without a cursor.
+
+`include_total=true` adds `X-Total-Count`, the count of rows matching the
+filters (not the rows remaining), to each page of a cursor read. It is one
+full count of the table, so it is not computed unless asked for.
+
+`updated_since=<RFC 3339 instant>` narrows to rows whose `updated_at` is at
+or after it, inclusive: `2026-11-13T00:00:00Z`, or with an offset such as
+`+02:00`. The offset is required; a bare date, a naive datetime or an
+instant that does not exist (30 February, hour 24) is a 400 rather than a
+guess at the zone. Percent-encode a `+` offset, or use `Z`.
+Three things to know about the delta:
+
+- It is additive. A deleted mapping is gone, not marked, so a nightly delta
+  never sees it. Reconcile deletions with a periodic full read
+  (`sort=updated_at` with no `updated_since`) and a set difference on
+  `mapping_id`.
+- Use the previous run's start time, less a margin, as the next
+  `updated_since`. A row re-saved and committed after you read it comes round
+  again in the same run, because its new `updated_at` is later than your
+  cursor. A row stamped inside a long writer transaction (a
+  `copy_reference_data` run, a bulk upload or a maintenance command) can
+  commit after your cursor has passed that stamp; the next delta delivers it
+  only if the margin covers clock skew *and* the longest such transaction.
+- It tracks curation, not sightings. Every writer that changes a row's
+  destination, status, description or source concept stamps `updated_at`,
+  including the bulk maintenance commands and `copy_reference_data` (a
+  copied row carries this instance's clock, not the source's). The Seen
+  count (`occurrence_count`, `first_seen`, `last_seen`) and the stored unit
+  evidence are counters that ingest bumps on every sighting; they do not
+  stamp it, or every row would be "updated" every night.
+Filters: `status` (`approved`, `proposed`, `rejected`), `source` (a source
+vocabulary id), `organization` (an organization slug, or `__none__` for
+instance-wide rows) and `search`, which matches the source code, the source
+vocabulary id and the destination concept's name and code, not the source
+description.
+
+Each row carries `status`, `source_vocabulary_id`, `source_code`,
+`source_code_description`, the destination (`destination_concept_id`,
+`destination_concept_code`, `destination_concept_name`,
+`destination_vocabulary_id`, `destination_domain_id`, `destination_omop_table`),
+`organization_slug`, `reviewer` and `reviewed_at`, and `occurrence_count`. A
+wearable row also describes its source metric: `category`, `measure_class`
+(how the source produces the value) and `metric_key`, the vendor-neutral key
+the Apple, Garmin, OpenWearables and HL7 PHR codes for one metric share; all
+three are `""` on other rows. A
+queue row with no destination yet has `destination_concept_id: null` and,
+normally, `status: "proposed"`. Consume as a vocabulary only `approved` rows
+with a destination; everything else is a gap.
+
+A machine reads the table, not the curation evidence: for a service credential
+the per-patient samples a curator sees (`example_quantity`, `sample_quantities`,
+`based_on`) come back empty, and `GET /api/v1/code-mappings/<id>/` returns the
+row without `source_evidence`, the stored metadata as the code arrived.
+
+The read is the whole of what a machine credential may do here. POST, PATCH
+and DELETE still require a professional session, so every change to a mapping
+has a reviewer and a history. A credential needs `system/etl.write` as well to
+call the lookup above; one token may hold both scopes.
+
+## Downloading the Wearables tab
+
+```
+GET /api/v1/code-mappings/wearables-export/?file_format=csv
+GET /api/v1/code-mappings/wearables-export/?file_format=docx
+GET /api/v1/code-mappings/wearables-export/?file_format=csv&sources=Apple,Garmin
+```
+
+Every mapping on the Wearables tab (the Apple HealthKit, Health Connect, Garmin,
+OpenWearables and HL7 PHR source vocabularies) as one file, for use outside the
+app. Rejected mappings and a hospital's own override of a code are left out.
+The Word document is refused with a 400 above 5,000 mappings; the CSV is not
+limited. Send `Accept: */*` (or none): DRF negotiates content before the view
+runs, and `Accept: text/csv` alone is answered 406. On the
+Code Mapping page it is "Download all wearable mappings" on the Wearables tab.
+It needs a session with a role that reads the mapping pages (staff, org admin,
+doctor or analyst); anyone else gets 403.
+
+| `file_format` | Response |
+|---|---|
+| `csv` (the default) | `text/csv; charset=utf-8`, one line per mapping under a header row |
+| `docx` | a Word document with one table per category, for reading and sharing |
+| anything else | 400 |
+
+The parameter is `file_format` because the API framework reserves `format`.
+The response is an attachment named `wearable-mappings-YYYY-MM-DD.csv` or
+`.docx` and is not cached.
+
+`sources` limits the file to some source code systems: the vocabulary ids
+`Apple` (HealthKit), `HealthConnect`, `Garmin`, `OpenWearables`, `HL7-PHR` and
+`CDISC-BC`, separated by commas or by repeating the parameter. Absent, blank
+or empty is every system (the default); an id that is not one of these is a
+400. The systems a file can be limited to are listed in
+`wearable_source_systems` of `GET /api/v1/code-mappings/reference/`
+(`[{id, label}]`, in the order a metric's codes are listed). A limited file's
+name ends with the systems (`wearable-mappings-apple-garmin-YYYY-MM-DD.csv`)
+and a Word document says so under its title. With `destination=cdisc-bc` the
+limit applies to the wearable codes: the Biomedical Concepts are still found
+through every mapping, whatever the systems chosen.
+
+The file holds every row of the tab in every section, proposed and approved,
+mapped and not yet mapped, **without rejected rows**. Rows are ordered by
+category, then metric key, then source (HealthKit, Health Connect, Garmin,
+OpenWearables, HL7 PHR), then source code, so the codes that report one metric
+sit together.
+
+CSV columns:
+
+| Column | Holds |
+|---|---|
+| Category, Measure class, Metric key | what the row says about the source metric (`category`, `measure_class`, `metric_key`) |
+| Source | the source vocabulary by name: HealthKit for `Apple`, Health Connect, Garmin, OpenWearables, HL7 PHR |
+| Source code, Description | the code as it arrives and its description |
+| Source unit | the units the source reports, joined with "; " |
+| Destination vocabulary, Destination code, Destination concept, OMOP concept ID | the destination concept; all blank while the code has none |
+| Domain | the destination's OMOP domain, or the domain the code is filed under while it has no destination |
+| Destination unit | the curated unit values are stored in (a UCUM code), blank when none is set |
+| Status | `proposed` or `approved`. Consume only `approved` rows with a destination as a vocabulary |
+| Provenance | what wrote the mapping (`origin_system`) |
+
+The file carries no patient value, reviewer or note. A cell that begins with
+`=`, `+`, `-`, `@`, a tab or a carriage return is written with a leading
+apostrophe, so a spreadsheet shows it as text; strip that apostrophe when
+reading the file with a program. For a program, the list endpoint above is
+the better read: it is paged, filterable and carries `updated_at`.
+
+In the Word document long identifiers wrap at invisible zero-width spaces.
+Copy exact codes from the CSV, not from the document.
+
+## Public voting on the wearable proposals
+
+A mapping administrator can put the wearable mapping proposals to a vote by
+people who have no account, such as a standards working group. The
+administrator makes a link (Share, on the Wearables tab); a voter opens it,
+chooses Yes or No or writes a comment on any proposal, gives an email address
+and submits.
+
+**Votes are not recorded until the voter confirms them from an email**, and
+**a vote never changes a mapping**: curators read the votes and approve or
+reject as before.
+
+### Signed in
+
+```
+GET    /api/v1/code-mappings/vote-shares/
+POST   /api/v1/code-mappings/vote-shares/                 {"title": "...", "note": "...", "expires_at": "2027-01-31", "source_vocabularies": ["Garmin"]}
+POST   /api/v1/code-mappings/vote-shares/<id>/revoke/
+DELETE /api/v1/code-mappings/vote-shares/<id>/
+GET    /api/v1/code-mappings/vote-shares/<id>/votes-export/
+GET    /api/v1/code-mappings/<mapping_id>/votes/
+```
+
+Reading the list of shares and a mapping's votes needs a role that reads the
+mapping pages. Everything else is for **staff and org admins**, the people
+who approve mappings: creating, revoking and deleting a share, the CSV, a
+share's `url`, and a voter's address. An analyst writes mappings and manages
+no share. A service token reaches none of these endpoints.
+
+`title` is required, one line, at most 200 characters, shown to voters and
+quoted in the confirmation email, so it may not contain a link (`http://`,
+`https://`, `www.`). `note` (at most 2,000) is shown on the page under the
+title and is not in the email. `expires_at` is optional: a date (through the
+end of that day, UTC) or an RFC 3339 instant with its offset, in the future
+and within two years.
+
+The list:
+
+```json
+{"results": [{"id": 4, "title": "HL7 PHR working group review", "note": "", "created_at": "...",
+              "expires_at": null, "revoked_at": null, "active": true, "voters": 7, "votes": 61,
+              "url": "https://<app>/vote#<token>"}],
+ "can_manage": true, "email_configured": true, "base_url_configured": true}
+```
+
+`voters` is the number of addresses that confirmed at least one vote. `url`
+is present only for an administrator. `email_configured` is false when the
+deployment has no real mail backend, in which case no voter can receive a
+confirmation link; `base_url_configured` is false when the links would point
+at `localhost`.
+
+**Revoke** stops the link at once, keeps the confirmed votes and discards
+submissions still waiting for confirmation. **Delete** (204) erases the share
+with its votes, the voters' addresses on them and anything pending. Use it
+for junk votes and when a voter asks to be removed.
+
+A mapping's votes:
+
+```json
+{"tally": {"yes": 3, "no": 1, "comments": 2}, "emails_included": true,
+ "votes": [{"id": 9, "choice": "yes", "comment": "", "confirmed_at": "...",
+            "share_id": 4, "share_title": "HL7 PHR working group review",
+            "stale": false, "voter_email": "..."}]}
+```
+
+`choice` is `yes`, `no` or `""` for a comment alone. `stale` is true for a
+vote cast on a destination the mapping has since moved off; stale votes are
+kept and are not in `tally`. `voter_email` is absent, and `emails_included`
+false, for anyone but an administrator. Each row of the mapping list
+(`GET /api/v1/code-mappings/`, browse and flat, for a session) carries the
+same tally as `votes`; a single-mapping response and a service token's read
+do not.
+
+The CSV has one line per confirmed vote: Share, Category, Metric key, Source,
+Source code, Description, Voted on destination (`vocabulary:code`), Voted on
+concept, OMOP concept ID, Vote, Comment, Voter email, Confirmed at, Stale. It
+follows the conventions of the Wearables download above: a byte order mark,
+and a leading apostrophe on any cell a spreadsheet would run as a formula,
+which matters here because comments are whatever a stranger typed.
+
+### For voters (no account)
+
+The links a voter is given are pages of the app, with the token as the URL
+fragment:
+
+```
+https://<app>/vote#<share token>
+https://<app>/vote/confirm#<confirmation token>
+```
+
+A browser does not send a fragment to any server, so a token is in no access
+log or Referer. The pages send it in a request body, and for that reason
+every public endpoint is a `POST` with a JSON object, the read included:
+
+```
+POST /api/v1/public/mapping-votes/                  {"token": "..."}
+POST /api/v1/public/mapping-votes/submit/           {"token": "...", "email": "...", "votes": [{"mapping": 12, "choice": "yes", "comment": ""}]}
+POST /api/v1/public/mapping-votes/confirm/preview/  {"token": "..."}
+POST /api/v1/public/mapping-votes/confirm/          {"token": "..."}
+```
+
+These read no session, set no cookie, answer JSON only and are never cached.
+No token is accepted in a path or a query string.
+
+The page lists the proposals open for voting: wearable mappings that are
+proposed, not hospital-specific, described (they carry a metric key) and have
+a destination concept. It is read live, so a proposal approved or rejected
+later drops off and a new one appears. Each proposal carries `id`,
+`metric_key`, `measure_class`, `source`, `source_code`, `description`,
+`destination_vocabulary`, `destination_code`, `destination_name` and `unit`,
+grouped by category in the Wearables download's order. Nothing else about a
+mapping is public.
+
+A submission names only the proposals the voter acted on. `choice` is `yes`,
+`no` or `""`; `comment` is at most 1,000 characters; an entry with neither is
+ignored, and a submission with none is a 400. So are an address that is
+invalid or cannot receive mail, an id that is not on the page (the answer
+does not say which), more votes than there are proposals, and text that is
+not valid Unicode. A body over 200 KB is a 413. Otherwise the answer is
+
+```
+202 {"detail": "Check your email to confirm your votes. They are not recorded until you confirm."}
+```
+
+whether or not that address has voted before, and whether or not it has
+reached its own daily limit. The email holds the share's title, the number
+of votes and comments and the confirmation link, and nothing the voter typed.
+
+`confirm/preview/` returns the pending votes and records nothing, however
+often it is called; the confirmation page calls it when it opens. `confirm/`
+records them, once, and answers `{"recorded": n, "skipped": m}`: `skipped`
+counts proposals that were approved, rejected, deleted or pointed at another
+destination since the voter read the page. One vote is kept per share,
+address and mapping, so confirming a later submission replaces the voter's
+earlier vote on the mappings it names and leaves the rest. The link is valid
+for 48 hours.
+
+A share token that is unknown, malformed, revoked or expired is the same
+`404 {"detail": "This link is not available."}`; a confirmation token that is
+unknown, malformed, used or expired is the same
+`404 {"detail": "This confirmation link is no longer valid."}`.
+
+### Limits
+
+Per client address, as `429`s: reading 60 a minute, submitting 30 an hour,
+the two confirmation endpoints together 60 an hour
+(`MAPPING_VOTE_READ_THROTTLE_RATE`, `MAPPING_VOTE_SUBMIT_THROTTLE_RATE`,
+`MAPPING_VOTE_CONFIRM_THROTTLE_RATE`). The client address is taken from
+`REMOTE_ADDR`, or, behind proxies, from the entry of `X-Forwarded-For` that
+`MAPPING_VOTE_PROXY_HOPS` names (see below).
+
+Counted in the database, so they hold across workers:
+
+| Limit | Default | Setting | Over it |
+|---|---|---|---|
+| unconfirmed submissions per share and address | 3 | `MAPPING_VOTE_MAX_PENDING_PER_EMAIL` | the oldest is replaced by the new one |
+| confirmation emails per address in 24 hours, across shares | 5 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY` | the usual 202; no email |
+| confirmation emails per share in 24 hours | 200 | `MAPPING_VOTE_MAX_EMAILS_PER_SHARE_PER_DAY` | 503 |
+| confirmation emails in 24 hours in total | 500 | `MAPPING_VOTE_MAX_EMAILS_PER_DAY_TOTAL` | 503 |
+
+The 503 is `{"detail": "Voting is temporarily unavailable. Please try again
+later."}`. An address is counted without a `+tag` on its local part, so
+`a+1@x.org` and `a+2@x.org` share one allowance; each still votes under the
+address as typed.
+
+### Running it
+
+- **Mail.** Voting needs working outbound email: the links are built from
+  `APP_BASE_URL` and sent through the deployment's mail backend
+  (`MAILGUN_API_KEY`, `MAILGUN_SENDER_DOMAIN`, `DEFAULT_FROM_EMAIL`). When
+  `CELERY_BROKER_URL` is set the worker sends the email, so the worker needs
+  those variables and `APP_BASE_URL` too; without a broker it is sent in the
+  request. `MAPPING_VOTE_EMAIL_TIMEOUT` (10 seconds) bounds the mail
+  service's call for these messages only.
+- **`MAPPING_VOTE_PROXY_HOPS`.** How many trusted proxies stand between a
+  voter and the app: `0` (the default) reads the socket's peer; `N` reads the
+  Nth entry from the right of `X-Forwarded-For`. Find the right value on each
+  platform by looking at the header a real request arrives with. Too high
+  and the entry read is one the client typed, so the limits can be dodged
+  with a made-up header; too low and it is a proxy's own address, so every
+  voter shares one bucket and a busy meeting gets 429s.
+- **Clearing unconfirmed submissions.** Every submission and every read of a
+  voting page deletes the expired ones. On a deployment nobody is voting on,
+  run `python manage.py purge_expired_vote_submissions` from a scheduler.
+
+## Uploading a source-code inventory
+
+Users with Code Mapping access can select **Upload** on the Code Mapping page,
+choose a CSV, name its source vocabulary, and set its provenance. Provenance
+defaults to the signed-in user's email but remains editable.
+
+The CSV header is case- and surrounding-whitespace-insensitive and must contain
+`source code` and `source description`. `seen count`, `destination concept ID`,
+and `state` are optional. An absent or blank seen count means zero. State accepts
+`Approved` or `Proposed` (case- and surrounding-whitespace-insensitive); an
+absent or blank state means `Proposed`. `Approved` requires a destination and
+is restricted to staff and organization admins. Unknown or duplicate headers,
+duplicate source codes, negative/non-integer counts, invalid states, malformed
+rows, and overlong values reject the entire upload with row-numbered errors.
+Uploads are limited to 5 MB and 100,000 nonblank data rows.
+
+For example, the complete five-column shape is:
+
+```csv
+source code,source description,seen count,destination concept ID,state
+A01,Albumin,8,3024561,Approved
+B02,Needs review,2,3024561,
+```
+
+The browser sends the form to:
+
+```http
+POST /api/v1/code-mappings/upload/
+Content-Type: multipart/form-data
+
+file=<CSV>
+source_vocabulary_id=VendorLab
+provenance=curator@example.com
+```
+
+New codes become proposed SCCM rows unless their state is explicitly Approved.
+A destination with Proposed or blank state remains in the review queue; only an
+Approved destination becomes effective and re-points matching clinical rows.
+Existing rows receive a nonblank description update and the uploaded count is
+added to `Seen`. When a destination is present, its state updates the mapping;
+without a destination, existing destination and review state are preserved.
+Notes and other curation fields are not changed. Provenance fills only a blank
+existing provenance value. The operation is atomic, and an immutable receipt
+records its result. Re-uploading identical CSV bytes for the same vocabulary
+and provenance returns that receipt with `duplicate: true` and does not add the
+counts again.
 
 ## What SCCM does under the hood
 
@@ -89,8 +609,12 @@ The lookup lifecycle is:
 2. Return an existing effective SCCM mapping. A curator-approved mapping wins
    over every automatic result.
 3. If an existing row is `proposed`, return it as unresolved and atomically
-   increment its `occurrence_count` and `last_seen`. Its target remains a
-   suggestion, never an effective mapping.
+   update its `last_seen` and `occurrence_count`. This endpoint asks once per
+   code per batch, not once per record, so its count is provisional (#2123):
+   it adds one only while the code has no per-patient rows on this instance,
+   and once they exist the count is set from them (per-record callers such as
+   FHIR sync always add one). Its target remains a suggestion, never an
+   effective mapping.
 4. On an SCCM miss, look up the code in loaded Athena vocabulary data. This is
    valid for every source vocabulary, including standard CPT4, LOINC, and
    SNOMED concepts. A successful direct match is materialized in SCCM as an
@@ -115,6 +639,53 @@ Curators approve, edit, reject, or replace proposed mappings in the Code
 Mapping UI. Approval makes the row effective and can re-point already stored
 clinical rows; that governed decision is why importers must never promote a
 proposal themselves.
+
+### SNOMED source identifiers
+
+The FHIR OID `urn:oid:2.16.840.1.113883.6.96` and `SNOMED` identify the same
+code system. Crossmap imports and new curator mappings store `SNOMED`; lookup
+accepts either spelling and preserves the caller's spelling in response keys.
+Source codes and destination concept IDs are not changed by this normalization.
+
+Migration `0260_normalize_snomed_oid_mappings` merges redundant imported OID
+rows into approved canonical mappings and normalizes alias-only rows. Only
+untouched HT-FHIR proposals with a matching, active standard SNOMED destination
+and consistent domain/table are automatically approved. Curator decisions,
+machine suggestions, invalid destinations and conflicting duplicates require
+review. A retained conflicting OID row continues to govern lookups using that
+OID, rather than silently falling through to the canonical row.
+
+Run `python manage.py audit_snomed_oid_mappings` for a read-only JSON preview.
+Duplicate merges retain the larger encounter count, earliest first-seen and
+latest last-seen timestamps, move candidate/review dependencies, and append the
+removed row's metadata to the survivor's notes. The migration does not rewrite
+clinical facts. It is irreversible: recovery requires a backup or manual
+reconciliation using those snapshots, accounting for subsequent curation.
+
+### Standard SNOMED identities and imported drug crossmaps
+
+A SNOMED code that is already an active OMOP standard concept does not need
+an automatic SNOMED-to-RxNorm translation. Crossmap imports prefer its exact
+SNOMED identity and its actual domain over the external crossmap destination.
+Existing mappings are not overwritten by re-imports.
+
+Migration `0261_prefer_standard_snomed_identities` corrects untouched imported
+proposals whose selected RxNorm destination is missing, nonstandard or invalid.
+It approves the matching active standard SNOMED concept, corrects domain/table
+metadata, retains imported candidates and encounter counts, and snapshots the
+old mapping in notes. Approved/rejected mappings, human edits, machine-suggestion
+decisions, locks and conflicting non-RxNorm candidates are protected. The
+resolver applies the same eligibility rules when it encounters a remaining
+crossmap proposal. Preview with `python manage.py audit_snomed_crossmap_identities`.
+
+Standard status belongs to a concept, not to the SNOMED vocabulary as a whole.
+Nonstandard or inactive SNOMED sources are not automatically self-mapped.
+An automatic Observation identity is usable for an Observation request, not a
+Drug request. Device identities remain approved reference mappings, but have
+no supported clinical table in this application and cannot resolve as drug
+exposures. Incompatible requests return `resolved: false`, the actual mapping
+domain/table, and `unresolved_reason: "destination_domain_or_validity_mismatch"`.
+Clinical facts are not moved between tables by either migration.
 
 ### Why curation lives in SCCM
 
@@ -165,3 +736,42 @@ excluded from the latest batch-run link. Requests without `async: true` retain
 the synchronous response, which now also includes the complete candidate pool.
 As with batch runs, live polling requires the queued dispatcher; inline execution
 returns all completed stages in the initial response.
+
+### Repair nonstandard SNOMED crossmap destinations from local relationships
+
+Migration `0262_reconcile_snomed_local_relationships` follows the identity repair.
+It starts with untouched imported SNOMED proposals whose RxNorm destination is
+missing or nonstandard, locates the source in `concept`, and reads its current
+outgoing `Maps to` rows from `concept_relationship`. It uses each environment's
+installed tables: there is no bundled mapping data, network lookup, export, or
+instance-specific ID list. Counts therefore depend on local vocabulary coverage.
+
+A single active standard destination becomes approved. Multiple active standard
+destinations replace the old candidates and remain proposed with no selected
+target, for curator review. No valid destination leaves the row unchanged. Only
+direct SNOMED relationships are used; indirect RxNorm recovery is deferred.
+Retired source codes can be resolved through their still-current relationships.
+Missing relationship targets are reported as incomplete evidence rather than
+approving from an incomplete target set. Destinations in deprecated vocabularies,
+locally authored concepts, and invalid/nonstandard destinations are excluded.
+
+Approval uses the destination's actual domain. Domains without clinical storage
+support (including Device) retain a blank table and cannot resolve as Drug.
+The resolver also leaves the multiple-destination queue for curator selection.
+Reimporting the HealthTree artifact preserves the repaired candidate set.
+
+Approved/rejected mappings, human attribution, locks, suggestion decisions and
+archived suggestion reviews are protected. The migration rechecks row eligibility
+under locks in bounded transactions. It preserves encounter counts, descriptions,
+source provenance and review history; original mapping/candidate definitions and
+relationship evidence are recorded in notes before replacement. Only SCCM and
+its destination candidates are written; concepts, relationships and clinical
+facts are unchanged. Repeated execution does not modify repaired rows. This is
+irreversible automatically: use the audit snapshots or a backup for manual
+recovery rather than overwriting later curation.
+
+Preview without writes or locks:
+
+```sh
+python manage.py audit_snomed_relationship_mappings
+```

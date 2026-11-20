@@ -1,0 +1,733 @@
+"""Concept-first review using the existing SCCM approval semantics."""
+from datetime import timedelta
+from uuid import UUID
+
+from django.db import OperationalError, transaction
+from django.utils import timezone
+from django.db.models import Count, F, Q
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from omop_core.models import (
+    AxisVariantRefresh, ConceptMappingNote, ConceptMappingPriority, FieldConceptMapping, PatientSourceCode,
+    SourceCodeConceptMapping, SuggestRun,
+)
+from omop_core.services import concept_lock
+from omop_core.services import concept_to_code as concept_browse
+from omop_core.services.concept_to_code import (
+    CONCEPT_ORDERS, WEARABLES_DOMAIN, browse_concepts, category_summary, concept_payload, eligible_sources,
+    order_concepts, source_payload, standard_destinations,
+)
+from omop_core.services.mapping_samples import attach_source_samples
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
+from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
+
+PAGE_SIZE = 50
+# The concept list may show more per page, so a curator can drag a concept
+# from what would be a later page into the priority order (#1914).
+CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
+# `view=categories` asks for the category headers alone (#2699).
+CONCEPT_VIEWS = ('categories',)
+
+
+def _authorize(user, *, write=False):
+    """Every professional role reads the tab; writing needs the analyst grant,
+    org_admin or staff (#2416)."""
+    from patient_portal.api.views import _can_manage_mappings, _can_view_mappings
+    if not _can_view_mappings(user):
+        raise PermissionDenied('Professional access required.')
+    if write and not _can_manage_mappings(user):
+        raise PermissionDenied('Mapping curator access required.')
+
+
+def _page_number(params):
+    try:
+        page = int(params.get('page', 1))
+        if page < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        raise ValidationError({'page': 'Enter a positive whole number.'})
+    return page
+
+
+def _paginate(queryset, params, page_size=PAGE_SIZE, count=None):
+    """One page of `queryset`. A caller that has already counted it passes `count`."""
+    page = _page_number(params)
+    if count is None:
+        count = queryset.count()
+    page = min(page, max(1, (count + page_size - 1) // page_size))
+    return queryset[(page - 1) * page_size:page * page_size], {
+        'page': page, 'page_size': page_size, 'total': count,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_list(request):
+    _authorize(request.user)
+    params = request.query_params
+    if params.get('scope', 'fields') not in ('fields', 'all'):
+        raise ValidationError({'scope': 'Choose fields or all.'})
+    if params.get('domain') and params['domain'] not in (*DOMAIN_TO_TABLE.values(), WEARABLES_DOMAIN):
+        raise ValidationError({'domain': 'Unknown clinical table.'})
+    if params.get('status') and params['status'] not in ('approved', 'proposed'):
+        raise ValidationError({'status': 'Choose approved or proposed.'})
+    if params.get('disease'):
+        from omop_core.services.disease_relevance import diseases
+        supported = diseases()
+        if params['disease'] not in supported:
+            raise ValidationError({'disease': f'Choose one of {", ".join(supported)}.'})
+    try:
+        page_size = int(params.get('page_size', PAGE_SIZE))
+    except (TypeError, ValueError):
+        page_size = 0
+    if page_size not in CONCEPT_PAGE_SIZES:
+        raise ValidationError({'page_size': f'Choose one of {", ".join(map(str, CONCEPT_PAGE_SIZES))}.'})
+    order = params.get('order') or 'category'
+    if order not in CONCEPT_ORDERS:
+        raise ValidationError({'order': f'Choose one of {", ".join(CONCEPT_ORDERS)}.'})
+    view = params.get('view') or ''
+    if view and view not in CONCEPT_VIEWS:
+        raise ValidationError({'view': f'Choose {" or ".join(CONCEPT_VIEWS)}, or leave it out.'})
+    _page_number(params)  # a malformed page is refused before anything is read
+    concepts, fields, annotations = browse_concepts(params)
+    # Counted once, here: the total decides the order as well as the paging.
+    # Sorting and counting by category is one more pass over the whole
+    # filtered list, so it is done only for a list short enough to afford it;
+    # a longer one keeps the priority order and is not grouped.
+    total = concepts.count()
+    limit = concept_browse.CONCEPT_CATEGORY_GROUP_LIMIT
+    grouped = order == 'category' and total <= limit
+    if not grouped:
+        order = 'priority'
+    categories = category_summary(concepts, params) if grouped else None
+    domains = FieldConceptMapping.objects.exclude(status='rejected').filter(
+        concept_id__in=standard_destinations().values('pk'),
+    ).values('omop_table').annotate(count=Count('concept_id', distinct=True)).order_by('omop_table')
+    if view == 'categories' and grouped:
+        # The headers alone: the page opens a category to ask for its rows, so
+        # no row, field, lock or note is read, and the cost does not grow with
+        # the concepts. A list that is not grouped has no headers to show and
+        # returns its page of rows as usual, so the caller needs no second request.
+        return Response({
+            'page': 1, 'page_size': page_size, 'total': total, 'domains': list(domains),
+            'order': order, 'grouped': True, 'group_limit': limit, 'categories': categories,
+            'results': [], 'prioritized': ConceptMappingPriority.objects.count(),
+        })
+    page, paging = _paginate(order_concepts(concepts, params, order), params, page_size, count=total)
+    page = list(page.annotate(**annotations))
+    field_map = {}
+    for field in fields.filter(concept_id__in=[concept.pk for concept in page]).order_by('field_name'):
+        field_map.setdefault(field.concept_id, []).append({
+            'field_name': field.field_name, 'status': field.status, 'omop_table': field.omop_table,
+        })
+    locks = concept_lock.locks_for([concept.pk for concept in page], request.user)
+    notes = _notes_for([concept.pk for concept in page])
+    return Response({
+        **paging, 'domains': list(domains),
+        # The order in force, whether the rows are in category order, and
+        # then every category of the filtered list with its size, in order.
+        'order': order, 'grouped': grouped, 'group_limit': limit, 'categories': categories,
+        'results': [{**concept_payload(concept), 'category': concept.category,
+                     'fields': field_map.get(concept.pk, []),
+                     'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
+                     'seen': concept.seen, 'priority': concept.priority,
+                     'done': concept.done, 'lock': locks.get(concept.pk),
+                     'note': notes.get(concept.pk)} for concept in page],
+        'prioritized': ConceptMappingPriority.objects.count(),
+    })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_priority(request):
+    """Rank one concept at a position, or unrank it with position null (#1914).
+
+    One concept per request, so a move from a filtered or paged view needs no
+    knowledge of the rest of the list: the server renumbers it.
+    """
+    from omop_core.services import concept_priority
+    _authorize(request.user, write=True)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept_id, position = data.get('concept_id'), data.get('position', 'missing')
+    if type(concept_id) is not int or concept_id <= 0:
+        raise ValidationError({'concept_id': 'Supply a positive integer concept ID.'})
+    if position is not None and (type(position) is not int or position < 1):
+        raise ValidationError({'position': 'Supply a position of 1 or more, or null to unrank.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    placed = concept_priority.move(concept, position, request.user)
+    return Response({'concept_id': concept.pk, 'position': placed,
+                     'prioritized': ConceptMappingPriority.objects.count()})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_done(request):
+    """Mark one concept Done, or return it to the queue (#2388).
+
+    Done unranks the concept; the list then shows it last, in italics.
+    """
+    from omop_core.services import concept_priority
+    _authorize(request.user, write=True)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept_id, done = data.get('concept_id'), data.get('done')
+    if type(concept_id) is not int or concept_id <= 0:
+        raise ValidationError({'concept_id': 'Supply a positive integer concept ID.'})
+    if type(done) is not bool:
+        raise ValidationError({'done': 'Supply true to mark the concept Done, false to return it to the queue.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    marked = concept_priority.mark_done(concept, done, request.user)
+    return Response({'concept_id': concept.pk, 'done': marked, 'position': None,
+                     'prioritized': ConceptMappingPriority.objects.count()})
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_lock(request, concept_id):
+    """Claim a concept (POST) or release it (DELETE) (#2390).
+
+    While one curator holds the concept, others can review but not map it.
+    POST is idempotent for the holder and 423 for anyone else; DELETE is for
+    the holder or staff.
+    """
+    _authorize(request.user, write=True)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    if request.method == 'POST':
+        lock = concept_lock.acquire(concept, request.user)
+        return Response({'concept_id': concept.pk, 'lock': concept_lock.lock_payload(lock, request.user)})
+    concept_lock.release(concept, request.user)
+    return Response({'concept_id': concept.pk, 'lock': None})
+
+
+def _note_payload(note):
+    """What a row shows: the note, who last wrote it and when."""
+    if note is None:
+        return None
+    return {'text': note.text, 'updated_by': concept_lock.user_display(note.updated_by),
+            'updated_at': note.updated_at}
+
+
+def _notes_for(concept_ids):
+    """{concept_id: payload} for the concepts of one page, in one query."""
+    rows = ConceptMappingNote.objects.filter(concept_id__in=concept_ids).select_related('updated_by')
+    return {note.concept_id: _note_payload(note) for note in rows}
+
+
+@api_view(['PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_note(request, concept_id):
+    """Save a concept's note (PUT), or clear it (DELETE, or PUT of a blank note) (#2411).
+
+    One shared note per concept; the last save wins. A note is commentary,
+    not a mapping write, so another curator's lock does not refuse it.
+    """
+    _authorize(request.user, write=True)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    text = ''
+    if request.method == 'PUT':
+        data = request.data
+        if not isinstance(data, dict) or not isinstance(data.get('note'), str):
+            raise ValidationError({'note': 'Supply the note as text; blank clears it.'})
+        text = data['note'].strip()
+        if '\x00' in text:
+            raise ValidationError({'note': 'The note holds a character that cannot be stored.'})
+        if len(text) > ConceptMappingNote.MAX_LENGTH:
+            raise ValidationError({'note': f'Keep the note to {ConceptMappingNote.MAX_LENGTH} characters or fewer.'})
+    if not text:
+        ConceptMappingNote.objects.filter(concept=concept).delete()
+        return Response({'concept_id': concept.pk, 'note': None})
+    note, _ = ConceptMappingNote.objects.update_or_create(
+        concept=concept, defaults={'text': text, 'updated_by': request.user},
+    )
+    return Response({'concept_id': concept.pk, 'note': _note_payload(note)})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_detail(request, concept_id):
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    mode = request.query_params.get('mode', 'linked')
+    if mode not in ('linked', 'available'):
+        raise ValidationError({'mode': 'Choose linked or available.'})
+    rows = (SourceCodeConceptMapping.objects.filter(target_concept=concept) if mode == 'linked'
+            else eligible_sources(concept))
+    search = request.query_params.get('search', '').strip()
+    if search:
+        rows = rows.filter(Q(source_code__icontains=search) | Q(source_code_description__icontains=search)
+                           | Q(source_vocabulary_id__icontains=search))
+    from omop_core.services.mapping_browse import apply_notes, apply_seen
+    # Before the counts, so they describe the codes the filter leaves (#2423).
+    rows = apply_notes(rows, request.query_params)
+    counts = rows.aggregate(encountered=Count('pk', filter=Q(occurrence_count__gt=0)),
+                            zero_seen=Count('pk', filter=Q(occurrence_count=0)))
+    # Seen > 0 narrows the work queue (the codes that could be mapped here),
+    # never the stored mappings: a concept's mapped codes are all listed, as
+    # the Code to Concept page lists its Mapped sections (#1648), so the
+    # concept list's counts and this list agree. A platform's own code
+    # (HealthKit, Health Connect, OpenWearables) is seeded with Seen 0 and
+    # was hidden here while the concept list counted it (#2686).
+    seen = apply_seen(rows, request.query_params)  # a malformed seen_only is a 400 in either mode
+    if mode == 'available':
+        rows = seen
+    # The dialog lists approved, proposed and rejected mappings as separate
+    # groups (#2010); counts cover every status so a collapsed group can show
+    # how many rows it holds before it is fetched. Available rows are all
+    # proposed by construction, so only linked mode counts.
+    statuses = [status for status, _ in SourceCodeConceptMapping.STATUS_CHOICES]
+    status = request.query_params.get('status', '')
+    if status not in ('', *statuses):
+        raise ValidationError({'status': 'Choose approved, proposed or rejected.'})
+    status_counts = None
+    if mode == 'linked':
+        status_counts = dict.fromkeys(statuses, 0)
+        status_counts.update(dict(rows.order_by().values_list('status').annotate(count=Count('pk'))))
+    if status:
+        rows = rows.filter(status=status)
+    order = request.query_params.get('order', '')
+    if order not in ('', 'confidence', '-confidence'):
+        raise ValidationError({'order': 'Choose confidence or -confidence.'})
+    ordering = ['-occurrence_count', 'source_vocabulary_id', 'source_code', 'pk']
+    if order:
+        # Rows no ranker scored sort last in either direction.
+        confidence = F('suggestion_confidence')
+        ordering.insert(0, confidence.desc(nulls_last=True) if order == '-confidence'
+                        else confidence.asc(nulls_last=True))
+    page, paging = _paginate(rows.select_related('target_concept').prefetch_related('axis_variants__target_concept')
+                             .order_by(*ordering), request.query_params)
+    attach_source_samples(page)
+    return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
+                     'results': [source_payload(row) for row in page]})
+
+
+SOURCE_EXAMPLE_LIMIT = 3
+# Candidate inventory rows read before access filtering. A curator who can see
+# few of the patients holding a common code may get fewer than the limit; the
+# bound keeps the per-patient access checks below from growing with the code.
+SOURCE_EXAMPLE_SCAN = 50
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_source_examples(request):
+    """Up to three patients whose ETL inventory carries this exact source code.
+
+    Each example is that patient's `PatientSourceCode` row: the Source Metadata
+    a curator checks before approving a mapping (#1911). Read-only. Patient
+    source data has the same audience as the patient Source Codes tab --
+    administrators -- and each patient passes the same check as opening their
+    record, so a curator never sees a patient they could not open.
+    """
+    from omop_core.authorization import can_access_patient
+    from omop_core.models import PatientSourceCode
+    from omop_core.services.access import get_admin_orgs
+    from patient_portal.api.permissions import get_request_org
+    from patient_portal.api.views import _is_admin_actor
+
+    _authorize(request.user)
+    if not _is_admin_actor(request):
+        raise PermissionDenied('Only administrators can view patient source metadata.')
+    params = request.query_params
+    vocabulary = str(params.get('source_vocabulary_id') or '').strip()
+    code = str(params.get('source_code') or '').strip()
+    if not code:
+        raise ValidationError({'source_code': 'Supply the source code.'})
+    omop_table = str(params.get('omop_table') or '').strip()
+    if omop_table and omop_table not in DOMAIN_TO_TABLE.values():
+        raise ValidationError({'omop_table': 'Unknown clinical table.'})
+    # "More patients": ids the dialog already shows are skipped, so each call
+    # returns the next up-to-three.
+    try:
+        excluded = {int(part) for part in str(params.get('exclude_person_ids') or '').split(',') if part.strip()}
+    except ValueError:
+        raise ValidationError({'exclude_person_ids': 'Supply comma-separated patient ids.'})
+
+    # The ETL posts the system URI it received; mappings store the canonical id.
+    aliases = [vocabulary, *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
+                             if canonical == vocabulary]]
+    rows = PatientSourceCode.objects.filter(
+        source_vocabulary_id__in=aliases, source_value=code,
+        person__patient_record__isnull=False,
+    )
+    if omop_table:
+        rows = rows.filter(Q(omop_table=omop_table) | Q(omop_table=''))
+    if excluded:
+        rows = rows.exclude(person_id__in=excluded)
+    rows = rows.order_by('-occurrence_count', '-last_seen', 'pk').values(
+        'person_id', 'person__patient_record__organization_id', 'omop_table', 'occurrence_count',
+        'source_unit', 'source_unit_override', 'example_quantity', 'example_quantity_override',
+        'source_metadata', 'last_seen',
+    )[:SOURCE_EXAMPLE_SCAN]
+
+    org = get_request_org(request)
+    staff = bool(getattr(request.user, 'is_staff', False))
+    admin_org_ids = None if staff or org is not None else set(
+        get_admin_orgs(request.user).values_list('id', flat=True))
+
+    def visible(row):
+        organization_id = row['person__patient_record__organization_id']
+        if org is not None:
+            return organization_id == org.pk
+        if staff:
+            return True
+        return organization_id in admin_org_ids or can_access_patient(request.user, row['person_id'])
+
+    examples, seen = [], set()
+    for row in rows:
+        if row['person_id'] in seen or not visible(row):
+            continue
+        seen.add(row['person_id'])
+        examples.append({
+            'person_id': row['person_id'], 'omop_table': row['omop_table'],
+            'occurrence_count': row['occurrence_count'],
+            'source_unit': (row['source_unit_override'] if row['source_unit_override'] is not None
+                            else row['source_unit']),
+            'example_quantity': (row['example_quantity_override'] if row['example_quantity_override'] is not None
+                                 else row['example_quantity']),
+            'source_metadata': row['source_metadata'] or {},
+            'last_seen': row['last_seen'].isoformat() if row['last_seen'] else None,
+        })
+        if len(examples) == SOURCE_EXAMPLE_LIMIT:
+            break
+    return Response({'examples': examples})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_estimate(request, concept_id):
+    """How many source codes Suggest could find for one concept, before running it."""
+    from omop_core.mapping.reverse_suggestions import estimate_source_count
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    strategies = [s for s in request.query_params.get('strategies', 'umls,lexical').split(',') if s]
+    if not strategies or any(s not in ('umls', 'lexical') for s in strategies):
+        raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
+    include_zero = request.query_params.get('include_zero_seen', '0') == '1'
+    include_declined = request.query_params.get('include_declined', '0') == '1'
+    try:
+        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero,
+                                         include_declined=include_declined)
+    except (TimeoutError, OperationalError):
+        # Even the approximation outran its budget; the page says so.
+        return Response({'total': None, 'timed_out': True})
+    return Response({**estimate, 'timed_out': False})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_suggest(request):
+    _authorize(request.user, write=True)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    ids = data.get('concept_ids')
+    if not isinstance(ids, list) or not ids or any(type(value) is not int or value <= 0 for value in ids):
+        raise ValidationError({'concept_ids': 'Supply a nonempty list of positive integer concept IDs.'})
+    ids = list(dict.fromkeys(ids))
+    for concept_id in ids:
+        concept_lock.check_concept_lock(concept_id, request.user)
+    dispatcher = get_dispatcher()
+    inline = isinstance(dispatcher, InlineDispatcher)
+    max_concepts = 1 if inline else 10
+    if len(ids) > max_concepts:
+        raise ValidationError({'concept_ids': f'At most {max_concepts} concepts per run.'})
+    if standard_destinations().filter(pk__in=ids).count() != len(ids):
+        raise ValidationError({'concept_ids': 'Every destination must be a current standard concept in a clinical domain.'})
+    strategies = data.get('strategies', ['umls', 'lexical'])
+    if not isinstance(strategies, list) or not strategies or any(s not in ('umls', 'lexical') for s in strategies):
+        raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
+    ranking_model = data.get('ranking_model', 'none')
+    if ranking_model not in ('none', 'anthropic', 'jev', 'both'):
+        raise ValidationError({'ranking_model': 'Unknown ranker.'})
+    include_zero = data.get('include_zero_seen', False)
+    if type(include_zero) is not bool:
+        raise ValidationError({'include_zero_seen': 'Supply a boolean.'})
+    include_declined = data.get('include_declined', False)
+    if type(include_declined) is not bool:
+        raise ValidationError({'include_declined': 'Supply a boolean.'})
+    exclude_keys = data.get('exclude_keys', [])
+    if not isinstance(exclude_keys, list) or any(
+        not isinstance(pair, list) or len(pair) != 2
+        or not isinstance(pair[0], str) or not isinstance(pair[1], str)
+        for pair in exclude_keys
+    ):
+        raise ValidationError({'exclude_keys': 'Supply a list of [vocabulary_id, code] pairs.'})
+    exclude_keys = [tuple(pair) for pair in exclude_keys]
+    auto_propose_threshold = data.get('auto_propose_threshold', None)
+    if auto_propose_threshold is not None:
+        if not isinstance(auto_propose_threshold, (int, float)) or not 0 <= auto_propose_threshold <= 1:
+            raise ValidationError({'auto_propose_threshold': 'Supply a number between 0 and 1, or null to disable.'})
+        auto_propose_threshold = float(auto_propose_threshold)
+    limit = data.get('limit', 10)
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
+    # One ranking request per candidate, not per concept.
+    ceiling = dispatcher.max_codes if ranking_model != 'none' else 100
+    limit = min(limit, max(1, ceiling // len(ids)))
+    params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
+                  include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
+                  exclude_keys=exclude_keys, auto_propose_threshold=auto_propose_threshold,
+                  retrieval_timeout_ms=8000 if inline else 30000)
+    with transaction.atomic():
+        run = SuggestRun.objects.create(
+            direction='reverse', total=len(ids), created_by=request.user,
+            ranking_model=ranking_model, selection=params,
+        )
+        dispatcher.dispatch(run, params)
+    run.refresh_from_db()
+    return Response(_run_payload(run), status=202)
+
+
+def _run_payload(run):
+    return {'run_id': str(run.pk), 'state': run.state, 'total': run.total,
+            'done': run.done, 'destinations': run.destinations, 'error': run.error,
+            'selection': run.selection, 'activity': run.activity or []}
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_run(request, run_id):
+    _authorize(request.user)
+    return Response(_run_payload(get_object_or_404(SuggestRun, pk=run_id, direction='reverse')))
+
+
+#: How old a preview may be and still vouch for a score: a mapping changes, and a score
+#: that is days old no longer describes what the row says.
+PREVIEW_MAX_AGE = timedelta(hours=24)
+
+
+def _preview_score(run, candidate, description):
+    """The score a preview gave a candidate, if it can still be trusted: else ``None``.
+
+    The run's activity was written by the server, so its ``confidence`` needs no token
+    (a client names the run, never the number). It stands only while the run is fresh
+    (``PREVIEW_MAX_AGE``) and the text it scored (the candidate's description) is still
+    what the row says, ignoring case and spacing.
+    """
+    from omop_core.mapping.confidence_token import description_hash
+    if run is None or candidate is None or run.created_at < timezone.now() - PREVIEW_MAX_AGE:
+        return None
+    if description_hash(candidate.get('source_code_description')) != description_hash(description):
+        return None
+    score = candidate.get('confidence')
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0.0 <= score <= 1.0:
+        return None
+    return score
+
+
+def _ranker_chose(candidate):
+    """Whether a preview candidate was chosen by a ranker, not merely retrieved."""
+    return bool(candidate and candidate.get('verdict') == 'supported' and not candidate.get('declined'))
+
+
+def _preview_candidate(run_id, concept, *, mapping_id):
+    """``(run, candidate)``: the candidate a saved Concept to Code preview listed for this
+    concept and source row, or ``(None, None)``.
+
+    ``mapping_id`` selects an existing proposal's candidate; ``None`` finds none.
+    """
+    if run_id in (None, ''):
+        return None, None
+    try:
+        run_id = UUID(str(run_id))
+    except (TypeError, ValueError):
+        raise ValidationError({'run_id': 'Supply the source preview run ID.'})
+    run = SuggestRun.objects.filter(
+        pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE],
+    ).first()
+    if run is None:
+        return None, None
+    return run, next((candidate for event in (run.activity or [])
+                      if event['concept']['concept_id'] == concept.pk
+                      for candidate in event['candidates']
+                      if mapping_id is not None and candidate.get('mapping_id') == mapping_id), None)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def concept_to_code_propose(request, concept_id):
+    """Create a proposal only for a reviewed source in a saved preview."""
+    from omop_core.mapping.reverse_catalog import refresh_catalog_candidate
+    from patient_portal.api.views import _upsert_source_code_mapping
+    _authorize(request.user, write=True)
+    if not isinstance(request.data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    if request.data.get('status', 'proposed') != 'proposed':
+        raise ValidationError({'status': 'Propose a new source before approving its mapping.'})
+    try:
+        run_id = UUID(str(request.data.get('run_id', '')))
+    except (TypeError, ValueError):
+        raise ValidationError({'run_id': 'Supply the source preview run ID.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    concept_lock.check_concept_lock(concept.pk, request.user)
+    run = get_object_or_404(SuggestRun, pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE])
+    candidate = next((candidate for event in (run.activity or [])
+                      if event['concept']['concept_id'] == concept.pk
+                      for candidate in event['candidates']
+                      if candidate.get('mapping_id') is None
+                      and candidate['source_code'] == request.data.get('source_code')
+                      and candidate['source_vocabulary_id'] == request.data.get('source_vocabulary_id')), None)
+    if candidate is None:
+        raise ValidationError({'detail': 'Choose a source code from this concept’s saved preview.'})
+    fresh = refresh_catalog_candidate(candidate, concept)
+    if fresh is None:
+        return Response({'detail': 'The source vocabulary changed after the preview. Run the search again.'}, status=409)
+    aliases = [fresh['source_vocabulary_id'], *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
+                                             if canonical == fresh['source_vocabulary_id']]]
+    if SourceCodeConceptMapping.objects.select_for_update().filter(
+        source_vocabulary_id__in=aliases, source_code=fresh['source_code'],
+    ).exists():
+        return Response({'detail': 'This source already has a mapping. Refresh before reviewing it.'}, status=409)
+    # The preview's own score stands while the preview is fresh and still describes the source.
+    score = _preview_score(run, candidate, fresh['source_code_description'])
+    row, _ = _upsert_source_code_mapping(concept, {
+        'source_vocabulary_id': fresh['source_vocabulary_id'], 'source_code': fresh['source_code'],
+        'source_code_description': fresh['source_code_description'][:255],
+        **({'notes': f"Source vocabulary label: {fresh['source_code_description']}"}
+           if len(fresh['source_code_description']) > 255 else {}),
+        'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
+        'status': 'proposed',
+        # The preview's ranker scored this source against this concept (#2382).
+        'decision_surface': 'concept2code', 'decision_confidence': score,
+        # A candidate a ranker chose is a machine proposal, so the curator who
+        # accepts it may approve it. A retrieved-only ('none' ranker) or declined
+        # candidate was nobody's pick but this curator's (#2726).
+    }, request.user, machine_proposal=_ranker_chose(candidate))
+    # The preview's ranker judged this source against this concept; without a
+    # ranker, or with a stale preview, the row keeps none.
+    if score is not None:
+        row.suggestion_confidence = score
+        row.save(update_fields=['suggestion_confidence'])
+    return Response(source_payload(row), status=201)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def concept_to_code_apply(request, concept_id, mapping_id):
+    """One reviewed source per transaction, with an exact revision precondition."""
+    from patient_portal.api.views import (
+        _check_mapping_lock, _upsert_source_code_mapping, MappingLocked,
+    )
+    _authorize(request.user, write=True)
+    if not isinstance(request.data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    concept_lock.check_concept_lock(concept.pk, request.user)
+    row = get_object_or_404(SourceCodeConceptMapping.objects.select_for_update(), pk=mapping_id)
+    if row.status != 'proposed' or row.origin_system == 'athena':
+        return Response({'detail': 'This source is no longer an editable proposal. Refresh before reviewing it.'}, status=409)
+    if request.data.get('expected_updated_at') != row.updated_at.isoformat():
+        return Response({'detail': 'This source changed after the preview. Refresh before reviewing it.'}, status=409)
+    try:
+        _check_mapping_lock(row, request.user)
+    except MappingLocked as exc:
+        return exc.as_response()
+    table = DOMAIN_TO_TABLE[concept.domain_id]
+    if (row.domain_id and row.domain_id != concept.domain_id) or (row.omop_table and row.omop_table != table):
+        raise ValidationError({'detail': 'Source and destination domains disagree. Review this source in the full editor.'})
+    selected_status = request.data.get('status', 'proposed')
+    if selected_status not in ('proposed', 'approved', 'rejected'):
+        raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
+    # A proposal moved to this concept carries the score the preview gave it for this
+    # concept (the machine's own number, read from the saved run, never a client's); a
+    # row whose destination stands keeps what it has, and no preview score stores none.
+    moved = row.target_concept_id != concept.pk
+    run, candidate = (_preview_candidate(request.data.get('run_id'), concept, mapping_id=row.pk)
+                      if moved else (None, None))
+    score = _preview_score(run, candidate, row.source_code_description)
+    row, repoint = _upsert_source_code_mapping(concept, {
+        'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
+        'destination_vocabulary_id': concept.vocabulary_id, 'decision_surface': 'concept2code',
+        **({'decision_confidence': score} if score is not None else {}),
+    }, request.user, mapping=row,
+        # A destination the ranker chose in the saved preview is the machine's;
+        # one the curator picked themselves, or a candidate nobody ranked, is
+        # theirs (#2726).
+        machine_proposal=moved and _ranker_chose(candidate))
+    if score is not None and moved:
+        row.suggestion_confidence = score
+        row.save(update_fields=['suggestion_confidence'])
+    return Response({**source_payload(row), 'repoint': repoint})
+
+
+def _walk_payload(request):
+    if request is None:
+        return None
+    return {
+        'id': request.pk, 'outcome': request.outcome, 'reason': request.reason,
+        'rebuild_evidence': request.rebuild_evidence, 'keys': request.keys, 'done': request.done,
+        'refreshed': request.refreshed, 'failure_reason': request.failure_reason,
+        'created_at': request.created_at, 'started_at': request.started_at,
+        'progress_at': request.progress_at, 'completed_at': request.completed_at,
+        'axis_evidence': request.axis_evidence or None,
+    }
+
+
+def _walk_status():
+    """The active walk, the last finished one, the last completed rebuild, and
+    the patients loaded since.
+
+    ``patients_since`` counts the persons whose first source code was recorded
+    after the last completed rebuild was asked for, which is what a curator
+    weighs before asking for another (#2050); with no completed rebuild it is
+    every patient with source codes. Asked for, not started: a resumed walk
+    restarts its clock, and a plain refresh rewrites no evidence. It is a
+    scan of the source codes, so it is not counted while a walk is active,
+    when the panel shows progress instead and polls.
+    """
+    active = AxisVariantRefresh.objects.filter(outcome__in=('queued', 'running')).order_by('pk').first()
+    last = AxisVariantRefresh.objects.filter(outcome__in=('done', 'failed')).order_by('-completed_at', '-pk').first()
+    completed = AxisVariantRefresh.objects.filter(outcome='done', rebuild_evidence=True).order_by(
+        '-completed_at', '-pk').first()
+    patients = None
+    if active is None:
+        patients = PatientSourceCode.objects.all()
+        if completed is not None:
+            patients = patients.filter(first_seen__gt=completed.created_at)
+        patients = patients.values('person_id').distinct().count()
+    return {
+        'active': _walk_payload(active), 'last': _walk_payload(last), 'completed': _walk_payload(completed),
+        'patients_since': patients,
+        'walked_at': completed.created_at if completed is not None else None,
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_axis_variant_walk(request):
+    """The axis variant walk a curator can ask for after loading patients (#2050).
+
+    ``POST`` records a rebuild request (#2043), which the worker performs: the
+    unit evidence of every mapped code is rewritten from the loaded patients,
+    its variants refreshed, and the axis evidence met on the way counted
+    (#2051). One walk at a time: a request while one is queued or running
+    returns that one with ``created: false``; a rebuild asked for while a
+    plain refresh is queued is folded into it, while one running cannot be
+    joined and is refused with 409, so the curator asks again when it is
+    done. Asking for a walk is an approver's action, as it costs the worker
+    hours on a large instance.
+    """
+    _authorize(request.user)
+    if request.method == 'GET':
+        return Response(_walk_status())
+    from patient_portal.api.views import _can_approve_mappings
+    if not _can_approve_mappings(request.user):
+        raise PermissionDenied('Approval rights are required to start a walk.')
+    from omop_core.services.axis_variant_jobs import request_refresh
+    who = getattr(request.user, 'email', '') or getattr(request.user, 'username', '') or str(request.user.pk)
+    walk, created = request_refresh(reason=f'Concept to Code: asked for by {who}', rebuild_evidence=True)
+    if not walk.rebuild_evidence:
+        return Response({**_walk_status(), 'created': False, 'request': _walk_payload(walk),
+                         'detail': 'A refresh of the axis variants is running and cannot be turned into a '
+                                   'rebuild. Ask again once it has finished.'}, status=409)
+    return Response({**_walk_status(), 'created': created, 'request': _walk_payload(walk)},
+                    status=202 if created else 200)

@@ -23,6 +23,7 @@ import logging
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from omop_core.mapping.suggestions import (
     VOCAB_TO_UMLS_ROOT,
@@ -99,6 +100,8 @@ class Command(BaseCommand):
                     changed = True
 
             if changed:
+                row.updated_at = timezone.now()  # bulk_update skips auto_now (#2451)
+                update_fields.add('updated_at')
                 rows_to_update.append(row)
 
         self.stdout.write(f'Rows to update: {len(rows_to_update)}')

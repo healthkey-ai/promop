@@ -17,8 +17,8 @@ export function LabValueCard({ card, onNavigate }: Props) {
   if (card.values.length === 0) return null;
 
   const latest = card.values[0];
-  const previous = card.values[1];
-  const sparklineValues = card.values.slice(0, 6);
+  const previous = card.values[1]?.unit === latest.unit ? card.values[1] : undefined;
+  const sparklineValues = card.values.filter(item => item.unit === latest.unit).slice(0, 6);
 
   const cardContent = (
     <Card className="transition-colors hover:bg-muted/30">
@@ -61,6 +61,7 @@ export function LabValueCard({ card, onNavigate }: Props) {
             )}
           </div>
 
+          {latest.normalized?.error && <p className="text-xs text-amber-700" role="status">Unit conversion unavailable: {latest.normalized.error}</p>}
           {card.values.length > 1 && (
             <div className="ml-auto h-12 w-24 shrink-0 sm:w-32">
               <Sparkline values={sparklineValues} unit={latest.unit ?? ""} />

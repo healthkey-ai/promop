@@ -23,3 +23,35 @@ Lettuce is licensed under the MIT License. Its complete copyright, permission,
 and warranty notice is reproduced in [licenses/lettuce-MIT.txt](licenses/lettuce-MIT.txt).
 Retain that notice when redistributing this adaptation. PROMOP's own license
 remains in [LICENSE](LICENSE).
+
+## LOINC
+
+PRomop uses LOINC content in its clinical vocabulary and imports the LOINC
+distribution's `LoincClass.csv` and `Loinc.csv` into the `LoincClass` and
+`LoincCodeClass` tables. LOINC concepts may also be loaded from an Athena
+vocabulary export. The following notice is required by Section 10 of the
+[LOINC license](https://loinc.org/kb/license):
+
+> This material contains content from LOINC (http://loinc.org/). LOINC is
+> copyright © Regenstrief Institute, Inc. and the Logical Observation
+> Identifiers Names and Codes (LOINC) Committee and is available at no cost
+> under the license at http://loinc.org/license. LOINC® is a registered United
+> States trademark of Regenstrief Institute, Inc.
+
+LOINC content is licensed separately from PRomop. Use and redistribution of
+that content remain subject to the LOINC license, including any notices for
+third-party content identified in the LOINC distribution.
+
+## DejaVu Sans
+
+The PHR record PDF export (`patient_portal/api/phr/export.py`) embeds the
+DejaVu Sans typeface, regular and bold, bundled as
+`patient_portal/api/phr/fonts/DejaVuSans.ttf` and `DejaVuSans-Bold.ttf`
+(taken unmodified from the DejaVu 2.35 distribution).
+
+DejaVu fonts are derived from Bitstream Vera Fonts, copyright (c) 2003 by
+Bitstream, Inc., with changes in the public domain and glyphs imported from
+Arev fonts, copyright (c) 2006 by Tavmjong Bah. Both permission notices are
+reproduced in full in
+[patient_portal/api/phr/fonts/LICENSE-DejaVu.txt](patient_portal/api/phr/fonts/LICENSE-DejaVu.txt),
+and the fonts are redistributed under their own names as those notices require.

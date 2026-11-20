@@ -1,3 +1,4 @@
+import { normalizedLabValue } from '@/utils/normalizedLabs';
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import type { LabResultCard, PaginatedResponse, LabValuesResponse } from "./types";
@@ -30,7 +31,7 @@ export function useLabResultsSummary(
           },
         },
       );
-      return resp.data;
+      return { ...resp.data, results: resp.data.results.map(card => ({ ...card, values: card.values.map(normalizedLabValue) })) };
     },
     enabled: !!apiClient,
   });
@@ -60,7 +61,7 @@ export function useLabValues(
           },
         },
       );
-      return resp.data;
+      return { ...resp.data, results: resp.data.results.map(normalizedLabValue) };
     },
     enabled: !!apiClient && !!params.conceptCode,
   });

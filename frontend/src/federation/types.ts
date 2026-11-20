@@ -1,3 +1,4 @@
+import type { NormalizedMeasurement } from '@/utils/normalizedLabs';
 import type { AxiosInstance } from "axios";
 import type { QueryClient } from "@tanstack/react-query";
 
@@ -37,6 +38,8 @@ export interface UploadProvenance {
 }
 
 export interface LabResultValue {
+  normalized?: NormalizedMeasurement | null;
+  original?: LabResultValue;
   measurement_id: number;
   value: number | null;
   value_string: string | null;

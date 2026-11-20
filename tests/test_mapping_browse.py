@@ -1,9 +1,11 @@
 import pytest
+from unittest.mock import patch
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
-from omop_core.models import SourceCodeConceptMapping
-from patient_portal.api.views import code_mapping_list
+from omop_core.models import MappingDestinationCandidate, SourceCodeConceptMapping
+from patient_portal.api.views import code_mapping_detail, code_mapping_list
 from patient_portal.models import Identity
+from tests.factories import ConceptFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -20,7 +22,116 @@ def browse():
 
 
 def row(code, **kwargs):
-    return SourceCodeConceptMapping.objects.create(source_code=code, **{'source_vocabulary_id': 'ICD10', 'status': 'proposed', **kwargs})
+    return SourceCodeConceptMapping.objects.create(source_code=code, **{'source_vocabulary_id': 'ICD10CM', 'status': 'proposed', **kwargs})
+
+
+@pytest.mark.parametrize('has_destination', [False, True])
+@pytest.mark.parametrize(('metadata', 'expected'), [
+    ({'fhir': {'resourceType': 'Observation', 'basedOn': [
+        {'display': ' Complete blood count ', 'reference': 'ServiceRequest/123'},
+        {'reference': 'ServiceRequest/456'},
+        {'display': ' ', 'reference': ' ServiceRequest/789 '},
+    ]}}, ['Complete blood count', 'ServiceRequest/456', 'ServiceRequest/789']),
+    ({'resourceType': 'Observation', 'basedOn': [{'display': 'Blood test'}]}, ['Blood test']),
+    ({}, []),
+    ({'fhir': {'resourceType': 'Observation'}}, []),
+    ({'fhir': {'basedOn': []}}, []),
+    ({'fhir': {'basedOn': [None, 'bad', {}, {'identifier': {'value': '123'}}]}}, []),
+    ({'fhir': {'basedOn': 'bad'}}, []),
+    ({'fhir': None}, []),
+])
+def test_based_on_comes_only_from_source_fhir_metadata(browse, has_destination, metadata, expected):
+    row('BASED-ON', source_metadata=metadata, origin='curator', origin_system='import',
+        target_concept=ConceptFactory() if has_destination else None)
+
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='BASED-ON',
+        source_vocabulary_id='ICD10CM', source_metadata=metadata)
+    result = browse().data['results'][0]
+
+    assert result['based_on'] == expected
+    assert 'source_metadata' not in result
+
+
+@pytest.mark.parametrize('has_destination', [False, True])
+@pytest.mark.parametrize(('value', 'expected'), [(12.5, '12.5'), (0, '0'), (None, ''), (True, '')])
+def test_mapping_quantity_uses_patient_inventory_samples(browse, has_destination, value, expected):
+    row('QUANTITY', source_metadata={'fhir': {'resourceType': 'Observation', 'valueQuantity': {'value': value}}},
+        target_concept=ConceptFactory() if has_destination else None)
+
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='QUANTITY',
+        source_vocabulary_id='ICD10CM', example_quantity=expected)
+    assert browse().data['results'][0]['example_quantity'] == expected
+
+
+def test_queue_sections_follow_destination_and_approval_including_athena(browse):
+    destination = ConceptFactory()
+    row('NO-DEST', status='approved')
+    row('PROPOSED', target_concept=destination)
+    row('REJECTED', status='rejected', target_concept=destination)
+    row('APPROVED', status='approved', target_concept=destination)
+    row('ATHENA', status='approved', target_concept=destination, origin_system='athena')
+    data = browse(queue_sections='1').data
+    assert {section: page['total'] for section, page in data['pages'].items()} == {
+        'Unmapped': 1, 'Proposed': 2, 'Approved': 2,
+    }
+
+
+def test_patient_samples_are_distinct_bounded_and_match_exact_source_identity(browse):
+    from omop_core.models import PatientSourceCode
+    mapping = row('SAMPLE', source_metadata={'fhir': {'basedOn': [{'display': 'Not a patient sample'}]}})
+    for i in range(6):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='SAMPLE',
+            source_vocabulary_id='ICD10CM', example_quantity=str(i),
+            source_metadata={'fhir': {'basedOn': [{'reference': f'ServiceRequest/{i}'}]}})
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='SAMPLE',
+        source_vocabulary_id='OTHER', example_quantity='wrong vocabulary')
+    data = browse(queue_sections='1').data['results'][0]
+    assert data['mapping_id'] == mapping.pk
+    assert data['sample_quantities'] == ['0', '1', '2']
+    assert data['based_on'] == ['ServiceRequest/0', 'ServiceRequest/1', 'ServiceRequest/2']
+
+
+def test_samples_do_not_cross_organization_boundaries_and_honor_corrections(browse):
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PatientRecordFactory, OrganizationFactory
+    org = OrganizationFactory()
+    row('SCOPED', organization=org)
+    mine = PatientRecordFactory(organization=org)
+    other = PatientRecordFactory(organization=OrganizationFactory())
+    for person, quantity in ((mine.person, '12'), (other.person, '999')):
+        PatientSourceCode.objects.create(person=person, source_value='SCOPED', source_vocabulary_id='ICD10CM',
+            example_quantity=quantity, example_quantity_override='0' if person == mine.person else None,
+            source_metadata={'fhir': {'basedOn': [{'display': quantity}]}})
+    data = browse(queue_sections='1').data['results'][0]
+    assert data['sample_quantities'] == ['0']
+    assert data['based_on'] == ['12']
+
+
+def test_sampling_cost_stays_flat_across_a_page(browse):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    row('FIRST')
+    with CaptureQueriesContext(connection) as small:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    for i in range(20):
+        row(f'NEXT-{i}')
+    with CaptureQueriesContext(connection) as large:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    assert len(large) == len(small)
+
+
+def test_label_groups_show_patient_examples_before_expansion(browse):
+    from omop_core.models import PatientSourceCode
+    row('GROUPED', source_code_description='Albumin', source_label_norm='albumin')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GROUPED',
+        source_vocabulary_id='ICD10CM', example_quantity='12', source_unit='g/dL',
+        source_metadata={'fhir': {'basedOn': [{'display': 'Albumin order'}]}})
+    group = browse(queue_sections='1', rollup='1').data['groups']['Unmapped'][0]
+    assert group['example_quantity'] == '12'
+    assert group['source_units'] == ['g/dL']
+    assert group['based_on'] == ['Albumin order']
 
 
 def test_pages_sort_before_slicing_and_report_full_counts(browse):
@@ -38,28 +149,373 @@ def test_pages_sort_before_slicing_and_report_full_counts(browse):
     assert browse(order_0='source_code').data['results'][0]['source_code'] == 'C000'
 
 
+def test_seen_filter_narrows_only_unmapped(browse):
+    """seen_only filters Unmapped to occurrence_count > 0 but leaves other sections unfiltered."""
+    for i in range(105):
+        row(f'Z-SEEN-{i:03}', occurrence_count=i + 1)
+    row('A-ZERO')  # would displace a seen row under the explicit code sort
+    row('APPROVED-SEEN', status='approved', occurrence_count=1)
+    row('APPROVED-ZERO', status='approved')
+    row('REJECTED-SEEN', status='rejected', occurrence_count=1)
+    row('REJECTED-ZERO', status='rejected')
+    row('ATHENA-SEEN', origin_system='athena', status='approved', occurrence_count=1)
+    row('ATHENA-ZERO', origin_system='athena', status='approved')
+    first = browse(seen_only='1', order_0='source_code').data
+    second = browse(seen_only='1', order_0='source_code', page_0=2).data
+    assert first['seen_only'] is True
+    # Unmapped narrows to the 105 rows with seen > 0.
+    assert first['pages']['Unmapped']['total'] == 105
+    # Mapped, Rejected, Athena include ALL rows regardless of seen_only.
+    assert first['pages']['Mapped']['total'] == 2
+    assert first['pages']['Rejected']['total'] == 2
+    assert first['pages']['Athena Mapped']['total'] == 2
+    # Total reflects narrowed Unmapped + full other sections.
+    assert first['total'] == second['total'] == 111
+    assert first['results'][0]['source_code'] == 'Z-SEEN-000'
+    assert second['results'][0]['source_code'] == 'Z-SEEN-100'
+    # Tab counts use the full set (including unseen proposed).
+    tab = next(tab for tab in first['tabs'] if tab['vocabulary_id'] == 'ICD10CM')
+    assert (tab['proposed'], tab['approved'], tab['athena']) == (106, 2, 2)
+    unfiltered = browse(seen_only='0', order_0='source_code').data
+    assert unfiltered['total'] == 112
+    assert unfiltered['results'][0]['source_code'] == 'A-ZERO'
+    assert SourceCodeConceptMapping.objects.count() == 112
+
+
+def test_seen_filter_combines_with_cross_tab_search_and_provenance(browse):
+    row('MATCH-1', occurrence_count=2, origin_system='curator')
+    row('MATCH-2', source_vocabulary_id='SNOMED', occurrence_count=1, origin_system='curator')
+    row('MATCH-ZERO', source_vocabulary_id='SNOMED', origin_system='curator')
+    row('MATCH-OTHER', occurrence_count=2, origin_system='HT-One')
+    data = browse(source='ICD10CM', search='MATCH', provenance='curator', seen_only='1').data
+    assert data['total'] == 2
+    assert {r['source_code'] for r in data['results']} == {'MATCH-1', 'MATCH-2'}
+    assert browse(source='__overall__', seen_only='1').data['total'] == 3
+    assert browse(seen_only='true').status_code == 400
+
+
+def test_all_total_is_not_the_number_of_loaded_rows(browse):
+    for i in range(110):
+        row(f'P{i:03}', occurrence_count=1)
+        row(f'A{i:03}', status='approved', occurrence_count=1)
+    data = browse(seen_only='1').data
+    assert len(data['results']) == 200
+    assert data['total'] == 220
+
+
+@pytest.mark.parametrize('params', [{}, {'source': '__overall__'}, {'search': 'SORT-'}])
+def test_unmapped_defaults_to_seen_descending_before_pagination(browse, params):
+    """Unmapped defaults to Seen, like every other section (#1575).
+
+    It grouped by provenance first until then. That buried the rows a Suggest
+    run had just answered: enqueue writes ``origin_system=''`` and a run
+    rewrites it to ``suggest v0.4``, which sorts last ascending.
+    """
+    curated = [row(f'SORT-C{i:03}', origin_system='curator', occurrence_count=i // 2) for i in range(101)]
+    suggested = row('SORT-S', origin_system='suggest v0.4', occurrence_count=1000)
+    expected = sorted([suggested] + curated, key=lambda m: (-m.occurrence_count, m.source_code, m.pk))
+    first = browse(**params).data
+    second = browse(page_0=2, **params).data
+    assert first['pages']['Unmapped']['total'] == 102
+    # The highest-Seen row leads regardless of its provenance.
+    assert first['results'][0]['mapping_id'] == suggested.pk
+    assert [r['mapping_id'] for r in first['results'] + second['results']] == [m.pk for m in expected]
+    # Provenance remains available as an explicit sort.
+    explicit = browse(order_0='origin_system', **params).data
+    assert explicit['results'][0]['origin_system'] == 'curator'
+
+
+def test_every_section_shares_the_seen_default(browse):
+    for status in ['proposed', 'approved', 'rejected']:
+        row(f'{status}-low', status=status, origin_system='curator', occurrence_count=1)
+        row(f'{status}-high', status=status, origin_system='suggest v0.4', occurrence_count=500)
+    row('athena-low', origin_system='athena', occurrence_count=1)
+    row('athena-high', origin_system='athena', occurrence_count=500)
+    data = browse().data
+    by_section = {}
+    for r in data['results']:
+        section = ('Athena Mapped' if r['origin_system'] == 'athena'
+                   else {'approved': 'Mapped', 'rejected': 'Rejected'}.get(r['status'], 'Unmapped'))
+        by_section.setdefault(section, []).append(r['source_code'])
+    assert by_section['Unmapped'] == ['proposed-high', 'proposed-low']
+    assert by_section['Mapped'] == ['approved-high', 'approved-low']
+    assert by_section['Rejected'] == ['rejected-high', 'rejected-low']
+    assert by_section['Athena Mapped'] == ['athena-high', 'athena-low']
+
+
+def test_athena_family_origins_land_in_athena_mapped(browse):
+    """Resolved athena origins are Athena Mapped; athena-multiple stays Unmapped."""
+    row('exact', origin_system='athena', status='approved', occurrence_count=1)
+    row('local', origin_system='athena-local-maps-to', status='approved', occurrence_count=1)
+    row('multi', origin_system='athena-multiple', status='proposed', occurrence_count=1)
+    row('self', origin_system='athena-standard-self', status='approved', occurrence_count=1)
+    row('curator', origin_system='curator', status='proposed', occurrence_count=1)
+    data = browse().data
+    # athena-multiple is a pending choice, so it belongs in Unmapped.
+    assert data['pages']['Athena Mapped']['total'] == 3
+    assert data['pages']['Unmapped']['total'] == 2
+
+
+def test_provenance_filter_narrows_rows_totals_and_pagination(browse):
+    for i in range(3):
+        row(f'CUR-{i}', origin_system='curator', occurrence_count=10)
+    for i in range(7):
+        row(f'SUG-{i}', origin_system='suggest v0.4', occurrence_count=99)
+    unfiltered = browse().data
+    assert unfiltered['pages']['Unmapped']['total'] == 10
+    assert unfiltered['selected_provenance'] == ''
+
+    filtered = browse(provenance='curator').data
+    assert [r['source_code'] for r in filtered['results']] == ['CUR-0', 'CUR-1', 'CUR-2']
+    # Totals follow the filter, or pagination would offer pages with no rows.
+    assert filtered['pages']['Unmapped']['total'] == 3
+    assert filtered['selected_provenance'] == 'curator'
+    # The tab strip keeps counting the whole tab -- it is how a curator sees
+    # what is there before filtering.
+    assert unfiltered['tabs'][0]['proposed'] == filtered['tabs'][0]['proposed'] == 10
+
+
+def test_provenance_filter_lists_every_value_on_the_tab_with_counts(browse):
+    row('A', origin_system='curator', occurrence_count=1)
+    row('B', origin_system='suggest v0.4', occurrence_count=1)
+    row('C', origin_system='suggest v0.4', occurrence_count=1)
+    row('D', origin_system='', occurrence_count=1)
+    data = browse().data
+    assert data['provenances'] == [
+        {'origin_system': 'suggest v0.4', 'count': 2},
+        {'origin_system': '', 'count': 1},
+        {'origin_system': 'curator', 'count': 1},
+    ]
+    # Choosing one must not drop the others from the control.
+    assert browse(provenance='curator').data['provenances'] == data['provenances']
+
+
+def test_blank_provenance_is_filterable_through_a_sentinel(browse):
+    """'' is a real provenance -- enqueue_unmapped_source_codes writes it for
+    every newly queued code -- but '' on the wire already means "no filter"."""
+    row('QUEUED-1', origin_system='', occurrence_count=9)
+    row('QUEUED-2', origin_system='', occurrence_count=8)
+    row('CURATED', origin_system='curator', occurrence_count=7)
+    assert browse().data['pages']['Unmapped']['total'] == 3
+    filtered = browse(provenance='__blank__').data
+    assert [r['source_code'] for r in filtered['results']] == ['QUEUED-1', 'QUEUED-2']
+    assert filtered['pages']['Unmapped']['total'] == 2
+    assert filtered['selected_provenance'] == '__blank__'
+    # An empty value is still "no filter", not "the blank provenance".
+    assert browse(provenance='').data['pages']['Unmapped']['total'] == 3
+
+
+def test_athena_rows_are_not_offered_as_a_filter_value(browse):
+    """Athena is reference data in a section that starts collapsed, and on the
+    ICD-10 tab it outnumbers everything -- offering it reads as an empty page."""
+    for i in range(5):
+        row(f'ATH-{i}', origin_system='athena', status='approved')
+    row('WORK', origin_system='HT-One')
+    assert browse().data['provenances'] == [{'origin_system': 'HT-One', 'count': 1}]
+
+
+def test_search_rebuilds_the_options_from_the_rows_the_filter_will_act_on(browse):
+    """A search reaches across tabs, so the active tab's counts would describe
+    a different set of rows than the filter applies to."""
+    row('HIT-A', source_vocabulary_id='ICD10CM', origin_system='curator')
+    row('HIT-B', source_vocabulary_id='RxNorm', origin_system='fhir-sync')
+    row('MISS', source_vocabulary_id='ICD10CM', origin_system='hk-labs')
+    assert browse(source='ICD10CM').data['provenances'] == [
+        {'origin_system': 'curator', 'count': 1}, {'origin_system': 'hk-labs', 'count': 1},
+    ]
+    # Searching widens to every tab, so the off-tab provenance must be offered.
+    assert browse(source='ICD10CM', search='HIT-').data['provenances'] == [
+        {'origin_system': 'curator', 'count': 1}, {'origin_system': 'fhir-sync', 'count': 1},
+    ]
+
+
+def test_provenance_options_cost_no_extra_query(browse):
+    """origin_system carries no index, so a GROUP BY of its own is a sequential
+    scan of the tab on every browse and every post-approve refresh. The options
+    ride on the aggregate browse already runs."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    def query_count():
+        with CaptureQueriesContext(connection) as captured:
+            data = browse().data
+        return len(captured.captured_queries), data
+
+    for i in range(30):
+        row(f'Q{i:03}', origin_system='curator' if i % 2 else '', occurrence_count=i)
+    baseline, first = query_count()
+    for i in range(30, 90):
+        row(f'Q{i:03}', origin_system='hk-labs', occurrence_count=i)
+    grown, second = query_count()
+    assert grown == baseline, f'query count grew {baseline} -> {grown}'
+    # The options really are being produced, so the count above is not flat
+    # because the feature quietly did nothing.
+    assert {o['origin_system'] for o in first['provenances']} == {'curator', ''}
+    assert {o['origin_system'] for o in second['provenances']} == {'curator', '', 'hk-labs'}
+
+
+def test_provenance_filter_composes_with_search_and_leaves_duplicates_alone(browse):
+    # A duplicate is one code twice after Upper(Trim(...)); the unique
+    # constraint forbids two rows with the identical spelling.
+    row('DUP', origin_system='curator', occurrence_count=5)
+    row(' dup ', origin_system='suggest v0.4', occurrence_count=5)
+    row('OTHER', origin_system='curator', occurrence_count=5)
+    data = browse(search='DUP', provenance='curator').data
+    assert [r['source_code'] for r in data['results']] == ['DUP']
+    # Both halves of the duplicate still surface: hiding one would turn the
+    # duplicate warning into a puzzle.
+    assert sorted(r['origin_system'] for r in data['duplicates']) == ['curator', 'suggest v0.4']
+
+
+def test_reversing_provenance_keeps_seen_descending_and_other_defaults(browse):
+    for status in ['proposed', 'approved', 'rejected']:
+        row(f'{status}-C', status=status, origin_system='curator', occurrence_count=100)
+        row(f'{status}-SA', status=status, origin_system='suggest v0.4', occurrence_count=1)
+        row(f'{status}-SZ', status=status, origin_system='suggest v0.4', occurrence_count=200)
+    data = browse(order_0='-origin_system').data
+    assert [r['source_code'] for r in data['results'] if r['status'] == 'proposed'] == [
+        'proposed-SZ', 'proposed-SA', 'proposed-C',
+    ]
+    for status in ['approved', 'rejected']:
+        assert [r['source_code'] for r in data['results'] if r['status'] == status] == [
+            f'{status}-SZ', f'{status}-C', f'{status}-SA',
+        ]
+
+
 def test_aliases_global_search_rejected_and_sections(browse):
-    row('A', source_vocabulary_id='ICD10CM', occurrence_count=50)
+    # ICD10CM is now a separate tab, so use ICD10 for row A.
+    row('A', occurrence_count=50)
     row('B', status='approved')
     row('C', status='rejected')
     row('D', source_vocabulary_id='LOINC', source_code_description='distinctive phrase')
     row('E', origin_system='athena', status='approved')
-    data = browse(source='ICD10').data
-    assert {r['source_code'] for r in data['results']} == {'A', 'B', 'E'}
+    data = browse(source='ICD10CM').data
+    # Rejected rows now appear in their own section, always visible.
+    assert {r['source_code'] for r in data['results']} == {'A', 'B', 'C', 'E'}
     assert data['rejected_count'] == 1
-    assert len(browse(source='ICD10', show_rejected='true').data['results']) == 4
-    assert [r['source_code'] for r in browse(source='ICD10', search='distinctive').data['results']] == ['D']
+    assert data['pages']['Rejected']['total'] == 1
+    assert [r['source_code'] for r in browse(source='ICD10CM', search='distinctive').data['results']] == ['D']
     assert browse(source='').data['results'] == []
+
+
+OID = 'urn:oid:1.2.840.114350.1.13.300.2.7.5.737384.162'
+
+
+def test_digit_search_matches_only_the_source_code(browse):
+    """A number is a source code (#2376). It used to match the digits of an
+    Epic OID vocabulary, so every row of that code system came back, and
+    before #2371 it raised FieldError on the concept id foreign key."""
+    concept = ConceptFactory(concept_id=3004061, concept_name='Hemoglobin 114350')
+    row('LAB-3004061-A', source_vocabulary_id='LOINC')
+    row('OTHER', source_vocabulary_id='LOINC', target_concept=concept, status='approved')
+    row('30040', source_vocabulary_id='LOINC')
+    row('6784', source_vocabulary_id=OID, source_code_description='Protein 3004061')
+    row('X', source_vocabulary_id=OID)
+
+    data = browse(source='__overall__', search='3004061').data
+    assert {r['source_code'] for r in data['results']} == {'LAB-3004061-A'}
+    assert [r['source_code'] for r in browse(source='__overall__', search='114350').data['results']] == []
+
+    # Too big for an integer column; thousands of digits int() refuses;
+    # isdigit() but not int(). Each used to be, or would be, a 500.
+    for odd in ('9' * 12, '9' * 5000, '\u00b2', '\u2460'):
+        assert browse(source='LOINC', search=odd).data['results'] == []
+
+
+@pytest.mark.parametrize(('search', 'expected'), [
+    ('code:6784', {'6784'}),
+    ('Source_Code_Value: 6784 ', {'6784'}),
+    ('source_code:prot', set()),
+    ('description:prot', {'6784'}),
+    ('system:114350', {'6784', 'X'}),
+    ('vocabulary:loinc', {'OTHER'}),
+    ('concept:hemo', {'OTHER'}),
+    ('concept_code:HGB', {'OTHER'}),
+    ('concept_id:3004061', {'OTHER'}),
+    ('concept_id:300406', set()),
+    ('concept_id:abc', set()),
+    ('org:hospital', {'X'}),
+    ('urn:oid:1.2.840', {'6784', 'X'}),   # not a field: plain text
+    ('code:', set()),                      # empty value: plain text "code:"
+])
+def test_fielded_search_restricts_to_one_field(browse, search, expected):
+    from omop_core.models import Organization
+    concept = ConceptFactory(concept_id=3004061, concept_name='Hemoglobin', concept_code='HGB-1')
+    row('6784', source_vocabulary_id=OID, source_code_description='Protein')
+    row('X', source_vocabulary_id=OID, organization=Organization.objects.create(name='Hospital A', slug='hospital-a'))
+    row('OTHER', source_vocabulary_id='LOINC', target_concept=concept, status='approved')
+
+    assert {r['source_code'] for r in browse(source='__overall__', search=search).data['results']} == expected
 
 
 def test_duplicates_include_off_page_and_rejected_members(browse):
     row('MATCH', occurrence_count=0)
-    row(' match ', source_vocabulary_id='ICD10CM', status='rejected')
+    row(' match ', status='rejected')
     for i in range(101):
         row(f'X{i}', occurrence_count=100)
     data = browse(search='X').data
     assert {r['source_code'] for r in data['duplicates']} == {'MATCH', ' match '}
     assert len(data['results']) == 100
+
+
+def test_initial_page_defers_duplicate_audit_and_closed_sections_without_losing_totals(browse):
+    row('MATCH', occurrence_count=2)
+    row(' match ', status='rejected')
+    row('MAPPED', status='approved')
+    row('ATHENA', origin_system='athena', status='approved')
+    baseline = browse(seen_only='1').data
+    with patch('omop_core.services.mapping_browse.mapping_duplicates', side_effect=AssertionError('audit blocked page')):
+        data = browse(seen_only='1', include_duplicates='0', sections='Unmapped').data
+    assert data['duplicates'] == []
+    assert data['duplicates_included'] is False
+    assert [item['source_code'] for item in data['results']] == ['MATCH']
+    assert data['pages'] == baseline['pages']
+    assert data['tabs'] == baseline['tabs']
+    assert data['total'] == baseline['total'] == 4
+    expanded = browse(include_duplicates='0', sections='Unmapped,Mapped').data
+    assert {item['source_code'] for item in expanded['results']} == {'MATCH', 'MAPPED'}
+    assert browse(include_duplicates='0', sections='').data['results'] == []
+    assert browse(sections='unknown').status_code == 400
+
+
+def test_duplicate_audit_returns_compact_complete_summaries_independently(browse):
+    first = row('MATCH', occurrence_count=0, notes='Long notes unnecessary for a warning')
+    second = row(' match ', status='rejected')
+    row('UNRELATED', occurrence_count=100)
+    with patch('patient_portal.api.views._serialize_code_mapping_row', side_effect=AssertionError('full serialization')):
+        response = browse(duplicates_only='1', source='ICD10CM', search='UNRELATED', seen_only='1')
+    assert response.status_code == 200
+    summaries = response.data['duplicate_summaries']
+    assert {item['mapping_id'] for item in summaries} == {first.pk, second.pk}
+    assert {item['status'] for item in summaries} == {'proposed', 'rejected'}
+    assert all(item['summary'] is True and 'notes' not in item and 'destination_count' not in item for item in summaries)
+    assert browse(duplicates_only='1').status_code == 400
+
+
+@pytest.mark.parametrize('source', ['OpenWearables', '__overall__'])
+def test_same_code_in_different_vocabularies_on_one_tab_is_not_a_duplicate(browse, source):
+    # Wearables consolidates three vocabularies; ingest resolves on the exact one.
+    for vocabulary in ('Apple', 'Garmin', 'OpenWearables'):
+        row('heart_rate', source_vocabulary_id=vocabulary)
+    row('A02.0')
+    row('A02.0', source_vocabulary_id='SNOMED')
+    assert browse(source=source).data['duplicates'] == []
+    assert browse(source='ICD10CM').data['duplicates'] == []
+
+
+def test_duplicate_within_one_vocabulary_on_a_shared_tab_is_still_reported(browse):
+    row('steps', source_vocabulary_id='Garmin')
+    row(' STEPS ', source_vocabulary_id='Garmin', status='rejected')
+    row('steps', source_vocabulary_id='Apple')
+    data = browse(source='OpenWearables').data
+    assert {(r['source_vocabulary_id'], r['source_code']) for r in data['duplicates']} == {
+        ('Garmin', 'steps'), ('Garmin', ' STEPS ')}
+
+
+def test_oid_spelling_of_a_vocabulary_is_the_same_vocabulary(browse):
+    row('123', source_vocabulary_id='SNOMED')
+    row('123', source_vocabulary_id='urn:oid:2.16.840.1.113883.6.96')
+    assert len(browse(source='SNOMED').data['duplicates']) == 2
 
 
 def test_bad_paging_or_sort_is_a_validation_error(browse):
@@ -68,18 +524,20 @@ def test_bad_paging_or_sort_is_a_validation_error(browse):
 
 
 @pytest.mark.parametrize('search', ['', 'CODE'])
-@pytest.mark.parametrize('show_rejected', ['false', 'true'])
-def test_combined_counts_preserve_all_sections_and_rejections(browse, search, show_rejected):
+def test_combined_counts_preserve_all_sections_and_rejections(browse, search):
+    # All rows use ICD10CM — ICD10CM is now a separate tab from ICD10.
     row('CODE-A', source_vocabulary_id='ICD10CM')
-    row('CODE-B', status='approved')
-    row('CODE-C', status='rejected')
+    row('CODE-B', source_vocabulary_id='ICD10CM', status='approved')
+    row('CODE-C', source_vocabulary_id='ICD10CM', status='rejected')
     row('CODE-D', source_vocabulary_id='LOINC', status='approved')
-    row('CODE-E', origin_system='athena', status='approved')
-    row('CODE-F', origin_system='athena', status='rejected')
-    data = browse(source='ICD10CM', search=search, show_rejected=show_rejected).data
-    assert data['pages']['Unmapped']['total'] == (2 if show_rejected == 'true' else 1)
+    row('CODE-E', source_vocabulary_id='ICD10CM', origin_system='athena', status='approved')
+    row('CODE-F', source_vocabulary_id='ICD10CM', origin_system='athena', status='rejected')
+    data = browse(source='ICD10CM', search=search).data
+    # Rejected rows always appear in their own section now.
+    assert data['pages']['Unmapped']['total'] == 1
     assert data['pages']['Mapped']['total'] == (2 if search else 1)
-    assert data['pages']['Athena Mapped']['total'] == (2 if show_rejected == 'true' else 1)
+    assert data['pages']['Rejected']['total'] == 1
+    assert data['pages']['Athena Mapped']['total'] == 2
     assert data['rejected_count'] == 1
     assert len(data['results']) == sum(page['total'] for page in data['pages'].values())
 
@@ -91,7 +549,7 @@ def test_default_browse_reuses_counts_and_loads_sections_together(browse):
     row('B', status='approved')
     row('C', origin_system='athena', status='approved')
     with CaptureQueriesContext(connection) as queries:
-        response = browse(source='ICD10')
+        response = browse(source='ICD10CM')
     assert response.status_code == 200
     assert len(response.data['results']) == 3
     sql = [q['sql'] for q in queries]
@@ -112,9 +570,9 @@ def test_plain_list_pages_before_serialization_and_filters_in_database(status_fi
     from patient_portal.api import views
 
     SourceCodeConceptMapping.objects.bulk_create([
-        SourceCodeConceptMapping(source_vocabulary_id='ICD10', source_code=f'P{i:03}', status='approved')
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'P{i:03}', status='approved')
         for i in range(105)
-    ] + [SourceCodeConceptMapping(source_vocabulary_id='ICD10', source_code='A-proposed')])
+    ] + [SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code='A-proposed')])
     user = Identity.objects.create_user(email='list-pages@example.test', is_staff=True)
 
     def get(**params):
@@ -124,8 +582,9 @@ def test_plain_list_pages_before_serialization_and_filters_in_database(status_fi
         force_authenticate(request, user=user)
         return code_mapping_list(request)
 
+    assert get(limit=100000).status_code == 400
     with patch.object(views, '_serialize_code_mapping_row', wraps=views._serialize_code_mapping_row) as serialize:
-        first = get(page_size=100000)
+        first = get()
         assert first.status_code == 200
         assert len(first.data) == serialize.call_count == 100
     assert first['X-Page-Size'] == '100'
@@ -148,13 +607,13 @@ def test_plain_list_exposes_pagination_headers_only_to_allowed_origins(settings,
     settings.CORS_ALLOW_ALL_ORIGINS = False
     settings.CORS_ALLOWED_ORIGINS = ['https://curation.example']
     SourceCodeConceptMapping.objects.bulk_create([
-        SourceCodeConceptMapping(source_vocabulary_id='ICD10', source_code=f'C{i:03}')
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'C{i:03}')
         for i in range(105)
     ])
     client = APIClient()
     client.force_authenticate(user=Identity.objects.create_user(email='cors-pages@example.test', is_staff=True))
 
-    response = client.get('/api/v1/code-mappings/', {'source': 'ICD10'}, HTTP_ORIGIN=origin, secure=True)
+    response = client.get('/api/v1/code-mappings/', {'source': 'ICD10CM'}, HTTP_ORIGIN=origin, secure=True)
 
     assert response.status_code == 200
     assert len(response.data) == 100
@@ -169,3 +628,465 @@ def test_plain_list_exposes_pagination_headers_only_to_allowed_origins(settings,
     else:
         assert 'Access-Control-Allow-Origin' not in response
         assert 'Access-Control-Expose-Headers' not in response
+
+
+# ── DELETE clears destination instead of removing ──────────────────────
+
+
+@pytest.fixture
+def staff_user():
+    return Identity.objects.create_user(email='staff-delete@example.test', is_staff=True)
+
+
+def _delete(user, mapping_id):
+    request = APIRequestFactory().delete(f'/api/v1/code-mappings/{mapping_id}/')
+    force_authenticate(request, user=user)
+    return code_mapping_detail(request, mapping_id=mapping_id)
+
+
+def _detail(user, mapping_id):
+    request = APIRequestFactory().get(f'/api/v1/code-mappings/{mapping_id}/')
+    force_authenticate(request, user=user)
+    return code_mapping_detail(request, mapping_id=mapping_id)
+
+
+def test_detail_includes_source_evidence_without_putting_it_on_browse_rows(staff_user):
+    from omop_core.models import Organization
+    organization = Organization.objects.create(name='Memorial Hospital', slug='memorial')
+    mapping = row(
+        'LOCAL-ALB', organization=organization, occurrence_count=20,
+        source_group_occurrence_count=37,
+        source_metadata={
+            'patients': 9,
+            'reference_range': {'records': 12, 'low_p50': 3.5, 'high_p50': 5.0},
+            'facilities': [{
+                'name': 'University Hospital', 'level': 'site',
+                'confidence': 'high', 'records': 20,
+            }],
+        },
+        source_unit_evidence=[{
+            'display': 'g/dL', 'code': 'g/dL', 'count': 18,
+            'distribution': {'p25': 3.6, 'p50': 4.2, 'p75': 4.7},
+        }],
+    )
+
+    detail = _detail(staff_user, mapping.pk)
+    assert detail.status_code == 200
+    assert detail.data['source_evidence'] == {
+        'organization': {'id': organization.pk, 'slug': 'memorial', 'name': 'Memorial Hospital'},
+        'system_context': {
+            'kind': 'verified', 'label': 'Memorial Hospital',
+            'names': [], 'name_count': 0,
+        },
+        'occurrence_count': 20,
+        'group_occurrence_count': 37,
+        'first_seen': None,
+        'last_seen': None,
+        'metadata': {
+            'patients': 9,
+            'reference_range': {'records': 12, 'low_p50': 3.5, 'high_p50': 5.0},
+        },
+        'facilities': [{
+            'name': 'University Hospital', 'level': 'site',
+            'confidence': 'high', 'records': 20,
+        }],
+        'units': mapping.source_unit_evidence,
+    }
+
+    client = APIClient()
+    client.force_authenticate(user=staff_user)
+    listed = client.get('/api/v1/code-mappings/', {'source': 'ICD10CM'})
+    assert listed.status_code == 200
+    assert 'source_evidence' not in listed.data[0]
+    assert listed.data[0]['source_system_context'] == detail.data['source_evidence']['system_context']
+
+
+def test_delete_with_destination_truly_deletes(staff_user):
+    """DELETE on a mapped row repoints clinical rows to 0 and truly deletes."""
+    concept = ConceptFactory(concept_id=999999, concept_name='Test Concept', concept_code='12345')
+    mapping = row('TEST-CODE', status='approved', target_concept=concept,
+                  destination_vocabulary_id='SNOMED')
+    MappingDestinationCandidate.objects.create(
+        mapping=mapping, target_vocabulary_id='SNOMED',
+        target_concept_code='12345', target_concept=concept,
+    )
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 204
+    assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+    # CASCADE removes candidates too
+    assert not MappingDestinationCandidate.objects.filter(mapping_id=mapping.id).exists()
+
+
+def test_delete_without_destination_is_rejected(staff_user):
+    """DELETE on an unmapped row returns 400 — the source code is real data."""
+    mapping = row('JUNK-CODE')
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 400
+    assert SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+
+
+# --- source_units in browse and flat responses (#1869, #1870) ---------------
+
+def _unit_evidence(*codes):
+    return [{'code': c, 'display': c, 'count': 1} for c in codes]
+
+
+def test_flat_browse_row_includes_source_units(browse):
+    row('ALB', occurrence_count=1, source_unit_evidence=_unit_evidence('mg/dL'))
+    data = browse().data
+    assert data['results'][0]['source_units'] == ['mg/dL']
+
+
+def test_flat_browse_row_without_units_returns_empty_list(browse):
+    row('ALB', occurrence_count=1)
+    data = browse().data
+    assert data['results'][0]['source_units'] == []
+
+
+def test_rollup_groups_by_label_only():
+    """Grouped browse entries group by label, not by units."""
+    from rest_framework.test import APIRequestFactory, force_authenticate
+    user = Identity.objects.create_user(email='rollup-units@example.test', is_staff=True)
+    row('A', source_code_description='Albumin', occurrence_count=5,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('B', source_code_description='ALBUMIN', occurrence_count=3,
+        source_unit_evidence=_unit_evidence('mg/dL'))
+    row('C', source_code_description='albumin', occurrence_count=2,
+        source_unit_evidence=_unit_evidence('mmol/L'))
+
+    request = APIRequestFactory().get('/api/v1/code-mappings/', {'browse': '1', 'rollup': '1'})
+    force_authenticate(request, user=user)
+    data = code_mapping_list(request).data
+    unmapped = data['groups']['Unmapped']
+    # All three rows share the same normalised label and belong to one group.
+    assert len(unmapped) == 1
+    group = unmapped[0]
+    assert group['members'] == 3
+    assert group['group_key'] == 'albumin'
+
+
+def test_delete_rejected_mapping_with_destination_truly_deletes(staff_user):
+    """DELETE on a rejected mapping with a destination truly deletes it."""
+    concept = ConceptFactory(concept_id=999998, concept_name='Rejected Concept', concept_code='99998')
+    mapping = row('REJECTED-CODE', status='rejected', target_concept=concept,
+                  destination_vocabulary_id='SNOMED')
+    response = _delete(staff_user, mapping.id)
+    assert response.status_code == 204
+    assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+
+
+def _reader(email):
+    client = APIClient()
+    client.force_authenticate(user=Identity.objects.create_user(email=email, is_staff=True))
+    return client
+
+
+def _next_url(response):
+    if 'Link' not in response:
+        return None
+    links = dict((part.split('; rel=')[1].strip('"'), part.split('>')[0].strip('<'))
+                 for part in response['Link'].split(', '))
+    return links.get('next')
+
+
+def _next_query(response):
+    from urllib.parse import parse_qs, urlparse
+    return parse_qs(urlparse(_next_url(response)).query)
+
+
+def _follow(client, response, seen):
+    """Follow next links to the end, appending every mapping_id to ``seen``."""
+    url = _next_url(response)
+    while url:
+        response = client.get(url, secure=True)
+        assert response.status_code == 200
+        seen.extend(r['mapping_id'] for r in response.data)
+        url = _next_url(response)
+    return response
+
+
+def test_plain_list_honours_limit_up_to_the_ceiling():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'S{i:03}')
+        for i in range(250)
+    ])
+    client = _reader('limit@example.test')
+
+    response = client.get('/api/v1/code-mappings/', {'limit': 200}, secure=True)
+    assert response.status_code == 200
+    assert len(response.data) == 200
+    assert response['X-Page-Size'] == '200'
+    assert response['X-Total-Count'] == '250'
+    assert 'page=2' in response['Link'] and 'limit=200' in response['Link']
+    assert len(client.get('/api/v1/code-mappings/', {'limit': 200, 'page': 2}, secure=True).data) == 50
+
+    for bad in ('0', '1001', 'ten'):
+        response = client.get('/api/v1/code-mappings/', {'limit': bad}, secure=True)
+        assert response.status_code == 400, bad
+        assert 'limit' in response.data
+
+
+def test_plain_list_pages_by_cursor_without_skipping_or_repeating():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'K{i:03}')
+        for i in range(7)
+    ])
+    client = _reader('cursor@example.test')
+
+    first = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3}, secure=True)
+    assert first.status_code == 200
+    ids = [r['mapping_id'] for r in first.data]
+    assert len(ids) == 3
+    assert 'X-Total-Count' not in first and 'X-Page' not in first
+    assert 'rel="prev"' not in first['Link']
+    next_url = _next_url(first)
+    assert next_url.startswith('https://')
+    query = _next_query(first)
+    assert query['sort'] == ['updated_at'] and query['limit'] == ['3'] and 'page' not in query
+    cursor = query['cursor'][0]
+    from django.core import signing
+    from patient_portal.api import views
+    assert signing.loads(cursor, salt=views._CODE_MAPPING_CURSOR_SALT)[1] == ids[-1]
+
+    # A row written and one deleted mid-read neither repeat nor skip anything.
+    SourceCodeConceptMapping.objects.filter(pk=ids[0]).delete()
+    new = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='A-new')
+    seen = list(ids)
+    response = _follow(client, first, seen)
+    assert len(seen) == len(set(seen)) == 8 and seen[-1] == new.pk
+    assert len(response.data) == 2  # 8 rows at 3 a page: no trailing empty page
+    assert 'Link' not in response
+
+    # A row re-saved after it was read comes round again in the same run, so a
+    # delta reader needs no margin for rows updated below its cursor.
+    first = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3}, secure=True)
+    page_one = [r['mapping_id'] for r in first.data]
+    resaved = SourceCodeConceptMapping.objects.get(pk=page_one[1])
+    resaved.status = 'approved'
+    resaved.save()
+    seen = list(page_one)
+    _follow(client, first, seen)
+    assert seen.count(resaved.pk) == 2 and seen[-1] == resaved.pk
+    assert len(seen) == 8 and len(set(seen)) == 7  # seven rows, one of them twice
+
+
+def test_plain_list_cursor_pages_through_updated_at_ties():
+    """A bulk writer stamps one clock value on a whole batch, so the id is
+    the tie-breaker inside one updated_at and a page boundary that falls
+    inside a tie must not skip or repeat the rest of it."""
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'T{i:03}')
+        for i in range(7)
+    ])
+    SourceCodeConceptMapping.objects.update(updated_at='2026-01-01T00:00:00.123456Z')
+    client = _reader('ties@example.test')
+
+    first = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3}, secure=True)
+    seen = [r['mapping_id'] for r in first.data]
+    _follow(client, first, seen)
+    assert seen == sorted(seen) and len(seen) == len(set(seen)) == 7
+
+
+def test_plain_list_cursor_is_bound_to_its_query():
+    rows = SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'B{i:03}',
+                                 status='approved' if i % 2 else 'proposed')
+        for i in range(6)
+    ])
+    client = _reader('bound@example.test')
+    since = '2020-01-01T00:00:00Z'
+    first = client.get('/api/v1/code-mappings/', {
+        'sort': 'updated_at', 'limit': 1, 'status': 'approved', 'updated_since': since,
+    }, secure=True)
+    assert [r['mapping_id'] for r in first.data] == [rows[1].pk]
+    query = _next_query(first)
+    assert query['status'] == ['approved'] and query['updated_since'] == [since]
+    cursor = query['cursor'][0]
+
+    def get(**overrides):
+        params = {'sort': 'updated_at', 'limit': 1, 'status': 'approved', 'updated_since': since, 'cursor': cursor}
+        params.update(overrides)
+        return client.get('/api/v1/code-mappings/', {k: v for k, v in params.items() if v is not None}, secure=True)
+
+    # The same query continues; the page size and the total request may change.
+    assert [r['mapping_id'] for r in get().data] == [rows[3].pk]
+    response = get(limit=5, include_total='true')
+    assert [r['mapping_id'] for r in response.data] == [rows[3].pk, rows[5].pk]
+    assert response['X-Total-Count'] == '3'
+    # Another filter, another delta boundary, or no sort: a different query.
+    for overrides in ({'status': 'proposed'}, {'updated_since': '2021-01-01T00:00:00Z'},
+                      {'updated_since': None}, {'source': 'ICD10CM'}, {'sort': None}):
+        response = get(**overrides)
+        assert response.status_code == 400 and 'cursor' in response.data, overrides
+    # A forged or damaged token is refused, not read.
+    flipped = cursor[:-1] + ('A' if cursor[-1] != 'A' else 'B')  # always differs from the real signature
+    for forged in (flipped, cursor.replace(':', '-', 1), str(rows[1].pk), ''):
+        response = get(cursor=forged)
+        assert response.status_code == (200 if forged == '' else 400), forged
+    assert get(page=2).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'sort': 'id'}, secure=True).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'page': 2}, secure=True).status_code == 400
+
+
+def test_plain_list_include_total_is_opt_in_on_a_cursor_read():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'C{i:03}',
+                                 status='approved' if i < 4 else 'proposed')
+        for i in range(6)
+    ])
+    client = _reader('total@example.test')
+    response = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3, 'status': 'approved'}, secure=True)
+    assert 'X-Total-Count' not in response
+    response = client.get('/api/v1/code-mappings/', {
+        'sort': 'updated_at', 'limit': 3, 'status': 'approved', 'include_total': 'true',
+    }, secure=True)
+    assert response['X-Total-Count'] == '4'  # the matching rows, not the remaining ones
+    assert _next_query(response)['include_total'] == ['true']
+    response = client.get(_next_url(response), secure=True)
+    assert response['X-Total-Count'] == '4' and len(response.data) == 1
+    for raw, expected in (('1', '4'), ('false', None), ('0', None)):
+        response = client.get('/api/v1/code-mappings/', {
+            'sort': 'updated_at', 'status': 'approved', 'include_total': raw,
+        }, secure=True)
+        assert response.get('X-Total-Count') == expected, raw
+    response = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'include_total': 'maybe'}, secure=True)
+    assert response.status_code == 400 and 'include_total' in response.data
+
+
+def test_plain_list_filters_by_updated_since_rfc3339_instant():
+    older = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='OLD')
+    SourceCodeConceptMapping.objects.filter(pk=older.pk).update(updated_at='2024-01-01T00:00:00Z')
+    newer = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='NEW')
+    client = _reader('since@example.test')
+
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2025-01-01T00:00:00Z'}, secure=True)
+    assert [r['mapping_id'] for r in response.data] == [newer.pk]
+    assert response['X-Total-Count'] == '1'
+    # Inclusive, and any offset will do.
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2024-01-01T02:00:00+02:00'}, secure=True)
+    assert {r['mapping_id'] for r in response.data} == {older.pk, newer.pk}
+    # An unencoded '+' arrives as a space and is read as the offset it was.
+    response = client.get('/api/v1/code-mappings/?updated_since=2024-01-01T02:00:00 02:00', secure=True)
+    assert {r['mapping_id'] for r in response.data} == {older.pk, newer.pk}
+    # A bare date, a naive datetime or prose is a 400, never read as UTC.
+    # Nor is an instant that is shaped right and is not real: that was a 500.
+    for bad in ('2023-12-31', '2023-12-31T00:00:00', 'yesterday', '2026-02-30T00:00:00Z', '2026-11-13T24:00:00Z',
+                '2026-13-01T00:00:00Z', '2026-11-13T00:00:00+99:00'):
+        response = client.get('/api/v1/code-mappings/', {'updated_since': bad}, secure=True)
+        assert response.status_code == 400 and 'updated_since' in response.data, bad
+        assert isinstance(response.data['updated_since'], list)
+    # RFC 3339 allows a lowercase t and z.
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2024-01-01t00:00:00z'}, secure=True)
+    assert response.status_code == 200 and len(response.data) == 2
+
+
+@pytest.mark.parametrize('k_service, expected', [('ctomop-staging', 'trusted'), ('', 'None')])
+def test_proxy_ssl_header_is_trusted_on_cloud_run(k_service, expected):
+    """Cloud Run strips a client's X-Forwarded-Proto as Render does, so Django
+    may build https links behind it; a bare server still trusts nothing."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = {**os.environ, 'DJANGO_SETTINGS_MODULE': 'promop.settings', 'DEBUG': 'True',
+           'SECRET_KEY': 'local-proxy-header-test', 'K_SERVICE': k_service,
+           'DATABASE_URL': 'postgresql://postgres@localhost:5432/unused_bootstrap_test',
+           'RENDER': '', 'RENDER_EXTERNAL_HOSTNAME': '', 'RENDER_EXTERNAL_URL': ''}
+    env.pop('TRUST_PROXY_SSL_HEADER', None)  # an explicit value, even empty, overrides the platform default
+    env['PYTHON_DOTENV_DISABLED'] = '1'  # a developer's .env must not fill it back in
+    script = ("from django.conf import settings; h = settings.SECURE_PROXY_SSL_HEADER; "
+              "print('trusted' if h == ('HTTP_X_FORWARDED_PROTO', 'https') else h)")
+    result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],
+                            env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
+# --- Destination unit on a list row -----------------------------------------
+
+def _ucum(code, name):
+    from tests.factories import DomainFactory, VocabularyFactory
+    return ConceptFactory(concept_code=code, concept_name=name,
+                          vocabulary=VocabularyFactory(vocabulary_id='UCUM'),
+                          domain=DomainFactory(domain_id='Unit'))
+
+
+def test_a_row_reports_its_curated_destination_unit(browse):
+    """The unit a mapping stores values in is on the list row, so a curator
+    sees it before approving instead of opening the dialog to find out."""
+    unit = _ucum('mg/dL', 'milligram per deciliter')
+    row('WITH-UNIT', target_concept=ConceptFactory(), destination_unit_concept=unit)
+    row('NO-UNIT', target_concept=ConceptFactory())
+    # The no-destination branch of the serializer carries the same keys.
+    row('UNIT-NO-DEST', destination_unit_concept=unit)
+    row('NOTHING')
+    rows = {r['source_code']: r for r in browse(queue_sections='1').data['results']}
+
+    assert rows['WITH-UNIT']['destination_unit_concept_id'] == unit.concept_id
+    assert rows['WITH-UNIT']['destination_unit_code'] == 'mg/dL'
+    assert rows['WITH-UNIT']['destination_unit_name'] == 'milligram per deciliter'
+    assert rows['UNIT-NO-DEST']['destination_unit_code'] == 'mg/dL'
+    assert rows['UNIT-NO-DEST']['destination_unit_name'] == 'milligram per deciliter'
+    for code in ('NO-UNIT', 'NOTHING'):
+        assert rows[code]['destination_unit_concept_id'] is None
+        assert rows[code]['destination_unit_code'] == ''
+        assert rows[code]['destination_unit_name'] == ''
+
+
+def test_a_unit_whose_concept_is_not_loaded_reads_as_no_unit(browse):
+    """The column has no database constraint, so the id can outlive its
+    concept. That is an empty cell, on the list and on the detail alike."""
+    mapping = row('DANGLING', target_concept=ConceptFactory())
+    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(destination_unit_concept_id=987654321)
+    listed = browse(queue_sections='1').data['results'][0]
+    assert listed['destination_unit_concept_id'] == 987654321
+    assert listed['destination_unit_code'] == ''
+    assert listed['destination_unit_name'] == ''
+
+    # A row loaded without the join (a save's response) reads the same.
+    from patient_portal.api.views import _serialize_code_mapping_row
+    unjoined = SourceCodeConceptMapping.objects.get(pk=mapping.pk)
+    assert _serialize_code_mapping_row(unjoined.target_concept, unjoined)['destination_unit_code'] == ''
+
+
+def test_the_curated_unit_is_on_the_detail_and_the_plain_list(browse):
+    unit = _ucum('g/L', 'gram per liter')
+    mapping = row('DETAIL', target_concept=ConceptFactory(), destination_unit_concept=unit)
+    user = Identity.objects.create_user(email='unit-detail@example.test', is_staff=True)
+
+    request = APIRequestFactory().get(f'/api/v1/code-mappings/{mapping.pk}/')
+    force_authenticate(request, user=user)
+    detail = code_mapping_detail(request, mapping_id=mapping.pk).data
+    assert (detail['destination_unit_code'], detail['destination_unit_name']) == ('g/L', 'gram per liter')
+
+    request = APIRequestFactory().get('/api/v1/code-mappings/')
+    force_authenticate(request, user=user)
+    listed = code_mapping_list(request).data[0]
+    assert (listed['destination_unit_code'], listed['destination_unit_name']) == ('g/L', 'gram per liter')
+
+
+def test_destination_units_cost_no_query_per_row(browse):
+    """The unit rides the page's own join. Read lazily it is one query a row,
+    on a page of 100."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from tests.factories import VocabularyFactory
+    units = [_ucum(f'u{i}', f'unit {i}') for i in range(3)]
+    # Not LOINC: a LOINC Measurement destination looks up its example units,
+    # which is a query a row while that table is empty, as it is here.
+    destination = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='SNOMED'))
+    row('FIRST', target_concept=destination, destination_unit_concept=units[0])
+    with CaptureQueriesContext(connection) as small:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    for i in range(20):
+        row(f'NEXT-{i}', target_concept=destination, destination_unit_concept=units[i % 3])
+    with CaptureQueriesContext(connection) as large:
+        data = browse(queue_sections='1', include_duplicates='0').data
+    assert sum(1 for r in data['results'] if r['destination_unit_code']) == 21
+    assert len(large) == len(small)
+    # And without units at all the page costs the same: the join is the page's.
+    SourceCodeConceptMapping.objects.update(destination_unit_concept=None)
+    with CaptureQueriesContext(connection) as none:
+        assert browse(queue_sections='1', include_duplicates='0').status_code == 200
+    assert len(none) == len(large)

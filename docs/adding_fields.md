@@ -2,6 +2,19 @@
 
 Issue: #721
 
+> **Built differently (2026-11-17).** The workflow of
+> [section 10.3 of the field concept mapping plan](field_concept_mapping_plan.md#103-creating-and-scoping-a-field-from-a-patient-tab)
+> replaced the inline dialog described below, and is what the app does now:
+> each patient tab has an Add Field link for staff and org admins, the link
+> opens the Field Concept Mapping dialog in create mode on that tab (and, from
+> the disease tab, scoped to the record's disease), and created fields render
+> read-only last on their tab. See
+> [Adding a field from a patient tab](field_concept_mapping_architecture.md#adding-a-field-from-a-patient-tab).
+> The checklist below is the original plan, kept for its data model,
+> migration and API items; its two UI items describe the inline control that
+> was removed. Not built: writing a created field's value from the patient
+> editor.
+
 ## Delivery checklist
 
 - [x] Define the runtime-safe data model: a `CustomPatientField` definition and

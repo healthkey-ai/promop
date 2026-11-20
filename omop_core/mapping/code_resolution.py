@@ -27,10 +27,14 @@ the rows already stored, or the decision only ever reaches data that happens to
 arrive again.
 """
 import logging
+from contextvars import ContextVar
+from datetime import date
 
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
 from django.db.models import Case, F, IntegerField, Q, When
+from django.db.models.functions import Substr, Upper
 from django.utils import timezone
 
 from omop_core.models import (
@@ -40,16 +44,24 @@ from omop_core.models import (
     Measurement,
     Observation,
     PatientRecord,
+    PatientSourceCode,
     ProcedureOccurrence,
     ProvenanceRecord,
     SourceCodeConceptMapping,
 )
+from omop_core.services.pk import next_pk
 from omop_core.mapping.therapy import (
     SOURCE_HEALTHKEY,
     _get_or_create_quarantine_concept,
     _slug,
 )
 from omop_core.signals import suppress_patient_record_refresh
+from omop_core.services.provenance_attribution import ATTRIBUTION, exclusively_attributed, with_attribution
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+from omop_core.services import source_vocabularies
+from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
+from omop_core.services.snomed_identity import IDENTITY_ORIGIN, is_standard_snomed, promote_crossmap_identity
+from omop_core.services.source_vocabularies import table_for_domain
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +84,18 @@ CLINICAL_TABLES = {
     'procedure': (ProcedureOccurrence, 'procedure_concept_id', 'procedure_source_value'),
 }
 
+# Fields needed to *create* a new clinical row, per table. Keyed on the
+# canonical table name (same keys as CLINICAL_TABLES). Each tuple is:
+#   (pk_field, concept_fk_field, source_value_field, date_field, type_concept_fk_field)
+# where *_fk_field names the Django FK attribute (not the raw _id column).
+_CREATE_FIELDS = {
+    'measurement':   ('measurement_id',         'measurement_concept',  'measurement_source_value',  'measurement_date',         'measurement_type_concept'),
+    'observation':   ('observation_id',          'observation_concept',  'observation_source_value',  'observation_date',          'observation_type_concept'),
+    'condition':     ('condition_occurrence_id', 'condition_concept',    'condition_source_value',    'condition_start_date',      'condition_type_concept'),
+    'drug_exposure': ('drug_exposure_id',        'drug_concept',         'drug_source_value',         'drug_exposure_start_date',  'drug_type_concept'),
+    'procedure':     ('procedure_occurrence_id', 'procedure_concept',    'procedure_source_value',    'procedure_date',            'procedure_type_concept'),
+}
+
 # Which HK-* vocabulary a minted destination lands in, per OMOP table, and the
 # domain/class it carries there.
 _QUARANTINE_TARGETS = {
@@ -81,6 +105,9 @@ _QUARANTINE_TARGETS = {
     'drug_exposure': ('HK-Drug', 'Drug', 'Drug', 'hkd'),
     'procedure': ('HK-Procedure', 'Procedure', 'Procedure', 'hkp'),
 }
+_QUARANTINE_VOCABULARIES: frozenset[str] = frozenset(
+    vocabulary_id for vocabulary_id, *_ in _QUARANTINE_TARGETS.values()
+)
 
 
 # What makes two rows the same event, per table. Mirrors the bulk write path's
@@ -124,7 +151,26 @@ def normalize_omop_table(omop_table):
 SOURCE_CODE_MAX = 100
 
 
-def approved_mapping_for(source_vocabulary_id, source_code):
+def _mapping_scope(source_vocabulary_id, source_code, organization=None):
+    """Mappings eligible for this encounter, safest choice first.
+
+    Hospital-local systems must never fall through to another institution's
+    row.  With organization context they require an exact organization match;
+    without it, legacy global rows remain available for backward compatibility.
+    Non-hospital vocabularies remain global.
+    """
+    queryset = SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=source_vocabulary_id or '',
+        source_code__iexact=source_code[:SOURCE_CODE_MAX],
+    )
+    if organization is None:
+        return queryset.filter(organization__isnull=True)
+    if source_vocabularies.hospital_vendor(source_vocabulary_id):
+        return queryset.filter(organization=organization)
+    return queryset.filter(organization__isnull=True)
+
+
+def approved_mapping_for(source_vocabulary_id, source_code, organization=None):
     """Return the approved mapping for this code, or None.
 
     Matched case-insensitively on the code: an uncoded source is a lab's or a
@@ -133,11 +179,21 @@ def approved_mapping_for(source_vocabulary_id, source_code):
     """
     if not source_code:
         return None
-    return SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '',
+    source_vocabulary_id = _resolution_vocabulary(source_vocabulary_id, source_code)
+    return _mapping_scope(
+        source_vocabulary_id, source_code, organization,
+    ).filter(status='approved').select_related('target_concept').first()
+
+
+def _resolution_vocabulary(vocabulary_id, source_code):
+    """Accept OIDs while respecting legacy exceptions retained by migration."""
+    canonical = canonical_source_vocabulary(vocabulary_id)
+    if vocabulary_id in VOCABULARY_OID_ALIASES and SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id=vocabulary_id,
         source_code__iexact=source_code[:SOURCE_CODE_MAX],
-        status='approved',
-    ).select_related('target_concept').first()
+    ).exists():
+        return vocabulary_id
+    return canonical
 
 
 def _direct_concept(source_vocabulary_id, source_code):
@@ -159,13 +215,70 @@ def _direct_concept(source_vocabulary_id, source_code):
     ).first()
 
 
+def _description_for(source_vocabulary_id, source_code, source_text):
+    """The display text for a new queue row.
+
+    FHIR sync passes the code itself when a Coding has no display, and the
+    resolve endpoint and crossmap importers pass nothing; either way the
+    curator would meet a bare code (#1464). Ask the vocabularies before
+    settling for that.
+    """
+    from omop_core.services.source_descriptions import describe_source_code
+
+    text = (source_text or '')[:255]
+    if text and text != source_code:
+        return text
+    return describe_source_code(source_vocabulary_id or '', source_code) or text
+
+
+#: True while a caller's sightings are one ask per code per batch, not one
+#: per record: the code-mappings lookup (#2123). Such a sighting is a
+#: provisional count, kept only until the code's per-patient rows exist.
+_PROVISIONAL = ContextVar('provisional_sightings', default=False)
+
+
+def _has_patient_rows(mapping):
+    """Whether this instance holds per-patient rows for the mapping's code:
+    then its Seen count is theirs, not the lookups' (#2123). The rows are
+    matched as the walk matches them (``axis_variants.rebuild_seen_counts``):
+    exact code and vocabulary, on the mapping's table when it names one, a
+    hospital-scoped mapping asking about its own hospital's patients. A
+    vocabulary stored under its canonical id also answers for the OID the
+    rows may carry; a code the mapping holds truncated answers by prefix."""
+    vocabulary = mapping.source_vocabulary_id or ''
+    rows = PatientSourceCode.objects.filter(source_vocabulary_id__in={
+        vocabulary, *[oid for oid, canonical in VOCABULARY_OID_ALIASES.items() if canonical == vocabulary]})
+    if len(mapping.source_code) >= SOURCE_CODE_MAX:
+        rows = rows.filter(source_value__startswith=mapping.source_code)
+    else:
+        rows = rows.filter(source_value=mapping.source_code)
+    if mapping.omop_table:
+        rows = rows.filter(omop_table=mapping.omop_table)
+    if mapping.organization_id is not None:
+        rows = rows.filter(person__patient_record__organization_id=mapping.organization_id)
+    return rows.exists()
+
+
+def _seen_from_rows(mapping):
+    """Set the mapping's Seen count from its per-patient rows (#2123)."""
+    from omop_core.mapping.axis_variants import rebuild_seen_counts
+
+    rebuild_seen_counts([(mapping.source_vocabulary_id, mapping.source_code)])
+
+
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
-                     concept, omop_table, source_system, notes='', is_suggestion=False):
+                     concept, omop_table, source_system, organization=None,
+                     notes='', is_suggestion=False):
     """Create or bump the proposed mapping for a code an import had to invent.
 
     Idempotent: the first sighting creates the row, later sightings bump
     ``occurrence_count`` and ``last_seen`` so the review queue can be ordered by
-    how much a code actually matters.  Never touches an approved row — that
+    how much a code actually matters.  A sighting under
+    :func:`provisional_sightings` (the code-mappings lookup, which asks once
+    per code per batch, not once per record) adds one only while the code
+    has no per-patient rows on this instance; once they exist they are the
+    count, and the sighting sets it from them (#2123). A per-record caller,
+    such as FHIR sync, always adds one. Never touches an approved row — that
     would let an import quietly undo a curator.
     """
     now = timezone.now()
@@ -173,10 +286,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
     # string but storing 100 chars means every later sighting of a longer source
     # text misses, re-enters the create branch, and trips the unique constraint.
     source_code = source_code[:SOURCE_CODE_MAX]
-    mapping = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '',
-        source_code__iexact=source_code,
-    ).first()
+    mapping = _mapping_scope(
+        source_vocabulary_id, source_code, organization,
+    ).filter(organization=organization).first()
 
     if mapping is None:
         try:
@@ -185,10 +297,13 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
             # IntegrityError escapes and fails the entire bundle with a 500 --
             # a normal condition for a parallel import, not an error.
             with transaction.atomic():
-                return SourceCodeConceptMapping.objects.create(
+                created = SourceCodeConceptMapping.objects.create(
+                    organization=organization,
                     source_vocabulary_id=source_vocabulary_id or '',
                     source_code=source_code,
-                    source_code_description=(source_text or '')[:255],
+                    source_code_description=_description_for(
+                        source_vocabulary_id, source_code, source_text,
+                    ),
                     # Without this a gap row carries no domain, and the UI has
                     # nothing to place it by -- it appeared in no tab at all.
                     domain_id=_DOMAIN_FOR_TABLE.get(omop_table, ''),
@@ -205,11 +320,14 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     last_seen=now,
                     notes=notes,
                 )
+            if _PROVISIONAL.get() and _has_patient_rows(created):
+                _seen_from_rows(created)
+                created.refresh_from_db(fields=['occurrence_count'])
+            return created
         except IntegrityError:
-            mapping = SourceCodeConceptMapping.objects.filter(
-                source_vocabulary_id=source_vocabulary_id or '',
-                source_code__iexact=source_code,
-            ).first()
+            mapping = _mapping_scope(
+                source_vocabulary_id, source_code, organization,
+            ).filter(organization=organization).first()
             if mapping is None:
                 raise
 
@@ -218,79 +336,298 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
 
     # This is called by concurrent import workers.  Reading, adding one in
     # Python, and saving loses sightings under load; keep Seen a real counter.
-    updates = {
-        'occurrence_count': F('occurrence_count') + 1,
-        'last_seen': now,
-    }
+    updates = {'last_seen': now}
+    if _PROVISIONAL.get() and _has_patient_rows(mapping):
+        # The rows are the count: set from them rather than add to them, so
+        # a row created after its patients were uploaded, or bumped while an
+        # upload landed, reads what the rows say (#2123).
+        _seen_from_rows(mapping)
+    else:
+        updates['occurrence_count'] = F('occurrence_count') + 1
     if mapping.first_seen is None:
         updates['first_seen'] = now
+    named = _name_if_unnamed(mapping, source_text)
+    if named:
+        # A sighting is a counter, not a change; naming the code is one (#2451).
+        updates['source_code_description'] = named
+        updates['updated_at'] = now
     SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
-    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen'])
+    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen', 'source_code_description'])
     return mapping
 
 
-def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table):
+def _unnamed(name, source_code):
+    return not (name or '').strip() or name.strip() == source_code
+
+
+def _name_if_unnamed(mapping, source_text):
+    """The name a later sighting gives a code first seen without one (#2168).
+
+    The description is written when the row is created. A code first seen as
+    a bare code (no display, no text) stayed unnamed even after a later
+    import sent its name, and so did the HK concept minted for it, which is
+    named after the code (``hkp:85025`` "85025"). Returns the new
+    description, or ``''`` when the row already has one or the sighting
+    brings none. A curator's text is never replaced: only an empty
+    description, or one that repeats the code, counts as unnamed.
+    """
+    text = (source_text or '').strip()[:255]
+    if _unnamed(mapping.source_code_description, mapping.source_code) and not _unnamed(text, mapping.source_code):
+        _name_minted_concept(mapping, text)
+        return text
+    return ''
+
+
+def _name_minted_concept(mapping, name):
+    """Rename the HK concept minted for this code when it is named after the code.
+
+    Only a concept no other mapping points at: one minted from a bare code
+    can be shared by another vocabulary's identical code, and that code's
+    name is not this one.
+    """
+    concept_id = mapping.target_concept_id
+    if concept_id is None:
+        return
+    concept = Concept.objects.filter(
+        concept_id=concept_id, vocabulary_id__in=_QUARANTINE_VOCABULARIES,
+    ).first()
+    if concept is None or not _unnamed(concept.concept_name, mapping.source_code):
+        return
+    shared = SourceCodeConceptMapping.objects.filter(
+        Q(target_concept_id=concept_id) | Q(suggested_target_concept_id=concept_id),
+    ).exclude(pk=mapping.pk).exists()
+    if shared:
+        return
+    Concept.objects.filter(concept_id=concept_id).update(concept_name=name)
+
+
+def _standard_maps_to(concept):
+    """The one live standard concept a non-standard Athena concept maps to, or None.
+
+    A J-code (HCPCS, Drug domain) is non-standard and carries a 'Maps to'
+    RxNorm ingredient; an ICD-10-CM code maps to SNOMED. ``sync_athena_mappings``
+    turns those edges into approved SCCM rows for the codes it is pointed at,
+    but a code it has not met yet should resolve the same way here rather
+    than to its own non-standard id, which no OMOP consumer can use.
+    """
+    targets = list(
+        Concept.objects.filter(
+            relationships_as_target__concept_1=concept,
+            relationships_as_target__relationship_id='Maps to',
+            relationships_as_target__invalid_reason__isnull=True,
+            standard_concept='S', invalid_reason__isnull=True,
+        ).distinct()[:2]
+    )
+    return targets[0] if len(targets) == 1 else None
+
+
+def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table,
+                              target=None):
     """Cache an authoritative direct vocabulary hit in SCCM.
 
     ``approved`` remains the effective state for backwards compatibility, but
     ``origin_system`` makes this a refreshable Athena-derived cache entry, not
     a curator sign-off.  A concurrent creator, or any existing curator row,
-    always wins rather than being overwritten.
+    always wins rather than being overwritten. ``target`` is the standard
+    concept the hit maps to when the hit itself is not standard.
     """
+    target = target or concept
     source_code = source_code[:SOURCE_CODE_MAX]
     existing = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '', source_code__iexact=source_code,
+        organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
+        source_code__iexact=source_code,
     ).select_related('target_concept').first()
     if existing is not None:
         return existing
+    standard_identity = source_vocabulary_id == 'SNOMED' and is_standard_snomed(concept)
     try:
         with transaction.atomic():
             return SourceCodeConceptMapping.objects.create(
+                organization=None,
                 source_vocabulary_id=source_vocabulary_id or '',
                 source_code=source_code,
                 source_code_description=(concept.concept_name or '')[:255],
                 source_concept=concept,
-                target_concept=concept,
-                destination_vocabulary_id=concept.vocabulary_id or '',
-                domain_id=concept.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
-                omop_table=omop_table,
+                target_concept=target,
+                destination_vocabulary_id=target.vocabulary_id or '',
+                domain_id=target.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
+                omop_table=table_for_domain(target.domain_id) if standard_identity else omop_table,
                 source='Athena', status='approved', origin='import',
-                origin_system='athena-direct', occurrence_count=0,
+                origin_system=IDENTITY_ORIGIN if standard_identity else 'athena-direct', occurrence_count=0,
             )
     except IntegrityError:
         return SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id=source_vocabulary_id or '', source_code__iexact=source_code,
+            organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
+            source_code__iexact=source_code,
         ).select_related('target_concept').get()
 
 
+def _promote_if_loaded(
+    pending: SourceCodeConceptMapping, source_vocabulary_id: str, source_code: str,
+) -> SourceCodeConceptMapping | None:
+    """Promote a proposal that was queued only because its vocabulary was missing.
+
+    Import writes a placeholder or an empty gap when the vocabulary is not
+    loaded. Without this the queue row blocks the direct lookup forever, so a
+    later vocabulary load never reaches the code. Returns the promoted mapping,
+    or None when the row must stay in the queue.
+    """
+    if not source_vocabulary_id or not _waiting_for_vocabulary(pending):
+        return None
+    concept = _direct_concept(source_vocabulary_id, source_code)
+    if not _usable_destination(concept, pending.omop_table):
+        return None
+    with transaction.atomic():
+        mapping = (
+            SourceCodeConceptMapping.objects.select_for_update(of=('self',))
+            .select_related('target_concept').filter(pk=pending.pk).first()
+        )
+        # A curator may have rejected or edited the row since it was read.
+        if mapping is None or not _waiting_for_vocabulary(mapping):
+            return None
+        mapping.source_concept = concept
+        mapping.target_concept = concept
+        mapping.destination_vocabulary_id = concept.vocabulary_id or ''
+        mapping.domain_id = concept.domain_id
+        mapping.source = 'Athena'
+        mapping.status = 'approved'
+        mapping.origin_system = 'athena-direct'
+        mapping.proposed_by = None
+        mapping.save(update_fields=[
+            'source_concept', 'target_concept', 'destination_vocabulary_id',
+            'domain_id', 'source', 'status', 'origin_system', 'proposed_by', 'updated_at',
+        ])
+    return mapping
+
+
+def _waiting_for_vocabulary(mapping: SourceCodeConceptMapping) -> bool:
+    """True for an untouched import proposal holding only a placeholder or a gap."""
+    if mapping.origin_system == MULTIPLE_ORIGIN or mapping.status != 'proposed' or mapping.origin != 'import':
+        return False
+    if mapping.reviewer_id is not None or mapping.suggested_target_concept_id is not None:
+        return False
+    target = mapping.target_concept
+    return target is None or (
+        target.source == SOURCE_HEALTHKEY and target.vocabulary_id in _QUARANTINE_VOCABULARIES
+    )
+
+
+def _usable_destination(concept: Concept | None, omop_table: str) -> bool:
+    """A standard valid concept in the domain of the table the rows are written to.
+
+    Non-standard hits like an RxNorm Brand Name and cross-domain hits like a
+    LOINC Observation code for a measurement stay with a curator.
+    """
+    return (
+        concept is not None
+        and concept.standard_concept == 'S'
+        and not concept.invalid_reason
+        and concept.domain_id == _DOMAIN_FOR_TABLE.get(normalize_omop_table(omop_table))
+    )
+
+
+def _identity_for_table(mapping, table):
+    """An automatic identity is only usable in its real clinical domain."""
+    target = mapping.target_concept
+    if (mapping.status != 'approved' or not _usable_destination(target, table)
+            or not target.valid_start_date <= date.today() <= target.valid_end_date):
+        return None, mapping
+    return target, mapping
+
+
 def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
-                        source_text='', source_system='fhir-upload'):
+                        source_text='', source_system='fhir-upload', organization=None,
+                        source_unit=None):
     """Resolve an inbound source code to a destination concept.
 
     Implements the four rules in the module docstring. Returns
     ``(concept, mapping_or_None)``; ``concept`` is None only when there is
     nothing to resolve (no code at all).
+
+    *source_unit* is the record's unit. A code whose units imply more than one
+    set of LOINC axes has an approved variant per set, and a record in one of
+    those units resolves to that variant's concept instead of the mapping's
+    (:mod:`omop_core.mapping.axis_variants`).
     """
+    concept, mapping, _variant = resolve_source_code_variant(
+        source_code=source_code, omop_table=omop_table,
+        source_vocabulary_id=source_vocabulary_id, source_text=source_text,
+        source_system=source_system, organization=organization,
+        source_unit=source_unit,
+    )
+    return concept, mapping
+
+
+def resolve_source_code_variant(*, source_code, omop_table, source_vocabulary_id='',
+                                source_text='', source_system='fhir-upload',
+                                organization=None, source_unit=None, metadata=None,
+                                mint=True, provisional=False):
+    """:func:`resolve_source_code`, also returning the axis variant that
+    routed the record (``None`` when the mapping's own concept applies).
+
+    *metadata* is what the caller knows about the record (unit, value,
+    specimen) in the shape :mod:`loinc_axes` reads; it steers the suggestion
+    made for a new code. *mint* False queues a code nothing matched with no
+    destination instead of a placeholder concept: right for a document term
+    (:mod:`text_terms`), where a placeholder per phrasing would be noise.
+    *provisional* says the caller asks once per code per batch, not once
+    per record, so its sighting counts only until the code's per-patient
+    rows exist (#2123).
+    """
+    token = _PROVISIONAL.set(provisional)
+    try:
+        concept, mapping = _resolve_source_code(
+            source_code=source_code, omop_table=omop_table,
+            source_vocabulary_id=source_vocabulary_id, source_text=source_text,
+            source_system=source_system, organization=organization,
+            metadata=metadata, mint=mint,
+        )
+    finally:
+        _PROVISIONAL.reset(token)
+    if mapping is not None and source_unit:
+        from omop_core.mapping.axis_variants import variant_for
+        variant = variant_for(mapping, source_unit)
+        if variant is not None:
+            return variant.target_concept, mapping, variant
+    return concept, mapping, None
+
+
+def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
+                         source_text, source_system, organization,
+                         metadata=None, mint=True):
     source_code = (source_code or '').strip()
     if not source_code:
         return None, None
+    source_vocabulary_id = _resolution_vocabulary(source_vocabulary_id, source_code)
     table = normalize_omop_table(omop_table)
+    mapping_organization = (
+        organization if source_vocabularies.hospital_vendor(source_vocabulary_id) else None
+    )
 
     # Rule 1 — SCCM is the primary resolver for every source vocabulary,
     # including LOINC, SNOMED, and CPT4. A curator-approved exception must not
     # lose to an automatic natural-key lookup.
-    approved = approved_mapping_for(source_vocabulary_id, source_code)
+    approved = approved_mapping_for(
+        source_vocabulary_id, source_code, mapping_organization,
+    )
     if approved is not None:
+        if approved.origin_system in (IDENTITY_ORIGIN, SINGLE_ORIGIN):
+            return _identity_for_table(approved, table)
         return approved.target_concept, approved
 
     # A proposed target is a review aid, never an effective mapping.  Once a
     # code is in the queue, every ingest caller receives the same unresolved
     # answer and the proposal's Seen count records that encounter.
-    pending = SourceCodeConceptMapping.objects.filter(
-        source_vocabulary_id=source_vocabulary_id or '',
-        source_code__iexact=source_code[:SOURCE_CODE_MAX], status='proposed',
-    ).first()
+    pending = _mapping_scope(
+        source_vocabulary_id, source_code, mapping_organization,
+    ).filter(status='proposed').select_related('target_concept').first()
     if pending is not None:
+        identity = promote_crossmap_identity(pending)
+        if identity is not None:
+            return _identity_for_table(identity, table)
+        promoted = _promote_if_loaded(pending, source_vocabulary_id, source_code)
+        if promoted is not None:
+            return promoted.target_concept, promoted
         return None, _record_proposal(
             source_vocabulary_id=source_vocabulary_id,
             source_code=source_code,
@@ -298,16 +635,22 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             concept=pending.target_concept,
             omop_table=table,
             source_system=source_system,
+            organization=mapping_organization,
         )
 
     # Rule 2 — LOINC/SNOMED retain direct Athena lookup only as a fallback.
     if source_vocabulary_id in SELF_RESOLVING_VOCABULARIES:
         concept = _direct_concept(source_vocabulary_id, source_code)
+        if source_vocabulary_id == 'SNOMED' and not is_standard_snomed(concept):
+            concept = None
         if concept is not None:
-            return concept, _effective_direct_mapping(
+            mapping = _effective_direct_mapping(
                 source_vocabulary_id=source_vocabulary_id,
                 source_code=source_code, concept=concept, omop_table=table,
             )
+            if source_vocabulary_id == 'SNOMED':
+                return _identity_for_table(mapping, table)
+            return concept, mapping
         # ...unless that concept is not loaded on this deploy. Returning None
         # here would drop the code to concept 0 with nothing in the review
         # queue, and LOINC is the dominant source system for the labs this
@@ -323,16 +666,36 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             concept=None,
             omop_table=table,
             source_system=source_system,
+            organization=mapping_organization,
         )
         return None, gap
 
-    # Rule 3a — resolve against Athena as before.
+    # Rule 3a — resolve against Athena as before. A standard, valid concept
+    # is the answer. A non-standard one (an HCPCS J-code, an ICD-10-CM code
+    # the mapping sync has not met) is the answer only through its one
+    # 'Maps to' standard target; with none it stays with a curator, as a
+    # non-standard hit already does on the promotion path (#2300).
     concept = _direct_concept(source_vocabulary_id, source_code)
+    if (concept is not None and not source_vocabulary_id
+            and concept.domain_id != _DOMAIN_FOR_TABLE.get(table)):
+        # No code system was sent, so the match is by code text alone and an
+        # in-house code can collide with a real one: HCPCS modifier 'SG' is a
+        # standard Observation, and a drug code 'SG' must not land on it.
+        # Only a hit in the table's own domain is evidence; else a curator.
+        concept = None
     if concept is not None:
-        return concept, _effective_direct_mapping(
-            source_vocabulary_id=source_vocabulary_id,
-            source_code=source_code, concept=concept, omop_table=table,
-        )
+        if concept.standard_concept == 'S' and not concept.invalid_reason:
+            return concept, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+            )
+        target = _standard_maps_to(concept)
+        if target is not None:
+            return target, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+                target=target,
+            )
 
     # Rule 4 — the suggestion service owns every retrieval/ranking strategy.
     # Its returned target is useful evidence for a curator but never an answer
@@ -343,6 +706,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         source_code=source_code,
         source_text=source_text,
         omop_table=table,
+        metadata=metadata,
     )
     if suggested is not None:
         mapping = _record_proposal(
@@ -352,12 +716,24 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
             concept=suggested,
             omop_table=table,
             source_system=source_system,
+            organization=mapping_organization,
             notes=note,
             is_suggestion=True,
         )
         return None, mapping
 
     # Rule 5 — mint only after direct resolution and suggestion both fail.
+    if not mint:
+        return None, _record_proposal(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code,
+            source_text=source_text,
+            concept=None,
+            omop_table=table,
+            source_system=source_system,
+            organization=mapping_organization,
+            notes=note,
+        )
     target = _QUARANTINE_TARGETS.get(table)
     if target is None:
         logger.warning(
@@ -381,6 +757,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
         concept=concept,
         omop_table=table,
         source_system=source_system,
+        organization=mapping_organization,
         notes=note,
     )
     return None, mapping
@@ -431,8 +808,52 @@ def _source_value_match(model, source_col, mapping, include_description=True):
     return match
 
 
+def _persons_coded_elsewhere(mapping, table, new_concept_id, model, source_col):
+    """Persons whose rows for this code may come from another code system.
+
+    A clinical row keeps the code but not its code system, so the concept-0
+    sweep matches every unresolved row with that code. A bare local code such
+    as Epic flowsheet "6" is body temperature at one hospital and FVC at
+    another. The per-patient source codes say which systems a person's code
+    arrived in: a person who also has it under a system without a global
+    approval to this same destination is left unresolved rather than guessed.
+
+    Codes match as the sweep matches rows (case-insensitive, at the clinical
+    column's width); an inventory code that only shares that prefix blocks.
+    A hospital-scoped approval never agrees: the inventory cannot say which
+    hospital a person's code came from.
+    """
+    width = model._meta.get_field(source_col).max_length or 50
+    code = mapping.source_code
+    rows = PatientSourceCode.objects.filter(omop_table=table).annotate(
+        stored_code=Upper(Substr('source_value', 1, width)),
+    ).filter(stored_code=code[:width].upper())
+    vocabularies = set(rows.values_list('source_vocabulary_id', flat=True).distinct())
+    if not vocabularies:
+        return rows.none().values('person_id')
+    # The resolver keeps an OID apart from its canonical name when the OID
+    # holds a mapping of its own (_resolution_vocabulary).
+    retained = set(SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id__in=vocabularies & set(VOCABULARY_OID_ALIASES),
+        source_code__iexact=code[:SOURCE_CODE_MAX],
+    ).values_list('source_vocabulary_id', flat=True))
+    agreeing = set(SourceCodeConceptMapping.objects.filter(
+        source_code__iexact=code, omop_table=table, status='approved',
+        organization__isnull=True, target_concept_id=new_concept_id,
+    ).values_list('source_vocabulary_id', flat=True))
+    agreeing.add(mapping.source_vocabulary_id)
+    blocking = {
+        vocabulary for vocabulary in vocabularies
+        if (vocabulary if vocabulary in retained else canonical_source_vocabulary(vocabulary)) not in agreeing
+    }
+    return rows.filter(
+        Q(source_vocabulary_id__in=blocking) | ~Q(source_value__iexact=code),
+    ).values('person_id')
+
+
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
-                          apply_changes=True, match_description=True):
+                          apply_changes=True, match_description=True,
+                          person_id=None, units=None):
     """Move stored clinical rows from one destination concept to another.
 
     Approving a mapping that a curator re-pointed has to rewrite the rows
@@ -450,6 +871,10 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     ``backfill_patient_records``, the same trade ``remap_shadow_concepts``
     makes.
 
+    *units* limits the move to rows whose ``unit_source_value`` normalizes to
+    one of them -- an axis variant (``mapping.axis_variants``) owns only the
+    records in its units. Tables without a unit column move nothing then.
+
     Returns ``{'rows_updated', 'persons_marked_stale', 'rows_collapsed'}``.
     """
     # person_ids is carried so a caller running more than one sweep can union
@@ -459,7 +884,7 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
               'person_ids': set()}
     # `is None`, not falsiness: concept 0 is OMOP's "No matching concept" and is
     # the single most common value a re-point moves rows *off*.
-    if old_concept_id is None or not new_concept_id or old_concept_id == new_concept_id:
+    if old_concept_id is None or new_concept_id is None or old_concept_id == new_concept_id:
         return result
 
     table = normalize_omop_table(mapping.omop_table)
@@ -475,6 +900,33 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     match = _source_value_match(
         model, source_col, mapping, include_description=match_description)
     qs = model.objects.filter(match, **{concept_col: old_concept_id})
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
+    if units is not None:
+        if not any(f.name == 'unit_source_value' for f in model._meta.concrete_fields):
+            return result
+        from omop_core.services.canonical_units import unit_code
+        wanted = set(units)
+        spellings = [
+            raw for raw in qs.values_list('unit_source_value', flat=True).distinct()
+            if raw and unit_code(raw) in wanted
+        ]
+        qs = qs.filter(unit_source_value__in=spellings)
+    table_has_provisional = has_provisional_rows(model)
+    if old_concept_id == NO_MATCHING_CONCEPT_ID:
+        qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
+            mapping, table, new_concept_id, model, source_col))
+    elif table_has_provisional:
+        # A provisional row is a guess about one code system; it becomes real
+        # only for a person whose code did not also arrive under another.
+        qs = qs.exclude(Q(confidence__isnull=False) & Q(person_id__in=_persons_coded_elsewhere(
+            mapping, table, new_concept_id, model, source_col)))
+    if mapping.organization_id:
+        # A shared Epic flowsheet code can mean different things at two
+        # hospitals.  Only rows whose write provenance names this mapping's
+        # organization are safe to move; historical rows with no attribution
+        # deliberately remain unresolved rather than being guessed.
+        qs = exclusively_attributed(qs, mapping.organization_id)
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
     result['rows_updated'] = qs.count()
     if not apply_changes or not result['rows_updated']:
@@ -493,26 +945,294 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
         # post_delete receivers are live, and the collapse below deletes rows.
         with suppress_patient_record_refresh():
+            # Snapshot PKs before the concept update: the lazy queryset filters
+            # on old_concept_id, so after .update() it would find zero rows.
+            repointed_pks = set(qs.values_list('pk', flat=True)) if model is Measurement else None
+            # Rows a proposal wrote are provisional until this approval says
+            # otherwise. They keep their confidence through the collapses so a
+            # real twin outranks them, and lose it once those are settled.
+            provisional_pks = (
+                set(qs.filter(confidence__isnull=False).values_list('pk', flat=True))
+                if table_has_provisional else set()
+            )
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
                 new_concept_id, person_ids,
+                organization_id=mapping.organization_id,
             )
+
+            # Not for a variant approval (units set): the variant has no
+            # curated unit of its own, and the mapping's was chosen for the
+            # mapping's LOINC, not the variant's (#2157).
+            if units is None:
+                _normalize_moved_measurements(
+                    model, concept_col, source_col, match, mapping,
+                    repointed_pks, new_concept_id, person_ids, result)
+            if provisional_pks:
+                result['rows_promoted'] = _promote_rows(
+                    model, provisional_pks, concept_col, new_concept_id)
 
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
-        '(%s collapsed, %s patient record(s) marked stale).',
+        '(%s collapsed, %s normalized, %s patient record(s) marked stale).',
         mapping.id, result['rows_updated'], table, old_concept_id,
-        new_concept_id, result['rows_collapsed'], result['persons_marked_stale'],
+        new_concept_id, result['rows_collapsed'],
+        result.get('rows_normalized', 0), result['persons_marked_stale'],
     )
     return result
 
 
+def _normalize_moved_measurements(model, concept_col, source_col, match, mapping,
+                                  pks, concept_id, person_ids, result,
+                                  only_provisional=False):
+    """Normalize units on moved Measurement rows (#2088) to the mapping's curated unit.
+
+    The savepoint keeps a failed conversion from undoing the move.
+    """
+    if not pks:
+        return
+    try:
+        from omop_core.services.canonical_units import normalize_measurement_units
+        with transaction.atomic():
+            norm_qs = model.objects.filter(pk__in=pks)
+            result['rows_normalized'] = normalize_measurement_units(norm_qs, mapping)
+            # Re-collapse: one result reported in two units (1 g/L and
+            # 100 mg/dL) is one value once both are converted.
+            if result['rows_normalized']:
+                result['rows_collapsed'] += _collapse_duplicates(
+                    model, concept_col, source_col, match,
+                    concept_id, person_ids,
+                    organization_id=mapping.organization_id,
+                    only_provisional=only_provisional,
+                )
+    except Exception:
+        logger.exception('Unit normalization failed for mapping %s', mapping.id)
+
+
+# --------------------------------------------------------------------------
+# Provisional rows: written from a proposal, promoted or reverted with it
+# (#2434, docs/provisional_data_plan.md)
+# --------------------------------------------------------------------------
+
+_PK_CHUNK = 10_000
+
+
+def has_provisional_rows(model):
+    """True when the table holds any provisional row.
+
+    Answered by the partial index on ``confidence IS NOT NULL``, so it is
+    cheap on a table that holds none, which lets approval, rejection and the
+    batch writers ask before they run a query that would scan the table.
+    """
+    return model.objects.filter(confidence__isnull=False).exists()
+
+
+def _promote_rows(model, pks, concept_col, concept_id):
+    """Make these provisional rows real, if they are still at *concept_id*.
+
+    Returns how many lost their confidence. The concept check keeps a row that
+    a concurrent run has since pointed at another proposal provisional.
+    """
+    pks = list(pks)
+    cleared = 0
+    for start in range(0, len(pks), _PK_CHUNK):
+        cleared += model.objects.filter(
+            pk__in=pks[start:start + _PK_CHUNK], confidence__isnull=False,
+            **{concept_col: concept_id},
+        ).update(confidence=None)
+    return cleared
+
+
+def promote_provisional_rows(*, mapping):
+    """Approval of a proposal at the concept its rows already sit on.
+
+    ``repoint_clinical_rows`` moves rows off one concept onto another and has
+    nothing to do when the two are the same, which is exactly the case where a
+    curator agrees with the proposal. The provisional rows at the destination
+    become real here: a provisional duplicate of a real row is folded into it
+    first (a real row is never deleted), units are normalised as a re-point
+    would, and the confidence is cleared last. A person whose code also arrived
+    under a system with no approval to this destination keeps theirs
+    provisional (:func:`_persons_coded_elsewhere`).
+
+    Returns ``{'rows_promoted', 'persons_marked_stale', 'person_ids',
+    'rows_collapsed'}``.
+    """
+    result = {'rows_promoted': 0, 'persons_marked_stale': 0, 'rows_collapsed': 0,
+              'person_ids': set()}
+    concept_id = mapping.target_concept_id
+    entry = CLINICAL_TABLES.get(normalize_omop_table(mapping.omop_table))
+    if concept_id is None or entry is None:
+        return result
+    model, concept_col, source_col = entry
+    if not has_provisional_rows(model):
+        return result
+
+    # The code alone, never the import description: a provisional row is keyed
+    # on its code, and the description of this mapping can be another
+    # mapping's code ("Glucose").
+    match = _source_value_match(model, source_col, mapping, include_description=False)
+    qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
+    qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
+        mapping, normalize_omop_table(mapping.omop_table), concept_id, model, source_col))
+    if mapping.organization_id:
+        qs = exclusively_attributed(qs, mapping.organization_id)
+    person_ids = set(qs.values_list('person_id', flat=True).distinct())
+    if not person_ids:
+        return result
+
+    with transaction.atomic():
+        result['person_ids'] = set(person_ids)
+        result['persons_marked_stale'] = PatientRecord.objects.filter(
+            person_id__in=person_ids).update(derivation_version=0)
+        with suppress_patient_record_refresh():
+            pks = set(qs.values_list('pk', flat=True))
+            result['rows_collapsed'] = _collapse_duplicates(
+                model, concept_col, source_col, match, concept_id, person_ids,
+                organization_id=mapping.organization_id, only_provisional=True)
+            _normalize_moved_measurements(
+                model, concept_col, source_col, match, mapping,
+                pks if model is Measurement else None, concept_id, person_ids, result,
+                only_provisional=True)
+            result['rows_promoted'] = _promote_rows(model, pks, concept_col, concept_id)
+    logger.info('Mapping %s: promoted %s provisional row(s) (%s collapsed).',
+                mapping.id, result['rows_promoted'], result['rows_collapsed'])
+    return result
+
+
+def revert_provisional_rows(*, mapping, concept_id, person_id=None, omop_table=None):
+    """A proposal stopped being the answer: its rows go back to unresolved.
+
+    Rows at *concept_id* that a proposal wrote (a confidence on them) return to
+    concept 0 with no confidence, which is what ingest would have stored had it
+    never acted on the proposal. A real row at the same concept is not touched,
+    and nothing is deleted: the ETL would re-send a deleted row (plan, open
+    decision 2). Called when the proposal is rejected or points somewhere else.
+
+    A patient-page save passes *person_id* and reverts that patient only; the
+    others are corrected when Generate OMOP next runs for them.
+
+    *omop_table* names the table the rows are in **now**, which is not the
+    mapping's when the same save re-files the code under another table and the
+    rows follow in a job (or, between tables that are not relocatable, never):
+    revert before they move, in the table they leave. Defaults to the mapping's.
+
+    Returns ``{'rows_reverted', 'persons_marked_stale', 'person_ids'}``.
+    """
+    result = {'rows_reverted': 0, 'persons_marked_stale': 0, 'person_ids': set()}
+    entry = CLINICAL_TABLES.get(normalize_omop_table(omop_table or mapping.omop_table))
+    if concept_id in (None, NO_MATCHING_CONCEPT_ID) or entry is None:
+        return result
+    model, concept_col, source_col = entry
+    if not has_provisional_rows(model):
+        return result
+
+    # The code alone: see promote_provisional_rows.
+    match = _source_value_match(model, source_col, mapping, include_description=False)
+    qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
+    if mapping.organization_id:
+        qs = exclusively_attributed(qs, mapping.organization_id)
+    person_ids = set(qs.values_list('person_id', flat=True).distinct())
+    if not person_ids:
+        return result
+
+    with transaction.atomic():
+        result['person_ids'] = set(person_ids)
+        result['persons_marked_stale'] = PatientRecord.objects.filter(
+            person_id__in=person_ids).update(derivation_version=0)
+        with suppress_patient_record_refresh():
+            result['rows_reverted'] = qs.update(
+                **{concept_col: NO_MATCHING_CONCEPT_ID, 'confidence': None})
+    logger.info('Mapping %s: reverted %s provisional row(s) off concept %s.',
+                mapping.id, result['rows_reverted'], concept_id)
+    return result
+
+
+def _confidence_percent(value):
+    """A ranker's 0-1 score as the whole percentage a clinical row carries."""
+    return max(0, min(100, int(round(float(value) * 100))))
+
+
+def provisional_proposal(source_code, omop_table, vocabularies=None):
+    """The ranked proposal a provisional row may be written from, or None.
+
+    Returns ``(concept, percent)``. Only a proposal qualifies that is
+    unscoped (the per-patient inventory cannot say which hospital a code came
+    from), carries a ranker's confidence at or above
+    ``PROVISIONAL_CONFIDENCE_FLOOR``, and points at a standard, valid concept
+    in the table's own domain, which leaves out an import's ``HK-*``
+    placeholder. When proposals for the same code (under different source
+    systems) disagree on the destination nothing qualifies, because the row
+    cannot say which system its code came from. Agreeing proposals take the
+    lowest of their confidences.
+
+    *vocabularies* are the code systems the person holds the code under (their
+    ``PatientSourceCode`` rows). Every one of them must be covered by a
+    qualifying proposal, or an Epic proposal for flowsheet "6" would write
+    provisional rows for a patient whose "6" came from Cerner. Without them
+    (a person with no inventory row for the code) the lookup is by code alone,
+    as the approved-mapping lookups are.
+    """
+    table = normalize_omop_table(omop_table)
+    if table not in CLINICAL_TABLES or not source_code:
+        return None
+    proposals = SourceCodeConceptMapping.objects.filter(
+        source_code__iexact=source_code[:SOURCE_CODE_MAX], omop_table=table,
+        status='proposed', organization__isnull=True,
+        target_concept__isnull=False, suggestion_confidence__isnull=False,
+    ).select_related('target_concept')
+    floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
+    qualifying = {}
+    for proposal in proposals:
+        percent = _confidence_percent(proposal.suggestion_confidence)
+        if percent >= floor and _usable_destination(proposal.target_concept, table):
+            qualifying.setdefault(proposal.target_concept_id, []).append(
+                (proposal.target_concept, percent,
+                 canonical_source_vocabulary(proposal.source_vocabulary_id)))
+    concepts = {}
+    for target_id, entries in qualifying.items():
+        concepts[target_id] = entries[0][0]
+    chosen = choose_proposal(
+        [(target_id, percent, vocabulary)
+         for target_id, entries in qualifying.items() for _c, percent, vocabulary in entries],
+        vocabularies)
+    if chosen is None:
+        return None
+    return concepts[chosen[0]], chosen[1]
+
+
+def choose_proposal(entries, vocabularies=None):
+    """The one proposal a code resolves to, from its qualifying *entries*, or None.
+
+    *entries* are ``(target_concept_id, percent, canonical_source_vocabulary)``
+    for the code's qualifying proposals. Nothing qualifies when they disagree on
+    the destination, or when a code system the person holds the code under has no
+    proposal; agreeing proposals take the lowest confidence. The pure half of
+    :func:`provisional_proposal`, so a caller holding the entries (the ingest
+    check) decides exactly as the resolver does, with no query.
+    """
+    by_target = {}
+    for target_id, percent, vocabulary in entries:
+        by_target.setdefault(target_id, []).append((percent, vocabulary))
+    if len(by_target) != 1:
+        return None
+    target_id, items = next(iter(by_target.items()))
+    if vocabularies:
+        held = {canonical_source_vocabulary(vocabulary) for vocabulary in vocabularies}
+        if not held <= {vocabulary for _percent, vocabulary in items}:
+            return None
+    return target_id, min(percent for percent, _vocabulary in items)
+
+
 def _collapse_duplicates(model, concept_col, source_col, match,
-                         concept_id, person_ids):
+                         concept_id, person_ids, organization_id=None,
+                         only_provisional=False):
     """Collapse rows the re-point just made identical.
 
-    "Identical" is the event identity CLAUDE.md documents for the bulk write
+    "Identical" is the event identity AGENTS.md documents for the bulk write
     path, not just (person, date). Measurement and Observation carry more of it
     on purpose: a patient legitimately has several distinct results for one
     analyte on one day, and keying on the date alone would delete real results
@@ -521,18 +1241,31 @@ def _collapse_duplicates(model, concept_col, source_col, match,
     identity_cols = _COLLAPSE_IDENTITY[concept_col]
     pk_col = model._meta.pk.name
 
+    candidates = model.objects.filter(
+        match, person_id__in=person_ids, **{concept_col: concept_id},
+    )
+    if organization_id:
+        candidates = exclusively_attributed(candidates, organization_id)
+    # A real row outranks a provisional one for the same event whatever the
+    # pks say: the survivor keeps the provenance and any hand edit, and a
+    # provisional twin behind it is the one that goes (#2584). Among rows of
+    # equal standing the earliest wins, as before.
     rows = (
-        model.objects
-        .filter(match, person_id__in=person_ids, **{concept_col: concept_id})
-        .order_by(pk_col)
-        .values_list(pk_col, 'person_id', *identity_cols)
+        with_attribution(candidates)
+        .order_by(F('confidence').asc(nulls_first=True), pk_col)
+        .values_list(pk_col, 'confidence', ATTRIBUTION, 'person_id', *identity_cols)
     )
 
+    # *only_provisional* is for callers that settle provisional rows: they may
+    # fold a provisional row into its twin but never delete a real one, which
+    # would also set aside the rule that a content collapse leaves a row with a
+    # source_record_key alone. Real rows come first, so a real twin survives.
     seen, doomed = set(), []
-    for row in rows:
-        pk, key = row[0], row[1:]
+    for pk, confidence, *key in rows:
+        key = (tuple(key[0]),) + tuple(key[1:])
         if key in seen:
-            doomed.append(pk)
+            if confidence is not None or not only_provisional:
+                doomed.append(pk)
         else:
             seen.add(key)
     if doomed:
@@ -544,3 +1277,411 @@ def _collapse_duplicates(model, concept_col, source_col, match,
         ).delete()
         model.objects.filter(**{f'{pk_col}__in': doomed}).delete()
     return len(doomed)
+
+
+# ------------------------------------------------------------------
+# Create clinical rows for source codes that have no OMOP row yet
+# ------------------------------------------------------------------
+
+# EHR type concept (concept_id 32817). Used as the type concept for rows
+# created by Generate OMOP, matching what the FHIR sync writes.
+_EHR_TYPE_CONCEPT_ID = 32817
+
+
+def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=None):
+    """Create clinical rows for PatientSourceCode entries with no existing row.
+
+    Creates rows where an approved SCCM mapping exists and no clinical row
+    with the same source value exists for this person in the target table.
+    With ``PROVISIONAL_DATA_ENABLED``, a code with no approved mapping but a
+    ranked proposal at or above the floor gets a *provisional* row instead:
+    at the proposal's concept, carrying its confidence (outcome
+    ``provisional``).
+
+    *source_values*: optional list of source strings to limit creation to.
+    *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
+
+    Returns ``(created_count, detail_list)`` where *detail_list* contains one
+    dict per processed PSC entry.
+    """
+    psc_qs = PatientSourceCode.objects.filter(person=person)
+    if source_values:
+        psc_qs = psc_qs.filter(source_value__in=source_values)
+    if not psc_qs.exists():
+        return 0, []
+
+    try:
+        ehr_type_concept = Concept.objects.get(concept_id=_EHR_TYPE_CONCEPT_ID)
+    except Concept.DoesNotExist:
+        logger.warning(
+            'Concept %d (EHR type) not loaded — cannot create clinical rows',
+            _EHR_TYPE_CONCEPT_ID,
+        )
+        return 0, []
+
+    created = 0
+    details: list[dict] = []
+
+    with transaction.atomic():
+        for psc in psc_qs.iterator():
+            table_key = normalize_omop_table(psc.omop_table)
+            if table_key not in _CREATE_FIELDS:
+                continue
+            if omop_tables and table_key not in omop_tables:
+                continue
+
+            pk_field, concept_fk, source_col, date_col, type_fk = _CREATE_FIELDS[table_key]
+            model, _concept_id_col, _sv_col = CLINICAL_TABLES[table_key]
+
+            sv = psc.source_value
+
+            # Look up the approved SCCM mapping.
+            mapping = (
+                SourceCodeConceptMapping.objects
+                .filter(
+                    source_code__iexact=sv[:SOURCE_CODE_MAX],
+                    omop_table=table_key,
+                    status='approved',
+                )
+                .select_related('target_concept')
+                .first()
+            )
+            if not (mapping and mapping.target_concept_id) and not settings.PROVISIONAL_DATA_ENABLED:
+                continue
+
+            # Skip if any clinical row with this source value already exists
+            # for this person (the repoint pass handles those). Asked before the
+            # proposal lookup, which is the dearer query.
+            if model.objects.filter(person=person, **{f'{source_col}__iexact': sv}).exists():
+                continue
+
+            confidence = None
+            if mapping and mapping.target_concept_id:
+                target_concept = mapping.target_concept
+            else:
+                proposal = provisional_proposal(sv, table_key, {psc.source_vocabulary_id})
+                if proposal is None:
+                    continue
+                target_concept, confidence = proposal
+
+            # Allocate PK and create the row.
+            row_pk = next_pk(model, pk_field)
+            row_date = psc.first_seen.date() if psc.first_seen else date.today()
+            extra = {} if confidence is None else {'confidence': confidence}
+            model.objects.create(**{
+                pk_field: row_pk,
+                'person': person,
+                concept_fk: target_concept,
+                source_col: sv,
+                date_col: row_date,
+                type_fk: ehr_type_concept,
+                **extra,
+            })
+            created += 1
+            details.append({
+                'source_value': sv,
+                'table': table_key,
+                'rows': 1,
+                'outcome': 'created' if confidence is None else 'provisional',
+                'target': target_concept.concept_name or str(target_concept.concept_id),
+                'target_concept_id': target_concept.concept_id,
+                **extra,
+            })
+
+    return created, details
+
+
+# ------------------------------------------------------------------
+# Per-patient source code resolution
+# ------------------------------------------------------------------
+
+def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv,
+                             quarantine_concept_ids, has_provisional, vocabularies=None):
+    """One code with no approved mapping: line its rows up with the proposal.
+
+    *rows* is the person's rows for the code; *vocabularies* the code systems
+    it arrived under. Returns ``None`` when nothing
+    applies (no qualifying proposal and no provisional row to take back), else
+    the code-detail dict: outcome ``provisional`` (rows written or rewritten at
+    the proposal's concept, with its ``confidence``) or ``reverted``.
+    """
+    proposal = (
+        provisional_proposal(sv, table_key, vocabularies)
+        if settings.PROVISIONAL_DATA_ENABLED else None
+    )
+    if proposal is None:
+        if not has_provisional:
+            return None
+        with transaction.atomic(), suppress_patient_record_refresh():
+            changed = rows.filter(confidence__isnull=False).update(
+                **{concept_col: NO_MATCHING_CONCEPT_ID, 'confidence': None})
+        return {'rows': changed, 'outcome': 'reverted'} if changed else None
+
+    concept, percent = proposal
+    unresolved = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+    if quarantine_concept_ids:
+        unresolved |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+    # What an earlier proposal wrote, if it is not what this one says.
+    stale = Q(confidence__isnull=False) & ~Q(**{concept_col: concept.pk, 'confidence': percent})
+    with transaction.atomic(), suppress_patient_record_refresh():
+        # A row entered in error is nobody's fact, proposed or approved: it is
+        # never made provisional (taking one back, above, still applies).
+        changed = rows.filter(is_erroneous=False).filter(
+            (Q(confidence__isnull=True) & unresolved) | stale,
+        ).update(**{concept_col: concept.pk, 'confidence': percent})
+    if not changed:
+        return None
+    return {
+        'rows': changed, 'outcome': 'provisional', 'confidence': percent,
+        'target': concept.concept_name or str(concept.concept_id),
+        'target_concept_id': concept.concept_id,
+    }
+
+
+def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
+    """Re-resolve clinical rows for *person* with unresolved or prior targets.
+
+    The work is :func:`_resolve_groups`; this wrapper makes the person's record
+    stale and queues the derivation for whatever it **committed**, even when a
+    later group raises: each group commits on its own, so a partial resolve has
+    changed rows the record must be re-derived from. The derivation runs after
+    the commits (on Celery with a broker; inline with a statement_timeout
+    otherwise) and a failure to queue it never masks the error that stopped the
+    resolve.
+    """
+    touched: set[int] = set()
+    failed = False
+    try:
+        return _resolve_groups(person, source_values, omop_tables, touched)
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        if touched:
+            try:
+                PatientRecord.objects.filter(person_id__in=touched).update(derivation_version=0)
+                from omop_core.services.derivation_jobs import get_dispatcher
+                get_dispatcher().dispatch(person)
+            except Exception:
+                if not failed:
+                    raise
+                logger.exception('Could not queue the derivation for person %s after a failed resolve.',
+                                 person.person_id)
+
+
+def _resolve_groups(person, source_values, omop_tables, person_ids_touched):
+    """Re-resolve clinical rows for *person* with unresolved or prior targets.
+
+    Uses the current approved SCCM mappings.  Returns a dict with counts:
+    ``{'resolved': N, 'created': N, 'provisional': N, 'reverted': N,
+    'skipped': N, 'already_resolved': N}``.
+
+    A code with no approved mapping is brought in line with its ranked
+    proposal (:func:`provisional_proposal`): with ``PROVISIONAL_DATA_ENABLED``
+    its unresolved rows become provisional at the proposal's concept, and
+    provisional rows an earlier proposal wrote are rewritten to the current
+    one. Provisional rows whose proposal no longer qualifies (rejected, moved
+    to another concept, below the floor, or the switch off) go back to
+    unresolved, so a missed hook cannot leave one behind. A code that has an
+    approved mapping promotes its provisional rows with the rest.
+
+    *source_values*: optional list of source strings to limit resolution to.
+    *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
+    """
+    from django.db.models import Count
+
+    resolved = 0
+    skipped = 0
+    already_resolved = 0
+    provisional = 0
+    reverted = 0
+    code_details: list[dict] = []
+
+    # Concept IDs in quarantine vocabularies (HK-*).
+    quarantine_concept_ids = frozenset(
+        Concept.objects.filter(vocabulary_id__in=_QUARANTINE_VOCABULARIES)
+        .values_list('concept_id', flat=True)
+    ) if _QUARANTINE_VOCABULARIES else frozenset()
+
+    tables = CLINICAL_TABLES
+    if omop_tables:
+        tables = {k: v for k, v in tables.items() if k in omop_tables}
+
+    for table_key, (model, concept_col, source_col) in tables.items():
+        qs = model.objects.filter(person=person).exclude(
+            **{f'{source_col}__isnull': True},
+        ).exclude(**{source_col: ''})
+
+        if source_values:
+            qs = qs.filter(**{f'{source_col}__in': source_values})
+
+        # Group by source_value to avoid per-row mapping lookups.
+        groups = list(
+            qs.values(source_col)
+            .annotate(row_count=Count('pk'))
+            .order_by(source_col)
+        )
+        # What this person's rows need, asked once per table rather than once
+        # per code: the codes holding a provisional row, the codes holding an
+        # unresolved one, and (to tell a code's systems apart) the code systems
+        # each code arrived under.
+        provisional_codes = set(
+            qs.filter(confidence__isnull=False).values_list(source_col, flat=True).distinct())
+        unresolved_codes, code_systems = set(), {}
+        if settings.PROVISIONAL_DATA_ENABLED:
+            unresolved_base = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+            if quarantine_concept_ids:
+                unresolved_base |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+            unresolved_codes = set(
+                qs.filter(unresolved_base).values_list(source_col, flat=True).distinct())
+            for value, vocabulary in PatientSourceCode.objects.filter(
+                    person=person, omop_table=table_key).values_list(
+                    'source_value', 'source_vocabulary_id'):
+                code_systems.setdefault(value.upper(), set()).add(vocabulary)
+
+        for group in groups:
+            sv = group[source_col]
+
+            # Find an approved mapping for this source value.
+            # Query SCCM directly rather than going through
+            # approved_mapping_for() which requires a vocabulary_id
+            # that clinical rows don't store.
+            mapping = (
+                SourceCodeConceptMapping.objects
+                .filter(
+                    source_code__iexact=sv,
+                    omop_table=table_key,
+                    status='approved',
+                )
+                .select_related('target_concept', 'destination_unit_concept')
+                .first()
+            )
+            if mapping is None:
+                outcome = (
+                    _reconcile_with_proposal(
+                        model, concept_col, source_col, table_key,
+                        qs.filter(**{source_col: sv}), sv, quarantine_concept_ids,
+                        sv in provisional_codes, code_systems.get(sv.upper()))
+                    if sv in provisional_codes or sv in unresolved_codes else None
+                )
+                if outcome is None:
+                    skipped += group['row_count']
+                    code_details.append({
+                        'source_value': sv, 'table': table_key,
+                        'rows': group['row_count'], 'outcome': 'skipped',
+                        'reason': 'no approved mapping',
+                    })
+                    continue
+                person_ids_touched.add(person.person_id)
+                if outcome['outcome'] == 'provisional':
+                    provisional += outcome['rows']
+                else:
+                    reverted += outcome['rows']
+                already_resolved += group['row_count'] - outcome['rows']
+                code_details.append({'source_value': sv, 'table': table_key, **outcome})
+                continue
+
+            target_concept_id = mapping.target_concept_id
+            if not target_concept_id:
+                skipped += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'skipped',
+                    'reason': 'mapping has no target concept',
+                })
+                continue
+
+            # Patient-scoped approvals leave prior targets for Generate OMOP.
+            # This includes standard-to-standard remaps that a 0/HK-only
+            # resolver would otherwise never pick up for other patients.
+            unresolved_q = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+            if quarantine_concept_ids:
+                unresolved_q |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+            if mapping.deferred_repoint_concept_ids:
+                unresolved_q |= Q(**{f'{concept_col}__in': mapping.deferred_repoint_concept_ids})
+            # An approval is the end of a proposal: the rows it wrote, at
+            # whatever concept, become real at the approved one.
+            if sv in provisional_codes:
+                unresolved_q |= Q(confidence__isnull=False)
+
+            rows_to_update = qs.filter(**{source_col: sv}).filter(unresolved_q)
+
+            count = rows_to_update.count()
+            if count == 0:
+                already_resolved += group['row_count']
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': group['row_count'], 'outcome': 'already_resolved',
+                    'target': mapping.target_concept.concept_name if mapping.target_concept else str(target_concept_id),
+                })
+                continue
+
+            with transaction.atomic():
+                with suppress_patient_record_refresh():
+                    # Snapshot PKs before the concept update: the lazy queryset
+                    # filters on unresolved_q, so after .update() it finds zero.
+                    resolved_pks = (
+                        set(rows_to_update.values_list('pk', flat=True))
+                        if model is Measurement else None
+                    )
+                    # Kept through the collapse so a real twin outranks them.
+                    provisional_pks = (
+                        set(rows_to_update.filter(confidence__isnull=False)
+                            .values_list('pk', flat=True))
+                        if sv in provisional_codes else set()
+                    )
+                    rows_to_update.update(**{concept_col: target_concept_id})
+                    if provisional_pks:
+                        _collapse_duplicates(
+                            model, concept_col, source_col, Q(**{source_col: sv}),
+                            target_concept_id, {person.person_id}, only_provisional=True)
+                    # Normalize units on resolved Measurement rows (#2088).
+                    # Wrapped in a savepoint and try/except so a normalization
+                    # failure does not roll back the concept update or abort
+                    # resolution for remaining groups.
+                    if resolved_pks:
+                        try:
+                            from omop_core.services.canonical_units import (
+                                normalize_measurement_units,
+                            )
+                            norm_qs = model.objects.filter(pk__in=resolved_pks)
+                            with transaction.atomic():
+                                normalize_measurement_units(norm_qs, mapping)
+                        except Exception:
+                            logger.exception(
+                                'Unit normalization failed for %s (mapping %s)',
+                                sv, mapping.id,
+                            )
+                    if provisional_pks:
+                        _promote_rows(model, provisional_pks, concept_col, target_concept_id)
+                person_ids_touched.add(person.person_id)
+                resolved += count
+                already_resolved += group['row_count'] - count
+                target_name = mapping.target_concept.concept_name if mapping.target_concept else str(target_concept_id)
+                code_details.append({
+                    'source_value': sv, 'table': table_key,
+                    'rows': count, 'outcome': 'resolved',
+                    'target': target_name,
+                    'target_concept_id': target_concept_id,
+                })
+
+    # Create clinical rows for PSC entries that have no existing row.
+    with suppress_patient_record_refresh():
+        rows_created, creation_details = _create_missing_clinical_rows(
+            person, omop_tables=omop_tables, source_values=source_values,
+        )
+    if rows_created:
+        person_ids_touched.add(person.person_id)
+    code_details.extend(creation_details)
+
+    return {
+        'resolved': resolved,
+        'created': rows_created,
+        # Rows written as provisional by this run, creations included.
+        'provisional': provisional + sum(
+            1 for detail in creation_details if detail['outcome'] == 'provisional'),
+        'reverted': reverted,
+        'skipped': skipped,
+        'already_resolved': already_resolved,
+        'code_details': code_details,
+    }

@@ -1,0 +1,2251 @@
+/**
+ * EditMappingDialog -- full-featured dialog for creating or editing a code
+ * mapping.  Extracted from CodeMappingPage so both that page and
+ * PatientSourceCodesTab can reuse it.
+ *
+ * The component manages all internal dialog state (form, concept search,
+ * suggest-one, destination options) and communicates
+ * with its parent through props:
+ *
+ *   open / onClose      -- visibility
+ *   mode / row          -- new or edit, the row being edited
+ *   reference           -- domain & vocabulary reference data
+ *   canApprove          -- whether the user can set status to Approved
+ *   canWrite            -- whether the user can change a mapping (default true:
+ *                          every opener offers the dialog to curators only)
+ *   strategies / rankingModel -- suggest settings from the parent
+ *   onSaved / onDeleted -- callbacks after a successful write or delete
+ *   onBanner            -- surface informational banners to the parent
+ *   defaultDestination  -- destination to offer when the row has none yet
+ *   sourceExamples      -- show example patients' Source Metadata for the code
+ */
+
+import CanonicalUnitEditor from "./CanonicalUnitEditor";
+import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
+import LoincAxesPanel, { type LoincAxesPanelHandle } from "./LoincAxesPanel";
+import { describeAxisValues, type AxisVariant, type LoincAxisOverrides } from "./loincAxes";
+import SnomedEvidencePanel from "./SnomedEvidencePanel";
+import type { SnomedSettings } from "./snomed";
+import SourceVocabularyLookup from "./SourceVocabularyLookup";
+import { destinationError as describeDestinationError, searchDestinationConcepts } from "./destinationSearch";
+import MintConceptDialog from "./MintConceptDialog";
+import MappingVotesSection from "./MappingVotesSection";
+import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
+import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
+import SourceEvidencePanel, { type SourceEvidence } from "./SourceEvidencePanel";
+import { hospitalContextDetails, hospitalContextText, sourceSystemManagementUrl } from "./sourceSystemContext";
+import api from "@/api/axios";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Search, Sparkles, Trash2, X } from "lucide-react";
+
+import type { CandidateActivity } from "./SuggestCandidates";
+import {
+  type CodeMappingRow,
+  type ConceptResult,
+  type DestinationOption,
+  type MappingForm,
+  type MappingSurface,
+  rankedConfidence,
+  signedScore,
+  type ConfidenceScore,
+  type Reference,
+  type RepointResult,
+  type SearchScope,
+  type SuggestRunProgress,
+  buildEditForm,
+  confidencePercent,
+  emptyForm,
+  pollSuggestRun,
+  omopTableFor,
+  retirementDetail,
+  approvalNote,
+  dominantSourceUnit,
+  strategyLabel,
+  DEFAULT_SEARCH_SCOPE,
+  CONCEPT_SEARCH_DEBOUNCE_MS,
+  SUGGEST_POLL_INTERVAL_MS,
+  SUGGEST_POLL_MAX_FAILURES,
+  SUGGEST_POLL_TIMEOUT_MS,
+  STRATEGY_LABELS,
+  TIP,
+  NEW_DESTINATION_NOTE,
+  OWN_PROPOSAL_NOTE,
+  isOwnProposal,
+} from "./codeMappingTypes";
+
+// Re-export types that callers may need.
+export type { CodeMappingRow, Reference, RepointResult, ConceptResult };
+
+// ── Props ───────────────────────────────────────────────────────────
+
+export interface EditMappingDialogProps {
+  open: boolean;
+  /** Limit clinical row updates when this dialog is opened from a patient. */
+  patientId?: string;
+  onClose: () => void;
+  mode: "new" | "edit";
+  row: CodeMappingRow | null;
+  reference: Reference;
+  canApprove: boolean;
+  /** The signed-in account: Approved is offered only for a mapping it did not propose (#2726). */
+  currentUserId?: number | string | null;
+  /**
+   * Whether the user can write mappings. Without it the wearable Category,
+   * Measure Class and Metric Key read as text. Defaults to true: the pages
+   * open the dialog for curators only.
+   */
+  canWrite?: boolean;
+  strategies: { umls: boolean; lexical: boolean; vectors: boolean };
+  rankingModel: "anthropic" | "jev" | "both";
+  onStrategiesChange?: (next: { umls: boolean; lexical: boolean; vectors: boolean }) => void;
+  onRankingModelChange?: (next: "anthropic" | "jev" | "both") => void;
+  onSaved: (saved: CodeMappingRow, repoint: RepointResult | null) => void;
+  onDeleted: (row: CodeMappingRow) => void;
+  onBanner?: (message: string | null) => void;
+  onSourceCodeUpdated?: () => void;
+  /** Pre-fill this destination when the row has none (Concept to Code). */
+  defaultDestination?: ConceptResult | null;
+  /**
+   * Offer up to three patients whose source inventory carries this exact code,
+   * and show the chosen patient's Source Metadata (#1911). Read-only: unlike
+   * `patientId`, it does not narrow what a save updates.
+   */
+  sourceExamples?: boolean;
+  /**
+   * Which mapping tab opened the dialog, recorded on the row with each save
+   * (#2382). A dialog with `patientId` is the patient page whatever this says;
+   * the server decides that from the patient.
+   */
+  surface?: MappingSurface;
+}
+
+/** One patient's inventory row for the code, from /concept-to-code/source-examples/. */
+export interface SourceExample {
+  person_id: number;
+  omop_table: string;
+  occurrence_count: number;
+  source_unit: string;
+  example_quantity: string;
+  source_metadata: Record<string, unknown>;
+  last_seen: string | null;
+}
+
+type SourceExamplesState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; examples: SourceExample[]; hasMore: boolean; loadingMore?: boolean; moreError?: boolean };
+
+/** Patients per page from source-examples/ (SOURCE_EXAMPLE_LIMIT on the server). */
+const EXAMPLE_PAGE_SIZE = 3;
+
+/** The `existing_mapping` block of a 400 from POST /v1/code-mappings/ (#2347). */
+interface ExistingMappingConflict {
+  id: number;
+  omop_table: string;
+  domain_id: string;
+  status: string;
+  target_concept_name: string;
+}
+
+function existingMappingConflict(detail: unknown): ExistingMappingConflict | null {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const raw = (detail as { existing_mapping?: unknown }).existing_mapping;
+  if (!raw || typeof raw !== "object") return null;
+  const block = raw as Record<string, unknown>;
+  const id = Number(block.id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return {
+    id,
+    omop_table: String(block.omop_table ?? ""),
+    domain_id: String(block.domain_id ?? ""),
+    status: String(block.status ?? ""),
+    target_concept_name: String(block.target_concept_name ?? ""),
+  };
+}
+
+/** `drug_exposure` -> `Drug Exposure`. */
+function tableLabel(omopTable: string): string {
+  return omopTable
+    ? omopTable.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")
+    : "no table";
+}
+
+/** What a wearable mapping says about its source metric. */
+type MetricFields = { category: string; measure_class: string; metric_key: string };
+const METRIC_FIELD_KEYS = ["category", "measure_class", "metric_key"] as const;
+const BLANK_METRIC_FIELDS: MetricFields = { category: "", measure_class: "", metric_key: "" };
+/** GET /v1/code-mappings/<id>/: the stored row and its destination options. */
+type StoredMapping = CodeMappingRow & { destination_options: DestinationOption[] };
+
+// ── Component ───────────────────────────────────────────────────────
+
+export default function EditMappingDialog({
+  open,
+  patientId,
+  onClose,
+  mode,
+  row: selectedRow,
+  reference,
+  canApprove,
+  currentUserId,
+  canWrite = true,
+  strategies,
+  rankingModel,
+  onStrategiesChange,
+  onRankingModelChange,
+  onSaved,
+  onDeleted,
+  onBanner,
+  surface,
+  onSourceCodeUpdated,
+  defaultDestination,
+  sourceExamples = false,
+}: EditMappingDialogProps) {
+  // ── refs ────────────────────────────────────────────────────────
+  const dialogRequest = useRef(0);
+  const axesPanel = useRef<LoincAxesPanelHandle>(null);
+  const dialogChoice = useRef<number | null>(null);
+  const conceptSearchTimer = useRef<number | null>(null);
+  const conceptSearchAbort = useRef<AbortController | null>(null);
+
+  // ── state ───────────────────────────────────────────────────────
+  const [form, setForm] = useState<MappingForm>(emptyForm);
+  // The server refuses an approval by whoever proposed the destination (#2726);
+  // say so up front rather than after the save.
+  const ownProposal = mode === "edit" && isOwnProposal(selectedRow, currentUserId);
+  // With the rule on, a save that creates the row or moves its destination makes
+  // the saver its proposer, so Approved would be refused in the same request.
+  const proposesDestination = reference.separate_approver === true && (
+    mode === "new"
+    || String(form.destination_concept_id ?? "") !== String(selectedRow?.destination_concept_id ?? ""));
+  const [searchVocabulary, setSearchVocabulary] = useState("");
+  const [searchScope, setSearchScope] = useState<SearchScope>(DEFAULT_SEARCH_SCOPE);
+  const [conceptSearchQuery, setConceptSearchQuery] = useState("");
+  const [conceptResults, setConceptResults] = useState<ConceptResult[]>([]);
+  const [destinationOptions, setDestinationOptions] = useState<DestinationOption[]>([]);
+  const [loadingDestinations, setLoadingDestinations] = useState(false);
+  const [destinationError, setDestinationError] = useState("");
+  const [sourceEvidence, setSourceEvidence] = useState<SourceEvidence | null>(null);
+  const [sourceEvidenceError, setSourceEvidenceError] = useState("");
+  const [searchingConcepts, setSearchingConcepts] = useState(false);
+  const [suggestionMessage, setSuggestionMessage] = useState("");
+  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean; axisKey?: string } | null>(null);
+  // True once the source text or table changed after the last Suggest run
+  // here, so its scores no longer describe the code being saved (#2382).
+  const suggestionStale = useRef(false);
+  // Calc (#2668): a score being computed for the destination chosen now, and the
+  // last one this dialog computed (the ranker's belief about exactly that destination).
+  const [calcing, setCalcing] = useState(false);
+  const [calcNote, setCalcNote] = useState("");
+  const [calcd, setCalcd] = useState<{ destination: string; confidence: number } | null>(null);
+  const calcRequest = useRef(0);
+  // The destination the form holds now, readable from callbacks that must tell a
+  // change from a repeat without depending on the form.
+  const destinationRef = useRef("");
+  // Abandon a Calc in flight, forget what it computed and what it said. Calc
+  // describes one source and one destination: when either changes it is stale.
+  const resetCalc = useCallback(() => {
+    calcRequest.current += 1;
+    setCalcing(false);
+    setCalcNote("");
+    setCalcd(null);
+  }, []);
+  useEffect(() => { destinationRef.current = form.destination_concept_id; }, [form.destination_concept_id]);
+  // The note as the dialog opened with it. A save sends the note only when
+  // the curator changed it: the row this form was built from may be stale or
+  // carry no note at all (the patient page's rows), and sending that back
+  // would overwrite the stored note and claim a curator wrote it (#2423).
+  const openedNotes = useRef("");
+  // A wearable metric's Category, Measure Class and Metric Key, and what the
+  // dialog opened with. Like the note, each is sent only when the curator
+  // changed it: a row built by another page (the patient's source codes)
+  // carries none of them, and sending that blank back would erase the stored
+  // value.
+  // State rather than refs, unlike the note's baseline: the selects render
+  // the opened value too, so a stored value outside the allowed list stays
+  // selectable after the curator has picked another.
+  const [metric, setMetric] = useState<{ opened: MetricFields; current: MetricFields }>(
+    { opened: BLANK_METRIC_FIELDS, current: BLANK_METRIC_FIELDS });
+  const setMetricField = (key: keyof MetricFields, value: string) =>
+    setMetric((prev) => ({ ...prev, current: { ...prev.current, [key]: value } }));
+  // What the mapping's own GET returned for the row the dialog is open on
+  // (data null when it failed). The form is rebuilt whenever the row or the
+  // reference payload changes, which can be after that GET has settled; the
+  // rebuild applies this again so the stored note, unit and metric fields are
+  // not replaced by the blanks of a row that never carried them.
+  const hydration = useRef<{ mappingId: number; data: StoredMapping | null } | null>(null);
+  // The destination unit as the dialog opened with it, and whether that is
+  // what the mapping stores. A patient page row carries no unit, so the form
+  // opens blank over a mapping that may have one: the mapping's own GET
+  // fills it in while the curator has not touched it, and until that GET has
+  // settled nothing is auto-selected from the source unit. A save whose
+  // baseline never became known leaves the unit out rather than send a blank
+  // the server would store as "no unit".
+  const openedUnitId = useRef("");
+  const rowCarriesUnit = useRef(false);
+  const [unitBaseline, setUnitBaseline] = useState<"loading" | "known" | "unknown">("known");
+  // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
+  // Keyed by mapping: overrides belong to the code they were made for, and
+  // must never ride along with a Suggest for another row or an edited code.
+  const [loincAxes, setLoincAxes] = useState<{ mappingId: number; overrides: LoincAxisOverrides } | null>(null);
+  const [loincAxesReload, setLoincAxesReload] = useState(0);
+  // How many axis variants the panel shows for this row: two or more and the
+  // dialog's Suggest fills each in with a proposed LOINC (#2012).
+  const [variantCount, setVariantCount] = useState<{ mappingId: number; count: number; variants: AxisVariant[] } | null>(null);
+  const [variantMessage, setVariantMessage] = useState("");
+  // SNOMED evidence: the panel's current settings, under the same guard.
+  const [snomedSettings, setSnomedSettings] = useState<{ mappingId: number; settings: SnomedSettings } | null>(null);
+  const [error, setError] = useState("");
+  /**
+   * A create that collided with a mapping already holding this code (#2347).
+   * The patient page lists a code under the clinical table its rows sit in,
+   * so a code whose mapping was filed under another table looks unmapped
+   * there. The server names that mapping; the curator can move it here.
+   */
+  const [existingMapping, setExistingMapping] = useState<ExistingMappingConflict | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [mintOpen, setMintOpen] = useState(false);
+  const [mintUnitOpen, setMintUnitOpen] = useState(false);
+  const [unitAutoPopulated, setUnitAutoPopulated] = useState(false);
+  const [sourceQuantity, setSourceQuantity] = useState("");
+  const [sourceUnit, setSourceUnit] = useState("");
+  const [savedSourceQuantity, setSavedSourceQuantity] = useState("");
+  const [savedSourceUnit, setSavedSourceUnit] = useState("");
+  const [savingSource, setSavingSource] = useState(false);
+  const [sourceSaveMessage, setSourceSaveMessage] = useState("");
+  const [unitSelectionAuto, setUnitSelectionAuto] = useState(false);
+  const [unitSelectionNeedsReview, setUnitSelectionNeedsReview] = useState(false);
+  const [examples, setExamples] = useState<SourceExamplesState | null>(null);
+  const [examplePersonId, setExamplePersonId] = useState<number | null>(null);
+
+  const evidenceFacilities = sourceEvidence?.facilities || [];
+
+  // ── Derived values ──────────────────────────────────────────────
+  const isNewMapping = !selectedRow?.mapping_id;
+  const sourceIdentityUnchanged = Boolean(
+    selectedRow
+    && form.source_code === selectedRow.source_code
+    && form.source_vocabulary_id === selectedRow.source_vocabulary_id,
+  );
+  // Calc scores an existing mapping on the text the server has stored for it (a score is about
+  // that text), so an unsaved edit to the code, system or description cannot be scored yet.
+  const sourceTextEdited = Boolean(
+    selectedRow?.mapping_id
+    && (!sourceIdentityUnchanged || form.source_code_description !== (selectedRow.source_code_description || "")),
+  );
+  const sourceSystemContext = sourceIdentityUnchanged
+    ? selectedRow?.source_system_context ?? sourceEvidence?.system_context
+    : undefined;
+  const willRepoint =
+    !patientId
+    && mode === "edit"
+    && form.status === "approved"
+    && selectedRow !== null
+    && String(selectedRow.destination_concept_id || "") !== form.destination_concept_id;
+
+  const hasRetrieval = strategies.umls || strategies.lexical || strategies.vectors;
+
+  // Category, Measure Class and Metric Key exist for the Wearables tab's
+  // vocabularies only; the server says which those are and what the first two
+  // may hold, and refuses a metric key that is not lowercase snake case.
+  const showMetricFields = (reference.wearable_source_vocabularies ?? []).includes(form.source_vocabulary_id);
+
+  /** Offer the caller's destination when the row arrives without one. */
+  const withDefaultDestination = useCallback((built: MappingForm): MappingForm => {
+    if (!defaultDestination) return built;
+    const domainId = built.domain_id || defaultDestination.domain_id || "";
+    return {
+      ...built,
+      domain_id: domainId,
+      destination_concept_id: String(defaultDestination.concept_id),
+      destination_concept_name: defaultDestination.concept_name,
+      destination_concept_code: defaultDestination.concept_code || "",
+      destination_vocabulary_id: defaultDestination.vocabulary_id,
+      destination_concept_class_id: defaultDestination.concept_class_id || "",
+      standard_concept: defaultDestination.standard_concept || "",
+      destination_invalid_reason: defaultDestination.invalid_reason || "",
+      omop_table: built.omop_table || omopTableFor(reference, domainId),
+    };
+  }, [defaultDestination, reference]);
+
+  /** Source code systems offered for the chosen domain, blank option first. */
+  const sourceCodeSystems = useMemo(() => {
+    const offered = reference.source_code_systems_by_domain[form.domain_id] || [];
+    const withBlank = offered.some((s) => s.vocabulary_id === "")
+      ? offered
+      : [{ vocabulary_id: "", label: "None -- uncoded / free text" }, ...offered];
+    const current = form.source_vocabulary_id;
+    if (current && !withBlank.some((s) => s.vocabulary_id === current)) {
+      const contextLabel = sourceSystemContext && sourceSystemContext.kind !== "none"
+        ? `${sourceSystemContext.label} — ` : "";
+      return [...withBlank, { vocabulary_id: current, label: `${contextLabel}${current}` }];
+    }
+    return withBlank;
+  }, [reference, form.domain_id, form.source_vocabulary_id, sourceSystemContext]);
+
+  /**
+   * Put what the mapping stores into a form built from a row that may be
+   * stale or carry less (a patient page row has no note, unit or metric
+   * fields). Each stored value replaces what the form opened with and becomes
+   * the baseline a save is compared against; a value the curator has already
+   * typed, picked or cleared is left alone.
+   */
+  const applyStored = useCallback((data: StoredMapping, patientRow: boolean) => {
+    const stored = data.notes;
+    const openedWith = openedNotes.current;
+    if (typeof stored === "string" && stored !== openedWith) {
+      openedNotes.current = stored;
+      setForm((prev) => prev.notes === openedWith ? { ...prev, notes: stored } : prev);
+    }
+    setMetric((prev) => {
+      let next = prev;
+      for (const key of METRIC_FIELD_KEYS) {
+        const value = data[key];
+        if (typeof value !== "string" || value === next.opened[key]) continue;
+        next = {
+          opened: { ...next.opened, [key]: value },
+          current: next.current[key] === next.opened[key] ? { ...next.current, [key]: value } : next.current,
+        };
+      }
+      return next;
+    });
+    // The stored unit, on the same rule: it replaces what the form opened
+    // with, never a unit the curator picked or cleared since.
+    if ("destination_unit_concept_id" in data) {
+      const storedUnit = data.destination_unit_concept_id ? String(data.destination_unit_concept_id) : "";
+      const openedUnit = openedUnitId.current;
+      openedUnitId.current = storedUnit;
+      setForm((prev) => prev.destination_unit_concept_id === openedUnit ? {
+        ...prev,
+        destination_unit_concept_id: storedUnit,
+        destination_unit_concept_code: storedUnit ? data.destination_unit_code || "" : "",
+        destination_unit_concept_name: storedUnit ? data.destination_unit_name || "" : "",
+      } : prev);
+    }
+    setUnitBaseline("known");
+    // Auto-populate source_unit from evidence when the form has none
+    // (e.g. opened from Code Mapping browse, where the list omits units).
+    const dominant = dominantSourceUnit(data.source_evidence?.units);
+    if (dominant) {
+      setForm((prev) => {
+        // A patient inventory row has an explicit source value, including
+        // an intentional curator correction to blank. Never replace it
+        // with the aggregate mapping's unit evidence.
+        if (patientRow || prev.source_unit) return prev;
+        setUnitAutoPopulated(true);
+        return { ...prev, source_unit: dominant };
+      });
+    }
+  }, []);
+
+  // ── Initialize form when dialog opens ───────────────────────────
+  useEffect(() => {
+    if (!open) return;
+    // Wrapped in an async IIFE to satisfy react-hooks/set-state-in-effect.
+    (async () => {
+      dialogRequest.current += 1;
+      dialogChoice.current = null;
+      setError("");
+      setSearchingConcepts(false);
+      setSuggestionMessage("");
+      setVariantMessage("");
+      setVariantCount(null);
+      setSaving(false);
+      setMintOpen(false);
+      setIndividualSuggestion(null);
+      setUnitAutoPopulated(false);
+      setSourceQuantity(selectedRow?.example_quantity || "");
+      setSourceUnit(selectedRow?.source_unit || "");
+      setSavedSourceQuantity(selectedRow?.example_quantity || "");
+      setSavedSourceUnit(selectedRow?.source_unit || "");
+      setSourceSaveMessage("");
+      // A score computed for the last row says nothing about this one.
+      resetCalc();
+      setUnitSelectionAuto(false);
+      setUnitSelectionNeedsReview(false);
+      const openedMetric: MetricFields = {
+        category: selectedRow?.category || "",
+        measure_class: selectedRow?.measure_class || "",
+        metric_key: selectedRow?.metric_key || "",
+      };
+      setMetric({ opened: openedMetric, current: openedMetric });
+
+      if (mode === "new") {
+        // When opened from PatientSourceCodesTab, selectedRow carries the
+        // source identity (code, vocabulary, domain, table) even though no
+        // mapping exists yet.  Pre-populate those fields so the curator does
+        // not have to re-type them.
+        const opened = withDefaultDestination(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm });
+        openedNotes.current = opened.notes;
+        openedUnitId.current = opened.destination_unit_concept_id;
+        setUnitBaseline("known");
+        setForm(opened);
+        setSearchVocabulary("");
+        setSearchScope(DEFAULT_SEARCH_SCOPE);
+        setConceptSearchQuery("");
+        setConceptResults([]);
+      } else if (selectedRow) {
+        const opened = withDefaultDestination(buildEditForm(selectedRow, reference));
+        openedNotes.current = opened.notes;
+        openedUnitId.current = opened.destination_unit_concept_id;
+        rowCarriesUnit.current = selectedRow.destination_unit_concept_id !== undefined;
+        setUnitBaseline(selectedRow.mapping_id ? "loading" : "known");
+        setForm(opened);
+        setSearchVocabulary(
+          reference.destination_vocabularies.some((v) => v.vocabulary_id === selectedRow.destination_vocabulary_id)
+            ? selectedRow.destination_vocabulary_id || ""
+            : "",
+        );
+        setSearchScope(DEFAULT_SEARCH_SCOPE);
+        setConceptSearchQuery("");
+        setConceptResults([]);
+        // A rebuild after the mapping's GET settled (the reference payload
+        // arriving late, the parent handing over a fresh row object): that
+        // effect does not run again, so what it learned is applied here.
+        const settled = hydration.current;
+        if (settled && settled.mappingId === selectedRow.mapping_id) {
+          if (settled.data) applyStored(settled.data, Boolean(selectedRow.source_code_id));
+          else setUnitBaseline(rowCarriesUnit.current ? "known" : "unknown");
+        }
+      }
+    })();
+  }, [open, mode, selectedRow, reference, withDefaultDestination, applyStored, resetCalc]);
+
+  // ── Example patients for the source code (#1911) ─────────────────
+  const exampleVocabulary = selectedRow?.source_vocabulary_id ?? "";
+  const exampleCode = selectedRow?.source_code ?? "";
+  const exampleTable = selectedRow?.destination_omop_table || "";
+  useEffect(() => {
+    if (!open || !sourceExamples || !exampleCode) return;
+    let active = true;
+    (async () => {
+      setExamples({ status: "loading" });
+      setExamplePersonId(null);
+      try {
+        const { data } = await api.get<{ examples: SourceExample[] }>("/v1/concept-to-code/source-examples/", {
+          params: { source_vocabulary_id: exampleVocabulary, source_code: exampleCode, omop_table: exampleTable },
+        });
+        if (!active) return;
+        const found = data?.examples ?? [];
+        setExamples({ status: "ready", examples: found, hasMore: found.length >= EXAMPLE_PAGE_SIZE });
+        setExamplePersonId(found[0]?.person_id ?? null);
+      } catch (err) {
+        if (!active) return;
+        const forbidden = (err as { response?: { status?: number } })?.response?.status === 403;
+        setExamples({ status: "error", message: forbidden
+          ? "Patient Source Metadata is limited to administrators."
+          : "Could not load example patients. Close and reopen this mapping to retry." });
+      }
+    })();
+    return () => { active = false; };
+  }, [open, sourceExamples, exampleVocabulary, exampleCode, exampleTable]);
+
+  // Up to three more patients, skipping those already listed.
+  const loadMoreExamples = useCallback(async () => {
+    if (examples?.status !== "ready" || examples.loadingMore) return;
+    const shown = examples.examples;
+    setExamples({ ...examples, loadingMore: true, moreError: false });
+    try {
+      const { data } = await api.get<{ examples: SourceExample[] }>("/v1/concept-to-code/source-examples/", {
+        params: {
+          source_vocabulary_id: exampleVocabulary, source_code: exampleCode, omop_table: exampleTable,
+          exclude_person_ids: shown.map((item) => item.person_id).join(","),
+        },
+      });
+      const found = (data?.examples ?? []).filter((item) => !shown.some((old) => old.person_id === item.person_id));
+      setExamples((current) => current?.status === "ready" ? {
+        status: "ready", examples: [...current.examples, ...found],
+        hasMore: found.length >= EXAMPLE_PAGE_SIZE,
+      } : current);
+      if (found.length) setExamplePersonId(found[0].person_id);
+    } catch {
+      setExamples((current) => current?.status === "ready" ? { ...current, loadingMore: false, moreError: true } : current);
+    }
+  }, [examples, exampleVocabulary, exampleCode, exampleTable]);
+
+  // ── Acquire edit lock on open ───────────────────────────────────
+  useEffect(() => {
+    if (!open || mode !== "edit" || !selectedRow?.mapping_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await api.post(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`);
+      } catch (err) {
+        if (cancelled) return;
+        const resp = err && typeof err === "object" && "response" in err
+          ? (err as { response?: { status?: number; data?: { detail?: string; locked_by?: string } } }).response
+          : undefined;
+        if (resp?.status === 423) {
+          setError(`Locked by ${resp.data?.locked_by || "another user"}.`);
+        }
+        // Non-lock errors -- still allow editing, the save may work.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, mode, selectedRow?.mapping_id]);
+
+  // ── Load destination options & source evidence for edit mode ─────
+  useEffect(() => {
+    let active = true;
+    // Whatever an earlier GET returned was for another opening of the dialog.
+    hydration.current = null;
+    (async () => {
+      setDestinationOptions([]);
+      setDestinationError("");
+      setSourceEvidence(null);
+      setSourceEvidenceError("");
+      if (!open || mode !== "edit" || !selectedRow?.mapping_id) return;
+      setLoadingDestinations(true);
+      try {
+        const { data } = await api.get<StoredMapping>(
+          `/v1/code-mappings/${selectedRow.mapping_id}/`,
+        );
+        if (!active) return;
+        setDestinationOptions(data.destination_options || []);
+        const evidence = data.source_evidence || null;
+        setSourceEvidence(evidence);
+        // What the mapping stores is the truth to show and to compare a save
+        // against; kept so a later rebuild of the form can apply it again.
+        hydration.current = { mappingId: selectedRow.mapping_id, data };
+        applyStored(data, Boolean(selectedRow.source_code_id));
+      } catch {
+        if (!active) return;
+        setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry.");
+        setSourceEvidenceError("Could not load source evidence. Close and reopen this mapping to retry.");
+        hydration.current = { mappingId: selectedRow.mapping_id, data: null };
+        // Only a row that carried the unit says what the mapping stores.
+        setUnitBaseline(rowCarriesUnit.current ? "known" : "unknown");
+      } finally {
+        if (active) setLoadingDestinations(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [open, mode, selectedRow?.mapping_id, selectedRow?.source_code_id, applyStored]);
+
+  // ── Cleanup timers on unmount ───────────────────────────────────
+  useEffect(() => () => {
+    dialogRequest.current += 1;
+    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
+    conceptSearchAbort.current?.abort();
+  }, []);
+
+  // ── Handlers ────────────────────────────────────────────────────
+
+  const closeDialog = useCallback(() => {
+    setSuggestionMessage("");
+    dialogRequest.current += 1;
+    setError("");
+    setExistingMapping(null);
+    setSearchingConcepts(false);
+    setMintOpen(false);
+    // Release edit lock.
+    if (selectedRow?.mapping_id) {
+      api.delete(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`).catch(() => {});
+    }
+    setSaving(false);
+    onClose();
+  }, [selectedRow?.mapping_id, onClose]);
+
+  const setField = useCallback((field: keyof MappingForm, value: string) => {
+    if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");
+    if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
+    const sourceEdited = ["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field);
+    if (sourceEdited) {
+      dialogRequest.current += 1;
+      suggestionStale.current = true;
+      setSearchingConcepts(false);
+      setError("");
+    }
+    // A confidence (and a Calc in flight) describes one source and one destination.
+    const destinationMoved = field === "destination_concept_id" && value !== destinationRef.current;
+    if (sourceEdited || destinationMoved) resetCalc();
+    if (field === "destination_concept_id") destinationRef.current = value;
+    setForm((prev) => ({
+      ...prev,
+      [field]: value,
+      ...(sourceEdited || destinationMoved
+        ? { suggestion_confidence: null, suggestion_confidence_token: null } : {}),
+    }));
+  }, [resetCalc]);
+
+  const setDomain = useCallback((domainId: string) => {
+    setSuggestionMessage("");
+    dialogRequest.current += 1;
+    suggestionStale.current = true;
+    setSearchingConcepts(false);
+    setError("");
+    resetCalc();
+    setForm((prev) => {
+      const offered = reference.source_code_systems_by_domain[domainId] || [];
+      const stillOffered =
+        !prev.source_vocabulary_id
+        || offered.some((s) => s.vocabulary_id === prev.source_vocabulary_id);
+      return {
+        ...prev,
+        domain_id: domainId,
+        source_vocabulary_id: stillOffered ? prev.source_vocabulary_id : "",
+        omop_table: omopTableFor(reference, domainId),
+        suggestion_confidence: null,
+        suggestion_confidence_token: null,
+      };
+    });
+  }, [reference, resetCalc]);
+
+  const applyConcept = useCallback((concept: ConceptResult, adoptDomain = false, score?: ConfidenceScore) => {
+    dialogChoice.current = dialogRequest.current;
+    setSuggestionMessage("");
+    // A new destination makes a Calc in flight, and what it said, stale; the same one does not.
+    if (destinationRef.current !== String(concept.concept_id)) resetCalc();
+    destinationRef.current = String(concept.concept_id);
+    setForm((prev) => {
+      // The confidence described the destination it was computed for. A new
+      // destination carries the one a Suggest run scored it with, else none
+      // until Calc computes it; the same destination keeps what it had.
+      const sameDestination = prev.destination_concept_id === String(concept.concept_id);
+      const domainId = (adoptDomain ? concept.domain_id : prev.domain_id) || concept.domain_id || "";
+      return {
+        ...prev,
+        domain_id: domainId,
+        destination_concept_id: String(concept.concept_id),
+        destination_concept_name: concept.concept_name,
+        destination_concept_code: concept.concept_code || "",
+        destination_vocabulary_id: concept.vocabulary_id,
+        destination_concept_class_id: concept.concept_class_id || "",
+        standard_concept: concept.standard_concept || "",
+        destination_invalid_reason: concept.invalid_reason || "",
+        omop_table: (adoptDomain ? "" : prev.omop_table) || omopTableFor(reference, domainId),
+        measurement_type: concept.measurement_type || "",
+        suggested_unit: concept.suggested_unit || "",
+        example_units: concept.example_units || [],
+        // A score the run gave this concept, with its signed token; otherwise a repeat keeps
+        // what it had and a different destination has none until Calc computes it.
+        suggestion_confidence: score ? score.confidence
+          : sameDestination ? prev.suggestion_confidence : null,
+        suggestion_confidence_token: score ? score.token
+          : sameDestination ? prev.suggestion_confidence_token : null,
+      };
+    });
+  }, [reference, resetCalc]);
+
+  const resolveConceptId = useCallback(async (rawId: string) => {
+    const id = rawId.trim();
+    if (!id) return;
+    try {
+      const resp = await api.get<ConceptResult>(`/v1/concepts/${id}/`);
+      applyConcept(resp.data);
+      setError("");
+    } catch {
+      setError(`No OMOP concept with id ${id}.`);
+      setForm((prev) => ({
+        ...prev,
+        destination_concept_code: "",
+        destination_concept_class_id: "",
+        standard_concept: "",
+        destination_invalid_reason: "",
+      }));
+    }
+  }, [applyConcept]);
+
+  const selectReplacement = useCallback(async () => {
+    if (!form.destination_concept_id) return;
+    try {
+      const { data } = await api.get(`/v1/concepts/${form.destination_concept_id}/replacement/`);
+      if (!data.replaced) {
+        onBanner?.("No active replacement is recorded; search for a current destination concept.");
+        return;
+      }
+      applyConcept(data.resolved_concept);
+      onBanner?.(`Replaced with active concept ${data.resolved_concept.concept_id}.`);
+    } catch {
+      setError("Could not look up a replacement concept.");
+    }
+  }, [form.destination_concept_id, applyConcept, onBanner]);
+
+  const searchConcepts = useCallback((query: string, vocabulary?: string, scope?: SearchScope) => {
+    const effectiveVocabulary = vocabulary ?? searchVocabulary;
+    const effectiveScope = scope ?? searchScope;
+    const request = ++dialogRequest.current;
+    setConceptSearchQuery(query);
+    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
+    conceptSearchTimer.current = null;
+    conceptSearchAbort.current?.abort();
+    conceptSearchAbort.current = null;
+    const q = query.trim();
+    if (q.length < 3) {
+      setSearchingConcepts(false);
+      setConceptResults([]);
+      return;
+    }
+    setSearchingConcepts(true);
+    conceptSearchTimer.current = window.setTimeout(async () => {
+      conceptSearchTimer.current = null;
+      if (request !== dialogRequest.current) return;
+      const controller = new AbortController();
+      conceptSearchAbort.current = controller;
+      try {
+        const matches = await searchDestinationConcepts(q, effectiveVocabulary, controller.signal, effectiveScope);
+        if (request === dialogRequest.current) setConceptResults(matches);
+      } catch {
+        if (request === dialogRequest.current) setConceptResults([]);
+      } finally {
+        if (request === dialogRequest.current) setSearchingConcepts(false);
+      }
+    }, CONCEPT_SEARCH_DEBOUNCE_MS);
+  }, [searchVocabulary, searchScope]);
+
+  // Whether the row can have LOINC axes at all: the server decides by domain
+  // (Measurement, Observation) or a LOINC source. A row that cannot gets no
+  // section while the axes request is in flight (#2030).
+  const axesMayApply = Boolean(selectedRow && (
+    ["Measurement", "Observation"].includes(selectedRow.domain_id
+      || { measurement: "Measurement", observation: "Observation" }[form.omop_table] || "")
+    || /loinc/i.test(form.source_vocabulary_id)));
+
+  /** The panel's variant for an axis key, when the panel has reported this row's variants. */
+  const currentVariant = useCallback((axisKey: string): AxisVariant | undefined =>
+    variantCount?.mappingId === selectedRow?.mapping_id ? variantCount?.variants.find(v => v.axis_key === axisKey) : undefined,
+  [variantCount, selectedRow?.mapping_id]);
+  /** The units of one variant ("%", "mg/dL, mg/dl"), else its axis values; never the raw key. */
+  const variantLabel = useCallback((axisKey: string): string => {
+    const variant = currentVariant(axisKey);
+    return variant?.units?.join(", ") || (variant ? describeAxisValues(variant.axis_values) : "this");
+  }, [currentVariant]);
+
+  /** One Suggest for the variants: a queued run gives each a proposed LOINC, left for approval. */
+  const suggestVariants = useCallback(async (request: number) => {
+    const mappingId = selectedRow?.mapping_id;
+    if (!mappingId) return;
+    setVariantMessage("Suggesting a LOINC for each axis variant…");
+    try {
+      const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
+      const { data: started } = await api.post<SuggestRunProgress>(`/v1/code-mappings/${mappingId}/axis-variants/suggest/`, {
+        strategies: enabled, ranking_model: rankingModel,
+        ...(loincAxes && loincAxes.mappingId === mappingId ? { loinc_axes: loincAxes.overrides } : {}),
+      });
+      let current = started;
+      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+      let failures = 0;
+      while ((current.state === "queued" || current.state === "running") && request === dialogRequest.current) {
+        if (Date.now() > deadline) throw new Error("Suggestion timed out");
+        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+        if (request !== dialogRequest.current) return;
+        try {
+          ({ data: current } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
+            params: { include_activity: "1" },
+          }));
+          failures = 0;
+        } catch (fetchError) {
+          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw fetchError;
+        }
+      }
+      if (request !== dialogRequest.current) return;
+      if (current.state === "failure") throw new Error(current.error || "The run failed.");
+      type VariantResult = { stage: string; suggestions?: { axis_key: string; suggested: unknown | null }[]; variants?: unknown[] };
+      const result = (current.activity as VariantResult[] | undefined)?.find(event => event.stage === "result");
+      const suggestions = result?.suggestions ?? [];
+      const filled = suggestions.filter(s => s.suggested).length;
+      const total = result?.variants?.length ?? 0;
+      setLoincAxesReload(n => n + 1);
+      // The message below sends the curator to that section; open it.
+      axesPanel.current?.open();
+      setVariantMessage(suggestions.length === 0
+        ? "Every axis variant already has a destination."
+        : `Suggested a LOINC for ${filled} of ${suggestions.length} axis variant${suggestions.length === 1 ? "" : "s"}${total ? ` (${total} in all)` : ""}; approve each under LOINC axes.`);
+    } catch (failure) {
+      if (request === dialogRequest.current) setVariantMessage(`Could not suggest the variants' destinations. ${describeDestinationError(failure)}`);
+    }
+  }, [selectedRow?.mapping_id, strategies, rankingModel, loincAxes]);
+
+  const suggestCurrentCode = useCallback(async (axisKey?: string) => {
+    setSuggestionMessage("");
+    setVariantMessage("");
+    const request = ++dialogRequest.current;
+    // The code's own destination and its variants are suggested together.
+    if (!axisKey && sourceIdentityUnchanged && variantCount && variantCount.mappingId === selectedRow?.mapping_id && variantCount.count >= 2) {
+      void suggestVariants(request);
+    }
+    dialogChoice.current = null;
+    suggestionStale.current = false;
+    setIndividualSuggestion({ request, activity: [], running: true, axisKey });
+    setError("");
+    setSearchingConcepts(true);
+    try {
+      const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
+      const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
+        source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
+        source_code_description: form.source_code_description, omop_table: form.omop_table,
+        // The Source Metadata shown below the description: context for the
+        // rankers, and only while it still describes the code being suggested.
+        source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
+        strategies: enabled, ranking_model: rankingModel, async: true,
+        // The row this dialog shows, so the server never takes another
+        // hospital's mapping of the same code for its axes and variants.
+        ...(sourceIdentityUnchanged && selectedRow?.mapping_id ? { mapping_id: selectedRow.mapping_id } : {}),
+        ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
+          ? { loinc_axes: loincAxes.overrides } : {}),
+        ...(snomedSettings && sourceIdentityUnchanged && snomedSettings.mappingId === selectedRow?.mapping_id
+          ? { snomed_attributes: snomedSettings.settings } : {}),
+        ...(axisKey ? { axis_key: axisKey } : {}),
+      });
+      let current = started;
+      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+      let failures = 0;
+      while (request === dialogRequest.current) {
+        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running", axisKey });
+        if (current.state !== "queued" && current.state !== "running") break;
+        if (Date.now() > deadline) throw new Error("Suggestion timed out");
+        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+        if (request !== dialogRequest.current) return;
+        try {
+          const { data } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
+            params: { include_activity: "1" },
+          });
+          current = data;
+          failures = 0;
+        } catch (fetchError) {
+          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw fetchError;
+        }
+      }
+      if (request !== dialogRequest.current) return;
+      if (current.state === "failure") {
+        setError(current.error || "Failed to suggest a destination concept.");
+        return;
+      }
+      const result = current.activity?.filter(event => event.stage === "result").at(-1);
+      if (axisKey) {
+        // A variant's winner belongs to the variant, not the mapping's destination.
+        setVariantMessage(`Candidates for the ${variantLabel(axisKey)} variant are shown below. Use one to make it that variant's destination.`);
+      } else if (result?.suggested && dialogChoice.current !== request) {
+        applyConcept(
+          result.suggested as ConceptResult, false,
+          signedScore(current.activity ?? [], String((result.suggested as ConceptResult).concept_id)) ?? undefined,
+        );
+        setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
+      } else if (!result?.suggested && dialogChoice.current !== request) {
+        setSuggestionMessage("No winner selected. You can choose a candidate or search below.");
+      }
+    } catch {
+      if (request === dialogRequest.current) setError("Failed to suggest a destination concept. Any candidates already shown are still selectable.");
+    } finally {
+      if (request === dialogRequest.current) {
+        setSearchingConcepts(false);
+        setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
+      }
+    }
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings, variantCount, suggestVariants, variantLabel]);
+
+  /**
+   * Calc (#2668): ask the ranker how sure it is of the destination chosen now, with
+   * the same evidence Suggest uses. Fills the number; writes nothing until Save.
+   */
+  const calcConfidence = useCallback(async () => {
+    const destination = form.destination_concept_id;
+    if (!destination) return;
+    const request = ++calcRequest.current;
+    const current = () => request === calcRequest.current;
+    setCalcing(true);
+    setCalcNote("");
+    try {
+      const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
+      const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/score/", {
+        source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
+        source_code_description: form.source_code_description, omop_table: form.omop_table,
+        source_metadata: sourceIdentityUnchanged ? selectedRow?.source_metadata || undefined : undefined,
+        strategies: enabled, ranking_model: rankingModel, async: true,
+        destination_concept_id: Number(destination),
+        ...(sourceIdentityUnchanged && selectedRow?.mapping_id ? { mapping_id: selectedRow.mapping_id } : {}),
+        ...(loincAxes && sourceIdentityUnchanged && loincAxes.mappingId === selectedRow?.mapping_id
+          ? { loinc_axes: loincAxes.overrides } : {}),
+        ...(snomedSettings && sourceIdentityUnchanged && snomedSettings.mappingId === selectedRow?.mapping_id
+          ? { snomed_attributes: snomedSettings.settings } : {}),
+      });
+      const finished = await pollSuggestRun(
+        started,
+        async (runId) => (await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${runId}/`, {
+          params: { include_activity: "1" },
+        })).data,
+        current,
+      );
+      if (!finished || !current()) return;
+      if (finished.state === "failure") {
+        setCalcNote(finished.error || "The score could not be computed.");
+        return;
+      }
+      const result = finished.activity?.filter(event => event.stage === "result").at(-1) as
+        { scored?: { confidence: number | null; token?: string; note?: string } } | undefined;
+      const confidence = result?.scored?.confidence;
+      const token = result?.scored?.token;
+      if (typeof confidence === "number" && token) {
+        setForm((prev) => prev.destination_concept_id === destination
+          ? { ...prev, suggestion_confidence: confidence, suggestion_confidence_token: token } : prev);
+        setCalcd({ destination, confidence });
+      } else {
+        setCalcNote(result?.scored?.note || "No confidence could be computed for this destination.");
+      }
+    } catch (failure) {
+      // A destination the server will not score says why (400).
+      const detail = (failure as { response?: { data?: { destination_concept_id?: string } } })?.response?.data?.destination_concept_id;
+      if (current()) setCalcNote(detail || "Could not compute a confidence. Try again.");
+    } finally {
+      if (current()) setCalcing(false);
+    }
+  }, [form.destination_concept_id, form.source_code, form.source_vocabulary_id, form.source_code_description,
+    form.omop_table, strategies, rankingModel, selectedRow?.source_metadata, selectedRow?.mapping_id,
+    sourceIdentityUnchanged, loincAxes, snomedSettings]);
+
+  const suggestedVariant = individualSuggestion?.axisKey ? currentVariant(individualSuggestion.axisKey) : undefined;
+
+  const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
+    sourceUnit.trim() !== savedSourceUnit
+    || sourceQuantity.trim() !== savedSourceQuantity
+  ));
+  const effectiveSourceUnit = patientId && selectedRow?.source_code_id
+    ? sourceUnit.trim() : form.source_unit;
+
+  const changeSourceUnit = (value: string) => {
+    setSourceUnit(value);
+    if (value.trim() === sourceUnit.trim()) return;
+    if (form.destination_unit_concept_id) {
+      if (unitSelectionAuto) {
+        setField("destination_unit_concept_id", "");
+        setField("destination_unit_concept_code", "");
+        setField("destination_unit_concept_name", "");
+        setUnitSelectionAuto(false);
+        setUnitSelectionNeedsReview(false);
+      } else {
+        setUnitSelectionNeedsReview(true);
+      }
+      setField("unit_match_type", "");
+    }
+  };
+
+  const persistSourceContext = async () => {
+    if (!patientId || !selectedRow?.source_code_id) return;
+    const extractedUnit = selectedRow.extracted_source_unit ?? "";
+    const extractedQuantity = selectedRow.extracted_example_quantity ?? "";
+    await api.patch(`/v1/patient-records/${patientId}/source-codes/`, {
+      source_code_id: selectedRow.source_code_id,
+      source_unit_override: sourceUnit.trim() === extractedUnit ? null : sourceUnit.trim(),
+      example_quantity_override: sourceQuantity.trim() === extractedQuantity ? null : sourceQuantity.trim(),
+    });
+    setForm((prev) => ({ ...prev, source_unit: sourceUnit.trim() }));
+    setSavedSourceUnit(sourceUnit.trim());
+    setSavedSourceQuantity(sourceQuantity.trim());
+    onSourceCodeUpdated?.();
+  };
+
+  // A Suggest run in this dialog, for the code itself rather than one of its
+  // axis variants and for the source text as it still reads, is the only time
+  // the dialog knows what the ranker thought of the destination being saved.
+  // Not dialogRequest: that counter also advances on concept-search keystrokes,
+  // which change nothing the ranker scored. Without a run the key is left out
+  // and the server keeps the row's own live confidence while the destination
+  // stands.
+  const suggestedHere = individualSuggestion !== null && !individualSuggestion.axisKey
+    && !suggestionStale.current;
+
+  // The number on screen is never sent (the server stores only a confidence it signed):
+  // a token for it goes instead, and null when the dialog cleared it.
+  const { suggestion_confidence: shownConfidence, suggestion_confidence_token: confidenceToken, ...formFields } = form;
+  const savePayload = () => ({
+    ...formFields,
+    ...(shownConfidence != null && confidenceToken ? { suggestion_confidence_token: confidenceToken } : {}),
+    ...(shownConfidence === null ? { suggestion_confidence: null } : {}),
+    notes: form.notes !== openedNotes.current ? form.notes : undefined,
+    ...(patientId ? { patient_id: Number(patientId) } : {}),
+    // The table this code was listed under on the patient page: rows there
+    // follow the mapping when it is filed under another table (#2393).
+    ...(patientId && selectedRow?.destination_omop_table ? { rows_omop_table: selectedRow.destination_omop_table } : {}),
+    ...(surface && !patientId ? { decision_surface: surface } : {}),
+    // Never sent for a row the fields are not shown on, nor when unchanged.
+    ...(showMetricFields && metric.current.category !== metric.opened.category
+      ? { category: metric.current.category } : {}),
+    ...(showMetricFields && metric.current.measure_class !== metric.opened.measure_class
+      ? { measure_class: metric.current.measure_class } : {}),
+    ...(showMetricFields && metric.current.metric_key.trim() !== metric.opened.metric_key
+      ? { metric_key: metric.current.metric_key.trim() } : {}),
+    ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
+    // A Calc for the destination being saved is the ranker's belief about exactly it.
+    ...(calcd && calcd.destination === form.destination_concept_id ? { decision_confidence: calcd.confidence } : {}),
+    source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
+    // Empty stays empty: never send concept 0 as a destination.
+    destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+    target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+    // Left out when the stored unit never became known and the curator did
+    // not choose one: the server keeps what it has for a key it is not sent.
+    destination_unit_concept_id: unitBaseline !== "known" && form.destination_unit_concept_id === openedUnitId.current
+      ? undefined
+      : form.destination_unit_concept_id ? Number(form.destination_unit_concept_id) : null,
+  });
+
+  const saveFailed = (err: unknown, fallback: string) => {
+    const detail =
+      err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: unknown } }).response?.data
+        : undefined;
+    // A refused move (lock, rights) carries no conflict block; keep the offer
+    // so the curator can retry rather than re-submit the form to get it back.
+    const conflict = existingMappingConflict(detail);
+    if (conflict) setExistingMapping(conflict);
+    const message =
+      detail && typeof detail === "object" && !Array.isArray(detail)
+        ? Object.entries(detail as Record<string, unknown>)
+          // `code` is the machine-readable twin of `detail` (e.g. self_approval).
+          .filter(([field]) => field !== "existing_mapping" && !(field === "code" && "detail" in detail))
+          .map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : String(value)}`)
+          .join(" ")
+        : "";
+    setError(message || fallback);
+    setSaving(false);
+  };
+
+  const submitForm = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    setExistingMapping(null);
+    try {
+      if (sourceContextDirty) await persistSourceContext();
+      const payload = savePayload();
+      const resp = selectedRow?.mapping_id
+        ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
+        : await api.post("/v1/code-mappings/", payload);
+      // Stored rows move in a background job; the parent says so.
+      const repoint: RepointResult | null = resp.data?.repoint ?? null;
+      onSaved(resp.data, repoint);
+      closeDialog();
+    } catch (err) {
+      saveFailed(err, sourceContextDirty
+        ? "Failed to save source context or code mapping. Please retry."
+        : "Failed to save code mapping.");
+    }
+  };
+
+  /**
+   * Re-file the mapping that already holds this code under the table and
+   * domain chosen here, with this form's destination and status. A PATCH of
+   * that row, so the server's own rules (locks, approval rights, rows still
+   * moving) still apply and the patient page then finds it under this table.
+   */
+  const moveExistingMapping = async () => {
+    if (!existingMapping) return;
+    setSaving(true);
+    setError("");
+    try {
+      // This form was not built from that mapping, so its unit is not this
+      // form's to clear, nor to replace with one matched from a source unit:
+      // only a unit the curator chose here goes with the move.
+      const chosenUnit = form.destination_unit_concept_id && !unitSelectionAuto
+        && form.destination_unit_concept_id !== openedUnitId.current
+        ? Number(form.destination_unit_concept_id) : undefined;
+      const resp = await api.patch(`/v1/code-mappings/${existingMapping.id}/`,
+        { ...savePayload(), destination_unit_concept_id: chosenUnit });
+      const repoint: RepointResult | null = resp.data?.repoint ?? null;
+      setExistingMapping(null);
+      onSaved(resp.data, repoint);
+      closeDialog();
+    } catch (err) {
+      saveFailed(err, "Failed to move the existing mapping.");
+    }
+  };
+
+  const saveSourceContext = async () => {
+    if (!patientId || !selectedRow?.source_code_id) return;
+    setSavingSource(true);
+    setSourceSaveMessage("");
+    try {
+      await persistSourceContext();
+      setSourceSaveMessage("Source context saved. Original FHIR evidence is unchanged.");
+    } catch {
+      setSourceSaveMessage("Could not save source context. Please try again.");
+    } finally {
+      setSavingSource(false);
+    }
+  };
+
+  const deleteMapping = useCallback(async (row: CodeMappingRow) => {
+    if (!row.mapping_id) return;
+    setError("");
+    try {
+      await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
+      onDeleted(row);
+      closeDialog();
+    } catch {
+      setError("Failed to delete code mapping.");
+    }
+  }, [onDeleted, closeDialog]);
+
+  // ── Render ──────────────────────────────────────────────────────
+
+  if (!open) return null;
+
+  return (
+    <>
+      <div inert={mintOpen} className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
+        <form
+          onSubmit={submitForm}
+          role="dialog"
+          aria-label={mode === "new" ? "New Mapping" : "Edit Mapping"}
+          className="w-full max-w-4xl rounded-md bg-white shadow-xl"
+        >
+          <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+            <h2 className="text-lg font-semibold text-slate-950">
+              {mode === "new" ? "New Mapping" : "Edit Mapping"}
+            </h2>
+            <button
+              type="button"
+              onClick={closeDialog}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100"
+              aria-label="Close"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          <div className="max-h-[70vh] overflow-y-auto px-5 py-5">
+            {error && (
+              <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {error}
+                {existingMapping
+                  && (canApprove || existingMapping.status !== "approved" || form.status === "approved") && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={moveExistingMapping}
+                      disabled={saving}
+                      className="rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                    >
+                      {existingMapping.omop_table && existingMapping.omop_table !== form.omop_table
+                        ? `Move it from ${tableLabel(existingMapping.omop_table)} to ${tableLabel(form.omop_table)}`
+                        : "Update the existing mapping"}
+                    </button>
+                    <span className="text-xs text-red-600">
+                      Saves this destination and status onto that mapping
+                      {existingMapping.target_concept_name
+                        ? `, replacing ${existingMapping.target_concept_name}` : ""}
+                      {existingMapping.status === "approved" && form.status !== "approved"
+                        ? `, and un-approves it (status becomes ${form.status || "proposed"})` : ""}.
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+            {/* -- SOURCE ------------------------------------------------- */}
+            <fieldset
+              data-testid="source-block"
+              className="mb-5 rounded-md border border-slate-200 p-4"
+            >
+              <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Source -- the code as it arrived
+              </legend>
+              {mode === "edit" && selectedRow && (
+                <p data-testid="source-organization" className="mb-4 text-sm text-slate-700">
+                  <span className="font-medium">Hospital / organization: </span>
+                  {selectedRow.organization_name || sourceEvidence?.organization?.name
+                    || (evidenceFacilities.length
+                      ? `${evidenceFacilities[0].name}${evidenceFacilities.length > 1 ? ` (+${evidenceFacilities.length - 1} more)` : ""}`
+                      : "Global / unattributed")}
+                  {(selectedRow.organization_slug || sourceEvidence?.organization?.slug) && (
+                    <span className="ml-1 text-xs text-slate-500">
+                      ({selectedRow.organization_slug || sourceEvidence?.organization?.slug})
+                    </span>
+                  )}
+                </p>
+              )}
+              <div data-testid="source-fields" className="grid gap-4 md:grid-cols-2">
+                <Field id="domain_id" label="Domain" tip={TIP.domain}>
+                  <select
+                    id="domain_id"
+                    title={TIP.domain}
+                    value={form.domain_id}
+                    onChange={(e) => setDomain(e.target.value)}
+                    required
+                    className={INPUT_CLASS}
+                  >
+                    <option value="">-- select --</option>
+                    {reference.domains.map((d) => (
+                      <option key={d.domain_id} value={d.domain_id}>{d.label || d.domain_id}</option>
+                    ))}
+                  </select>
+                </Field>
+
+                <Field id="source_vocabulary_id" label="Source Code System" tip={TIP.source_code_system}>
+                  <select
+                    id="source_vocabulary_id"
+                    title={TIP.source_code_system}
+                    value={form.source_vocabulary_id}
+                    onChange={(e) => setField("source_vocabulary_id", e.target.value)}
+                    className={INPUT_CLASS}
+                  >
+                    {sourceCodeSystems.map((s) => (
+                      <option key={s.vocabulary_id || "__none__"} value={s.vocabulary_id}>
+                        {s.label || s.vocabulary_id}
+                      </option>
+                    ))}
+                  </select>
+                  {(form.source_vocabulary_id.startsWith("urn:oid:") || form.source_vocabulary_id.startsWith("http")) && (
+                    <div className="mt-1 text-xs text-slate-600">
+                      {sourceSystemContext && sourceSystemContext.kind !== "none" && (
+                        <p title={hospitalContextDetails(sourceSystemContext)}>{hospitalContextText(sourceSystemContext)}</p>
+                      )}
+                      <p>Exact FHIR Coding.system: <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
+                          target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
+                          title="Open Source Code Systems/Hospitals Management to review and manage facilities associated with this exact source system">
+                          <code className="break-all">{form.source_vocabulary_id}</code>
+                        </a></p>
+                    </div>
+                  )}
+                </Field>
+
+                <Field id="source_code" label="Source Code Value" tip={TIP.source_code_value}>
+                  <input
+                    id="source_code"
+                    title={TIP.source_code_value}
+                    value={form.source_code}
+                    onChange={(e) => setField("source_code", e.target.value)}
+                    required
+                    className={`${INPUT_CLASS} font-mono`}
+                  />
+                  {sourceIdentityUnchanged && (selectedRow?.source_concept_id || selectedRow?.source_retired) && (
+                    <p data-testid="source-code-metadata" className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                      {selectedRow.source_concept_id && <span>(OMOP concept {selectedRow.source_concept_id})</span>}
+                      {selectedRow.source_retired && <span className="font-semibold text-red-700"
+                        title={retirementDetail(selectedRow)}>Retired</span>}
+                    </p>
+                  )}
+                </Field>
+
+                <Field id="source_code_description" label="Source Description" tip={TIP.source_description}>
+                  <input
+                    id="source_code_description"
+                    title={TIP.source_description}
+                    value={form.source_code_description}
+                    onChange={(e) => setField("source_code_description", e.target.value)}
+                    className={INPUT_CLASS}
+                  />
+                </Field>
+
+                {patientId && selectedRow?.source_code_id ? (
+                  <>
+                    <Field id="source_quantity" label="Source Quantity" tip="Representative quantity from this patient's source-code inventory. Compare with Source Metadata below before correcting.">
+                      <input id="source_quantity" className={INPUT_CLASS} maxLength={100}
+                        value={sourceQuantity} onChange={(event) => setSourceQuantity(event.target.value)} />
+                      {selectedRow.example_quantity_override !== null && selectedRow.example_quantity_override !== undefined && (
+                        <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_example_quantity || "\u2014"}</p>
+                      )}
+                    </Field>
+                    <Field id="source_unit" label="Source Unit" tip="Unit string from this patient's source-code inventory. This is context, not the destination unit concept.">
+                      <input id="source_unit" className={INPUT_CLASS} maxLength={50}
+                        value={sourceUnit} onChange={(event) => changeSourceUnit(event.target.value)} />
+                      {selectedRow.source_unit_override !== null && selectedRow.source_unit_override !== undefined && (
+                        <p className="mt-1 text-xs text-slate-600">Extracted: {selectedRow.extracted_source_unit || "\u2014"}</p>
+                      )}
+                    </Field>
+                  </>
+                ) : (
+                  <>
+                    <ReadOnlyField id="source_quantity_display" label="Source Quantity" tip="Representative quantity value(s) from the source data." value={selectedRow?.example_quantity || "\u2014"} testId="source-quantity" />
+                    <ReadOnlyField id="source_unit_display" label="Source Unit" tip="Unit string as reported by the ETL source." value={form.source_unit || "\u2014"} testId="source-unit-context" />
+                  </>
+                )}
+
+                {(reference.source_catalog_vocabularies || []).includes(form.source_vocabulary_id) && (
+                  <SourceVocabularyLookup
+                    vocabularyId={form.source_vocabulary_id}
+                    code={form.source_code}
+                    onSelect={(term) => {
+                      setField("source_code", term.code);
+                      setField("source_code_description", term.name.slice(0, 255));
+                      setField("source_concept_id", "");
+                    }}
+                  />
+                )}
+                <div data-testid="source-context-row" className="col-span-full grid grid-cols-1 items-end gap-3 sm:grid-cols-2">
+                  {patientId && selectedRow?.source_code_id ? (
+                    <div className="flex min-h-10 flex-wrap items-center gap-2 text-xs">
+                      <button type="button" onClick={() => void saveSourceContext()} disabled={savingSource}
+                        title="Save this patient's quantity and unit corrections separately from the code mapping."
+                        className="rounded border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
+                        {savingSource ? "Saving..." : "Save source context"}
+                      </button>
+                      <button type="button" title="Restore the original extracted quantity and unit in this form. Click Save source context to save them." onClick={() => {
+                        setSourceQuantity(selectedRow.extracted_example_quantity || "");
+                        changeSourceUnit(selectedRow.extracted_source_unit || "");
+                      }} className="text-slate-600 underline">Use extracted values</button>
+                      {sourceSaveMessage && <span role="status">{sourceSaveMessage}</span>}
+                    </div>
+                  ) : showMetricFields ? (
+                    // The cell beside BasedOn is free outside the patient page.
+                    <MetricChoiceField id="category" label="Category" tip={TIP.category}
+                      value={metric.current.category} stored={metric.opened.category}
+                      options={reference.wearable_metric_categories ?? []}
+                      canWrite={canWrite} onChange={(value) => setMetricField("category", value)} />
+                  ) : <div />}
+                  <div className="min-w-0">
+                    <ReadOnlyField id="source_based_on" label="BasedOn"
+                      tip="Source FHIR basedOn display text, or its reference when no display is provided."
+                      value={sourceIdentityUnchanged ? selectedRow?.based_on?.join("; ") || "" : ""}
+                      testId="source-based-on" fullWidth />
+                  </div>
+                  {showMetricFields && patientId && selectedRow?.source_code_id && (
+                    <MetricChoiceField id="category" label="Category" tip={TIP.category}
+                      value={metric.current.category} stored={metric.opened.category}
+                      options={reference.wearable_metric_categories ?? []}
+                      canWrite={canWrite} onChange={(value) => setMetricField("category", value)} />
+                  )}
+                  {showMetricFields && (
+                    <MetricChoiceField id="measure_class" label="Measure Class" tip={TIP.measure_class}
+                      value={metric.current.measure_class} stored={metric.opened.measure_class}
+                      options={reference.wearable_measure_classes ?? []}
+                      canWrite={canWrite} onChange={(value) => setMetricField("measure_class", value)} />
+                  )}
+                  {showMetricFields && (canWrite ? (
+                    <Field id="metric_key" label="Metric Key" tip={TIP.metric_key}>
+                      <input id="metric_key" title={TIP.metric_key} value={metric.current.metric_key}
+                        onChange={(e) => setMetricField("metric_key", e.target.value)}
+                        maxLength={64} spellCheck={false} autoCapitalize="none"
+                        placeholder="e.g. resting_hr" className={`${INPUT_CLASS} font-mono`} />
+                    </Field>
+                  ) : (
+                    <ReadOnlyField id="metric_key" label="Metric Key" tip={TIP.metric_key}
+                      value={metric.current.metric_key} fullWidth />
+                  ))}
+                </div>
+              </div>
+              {/* The list row omits the mapping's own metadata; the detail
+                  response carries it as source evidence. */}
+              <SourceMetadataBlock metadata={selectedRow?.source_metadata && Object.keys(selectedRow.source_metadata).length
+                ? selectedRow.source_metadata : sourceEvidence?.metadata as Record<string, unknown> | undefined} />
+              {sourceExamples && (
+                <SourceExamplesBlock state={examples} selected={examplePersonId} onSelect={setExamplePersonId}
+                  onMore={loadMoreExamples}
+                  inventoryPatients={sourceEvidence?.metadata?.patients} />
+              )}
+            </fieldset>
+
+            {mode === "edit" && selectedRow?.mapping_id && (
+              <SourceEvidencePanel evidence={sourceEvidence} mappingId={selectedRow.mapping_id}
+                sourceSystem={selectedRow.source_vocabulary_id} loading={loadingDestinations}
+                error={sourceEvidenceError} />
+            )}
+
+            {/* -- DESTINATION -------------------------------------------- */}
+            <fieldset
+              data-testid="destination-block"
+              className="rounded-md border border-slate-200 p-4"
+            >
+              <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Destination -- the OMOP concept it means
+              </legend>
+
+              {mode === "edit" && (
+                <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3">
+                  {(selectedRow?.destination_count || destinationOptions.length) > 1 && (
+                    <p className="mb-2 font-semibold text-amber-900">
+                      Multiple destinations are available for this source code. Review the source data alternatives and choose the correct destination.
+                    </p>
+                  )}
+                  {loadingDestinations && <p role="status">Loading source destinations...</p>}
+                  {destinationError && <p role="alert" className="text-red-700">{destinationError}</p>}
+                  {destinationOptions.length > 0 && (
+                    <>
+                      <label htmlFor="imported-destination" className="mb-1 block text-sm font-medium">
+                        Source data destinations ({destinationOptions.length})
+                      </label>
+                      <select id="imported-destination" className={INPUT_CLASS}
+                        value={destinationOptions.some((option) => String(option.concept_id) === form.destination_concept_id) ? form.destination_concept_id : ""}
+                        onChange={(event) => {
+                          const option = destinationOptions.find((item) => String(item.concept_id) === event.target.value);
+                          if (option?.selectable && option.concept_id !== null) {
+                            applyConcept({ ...option, concept_id: option.concept_id }, true);
+                          }
+                        }}>
+                        <option value="">Choose a destination</option>
+                        {destinationOptions.map((option) => (
+                          <option key={`${option.vocabulary_id}:${option.concept_code}`}
+                            value={option.concept_id === null ? `unavailable:${option.vocabulary_id}:${option.concept_code}` : String(option.concept_id)}
+                            disabled={!option.selectable}>
+                            {option.concept_name} -- {option.vocabulary_id}:{option.concept_code} -- OMOP {option.concept_id ?? "not loaded"}
+                            {option.measurement_type ? ` \u00b7 ${option.measurement_type === "quantitative" ? "Quantitative" : "Qualitative"}` : ""}
+                            {option.suggested_unit ? ` \u00b7 ${option.suggested_unit}` : ""}
+                            {option.origins.length ? ` (${option.origins.join(", ")})` : ""}
+                            {!option.selectable ? " -- unavailable" : ""}
+                          </option>
+                        ))}
+                      </select>
+                      <p className="mt-1 text-xs text-slate-600">
+                        Save your choice below. Imported alternatives are retained for review; unavailable targets cannot be selected.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {suggestionMessage && (
+                <p role="status" className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                  {suggestionMessage}
+                </p>
+              )}
+
+              {/* Search sits at the top: picking a concept fills everything below it. */}
+              <div className="mb-4">
+                {!defaultDestination && (
+                <div className="mb-2 flex items-end justify-between gap-3">
+                  <div className="flex items-center gap-1">
+                    <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
+                      Search destination concepts
+                    </label>
+                    <HelpTip tip={TIP.search} />
+                  </div>
+                  {!defaultDestination && (
+                  <div className="flex flex-wrap items-center gap-3">
+                    {(["umls", "lexical", "vectors"] as const).map((key) => (
+                      <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
+                        <label className="inline-flex items-center gap-1">
+                          <input type="checkbox" checked={strategies[key]}
+                            onChange={(e) => onStrategiesChange?.({ ...strategies, [key]: e.target.checked })} />
+                          {STRATEGY_LABELS[key]}
+                        </label>
+                        <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A unique match wins after the other enabled searches finish." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
+                      </div>
+                    ))}
+                    <div className="inline-flex items-center gap-1 text-xs text-slate-600">
+                      <label className="inline-flex items-center gap-1">
+                        Ranker
+                        <select
+                          value={rankingModel}
+                          onChange={(e) => onRankingModelChange?.(e.target.value as "anthropic" | "jev" | "both")}
+                          className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
+                        >
+                          <option value="anthropic">Anthropic</option>
+                          <option value="jev">Jev</option>
+                          <option value="both">Both</option>
+                        </select>
+                      </label>
+                      <HelpTip tip={TIP.ranker} />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void suggestCurrentCode()}
+                      disabled={searchingConcepts || !hasRetrieval}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      <Sparkles size={13} />
+                      Suggest
+                    </button>
+                  </div>
+                  )}
+                </div>
+                )}
+                {variantMessage && <p role="status" data-testid="variant-suggestion" className="text-xs text-slate-700">{variantMessage}</p>}
+                {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
+                  key={selectedRow.mapping_id} ref={axesPanel} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
+                  reloadToken={loincAxesReload}
+                  expectedVariants={selectedRow.axis_variant_count}
+                  // A code the queue flags is the one case with something to do here.
+                  defaultOpen={(selectedRow.axis_variant_count ?? 0) >= 2}
+                  mayApply={axesMayApply}
+                  onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
+                  onVariantsChange={(count, variants) => setVariantCount({ mappingId: selectedRow.mapping_id!, count, variants })}
+                  onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
+                {mode === "edit" && selectedRow?.mapping_id && <SnomedEvidencePanel
+                  key={`snomed-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} canEdit
+                  onSettingsChange={settings => setSnomedSettings({ mappingId: selectedRow.mapping_id!, settings })} />}
+                {/* Public votes are cast on wearable proposals only (#2678). */}
+                {mode === "edit" && selectedRow?.mapping_id && showMetricFields && <MappingVotesSection
+                  key={`votes-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} />}
+                {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
+                  activity={individualSuggestion.activity} running={individualSuggestion.running}
+                  variant={individualSuggestion.axisKey ? variantLabel(individualSuggestion.axisKey) : undefined}
+                  selectedId={individualSuggestion.axisKey
+                    ? String(suggestedVariant?.target_concept?.concept_id ?? "") : form.destination_concept_id}
+                  onSelect={candidate => {
+                    const axisKey = individualSuggestion.axisKey;
+                    if (axisKey && selectedRow?.mapping_id) {
+                      // The panel writes it, keeps an approved variant approved, and
+                      // shows the outcome beside the variants (#2036).
+                      void axesPanel.current?.setVariantDestination(axisKey, candidate.concept_id);
+                      return;
+                    }
+                    applyConcept(candidate as ConceptResult, false, signedScore(
+                      individualSuggestion.activity, String(candidate.concept_id)) ?? undefined);
+                    setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
+                  }} />}
+                {!defaultDestination && (<><div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
+                    <input
+                      id="code-mapping-concept-search"
+                      title={TIP.search}
+                      value={conceptSearchQuery}
+                      onChange={(e) => void searchConcepts(e.target.value)}
+                      placeholder={
+                        searchVocabulary
+                          ? `Search ${searchVocabulary} concepts...`
+                          : "Search destination concepts..."
+                      }
+                      className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <select
+                      id="code-mapping-search-vocabulary"
+                      aria-label="Search vocabulary"
+                      title={TIP.search_vocabulary}
+                      value={searchVocabulary}
+                      onChange={(e) => {
+                        setSearchVocabulary(e.target.value);
+                        void searchConcepts(conceptSearchQuery, e.target.value);
+                      }}
+                      className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
+                    >
+                      <option value="">All vocabularies</option>
+                      {reference.destination_vocabularies.map((v) => (
+                        <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
+                      ))}
+                    </select>
+                    <HelpTip tip={TIP.search_vocabulary} />
+                  </div>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                  <span>Showing active, standard concepts.</span>
+                  {([
+                    ["retired", "Include retired", TIP.search_include_retired],
+                    ["nonStandard", "Include non-standard", TIP.search_include_non_standard],
+                  ] as const).map(([key, label, tip]) => (
+                    <span key={key} className="flex items-center gap-1">
+                      <label className="flex items-center gap-1" title={tip}>
+                        <input
+                          type="checkbox"
+                          checked={searchScope[key]}
+                          onChange={(e) => {
+                            const next = { ...searchScope, [key]: e.target.checked };
+                            setSearchScope(next);
+                            void searchConcepts(conceptSearchQuery, searchVocabulary, next);
+                          }}
+                        />
+                        {label}
+                      </label>
+                      <HelpTip tip={tip} />
+                    </span>
+                  ))}
+                </div>
+                <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
+                  {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
+                  {!searchingConcepts && conceptResults.length === 0 && conceptSearchQuery.length >= 3 && (
+                    <div className="px-3 py-2 text-sm text-slate-500">
+                      {searchScope.retired && searchScope.nonStandard
+                        ? "No suggestions found."
+                        : "No active, standard concepts found. Widen the search with the options above."}
+                    </div>
+                  )}
+                  {!searchingConcepts && conceptResults.map((concept) => (
+                    <button
+                      key={concept.concept_id}
+                      type="button"
+                      onClick={() => applyConcept(concept)}
+                      className="w-full border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
+                    >
+                      <span className="grid grid-cols-[8rem_1fr_6rem] gap-2">
+                        <span className="font-mono text-slate-700">{concept.concept_code}</span>
+                        <span className="text-slate-900">
+                          {concept.concept_name}
+                          {concept.invalid_reason ? (
+                            <span className="ml-2 rounded bg-red-100 px-1 text-[10px] font-semibold uppercase text-red-800">Retired</span>
+                          ) : concept.standard_concept === "S" ? (
+                            <span className="ml-2 rounded bg-emerald-100 px-1 text-[10px] font-semibold uppercase text-emerald-800">Standard</span>
+                          ) : (
+                            <span className="ml-2 rounded bg-amber-100 px-1 text-[10px] font-semibold uppercase text-amber-800">Non-standard</span>
+                          )}
+                        </span>
+                        <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
+                      </span>
+                      <ConceptInputDetails {...concept} />
+                    </button>
+                  ))}
+                </div>
+                </>)}
+              </div>
+
+              {/* Destination fields */}
+              <div data-testid="destination-fields" className="grid gap-4 md:grid-cols-2">
+                <Field id="destination_concept_id" label="Destination Concept ID" tip={TIP.destination_concept_id}>
+                  <input
+                    id="destination_concept_id"
+                    title={TIP.destination_concept_id}
+                    type="number"
+                    value={form.destination_concept_id}
+                    onChange={(e) => setField("destination_concept_id", e.target.value)}
+                    onBlur={(e) => void resolveConceptId(e.target.value)}
+                    min={1}
+                    // Optional only while the row has no destination: clearing an
+                    // existing one is not a way to remove it, so it stays required.
+                    required={isNewMapping || Boolean(selectedRow?.destination_concept_id)}
+                    className={`${INPUT_CLASS} font-mono`}
+                  />
+                </Field>
+
+                <ReadOnlyField
+                  id="destination_concept_name"
+                  label="Destination Concept Name"
+                  tip={TIP.destination_concept_name}
+                  value={form.destination_concept_name}
+                  testId="destination-concept-name"
+                />
+
+                <ReadOnlyField
+                  id="destination_concept_code"
+                  label="Destination Concept Code"
+                  tip={TIP.destination_concept_code}
+                  value={form.destination_concept_code}
+                  testId="destination-concept-code"
+                />
+                <ReadOnlyField
+                  id="destination_vocabulary_id"
+                  label="Destination Vocabulary ID"
+                  tip={TIP.destination_vocabulary_id}
+                  value={form.destination_vocabulary_id}
+                  testId="destination-vocabulary-id"
+                />
+                <ReadOnlyField
+                  id="destination_concept_class_id"
+                  label="Destination Concept Class"
+                  tip={TIP.destination_concept_class}
+                  value={form.destination_concept_class_id}
+                  testId="destination-concept-class"
+                />
+                <ReadOnlyField
+                  id="standard_concept"
+                  label="Standard Concept"
+                  tip={TIP.standard_concept}
+                  value={form.standard_concept}
+                  testId="standard-concept"
+                />
+                {/* A stored unit is saved with the mapping whatever its table,
+                    so it is shown, and can be cleared, whatever its table. */}
+                {(form.omop_table === "measurement" || effectiveSourceUnit || form.destination_unit_concept_id) && (
+                  <DestinationUnitPicker
+                    key={effectiveSourceUnit}
+                    sourceUnit={effectiveSourceUnit}
+                    autoSelect={unitBaseline === "known"}
+                    selectedConceptId={form.destination_unit_concept_id}
+                    selectedConceptCode={form.destination_unit_concept_code}
+                    selectedConceptName={form.destination_unit_concept_name}
+                    matchType={form.unit_match_type}
+                    autoPopulated={unitAutoPopulated}
+                    needsReview={unitSelectionNeedsReview}
+                    onSelect={(unit, auto = false) => {
+                      setField("destination_unit_concept_id", unit ? String(unit.concept_id) : "");
+                      setField("destination_unit_concept_code", unit?.concept_code || "");
+                      setField("destination_unit_concept_name", unit?.concept_name || "");
+                      setField("unit_match_type", unit?.match || "");
+                      setUnitSelectionAuto(Boolean(unit && auto));
+                      setUnitSelectionNeedsReview(false);
+                    }}
+                    onMintUnit={() => setMintUnitOpen(true)}
+                  />
+                )}
+                <ReadOnlyField
+                  id="omop_table"
+                  label="Destination Table"
+                  tip={TIP.destination_table}
+                  value={form.omop_table}
+                  testId="destination-table"
+                />
+                {form.suggested_unit && (
+                  <ReadOnlyField
+                    id="suggested_unit"
+                    label="Suggested unit"
+                    tip="A suggested unit, not a unit mandated by Athena. The instance canonical unit is configured below."
+                    value={form.suggested_unit}
+                    testId="suggested-unit"
+                  />
+                )}
+              </div>
+              {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
+                <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
+              {/* The destination's standing is a fact about the concept, not
+                  a field: plain text on the line of the mint button. */}
+              <div className="mt-3 flex items-center gap-2">
+                {form.destination_concept_id && (
+                  <p data-testid="destination-status"
+                    title={form.destination_invalid_reason
+                      ? `Retired / invalid (reason ${form.destination_invalid_reason}). A retired concept is no longer current; select an active replacement when one is available.`
+                      : "Active concepts can be used as destinations."}
+                    className={form.destination_invalid_reason ? "text-sm font-semibold text-red-700" : "text-sm text-slate-700"}>
+                    <span className="sr-only">Destination status: </span>
+                    {form.destination_invalid_reason ? "Retired" : "Active"}
+                    {form.destination_invalid_reason && <span className="font-normal"> (reason {form.destination_invalid_reason})</span>}
+                  </p>
+                )}
+                <button type="button" onClick={() => setMintOpen(true)} className="ml-auto rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
+              </div>
+              {form.destination_invalid_reason && (
+                <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  <span>This destination is retired. Use its active replacement when available.</span>
+                  <button type="button" onClick={() => void selectReplacement()} className="shrink-0 rounded border border-amber-400 px-2 py-1 text-xs font-medium hover:bg-amber-100">
+                    Find replacement
+                  </button>
+                </div>
+              )}
+            </fieldset>
+
+            {selectedRow && (
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <span className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-700">
+                  Seen <span className="font-mono font-semibold">{selectedRow.occurrence_count || 0}</span> time{selectedRow.occurrence_count !== 1 ? "s" : ""}
+                </span>
+                <span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium ${
+                  selectedRow.destination_count !== 1 ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"
+                }`}>
+                  Destinations <span className="font-mono font-semibold">{selectedRow.destination_count ?? 0}</span>
+                </span>
+              </div>
+            )}
+
+            {selectedRow
+              && (selectedRow.origin === "import"
+                || selectedRow.created_by
+                || approvalNote(selectedRow)) && (
+              <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                {selectedRow.origin === "import" ? (
+                  <>
+                    Proposed by import
+                    {selectedRow.origin_system ? ` (${selectedRow.origin_system})` : ""}
+                  </>
+                ) : (
+                  selectedRow.created_by ? <>Created by {selectedRow.created_by}</> : null
+                )}
+                {approvalNote(selectedRow)}
+                {selectedRow.suggest_strategy ? (
+                  <>
+                    {" \u00b7 suggested via "}
+                    <span className="font-medium">{strategyLabel[selectedRow.suggest_strategy] || selectedRow.suggest_strategy}</span>
+                    {selectedRow.umls_cui ? ` (CUI ${selectedRow.umls_cui})` : ""}
+                  </>
+                ) : null}
+              </p>
+            )}
+
+            <div className="mt-4 grid gap-1">
+              <div className="flex items-center gap-1">
+                <label className="text-sm font-medium text-slate-700" htmlFor="notes">Notes</label>
+                <HelpTip tip={TIP.notes} />
+              </div>
+              <textarea
+                id="notes"
+                title={TIP.notes}
+                value={form.notes}
+                onChange={(e) => setField("notes", e.target.value)}
+                rows={2}
+                className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-950"
+              />
+            </div>
+
+          </div>
+
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 border-t border-slate-200 px-5 py-4">
+            <div className="min-w-0 text-sm text-slate-700" data-testid="mapping-provenance">
+              <span className="font-medium">Provenance</span>{" "}
+              <span className="break-words text-slate-600">
+                {selectedRow?.origin_system || "\u2014"}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium text-slate-700" htmlFor="status">Status</label>
+                <HelpTip tip={TIP.status} />
+                <select
+                  id="status"
+                  title={TIP.status}
+                  value={form.status}
+                  onChange={(e) => setField("status", e.target.value)}
+                  className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
+                >
+                  <option value="proposed">Proposed</option>
+                  <option value="approved" disabled={!canApprove || !form.destination_concept_id || ownProposal || proposesDestination}
+                    title={ownProposal ? OWN_PROPOSAL_NOTE : proposesDestination ? NEW_DESTINATION_NOTE : undefined}>
+                    {!form.destination_concept_id ? "Approved (set destination first)"
+                      : !canApprove ? "Approved (admin only)"
+                        : ownProposal ? "Approved (you proposed this)"
+                          : proposesDestination ? "Approved (save as proposed first)" : "Approved"}
+                  </option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <span
+                  data-testid="mapping-confidence"
+                  role="status"
+                  aria-label="Confidence"
+                  title={confidencePercent(form.suggestion_confidence)
+                    ? `Confidence ${confidencePercent(form.suggestion_confidence)}%`
+                    : "Confidence: not computed yet"}
+                  className="inline-block min-w-[2ch] text-right text-sm font-medium tabular-nums text-slate-800"
+                >
+                  {confidencePercent(form.suggestion_confidence)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void calcConfidence()}
+                  disabled={!form.destination_concept_id || calcing || sourceTextEdited}
+                  title={!form.destination_concept_id
+                    ? "Choose a destination to compute its confidence."
+                    : sourceTextEdited
+                      ? "Save the source change first: a score is about the saved source text."
+                      : "Compute (or recompute) the ranker's confidence in this destination."}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-60"
+                >
+                  {calcing && <Loader2 size={13} className="animate-spin" aria-hidden="true" />}
+                  Calc
+                </button>
+                {calcNote && <span role="note" data-testid="calc-note" className="max-w-xs text-xs text-slate-600">{calcNote}</span>}
+              </div>
+              {selectedRow?.mapping_id && selectedRow?.destination_concept_id && (
+                <button
+                  type="button"
+                  onClick={() => void deleteMapping(selectedRow)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                >
+                  <Trash2 size={13} />
+                  Delete
+                </button>
+              )}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeDialog}
+                className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
+              >
+                {saving
+                  ? "Saving"
+                  : willRepoint
+                    ? "Update & Approve"
+                    : mode === "edit"
+                      ? "Update Mapping"
+                      : "Save Mapping"}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+      {mintOpen && (
+        <MintConceptDialog
+          vocabularies={reference.destination_vocabularies} domains={reference.domains}
+          initialDomain={form.domain_id} initialName={form.source_code_description || form.source_code}
+          sourceCode={form.source_code} sourceVocabulary={form.source_vocabulary_id}
+          onClose={() => setMintOpen(false)}
+          onSelect={concept => { applyConcept(concept as ConceptResult); setMintOpen(false); }}
+        />
+      )}
+      {mintUnitOpen && (
+        <MintConceptDialog
+          vocabularies={[{ vocabulary_id: "HK-Units", vocabulary_name: "HealthKey Units" }]}
+          domains={[{ domain_id: "Unit", label: "Unit" }]}
+          initialDomain="Unit"
+          initialName={form.source_unit}
+          sourceCode={form.source_unit}
+          sourceVocabulary=""
+          onClose={() => setMintUnitOpen(false)}
+          onSelect={(concept) => {
+            setField("destination_unit_concept_id", String(concept.concept_id));
+            setField("destination_unit_concept_code", concept.concept_code || "");
+            setField("destination_unit_concept_name", concept.concept_name || "");
+            setField("unit_match_type", "");
+            setMintUnitOpen(false);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+// ── Source Examples Block ──────────────────────────────────────────
+
+function SourceExamplesBlock({ state, selected, onSelect, onMore, inventoryPatients }: {
+  state: SourceExamplesState | null;
+  selected: number | null;
+  onSelect: (personId: number) => void;
+  onMore: () => void;
+  inventoryPatients?: number | null;
+}) {
+  if (!state) return null;
+  if (state.status === "loading") {
+    return <p role="status" className="mt-3 text-xs text-slate-500">Loading example patients…</p>;
+  }
+  if (state.status === "error") {
+    return <p role="alert" className="mt-3 text-xs text-rose-700">{state.message}</p>;
+  }
+  if (!state.examples.length) {
+    return <p className="mt-3 text-xs text-slate-500" data-testid="source-examples-empty">
+      No patient you can open has this source code in their source inventory.
+      {inventoryPatients != null && " The patient counts above come from the aggregate source inventory, which has no individual patients."}
+    </p>;
+  }
+  const example = state.examples.find((item) => item.person_id === selected) ?? state.examples[0];
+  return (
+    <div className="mt-3 space-y-2" data-testid="source-examples">
+      <label className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-600">
+        Example patient
+        <select aria-label="Example patient" value={example.person_id}
+          onChange={(event) => onSelect(Number(event.target.value))}
+          className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-normal text-slate-800">
+          {state.examples.map((item) => (
+            <option key={item.person_id} value={item.person_id}>
+              Patient {item.person_id} · Seen {item.occurrence_count}
+            </option>
+          ))}
+        </select>
+        {state.hasMore && (
+          <button type="button" onClick={onMore} disabled={state.loadingMore}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+            {state.loadingMore ? "Loading…" : "More patients"}
+          </button>
+        )}
+        {state.moreError && <span role="alert" className="text-xs font-normal text-rose-700">Could not load more patients.</span>}
+      </label>
+      {(example.source_unit || example.example_quantity) && (
+        <p className="text-xs text-slate-600">
+          {example.example_quantity && <>Quantity <span className="font-mono">{example.example_quantity}</span> </>}
+          {example.source_unit && <>Unit <span className="font-mono">{example.source_unit}</span></>}
+        </p>
+      )}
+      {Object.keys(example.source_metadata).length ? (
+        <SourceMetadataBlock key={example.person_id} metadata={example.source_metadata} defaultExpanded />
+      ) : (
+        <p className="text-xs text-slate-500">This patient's source row carries no metadata.</p>
+      )}
+    </div>
+  );
+}
+
+// ── Source Metadata Block ──────────────────────────────────────────
+
+function SourceMetadataBlock({ metadata, defaultExpanded = false }: {
+  metadata?: Record<string, unknown>;
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  if (!metadata || Object.keys(metadata).length === 0) return null;
+  return (
+    <div className="mt-3">
+      <button type="button" onClick={() => setExpanded((p) => !p)}
+        className="mb-1 flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-900">
+        <span className={`inline-block transition-transform ${expanded ? "rotate-90" : ""}`}>{"\u25B6"}</span>
+        Source Metadata
+      </button>
+      {expanded && (
+        <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded border bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700">
+          {JSON.stringify(metadata, null, 2)}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ── Destination Unit Picker ─────────────────────────────────────────
+
+interface UnitResult {
+  concept_id: number;
+  concept_code: string;
+  concept_name: string;
+  match: "exact" | "close";
+}
+
+const DESTINATION_UNIT_TIP = "UCUM concept linked to this mapping. Used for unit conversion during ETL.";
+
+/**
+ * One of a wearable metric's two fields with a fixed list (Category, Measure Class):
+ * a select of the allowed values for a curator, plain text for anyone else. A
+ * stored value the list does not offer is shown, not blanked, and stays
+ * selectable after the curator has picked another, so they can go back to it.
+ */
+function MetricChoiceField({ id, label, tip, value, stored, options, canWrite, onChange }: {
+  id: string;
+  label: string;
+  tip: string;
+  value: string;
+  /** What the mapping stores: offered beside the list when it is not on it. */
+  stored: string;
+  options: string[];
+  canWrite: boolean;
+  onChange: (next: string) => void;
+}) {
+  if (!canWrite) {
+    return <ReadOnlyField id={id} label={label} tip={tip} value={value} fullWidth />;
+  }
+  const offered = [...options];
+  for (const extra of [stored, value]) {
+    if (extra && !offered.includes(extra)) offered.push(extra);
+  }
+  return (
+    <Field id={id} label={label} tip={tip}>
+      <select id={id} title={tip} value={value} onChange={(e) => onChange(e.target.value)} className={INPUT_CLASS}>
+        <option value="">-- none --</option>
+        {offered.map((option) => <option key={option} value={option}>{option}</option>)}
+      </select>
+    </Field>
+  );
+}
+
+interface DestinationUnitPickerProps {
+  sourceUnit: string;
+  selectedConceptId: string;
+  selectedConceptCode: string;
+  selectedConceptName: string;
+  matchType: "exact" | "close" | "none" | "";
+  autoPopulated?: boolean;
+  needsReview?: boolean;
+  /** False while the mapping's stored unit is not known yet: the source unit
+   * is not searched, so nothing is matched over a unit about to arrive. */
+  autoSelect?: boolean;
+  onSelect: (unit: UnitResult | null, auto?: boolean) => void;
+  onMintUnit: () => void;
+}
+
+function DestinationUnitPicker({
+  sourceUnit, selectedConceptId, selectedConceptCode, selectedConceptName,
+  matchType, autoPopulated, needsReview, autoSelect = true, onSelect, onMintUnit,
+}: DestinationUnitPickerProps) {
+  // A search answers after the selection may have changed (the stored unit
+  // arrived, or the curator clicked a result): it reads the selection as it
+  // is then, not as it was when the search started.
+  const selected = useRef(selectedConceptId);
+  useEffect(() => { selected.current = selectedConceptId; });
+  const [query, setQuery] = useState(sourceUnit);
+  const [results, setResults] = useState<UnitResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestSeq = useRef(0);
+
+  useEffect(() => () => {
+    requestSeq.current += 1;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
+
+  const doSearch = useCallback(async (q: string) => {
+    const request = ++requestSeq.current;
+    if (!q.trim()) { setResults([]); setSearched(false); return; }
+    setSearching(true);
+    try {
+      const { data } = await api.get<{ results: UnitResult[] }>("/v1/code-mappings/unit-search/", { params: { q } });
+      if (request !== requestSeq.current) return;
+      setResults(data.results);
+      setSearched(true);
+      // Auto-select exact match
+      if (selected.current) return;
+      if (data.results.length > 0 && data.results[0].match === "exact") {
+        onSelect(data.results[0], true);
+      } else if (data.results.length === 0) {
+        onSelect(null);
+      }
+    } catch {
+      if (request !== requestSeq.current) return;
+      setResults([]);
+      setSearched(true);
+    } finally {
+      if (request === requestSeq.current) setSearching(false);
+    }
+  }, [onSelect]);
+
+  // The keyed picker remounts when Source Unit changes, dropping the old query
+  // and results. Debounce the replacement search while the curator types.
+  useEffect(() => {
+    if (autoSelect && sourceUnit && !searched && !selectedConceptId) {
+      const timer = setTimeout(() => { void doSearch(sourceUnit); }, 300);
+      return () => clearTimeout(timer);
+    }
+  }, [autoSelect, sourceUnit, searched, selectedConceptId, doSearch]);
+
+  const handleQueryChange = (value: string) => {
+    setQuery(value);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => { void doSearch(value); }, 300);
+  };
+
+  const matchIndicator = matchType === "exact" && autoPopulated
+    ? <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700" title="Auto-matched from source evidence">Auto-matched &#10003;</span>
+    : matchType === "exact"
+      ? <span className="text-green-600" title="Exact UCUM match">&#10003; Exact</span>
+      : matchType === "close"
+        ? <span className="text-amber-600" title="Close UCUM match">&#126; Close</span>
+        : matchType === "none"
+          ? <span className="text-red-600" title="No UCUM match">&#10007; No match</span>
+          : null;
+
+  return (
+    <div data-testid="destination-unit-field" className="grid content-start gap-1">
+      {selectedConceptId ? (
+        <>
+          <div className="flex items-center gap-1">
+            <span className="text-sm font-medium text-slate-700">Destination Unit</span>
+            <HelpTip tip={DESTINATION_UNIT_TIP} />
+          </div>
+          <div className="flex min-h-10 items-center gap-2 rounded-md border border-slate-300 px-3 text-sm">
+            <span className="font-mono">{selectedConceptCode}</span>
+            <span className="text-slate-500">{selectedConceptName}</span>
+            {matchIndicator}
+            <button type="button" onClick={() => onSelect(null)}
+              className="ml-auto text-xs text-slate-500 hover:text-red-600">Clear</button>
+          </div>
+          {needsReview && <p className="mt-2 text-xs text-amber-700">Source unit changed. Review this destination unit before saving the mapping.</p>}
+        </>
+      ) : (
+        <Field id="destination_unit_search" label="Destination Unit" tip={DESTINATION_UNIT_TIP}>
+          <div className="flex items-center gap-2">
+            <input
+              id="destination_unit_search"
+              type="text"
+              aria-label="Search UCUM units"
+              value={query}
+              onChange={(e) => handleQueryChange(e.target.value)}
+              placeholder="Search UCUM units..."
+              className={`${INPUT_CLASS} flex-1`}
+            />
+            {searching && <span className="text-xs text-slate-400">Searching...</span>}
+          </div>
+          {searched && results.length === 0 && !searching && (
+            <div className="mt-2 flex items-center gap-2 text-xs text-red-600">
+              <span>&#10007; No UCUM match found</span>
+              <button type="button" onClick={onMintUnit}
+                className="rounded border border-sky-300 px-2 py-1 text-sky-700 hover:bg-sky-50">
+                Mint Unit
+              </button>
+            </div>
+          )}
+          {results.length > 0 && (() => {
+            const allClose = results.every((r) => r.match !== "exact");
+            return (
+              <ul className="mt-1 max-h-40 overflow-y-auto rounded border bg-white text-xs">
+                {results.map((r, i) => {
+                  const isSuggested = allClose && i === 0;
+                  return (
+                    <li key={r.concept_id}
+                      className={`flex cursor-pointer items-center gap-2 px-2 py-1.5 hover:bg-sky-50${isSuggested ? " border-l-2 border-amber-400 bg-amber-50" : ""}`}
+                      onClick={() => onSelect(r)}>
+                      <span className="font-mono font-medium">{r.concept_code}</span>
+                      <span className="text-slate-500">{r.concept_name}</span>
+                      <span className={r.match === "exact" ? "ml-auto text-green-600" : "ml-auto text-amber-500"}>
+                        {r.match === "exact" ? "exact" : isSuggested ? "Suggested \u2014 click to accept" : "close"}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            );
+          })()}
+        </Field>
+      )}
+    </div>
+  );
+}

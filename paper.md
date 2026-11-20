@@ -176,7 +176,7 @@ PRomop runs in production in two separately operated deployments: the HealthTree
 (approximately 14,000 blood-cancer patients) and CancerBot (approximately 3,500 patients), a
 service founded and led by the author. Together they support clinical trial matching against
 18,000+ trials with structured eligibility criteria across five cancer types (multiple myeloma,
-follicular lymphoma, chronic lymphocytic leukemia, breast cancer, and diffuse large B-cell
+follicular lymphoma, chronic lymphocytic leukemia, breast cancer, and mantle cell
 lymphoma). No data from either deployment appears in this paper or in the repository; every
 result reported here uses synthetic patients.
 

@@ -11,8 +11,13 @@ export interface DrugConcept {
 }
 
 export interface TherapyLineDrug {
+  /** Existing administration, scoped by the server to the edited line. */
+  drug_exposure_id?: number;
   concept_id: number;
   source_value?: string | null;
+  start_date?: string;
+  end_date?: string | null;
+  maintenance?: boolean;
 }
 
 export interface TherapyLinePayload {
@@ -21,10 +26,13 @@ export interface TherapyLinePayload {
   start_date?: string | null;
   end_date?: string | null;
   drugs: TherapyLineDrug[];
+  /** Record/keep the line without claiming which drugs were given. */
+  composition_unknown?: boolean;
   regimen_concept_id?: number | null;
   outcome?: string | null;
   intent?: string | null;
   discontinuation_reason?: string | null;
+  progression_date?: string | null;
 }
 
 export interface TherapyLineResult {
@@ -46,7 +54,10 @@ export interface EditableTherapyLine {
   discontinuation_reason?: string | null;
   regimen?: string | null;
   regimen_concept_id?: number | null;
-  drugs?: Array<DrugConcept & { source_value?: string | null }>;
+  /** False when the line is recorded without its drug composition (#1924). */
+  composition_known?: boolean;
+  drugs?: Array<DrugConcept & TherapyLineDrug>;
+  progression_date?: string | null;
 }
 
 export interface TherapyOutcomeChoice { code: string; value: string; label: string }
@@ -140,4 +151,22 @@ export async function updateTherapyLine(
     payload,
   );
   return resp.data as TherapyLineResult;
+}
+
+/** Withdraw the claim that this line happened (not the same as clearing its drugs). */
+export async function retractTherapyLine(episodeId: number): Promise<TherapyLineResult> {
+  const resp = await clinicalClient().delete(clinicalUrl(`/v1/therapy-lines/${episodeId}/`));
+  return resp.data as TherapyLineResult;
+}
+
+/** Confirm, or withdraw, that the recorded lines are the patient's full history. */
+export async function setTherapyHistoryCompleteness(
+  personId: number,
+  complete: boolean,
+): Promise<{ therapy_history_complete: boolean | null; patient_info: Record<string, unknown> }> {
+  const resp = await clinicalClient().post(clinicalUrl('/v1/therapy-history/completeness/'), {
+    person: personId,
+    complete,
+  });
+  return resp.data;
 }

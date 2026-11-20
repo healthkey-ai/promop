@@ -12,6 +12,15 @@ _V2_COMPONENTS = (
     ('coverage_depth', '82121-5', 'observation', 'number'),
     ('amino_acid_change_type', '48006-1', 'measurement', 'string'),
 )
+_FEATURE_COMPONENTS = (
+    ('genomic_feature', '', 'observation', 'string'),
+    ('feature_type', '', 'observation', 'string'),
+    ('finding_category', '', 'observation', 'string'),
+)
+# PHR record design D22 (#1865); mirrors 0297.
+_PHR_COMPONENTS = (
+    ('pathologist_notes', '77202-0', 'observation', 'string'),
+)
 _DOMAIN_CORRECTIONS = {
     'genomic_dna_change': 'observation',
     'variant_analysis_method_type': 'observation',
@@ -35,7 +44,7 @@ def components():
         'key': key, 'code': 'genomics:' + key, 'table': table,
         'value_kind': kind, 'vocabulary_id': 'LOINC' if loinc else '',
         'concept_code': loinc,
-    } for key, loinc, table, kind in _V2_COMPONENTS)
+    } for key, loinc, table, kind in _V2_COMPONENTS + _FEATURE_COMPONENTS + _PHR_COMPONENTS)
     for attribute in attributes:
         if attribute['key'] == 'variant_name':
             attribute.update(vocabulary_id='LOINC', concept_code='81253-7', recipe_version=3)

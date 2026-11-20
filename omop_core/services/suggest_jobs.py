@@ -29,7 +29,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.models import SuggestRun
+from omop_core.models import SourceCodeConceptMapping, SuggestRun
 
 # What a run may attempt when it is genuinely queued: bounded by
 # CELERY_TASK_TIME_LIMIT (900s default) against ~3.5s per code, with wide margin.
@@ -56,6 +56,7 @@ def selection_summary(params):
 
     return {
         'order': (
+            'Codes with Seen greater than zero before zero-Seen codes. Within each group: '
             'Codes without destinations first, regardless of provenance, ordered '
             'by Seen count highest first. Then eligible replacements not yet tried '
             'by this model version, followed by previously tried replacements, '
@@ -98,7 +99,9 @@ class CeleryDispatcher:
         # transaction cannot see the SuggestRun row the caller just created and
         # fails looking it up.
         transaction.on_commit(
-            lambda: suggest_mappings_task.apply_async(args=[run_id, params])
+            lambda: suggest_mappings_task.apply_async(
+                args=[run_id, params], queue='suggest',
+            )
         )
 
 
@@ -172,12 +175,57 @@ def execute_preview(run_id: str, params: dict) -> None:
         runs.update(activity=events, retrieved=int(event['stage'] in ('ranking', 'result')))
 
     try:
-        result = suggest_one_mapping(**params['preview'], activity=activity)
-        activity({'stage': 'result', **params['preview'], **result, 'dry_run': True, 'updated': False})
+        preview_params = dict(params['preview'])
+        preview_params['ranking_model'] = params.get('ranking_model', 'anthropic')
+        result = suggest_one_mapping(**preview_params, activity=activity)
+        preview = {k: v for k, v in params['preview'].items() if k != 'row_metadata'}
+        activity({'stage': 'result', **preview, **result, 'dry_run': True, 'updated': False})
         runs.update(state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
     except Exception as exc:  # noqa: BLE001 - retain partial candidates on failure
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
         runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
+
+
+def execute_variants(run_id: str, params: dict) -> None:
+    """Suggest a proposed LOINC for each axis variant of one code (#2012).
+
+    The dialog's Suggest already runs one pipeline through this dispatcher
+    because one takes seconds; a code's variants are up to five of them, so
+    they take the same path. The result event carries the suggestions and the
+    variants as stored afterwards.
+    """
+    from omop_core.mapping import axis_variants
+
+    runs = SuggestRun.objects.filter(pk=run_id)
+    # A redelivered task must not suggest the same variants twice.
+    if not runs.filter(state=SuggestRun.QUEUED).update(state=SuggestRun.RUNNING):
+        return
+    run = runs.first()
+    spec = params['variants']
+    try:
+        mapping = SourceCodeConceptMapping.objects.filter(pk=spec['mapping_id']).first()
+        if mapping is None:
+            raise ValueError('Mapping not found.')
+        suggestions = axis_variants.suggest_destinations(
+            mapping, ranking_model=spec['ranking_model'], user=run.created_by,
+            strategies=spec.get('strategies'), overrides=spec.get('overrides'),
+            limit=spec.get('limit', axis_variants.SUGGEST_MAX),
+        )
+        runs.update(activity=[{
+            'at': timezone.now().isoformat(), 'stage': 'result', 'mapping_id': mapping.pk,
+            'suggestions': suggestions, 'variants': axis_variants.serialize_all(mapping),
+        }], state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
+    except Exception as exc:  # noqa: BLE001 - the row is where the dialog looks
+        runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
+
+
+def _release_batch_locks(params: dict) -> None:
+    """Release edit locks acquired by a batch suggest run."""
+    locked_ids = params.get('_locked_mapping_ids')
+    if locked_ids:
+        SourceCodeConceptMapping.objects.filter(id__in=locked_ids).update(
+            locked_by=None, locked_at=None,
+        )
 
 
 def execute_run(run_id: str, params: dict) -> None:
@@ -186,12 +234,24 @@ def execute_run(run_id: str, params: dict) -> None:
     Never raises: a failure belongs on the row, where the page is already
     looking, rather than in a worker log the curator cannot see.
     """
+    if params.get('mode') in {'group-action', 'group-suggest'}:
+        from omop_core.services.group_mapping_jobs import execute_group_run
+        execute_group_run(run_id, params)
+        return
+    if params.get('direction') == 'reverse':
+        from omop_core.services.reverse_suggest_jobs import execute_reverse_run
+        execute_reverse_run(run_id, params)
+        return
     if 'preview' in params:
         execute_preview(run_id, params)
         return
+    if 'variants' in params:
+        execute_variants(run_id, params)
+        return
 
     from omop_core.mapping.suggestions import (
-        SUGGESTION_MODEL_VERSION, suggest_mappings, suggestable_queryset,
+        DEFAULT_RANKING_MODEL, SUGGESTION_MODEL_VERSION, suggest_mappings,
+        suggestable_queryset,
     )
 
     run = SuggestRun.objects.filter(pk=run_id).first()
@@ -245,6 +305,7 @@ def execute_run(run_id: str, params: dict) -> None:
             resuggest=params['resuggest'],
             progress=progress,
             activity=activity,
+            ranking_model=params.get('ranking_model', 'anthropic'),
         )
     except Exception as exc:                      # noqa: BLE001 - record, never crash the worker
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
@@ -252,6 +313,7 @@ def execute_run(run_id: str, params: dict) -> None:
             state=SuggestRun.FAILURE, error=str(exc)[:2000],
             finished_at=timezone.now(),
         )
+        _release_batch_locks(params)
         return
 
     landed: dict[str, int] = {}
@@ -277,13 +339,16 @@ def execute_run(run_id: str, params: dict) -> None:
     # re-running only re-declines them, so "run Suggest again" would be advice
     # that goes nowhere. Once every code has been tried this reads 0, which is
     # the honest answer: the next thing to move it is a new model version.
+    ranking_model = params.get('ranking_model', DEFAULT_RANKING_MODEL)
+    attempt_stamp = f'{SUGGESTION_MODEL_VERSION}-{ranking_model}'
     try:
         remaining = suggestable_queryset(
             params.get('tables') or None,
             source_vocabulary_id=params['source_vocabulary_id'],
             min_occurrences=params['min_occurrences'],
             resuggest=params['resuggest'],
-        ).exclude(last_suggest_attempt=SUGGESTION_MODEL_VERSION).count()
+            ranking_model=ranking_model,
+        ).exclude(last_suggest_attempt=attempt_stamp).count()
     except Exception:                             # noqa: BLE001 - a count must not fail a run
         remaining = 0
 
@@ -299,3 +364,4 @@ def execute_run(run_id: str, params: dict) -> None:
         landed_in=landed,
         finished_at=timezone.now(),
     )
+    _release_batch_locks(params)
