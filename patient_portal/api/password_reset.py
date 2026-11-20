@@ -33,19 +33,31 @@ class PasswordResetEmailError(Exception):
 
 
 def make_reset_link(identity) -> str:
+    """The installation's /reset-password page (family_auth.installations),
+    so a phr installation's patient resets where they signed up."""
+    from family_auth.installations import app_for
+
     uidb64 = urlsafe_base64_encode(force_bytes(identity.pk))
     token = default_token_generator.make_token(identity)
-    return f"{settings.APP_BASE_URL}/reset-password?uid={uidb64}&token={token}"
+    return f"{app_for(identity).url}/reset-password?uid={uidb64}&token={token}"
 
 
-def send_password_reset_email(identity) -> None:
+def send_password_reset_email(identity, *, by_administrator: bool = True) -> None:
+    """Email the reset link. ``by_administrator`` says who asked: an
+    administrator (the admin action), or the account holder themselves
+    (``request_password_reset``), and the email says so."""
+    from family_auth.installations import app_for
+
     if not identity.email:
         raise PasswordResetEmailError('Identity has no email address.')
     url = make_reset_link(identity)
-    subject = "Reset your PROMOP password"
+    app_name = app_for(identity).name
+    subject = f"Reset your {app_name} password"
+    who = ("An administrator has started a password reset" if by_administrator
+           else "We received a request to reset the password")
     body = (
         "Hi,\n\n"
-        "An administrator has initiated a password reset for your PROMOP account.\n\n"
+        f"{who} for your {app_name} account.\n\n"
         "Click the link below to choose a new password:\n\n"
         f"  {url}\n\n"
         "The link can be used once and expires. If you weren't expecting this, you can "
@@ -96,7 +108,7 @@ def request_password_reset(request):
         return Response(success_msg)
 
     try:
-        send_password_reset_email(identity)
+        send_password_reset_email(identity, by_administrator=False)
     except PasswordResetEmailError:
         pass  # Don't reveal failure — same response either way
     return Response(success_msg)

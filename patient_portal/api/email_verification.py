@@ -42,21 +42,11 @@ class ResendVerificationThrottle(UserRateThrottle):
     rate = '3/minute'
 
 
-def _verification_app(identity) -> tuple[str, str]:
-    """Where the account verifies, and what the email calls it: the phr
-    installation it signed up on (family auth), else PROMOP itself."""
-    from family_auth.installations import installation_for
-
-    installation = installation_for(identity)
-    if installation is not None:
-        return installation.url, installation.name
-    return settings.APP_BASE_URL, 'PROMOP'
-
-
 def make_verification_link(identity) -> str:
+    from family_auth.installations import app_for
+
     token = signing.dumps({'id': identity.pk, 'email': identity.email.lower()}, salt=_SALT)
-    base, _ = _verification_app(identity)
-    return f"{base.rstrip('/')}/verify-email?token={token}"
+    return f"{app_for(identity).url}/verify-email?token={token}"
 
 
 def send_verification_email(identity) -> bool:
@@ -67,8 +57,10 @@ def send_verification_email(identity) -> bool:
     """
     if not identity.email or identity.has_verified_email:
         return False
+    from family_auth.installations import app_for
+
     url = make_verification_link(identity)
-    _, app_name = _verification_app(identity)
+    app_name = app_for(identity).name
     body = (
         "Hi,\n\n"
         f"Please confirm this is your email address for {app_name}:\n\n"

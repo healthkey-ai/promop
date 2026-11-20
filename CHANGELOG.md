@@ -308,6 +308,12 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Password-reset emails go to the app the account belongs to** — like the
+  verification email, the reset link points at the installation's
+  `/reset-password` page and the email names its org (`FAMILY_AUTH_APP_URLS`,
+  `family_auth.installations.app_for`). A reset the account holder asked for
+  no longer says an administrator started it.
+
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only
   while the instance holds no per-patient source-code rows for the code, and

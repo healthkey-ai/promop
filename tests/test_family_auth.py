@@ -418,3 +418,57 @@ def test_a_malformed_app_url_stops_the_deploy_and_is_ignored_by_mail(settings, m
     _signup(APIClient(), "phr")
     assert "https://promop.test/verify-email?token=" in mailoutbox[-1].body
 
+
+
+# ── Password-reset links go there too ─────────────────────────────────────────
+
+def _verified_phr_patient(settings, mailoutbox):
+    import re
+
+    OrganizationFactory(slug="phr", name="HealthKey PHR", allows_patient_signup=True)
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    _signup(APIClient(), "phr")
+    token = re.search(r"token=(\S+)", mailoutbox[-1].body).group(1)
+    assert APIClient().post(f"{BASE}/verify-email/", {"token": token}, format="json").status_code == 200
+    mailoutbox.clear()
+
+
+def test_a_phr_patient_who_forgot_their_password_resets_it_on_phr(settings, mailoutbox):
+    import re
+
+    from django.core.cache import cache
+
+    _verified_phr_patient(settings, mailoutbox)
+    cache.clear()  # the reset endpoint's rate limit counts every earlier test's requests
+
+    assert APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"}).status_code == 200
+
+    message = mailoutbox[-1]
+    assert message.subject == "Reset your HealthKey PHR password"
+    assert "We received a request to reset the password for your HealthKey PHR account." in message.body
+    assert "PROMOP" not in message.body and "administrator" not in message.body
+    link = re.search(r"https://\S+", message.body).group(0)
+    assert link.startswith("https://phr.test/reset-password?uid=")
+
+    # phr's page completes it through PROMOP's API, then the new password signs in.
+    uid, token = re.search(r"uid=([^&]+)&token=(\S+)", link).groups()
+    reset = APIClient().post("/api/v1/auth/reset-password/",
+                             {"uid": uid, "token": token, "new_password": "another-long-pass-77"}, format="json")
+    assert reset.status_code == 200, reset.data
+    assert _login(APIClient(), "pat@example.com", "another-long-pass-77").status_code == 200
+
+
+def test_an_administrators_reset_says_so_and_other_accounts_keep_promops_link(settings, mailoutbox):
+    from patient_portal.api.password_reset import send_password_reset_email
+    from patient_portal.models import Identity
+
+    settings.APP_BASE_URL = "https://promop.test/"
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    identity = Identity.objects.create_user(email="staff-made@example.com", password="a-long-enough-pass-42")
+
+    send_password_reset_email(identity)
+
+    message = mailoutbox[-1]
+    assert message.subject == "Reset your PROMOP password"
+    assert "An administrator has started a password reset for your PROMOP account." in message.body
+    assert "https://promop.test/reset-password?uid=" in message.body

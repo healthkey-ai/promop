@@ -35,9 +35,15 @@ verification email for that installation: the link is
 `https://phr.example.com/verify-email?token=…` and the email names the org
 ("Confirm your email address for HealthKey PHR"). phr's page completes it with
 `POST /api/v1/family/auth/verify-email/ {token}` (PROMOP's own verify
-endpoint). Everyone else keeps `APP_BASE_URL` and "PROMOP". The base comes only
-from this setting, never from a request; a malformed entry stops the deploy
-(`ensure_signup_orgs`) and is ignored by mail.
+endpoint). Password-reset emails follow the same rule
+(`family_auth.installations.app_for`): the link is
+`https://phr.example.com/reset-password?uid=…&token=…`, completed with
+`POST /api/v1/auth/reset-password/ {uid, token, new_password}`, and the email
+names the org and who asked (the account holder through
+`/api/v1/auth/request-reset/`, or an administrator). Everyone else keeps
+`APP_BASE_URL` and "PROMOP". The base comes only from this setting, never from
+a request; a malformed entry stops the deploy (`ensure_signup_orgs`) and is
+ignored by mail.
 
 ## Tokens
 
@@ -65,7 +71,7 @@ FAMILY_AUTH_ISSUER        https://<this promop> (required)
 FAMILY_AUTH_AUDIENCE      promop-api[,<sibling>…]
 FAMILY_AUTH_THROTTLE_RATE 30/minute per client address (login, refresh, introspect)
 FAMILY_AUTH_SIGNUP_ORGS   slug:Name[,slug:Name…] — each installation's sign-up org
-FAMILY_AUTH_APP_URLS      slug=https://origin[,…] — where that org's sign-ups verify
+FAMILY_AUTH_APP_URLS      slug=https://origin[,…] — where that org's accounts verify and reset
 CORS_ALLOWED_ORIGINS      + every phr installation's origin
 ```
 

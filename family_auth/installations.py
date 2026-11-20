@@ -1,8 +1,9 @@
 """Which phr installation an account belongs to, for links sent to it.
 
 A patient who signs up on a phr installation that PROMOP hosts identity for
-should finish on that installation: the verification link points at its
-/verify-email page and the email names it, not PROMOP. FAMILY_AUTH_APP_URLS
+should finish on that installation: the verification and password-reset links
+point at its /verify-email and /reset-password pages and the emails name it,
+not PROMOP (``app_for``). FAMILY_AUTH_APP_URLS
 maps each installation's sign-up org to its origin (``slug=https://…``); an
 account with access to one of those orgs belongs to it.
 
@@ -51,6 +52,12 @@ def app_urls() -> dict[str, str]:
     except InvalidAppUrls:
         logger.exception("Ignoring FAMILY_AUTH_APP_URLS")
         return {}
+
+
+def app_for(identity) -> Installation:
+    """Where links emailed to this account point, and what the email calls
+    it: the installation it signed up through, else PROMOP itself."""
+    return installation_for(identity) or Installation(url=settings.APP_BASE_URL.rstrip("/"), name="PROMOP")
 
 
 def installation_for(identity) -> Installation | None:
