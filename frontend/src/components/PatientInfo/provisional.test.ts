@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { attestationBlockers, marksOf, rejectedProposals, withoutMarks } from './provisional';
+import { attestationBlockers, diseaseTypeOf, marksOf, rejectedProposals, withoutMarks } from './provisional';
 
 describe('rejectedProposals', () => {
   const proposed = { hemoglobin_g_dl: 82, smoking_status: 70 };
@@ -103,5 +103,57 @@ describe('attestationBlockers (#2761)', () => {
   it('falls as the patient edits a marked field', () => {
     const info = { provisional_fields: { esr: 70, hemoglobin_g_dl: 82 } };
     expect(attestationBlockers(withoutMarks(info, ['esr']), descriptors)).toEqual(['hemoglobin_g_dl']);
+  });
+});
+
+// The same cases are in tests/test_patient_visible_fields.py: the page and the server must
+// pick the same disease section from one text.
+const DISEASE_TYPE_CASES: [unknown, string][] = [
+  ['Breast Cancer', 'breast'],
+  ['Mantle Cell Lymphoma', 'mcl'],
+  ['Follicular Lymphoma', 'lymphoma'],
+  ['Multiple Myeloma', 'myeloma'],
+  ['CLL', 'cll'],
+  ['Chronic Lymphocytic Leukemia', 'cll'],
+  ['Squamous cell carcinoma', 'other'],
+  ['', 'other'],
+  [null, 'other'],
+  [42, 'other'],
+  ['breast lymphoma', 'breast'],
+  ['MANTLE CELL LYMPHOMA', 'mcl'],
+];
+
+describe('diseaseTypeOf', () => {
+  it.each(DISEASE_TYPE_CASES)('reads %j as %s', (text, expected) => {
+    expect(diseaseTypeOf(text)).toBe(expected);
+  });
+});
+
+describe('attestationBlockers with the disease tab and the checklists (#2761)', () => {
+  const lymphoma = (marks: Record<string, number>) => ({ disease: 'Follicular Lymphoma', provisional_fields: marks });
+
+  it('counts a field of the disease section the record shows', () => {
+    expect(attestationBlockers(lymphoma({ b_symptom_fever: 75, esr: 70 }), null)).toEqual(['b_symptom_fever', 'esr']);
+  });
+
+  it('counts the GELF checklist on a lymphoma record', () => {
+    expect(attestationBlockers(lymphoma({ gelf_criteria_options: 80 }), null)).toEqual(['gelf_criteria_options']);
+  });
+
+  it('leaves out a disease field the page does not show for this disease', () => {
+    const myeloma = { disease: 'Multiple Myeloma', provisional_fields: { b_symptom_fever: 75, gelf_criteria_options: 80, esr: 70 } };
+    expect(attestationBlockers(myeloma, null)).toEqual(['esr']);
+    expect(attestationBlockers({ provisional_fields: { b_symptom_fever: 75 } }, null)).toEqual([]);
+  });
+
+  it('follows the disease the page shows, a proposed one included', () => {
+    const marks = { b_symptom_fever: 75 };
+    expect(attestationBlockers({ disease: 'Follicular Lymphoma', provisional_fields: marks }, null)).toEqual(['b_symptom_fever']);
+    expect(attestationBlockers({ disease: 'Breast Cancer', provisional_fields: marks }, null)).toEqual([]);
+  });
+
+  it('leaves out a calculated field once the descriptor says it has no write path', () => {
+    const descriptors = { flipi_score: { writable: false }, b_symptom_fever: { writable: true } };
+    expect(attestationBlockers(lymphoma({ flipi_score: 66, b_symptom_fever: 75 }), descriptors)).toEqual(['b_symptom_fever']);
   });
 });

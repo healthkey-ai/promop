@@ -380,5 +380,138 @@
     "walking_step_length_avg_30d",
     "wbc_count_thousand_per_ul",
     "weight"
-  ]
+  ],
+  "disease_rules": [
+    [
+      "breast",
+      "breast"
+    ],
+    [
+      "mantle",
+      "mcl"
+    ],
+    [
+      "lymphoma",
+      "lymphoma"
+    ],
+    [
+      "myeloma",
+      "myeloma"
+    ],
+    [
+      "cll",
+      "cll"
+    ],
+    [
+      "chronic lymphocytic",
+      "cll"
+    ]
+  ],
+  "disease_sections": {
+    "breast": [
+      "BreastCancerSection",
+      "StagingBiomarkersSection"
+    ],
+    "lymphoma": [
+      "LymphomaSection"
+    ],
+    "myeloma": [
+      "MyelomaSection"
+    ],
+    "cll": [
+      "CLLSection"
+    ],
+    "mcl": [
+      "MCLSection"
+    ]
+  },
+  "disease_fields": {
+    "breast": [
+      "androgen_receptor_status",
+      "bone_only_metastasis_status",
+      "distant_metastasis_stage",
+      "estrogen_receptor_status",
+      "her2_status",
+      "histologic_type",
+      "hr_status",
+      "hrd_status",
+      "ki67_proliferation_index",
+      "lymph_node_status",
+      "measurable_disease_by_recist_status",
+      "menopausal_status",
+      "metastasis_status",
+      "nodes_stage",
+      "oncotype_dx_score",
+      "pd_l1_assay",
+      "pd_l1_combined_positive_score",
+      "pd_l1_ic_percentage",
+      "pd_l1_tumor_cells",
+      "progesterone_receptor_status",
+      "report_interpretation",
+      "staging_modalities",
+      "test_date",
+      "test_methodology",
+      "test_specimen_type",
+      "tumor_grade",
+      "tumor_stage"
+    ],
+    "lymphoma": [
+      "b_symptom_fever",
+      "b_symptom_night_sweats",
+      "b_symptom_weight_loss",
+      "bone_marrow_involvement",
+      "bulky_disease",
+      "dlbcl_transformation_date",
+      "dlbcl_transformation_date_precision",
+      "flipi_score",
+      "gelf_criteria_options",
+      "ldh_upper_limit_normal",
+      "number_of_nodal_sites",
+      "post_transformation_outcome",
+      "stage",
+      "transformed_to_dlbcl",
+      "tumor_grade"
+    ],
+    "myeloma": [
+      "bone_lesions",
+      "clonal_plasma_cells",
+      "cytogenetic_markers",
+      "involved_uninvolved_ratio",
+      "kappa_flc",
+      "kappa_lambda_ratio",
+      "lambda_flc",
+      "meets_crab",
+      "meets_slim",
+      "monoclonal_protein_serum",
+      "monoclonal_protein_urine",
+      "mrd_status",
+      "sct_date",
+      "sct_date_precision",
+      "stage"
+    ],
+    "cll": [
+      "absolute_lymphocyte_count",
+      "bcl2_inhibitor_refractory",
+      "binet_stage",
+      "bone_marrow_involvement",
+      "btk_inhibitor_refractory",
+      "disease_activity",
+      "hepatomegaly",
+      "largest_lymph_node_size",
+      "lymphadenopathy",
+      "lymphocyte_doubling_time",
+      "qtcf_value",
+      "serum_beta2_microglobulin_level",
+      "splenomegaly",
+      "tumor_burden"
+    ],
+    "mcl": [
+      "hepatomegaly",
+      "ki67_proliferation_index",
+      "largest_lymph_node_size",
+      "lymphadenopathy",
+      "splenomegaly",
+      "stage"
+    ]
+  }
 }

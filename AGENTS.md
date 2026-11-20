@@ -1776,12 +1776,16 @@ overlay's scalar marks (`overlay(record, lists=False)`) in
 `frontend/src/components/PatientInfo/patientVisibleFields.json`, less the fields the write
 descriptor says have no write path of their own (calculated, mirrored, unit pickers). That
 one file, imported by the frontend and read by the server, is generated from the General,
-Labs, Behavior and Wearable tab components
+Labs, Behavior and Wearable tab components, plus, per disease type, the sections of the
+disease tab (`disease_fields`; the page and the server pick the section from the disease
+text by the same `disease_rules`, `diseaseTypeOf` / `disease_type`)
 (`python -m omop_core.services.patient_visible_fields --write`); when a tab adds or drops
-a field, regenerate, or `tests/test_patient_visible_fields.py` and the frontend check fail. A field no tab shows (`concomitant_medications`, the diagnosis date),
-the list fields, the disease and treatment tabs and the controls that bypass `Field` do
-not block: a gap the plan lists, and a block on a field the patient cannot see could never
-be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
+a field, or the disease tab gets a section, regenerate or map it, or
+`tests/test_patient_visible_fields.py` and the frontend check fail. A control outside `Field`
+(GELF, FLIPI) is wrapped in `MarkedControl name="<field>"`: that shows the indicator and
+the quoted name is what the scan reads. A field no tab shows (`concomitant_medications`, the
+diagnosis date), the list fields and the treatment tab do not block, and a block on a field
+the patient cannot see could never be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
 approved data; for a select, pick another option and then the shown one again) or by
 rejecting the proposal: a blank value (`null`, or `''` for text and select, except the GELF
 and FLIPI checklists, whose `''` is a recorded answer and only `null` rejects) for a marked
