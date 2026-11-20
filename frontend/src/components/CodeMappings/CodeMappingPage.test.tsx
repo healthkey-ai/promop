@@ -176,11 +176,11 @@ function suggestRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
+function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow], referenceData: object = reference) {
   mockGet.mockImplementation((url: string) => {
     if (url.endsWith("/canonical-unit/")) return Promise.resolve({ data: { unit: "", revision: 0, available_units: ["mg/dL", "g/L"], example_units: ["mg/dL"], can_edit: true } });
     if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
-    if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+    if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: referenceData });
     const detail = url.match(/^\/v1\/code-mappings\/(\d+)\/$/);
     if (detail) {
       const row = rows.find((candidate) => candidate.mapping_id === Number(detail[1]));
@@ -265,6 +265,60 @@ describe("CodeMappingPage", () => {
       "title",
       `Deployed commit ${reference.release_commit}`,
     );
+  });
+
+  describe("Suggest auto-approval (#1532)", () => {
+    const approverReference = {
+      ...reference,
+      suggest_auto_approve: { allowed: true, threshold: 95, min: 90, max: 100 },
+    };
+
+    it("offers no threshold to an account that may not approve", async () => {
+      renderPage([proposedRow], { ...reference, suggest_auto_approve: { allowed: false, threshold: 100, min: 90, max: 100 } });
+      await screen.findByLabelText("Number of suggestions");
+      expect(screen.queryByLabelText("Auto-approve confidence")).not.toBeInTheDocument();
+    });
+
+    it("prefills the curator's last choice and sends the one chosen with the run", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({
+        total: 3, destinations: 3, auto_approved: 2, auto_approve_threshold: 92,
+      }) });
+      renderPage([proposedRow], approverReference);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      await waitFor(() => expect(threshold).toHaveValue(95));
+
+      fireEvent.change(threshold, { target: { value: "92" } });
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        "/v1/code-mappings/suggest/",
+        expect.objectContaining({ auto_approve_threshold: 92 }),
+      ));
+      // The progress strip and the banner both say how many it approved on its own.
+      expect(await screen.findAllByText(/2 of them approved automatically \(confidence 92% or more\)/)).toHaveLength(2);
+    });
+
+    it("will not start a run below the minimum", async () => {
+      renderPage([proposedRow], approverReference);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      await waitFor(() => expect(threshold).toHaveValue(95));
+
+      fireEvent.change(threshold, { target: { value: "89" } });
+
+      expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
+    });
+
+    it("sends no threshold for an account that may not approve", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ total: 1, destinations: 1 }) });
+      renderPage([proposedRow]);
+      await screen.findByLabelText("Number of suggestions");
+
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalled());
+      const [, body] = mockPost.mock.calls[0];
+      expect(body).not.toHaveProperty("auto_approve_threshold");
+    });
   });
 
   it("flags a source code whose units imply several LOINC axis sets", async () => {

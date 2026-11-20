@@ -2057,7 +2057,7 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      strategies=None, lexical_limit=CANDIDATE_LIMIT,
                      resuggest=False, progress=None, activity=None,
                      ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None,
-                     skip_fallback=False):
+                     skip_fallback=False, auto_approve_threshold=None, approve_as=None):
     """Propose destinations for the unanswered queue rows on one tab.
 
     The candidate set is :func:`suggestable_mappings` -- rows already on the
@@ -2094,6 +2094,14 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     left exactly as it was, unwritten and unstamped (so a rerun retries it), and
     its result entry carries ``unanswered: True``. A ranker's explicit decline is
     an answer and is still written and stamped.
+
+    *auto_approve_threshold* (a whole percent, with *approve_as*, the person the run
+    belongs to) approves a proposal as it is written when a ranker's confidence in
+    it rounds to the threshold or more (#1532, ``suggest_auto_approve``). Off when
+    either is ``None`` and for a dry run, so every existing caller is unchanged. The
+    result entry of a row it approved carries ``auto_approved: True``. A row the
+    approval is refused for (a locked destination concept, an Athena duplicate)
+    stays proposed.
 
     *progress*, when given, is called as ``progress(stage, done, total)`` with
     *stage* ``'retrieving'`` then ``'writing'``.  Retrieval is two thirds of the
@@ -2455,9 +2463,11 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             # is blank, so a note ingest supplied through _record_proposal survives
             # too. Only a note left by a previous run of this code is rewritten.
             ours = attempted_before and mapping.updated_by_id is None
+            note_written = False
             if (not mapping.notes and mapping.updated_by_id is None) or ours:
                 mapping.notes = note
                 fields.append('notes')
+                note_written = True
             # Source-side enrichment is written only when it was missing: these
             # describe the code, not the suggestion, and a curator may have
             # corrected them.
@@ -2474,6 +2484,16 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             if moved_off:
                 from omop_core.mapping.code_resolution import revert_provisional_rows
                 revert_provisional_rows(mapping=mapping, concept_id=moved_off)
+            # The proposal is written; a ranker certain enough of it gets it
+            # approved by the person the run belongs to, through the approval a
+            # curator's save makes.
+            if (auto_approve_threshold is not None and approve_as is not None
+                    and concept is not None and not athena_duplicate):
+                from omop_core.services import suggest_auto_approve
+                if (suggest_auto_approve.qualifies(mapping, auto_approve_threshold, concept=concept)
+                        and suggest_auto_approve.approve(
+                            mapping, approve_as, auto_approve_threshold, note_written=note_written)):
+                    entry['auto_approved'] = True
         entry['updated'] = True
         results.append(entry)
         emit('result', **entry, dry_run=False)

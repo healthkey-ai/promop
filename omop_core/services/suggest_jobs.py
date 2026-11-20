@@ -74,6 +74,10 @@ def selection_summary(params):
         'strategies': params['strategies'],
         'resuggest': params['resuggest'],
         'dry_run': params['dry_run'],
+        # None: this run approves nothing (the starter may not approve, or the
+        # run is a dry run). A number: the confidence at or above which a
+        # proposal is approved as it is written (#1532).
+        'auto_approve_threshold': params.get('auto_approve_threshold'),
         'model_version': SUGGESTION_MODEL_VERSION,
     }
 
@@ -293,6 +297,18 @@ def execute_run(run_id: str, params: dict) -> None:
             **{field: min(done, counted['total']) if counted['total'] else done}
         )
 
+    # The starter is re-checked here, not trusted from the request: the params
+    # outlive it in a queue, and an account that lost the right since, or a
+    # machine, must not approve anything.
+    threshold = params.get('auto_approve_threshold')
+    approver = None
+    if threshold is not None and not params['dry_run']:
+        from omop_core.services import suggest_auto_approve
+        if run.created_by is not None and suggest_auto_approve.eligible(run.created_by):
+            approver = run.created_by
+        else:
+            threshold = None
+
     try:
         results = suggest_mappings(
             params.get('tables') or None,
@@ -306,6 +322,8 @@ def execute_run(run_id: str, params: dict) -> None:
             progress=progress,
             activity=activity,
             ranking_model=params.get('ranking_model', 'anthropic'),
+            auto_approve_threshold=threshold if approver is not None else None,
+            approve_as=approver,
         )
     except Exception as exc:                      # noqa: BLE001 - record, never crash the worker
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
@@ -353,7 +371,12 @@ def execute_run(run_id: str, params: dict) -> None:
         remaining = 0
 
     activity({'stage': 'completed', 'note': f'Finished processing {len(results)} code(s).'})
+    # How many it approved, beside the threshold it used, so a past run explains itself.
+    selection = dict(SuggestRun.objects.filter(pk=run.pk).values_list('selection', flat=True).first() or {})
+    selection['auto_approved'] = sum(1 for r in results if r.get('auto_approved'))
+    selection['auto_approve_threshold'] = threshold if approver is not None else None
     SuggestRun.objects.filter(pk=run.pk).update(
+        selection=selection,
         state=SuggestRun.SUCCESS,
         total=len(results),
         remaining=remaining,

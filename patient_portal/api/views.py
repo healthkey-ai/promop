@@ -116,7 +116,7 @@ from omop_core.mapping.suggestions import (
 )
 from omop_core.services.suggest_jobs import get_dispatcher as get_suggest_dispatcher
 from omop_core.services.write_descriptor import mapping_table_is_writable
-from omop_core.services import mapping_approval, source_vocabularies
+from omop_core.services import mapping_approval, source_vocabularies, suggest_auto_approve
 from omop_core.services import wearable_mapping_export as wearable_export
 from omop_core.mapping.therapy import (
     get_or_create_quarantine_drug,
@@ -14959,6 +14959,14 @@ def code_mapping_suggest(request):
     dry_run = bool(request.data.get('dry_run'))
     replace = bool(request.data.get('replace'))
 
+    # The confidence at or above which this run approves what it writes (#1532).
+    # Checked for everyone, so a bad value fails on any account; whether it is
+    # used, and remembered as the curator's own, is decided once the run starts.
+    try:
+        suggest_auto_approve.parse_threshold(request.data.get('auto_approve_threshold'))
+    except ValueError as exc:
+        return Response({'auto_approve_threshold': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
     # Retrieval strategies.
     raw_strategies = request.data.get('strategies')
     if raw_strategies is not None:
@@ -15043,6 +15051,14 @@ def code_mapping_suggest(request):
             locked_by=request.user, locked_at=timezone.now(),
         )
 
+    # Decided only now, with the batch locked: an approver's value is remembered
+    # as theirs for the next run, and none sent uses what they last set. Another
+    # account's setting is ignored, and a dry run approves nothing.
+    auto_threshold = suggest_auto_approve.run_threshold(
+        request.user, request.data.get('auto_approve_threshold'))
+    if dry_run:
+        auto_threshold = None
+
     from omop_core.services.suggest_jobs import selection_summary
     params = {
         'tables': list(tables),
@@ -15054,6 +15070,7 @@ def code_mapping_suggest(request):
         'lexical_limit': lexical_limit,
         'resuggest': replace,
         'ranking_model': ranking_model,
+        'auto_approve_threshold': auto_threshold,
         '_locked_mapping_ids': batch_ids,  # for lock release on completion
     }
     run = SuggestRun.objects.create(
@@ -15087,6 +15104,9 @@ def _serialize_suggest_run(run, *, include_activity=False):
         'landed_in': run.landed_in or {},
         'model_version': run.model_version,
         'ranking_model': run.ranking_model or 'anthropic',
+        # What the run was set to approve at, and how many it did (#1532).
+        'auto_approve_threshold': (run.selection or {}).get('auto_approve_threshold'),
+        'auto_approved': (run.selection or {}).get('auto_approved', 0),
         'error': run.error,
         'created_at': run.created_at,
         'finished_at': run.finished_at,
@@ -15394,7 +15414,7 @@ def code_mapping_reference(request):
     """
     if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-    return Response(_code_mapping_reference_payload())
+    return Response(_code_mapping_reference_payload(request.user))
 
 
 def _suggestion_review_totals(counts):
@@ -15757,7 +15777,7 @@ def _source_vocabulary_tabs():
     return tabs
 
 
-def _code_mapping_reference_payload():
+def _code_mapping_reference_payload(user=None):
     deployed_commit = (os.environ.get('RENDER_GIT_COMMIT') or '').strip()
     if not re.fullmatch(r'[0-9a-fA-F]{7,64}', deployed_commit):
         deployed_commit = ''
@@ -15824,6 +15844,14 @@ def _code_mapping_reference_payload():
         # Whether the proposer may not approve (#2726): the pages disable the controls that would be refused.
         'separate_approver': mapping_approval.enabled(),
         'suggest_max_per_run': get_suggest_dispatcher().max_codes,
+        # The Suggest auto-approval control (#1532): offered only to an account
+        # that may approve, prefilled with what it last set (100 until it sets one).
+        'suggest_auto_approve': {
+            'allowed': suggest_auto_approve.eligible(user),
+            'threshold': suggest_auto_approve.saved_threshold(user),
+            'min': suggest_auto_approve.MIN_THRESHOLD,
+            'max': suggest_auto_approve.MAX_THRESHOLD,
+        },
     }
 
 
@@ -15839,7 +15867,7 @@ def code_mapping_vocabularies(request):
     """
     if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
-    return Response(_code_mapping_reference_payload())
+    return Response(_code_mapping_reference_payload(request.user))
 
 
 @api_view(['POST'])

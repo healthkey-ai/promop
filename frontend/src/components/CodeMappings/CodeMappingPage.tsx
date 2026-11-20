@@ -141,11 +141,18 @@ const suggestProgressCount = (run: SuggestRunProgress) => {
   return run.done > 0 ? run.done : run.retrieved;
 };
 
+/** What the run approved on its own, when it did (#1532); empty otherwise. */
+const autoApprovedNote = (run: SuggestRunProgress) =>
+  run.auto_approved
+    ? ` ${run.auto_approved} of them approved automatically (confidence ${run.auto_approve_threshold}% or more).`
+    : "";
+
 const describeSuggestRun = (run: SuggestRunProgress) => {
   if (run.state === "failure") return run.error || "The suggest run failed.";
   if (run.state === "success") {
     if (run.total === 0) return "Done — nothing on this tab was awaiting a suggestion.";
     return `Done — wrote ${run.destinations} new destination(s) across ${run.total} code(s).`
+      + autoApprovedNote(run)
       // A run is capped well below a tab's backlog, so without this the curator
       // cannot tell from the page that another run is warranted.
       + (run.remaining ? ` ${run.remaining} still awaiting a suggestion — run Suggest again.` : "");
@@ -493,6 +500,14 @@ export default function CodeMappingPage() {
     umls: true, lexical: true, vectors: true,
   });
   const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
+  // The confidence at or above which a run approves what it writes (#1532). Offered
+  // only to an account that may approve; the server prefills what that curator last
+  // set (100 until they set one) and remembers whatever the next run sends.
+  const autoApprove = reference.suggest_auto_approve;
+  const [autoApproveThreshold, setAutoApproveThreshold] = useState<number | "">(100);
+  const validAutoApprove = !autoApprove?.allowed || (
+    autoApproveThreshold !== "" && Number.isInteger(autoApproveThreshold)
+    && autoApproveThreshold >= autoApprove.min && autoApproveThreshold <= autoApprove.max);
   const [inlineMappingId, setInlineMappingId] = useState<number | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
@@ -559,6 +574,7 @@ export default function CodeMappingPage() {
           setReferenceReady(true);
           setReferenceError("");
           setSuggestionLimit((current) => current === "" ? current : Math.min(current, data?.suggest_max_per_run || 100));
+          if (data?.suggest_auto_approve?.allowed) setAutoApproveThreshold(data.suggest_auto_approve.threshold);
       }).catch(() => {
         setReferenceError("Could not load mapping options. Refresh to retry.");
       }).finally(() => { referenceRequest.current = null; });
@@ -1011,6 +1027,10 @@ export default function CodeMappingPage() {
       setError(`Choose a number of suggestions between 1 and ${maxSuggestions}.`);
       return;
     }
+    if (!validAutoApprove) {
+      setError(`Choose an auto-approval confidence between ${autoApprove?.min} and ${autoApprove?.max}.`);
+      return;
+    }
     // Replace is only valid when a specific vocabulary is selected (the backend
     // rejects replace without source_vocabulary_id to prevent global deletes).
     const effectiveReplace = replaceExisting && !overallTab;
@@ -1043,6 +1063,8 @@ export default function CodeMappingPage() {
           ranking_model: rankingModel,
           replace: effectiveReplace,
           include_activity: true,
+          // Only an approver is offered it; the server ignores it for anyone else.
+          ...(autoApprove?.allowed ? { auto_approve_threshold: autoApproveThreshold } : {}),
         },
       );
       suggestRunRef.current = started.run_id;
@@ -1141,6 +1163,7 @@ export default function CodeMappingPage() {
         ? `Wrote ${run.destinations} new destination(s) across ${run.total} queued code(s)`
           + (byStrategy ? ` (${byStrategy})` : "")
           + (where ? ` — ${where}.` : ".")
+          + autoApprovedNote(run)
           + (run.remaining ? ` ${run.remaining} still awaiting a suggestion — run Suggest again.` : "")
         : "No queued codes on this tab awaiting a suggestion.",
     );
@@ -1690,7 +1713,7 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting || !hasRetrieval || !validSuggestionLimit || overallTab}
+            disabled={suggesting || !hasRetrieval || !validSuggestionLimit || !validAutoApprove || overallTab}
             title={overallTab ? "Select a specific vocabulary tab to run suggestions." : "Propose destinations for queued source codes on this tab."}
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -1746,6 +1769,31 @@ export default function CodeMappingPage() {
               <option value="both">Both</option>
             </select>
           </label>
+          {autoApprove?.allowed && (
+            <label
+              className="inline-flex items-center gap-1 text-xs text-slate-600"
+              title={
+                `Suggestions the ranker is at least this confident in are approved as they are written; `
+                + `lower ones stay proposed for review. ${autoApprove.max} approves only certain matches. `
+                + `The lowest you can set is ${autoApprove.min}. Your choice is remembered for your next run.`
+              }
+            >
+              Auto-approve at
+              <input
+                aria-label="Auto-approve confidence"
+                type="number"
+                min={autoApprove.min}
+                max={autoApprove.max}
+                value={autoApproveThreshold}
+                onChange={(event) => setAutoApproveThreshold(event.target.value === "" ? "" : Number(event.target.value))}
+                className={
+                  "h-7 w-14 rounded-md border px-1.5 text-xs "
+                  + (validAutoApprove ? "border-slate-300" : "border-rose-400 bg-rose-50")
+                }
+              />
+              %
+            </label>
+          )}
         </div>
 
         </>}

@@ -165,6 +165,11 @@ export interface Reference {
   wearable_source_systems?: WearableSourceSystem[];
   /** Whether the proposer may not approve their own proposal (#2726). */
   separate_approver?: boolean;
+  /**
+   * The Suggest auto-approval control (#1532): offered only when `allowed` (an account that
+   * may approve), prefilled with the curator's last choice (100 until they set one).
+   */
+  suggest_auto_approve?: { allowed: boolean; threshold: number; min: number; max: number };
 }
 
 export interface WearableSourceSystem {
@@ -459,6 +464,10 @@ export type SuggestRunProgress = {
   landed_in: Record<string, number>;
   error: string;
   ranking_model?: string;
+  /** The confidence at or above which this run approved what it wrote; null when it approved nothing (#1532). */
+  auto_approve_threshold?: number | null;
+  /** How many proposals the run approved as it wrote them. */
+  auto_approved?: number;
 };
 
 /**

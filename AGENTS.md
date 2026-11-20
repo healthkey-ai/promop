@@ -1477,6 +1477,56 @@ Not addressed:
 - A forward suggestion nobody has reviewed yet, replaced by a reverse pick,
   is replaced silently and is not an archived review.
 
+### Auto-approving a Suggest result (#1532)
+
+A run can approve a proposal as it writes it, when the ranker's confidence in
+it is high enough. `omop_core/services/suggest_auto_approve.py` holds the rules;
+`suggest_mappings(auto_approve_threshold=, approve_as=)` applies them.
+
+- **The threshold is a whole percent, 90 to 100, default 100, and never lower.**
+  `POST /v1/code-mappings/suggest/` takes `auto_approve_threshold`; outside
+  90..100, a fraction or a non-number is a 400 on any account, never a clamp.
+  A proposal qualifies when `_confidence_percent(suggestion_confidence)` (the
+  same rounding to a whole percent a provisional row carries) is at or above it,
+  so 100 approves only a score that rounds to 100%. Below it the row is written
+  as proposed, as before. `Identity.suggest_auto_approve_threshold` is
+  database-checked to the same range.
+- **Which proposals can qualify.** One a ranker scored: the Anthropic ranker
+  scores its qualitative labels 0.85 / 0.55 / 0.25 (`ANTHROPIC_CONFIDENCE_MAP`),
+  so on its own it never reaches 90 and nothing is auto-approved; Jev's
+  probabilities and "Both" (the higher of the two) can. A UMLS single-concept
+  shortcut and a retrieval fallback carry no ranker score and are never
+  approved. A declined code, a dry run and a row whose approval is refused (a
+  destination concept another curator has locked, an Athena duplicate) stay
+  proposed.
+- **Sticky, per curator.** A value an approver sends is saved on their identity
+  and is what their next run uses when none is sent, and what the Suggest
+  controls are prefilled with (`reference.suggest_auto_approve`). It is not a
+  deployment setting. The run records the threshold it used and how many it
+  approved on `SuggestRun.selection` (`auto_approve_threshold`,
+  `auto_approved`), and the run payload carries both.
+- **Only an approver gets it.** Approval is staff and org admin
+  (`_can_approve_mappings`); an analyst can run Suggest, the setting is ignored
+  and stores nothing, and the page does not offer it; a doctor or patient still
+  gets 403 on Suggest. A service credential never auto-approves. The queued
+  task re-checks `run.created_by` before approving, because the params outlive
+  the request.
+- **It is a curator's approval, through the same path.** `approve()` calls
+  `_upsert_source_code_mapping(..., {'status': 'approved'}, record_decision=False)`,
+  so the status, reviewer (the person whose run it is), the re-point of stored
+  rows (queued as for any approval), promotion of provisional rows and the
+  relocation rules run once, in one place. What differs is only what a machine
+  decided: `origin_system` becomes `suggest v0.4 auto-approved <threshold>%` (it
+  begins `suggest`, and an approved row is outside Suggest's candidates anyway),
+  the note gains "Auto-approved by Suggest: P% confidence, threshold T%.", no
+  `decision_surface` / `decision_confidence` is stamped (those record a
+  curator's decision), and `suggestion_outcome` stays blank (it is the
+  *curator's* first disposition of a suggestion, so an auto-approval does not
+  count toward the accuracy figures).
+- **Not covered.** Group Suggest (`group/suggest/`), the dialog's suggest-one
+  preview and Concept to Code runs write or preview as before and never
+  auto-approve.
+
 ### Which notes are a curator's
 
 `SourceCodeConceptMapping.notes` is one column that Suggest (its rationale),
