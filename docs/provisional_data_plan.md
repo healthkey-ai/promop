@@ -997,13 +997,21 @@ What follows from it:
   unit, and rejecting the disease or its slug rejects the whole disease group and the
   `disease_slugs` list.
 - **The rows it is held against.** The rows that feed the field, not every provisional row of
-  the person (`_field_origins`, found only for a field that has a rejection, since it reads
-  the rows again per code group): the code groups the field changes without, or, when several
-  codes agree and none decides it alone, those that give the same value on their own. The
-  disease group and the medication list use the condition or drug rows they read. A person
-  with more than `MAX_ORIGIN_GROUPS` code groups, or a field no group explains, falls back to
-  every measurement and observation row, which can only lapse a rejection more often. An
-  unrelated new proposal never lapses one.
+  the person (`_field_origins`, found only for a field that has a rejection): the code groups
+  the field changes without, or, when several codes agree and none decides it alone, those
+  that give the same value on their own. The disease group and the medication list use the
+  condition or drug rows they read. **This search re-runs on every derivation pass while the
+  hold applies**, about two queries per code group, so it is bounded: when every provisional
+  row the person has is one the rejection was made against it is skipped altogether (nothing
+  else can feed the field), and a person with more than `MAX_ORIGIN_GROUPS` (40, as the
+  confidence's own cap) code groups, or a field no group explains, falls back to every
+  measurement and observation row, which can only lapse a rejection more often. An unrelated
+  new proposal never lapses one below the cap.
+- **A date and its precision.** They are one answer: rejecting `diagnosis_date`, `sct_date`
+  or `dlbcl_transformation_date` rejects its `<date>_precision` (`REJECTION_FOLLOWERS`);
+  the overlay shows a proposed precision only with its proposed date (an approved
+  2020-05-12 beside a proposed precision "year" does not read as "2020"); and editing the
+  date takes its precision's proposal back (`mirror_user_edit`).
 - **When a rejection lapses.** It holds while every provisional row that feeds the field
   is one of the rows that fed it when it was rejected (`held_rejections`): the same
   source code under the same concept. A new reading of that code stays rejected. A code now
@@ -1014,7 +1022,14 @@ What follows from it:
   select's "Unknown" emits `''` after the two-second autosave, so a user can reject a
   proposal without meaning to. There is no control that restores a rejected proposal, and
   the page shows nothing where it was; **typing a value in the field is the only way back**
-  (until a different code or concept proposes the field again). A "show proposal again"
+  (until a different code or concept proposes the field again). A text clear that is
+  retried or submitted twice, after the first has removed the mark, arrives as an ordinary
+  blank on a field with no proposal and is stored as `''`: an edit, with the same empty
+  result. The General tab's **Disease Category** select sends `disease: null` when the
+  category changes to one that does not contain the disease, or is cleared; with a proposed
+  disease on display that is declared as a rejection of the whole disease group, which is the
+  meaning of the change (the proposed disease does not fit the category the user chose), and
+  is left as it is. A "show proposal again"
   control would need the record read to list the rejections and a way to delete one; it is
   left for later.
 - **Access.** Whoever may write the record: the patient's own, a verified representative's,

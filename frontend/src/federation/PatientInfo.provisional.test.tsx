@@ -45,12 +45,16 @@ const PATIENT_INFO = {
 let client: AxiosInstance;
 let qc: QueryClient;
 let patches: Array<[string, Record<string, unknown>]>;
+// What the server holds: a save settles the marks of the fields it wrote, and the next
+// read says so. The PATCH response itself carries none, as the real one does not.
+let server: Record<string, unknown>;
 
 beforeEach(() => {
   vi.clearAllMocks();
   __resetWritableFieldsCache();
   resetClinicalTransport();
   patches = [];
+  server = { ...PATIENT_INFO, provisional_fields: { ...PATIENT_INFO.provisional_fields } };
   qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   client = {
     get: vi.fn((url: string) => {
@@ -58,7 +62,7 @@ beforeEach(() => {
       if (url.includes('/patient-info/me/')) {
         return Promise.resolve({
           data: {
-            patient_info: { ...PATIENT_INFO },
+            patient_info: { ...server },
             user: { name: 'Alishia Howell', email: 'howell@example.org' },
             patient_name: 'Alishia Tawny Howell',
           },
@@ -69,8 +73,13 @@ beforeEach(() => {
     post: vi.fn(() => Promise.resolve({ data: {} })),
     patch: vi.fn((url: string, body: Record<string, unknown>) => {
       patches.push([url, body]);
+      const { rejected_proposals: _declared, ...written } = body;
+      const marks = { ...(server.provisional_fields as Record<string, number>) };
+      for (const field of Object.keys(written)) delete marks[field];
+      server = { ...server, ...written, provisional_fields: marks };
+      const { provisional_fields: _marks, ...response } = server;
       return Promise.resolve({
-        data: { patient_info: { ...PATIENT_INFO, ...body, provisional_fields: {} }, patient_name: 'Alishia Tawny Howell' },
+        data: { patient_info: response, patient_name: 'Alishia Tawny Howell' },
       });
     }),
   } as unknown as AxiosInstance;
@@ -120,5 +129,38 @@ describe('federated PatientInfo provisional values', () => {
 
     await waitFor(() => expect(patches.length).toBeGreaterThan(0));
     expect(patches.at(-1)![1]).toEqual({ anc_thousand_per_ul: 4 });
+    // The PATCH response has no marks: the badge must not come back with the merge.
+    await waitFor(() => expect(screen.queryByTestId('provisional-anc_thousand_per_ul')).not.toBeInTheDocument());
+    expect(screen.queryByTestId('provisional-anc_thousand_per_ul')).not.toBeInTheDocument();
+    // A save that wrote a marked field reads the record again, so the marks that went with
+    // it (a unit, a calculation, the disease group) follow the server's answer.
+    await waitFor(() => expect((client.get as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([url]: [string]) => url.includes('/patient-info/me/')).length).toBeGreaterThan(1));
+  });
+
+  it('rejects a proposal by clearing it, naming only the cleared marked field (#2671)', async () => {
+    await renderAndOpenLabs();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('3.1'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), { target: { value: '' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches.length).toBeGreaterThan(0));
+    const body = patches.at(-1)![1];
+    // The email was cleared too but showed no proposal: it is sent, and not declared.
+    expect(body).toEqual({ anc_thousand_per_ul: null, email: '', rejected_proposals: ['anc_thousand_per_ul'] });
+    fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
+    await waitFor(() => expect(screen.queryByTestId('provisional-anc_thousand_per_ul')).not.toBeInTheDocument());
+  });
+
+  it('declares nothing when a marked field is saved with a value', async () => {
+    await renderAndOpenLabs();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('3.1'), { target: { value: '5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches.length).toBeGreaterThan(0));
+    expect('rejected_proposals' in patches.at(-1)![1]).toBe(false);
   });
 });

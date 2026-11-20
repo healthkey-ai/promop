@@ -240,8 +240,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       }
 
       const result = await patchMutation.mutateAsync(payload);
-      serverInfoRef.current = withoutMarks(serverInfoRef.current, Object.keys(combined));
-      for (const f of Object.keys(combined)) {
+      // The fields the save wrote, not the request body: rejected_proposals is no field.
+      serverInfoRef.current = withoutMarks(serverInfoRef.current, Object.keys(patchFields));
+      for (const f of Object.keys(patchFields)) {
         serverInfoRef.current[f] = info[f];
         if (pendingDataRef.current?.[f] === info[f]) dirtyFieldsRef.current.delete(f);
       }

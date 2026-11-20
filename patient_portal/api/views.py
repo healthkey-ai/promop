@@ -264,8 +264,8 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
     # patient_name targets Person, not PatientRecord, so it is handled by hand
     # here exactly as /patient-info/me/ handles it — through the same pair of
     # helpers, so the two routes cannot drift apart again. This is the route
-    # the provider UI PATCHes, and leaving the key in the body would 405 the
-    # request below as a non-projection-owned field.
+    # the provider UI PATCHes; left in the body the key would be dropped by the
+    # serializer (a read-only method field), so a rename would never be saved.
     patient_name, patch_data = _pop_patient_name(data)
     declared_rejections = _pop_rejected_proposals(patch_data) if allow_reject else ()
     if 'rejected_proposals' in patch_data:
@@ -834,8 +834,8 @@ def _pop_patient_name(data):
 
     patient_name is a SerializerMethodField over Person.given_name/family_name —
     an OMOP column, not a PatientRecord one — so it can only be applied by hand.
-    Left in the body it is not merely ignored: it is not projection-owned, so it
-    trips the writable-fields check and 405s the whole request.
+    Left in the body it would be silently dropped by the serializer (a read-only
+    field), so the rename would never reach Person.
     """
     if 'patient_name' not in data:
         return None, data

@@ -174,9 +174,11 @@ def _attribute(person, record, snapshot, kept, measurements, observations, routi
 
 
 # A rejection is held against the rows that feed its field, found only for the fields
-# that have one (a few, rarely), so the search may take a read per code group where the
-# confidence above is bounded by MAX_ATTRIBUTION_GROUPS.
-MAX_ORIGIN_GROUPS = 200
+# that have one. The search reads the rows again per code group (about two queries each,
+# on every derivation while the hold applies and the person has codes beyond those it was
+# made against), so it is bounded like the confidence above: past this many groups the
+# fallback is every measurement and observation row, which can only lapse more.
+MAX_ORIGIN_GROUPS = MAX_ATTRIBUTION_GROUPS
 
 
 def _field_origins(person, record, snapshot, kept, fields, measurements, observations, routing) -> dict:
@@ -720,7 +722,20 @@ REJECTION_FOLLOWERS = {
     'height': ('height_units',),
     'disease': (*DISEASE_FIELDS, 'disease_slugs'),
     'disease_slug': (*DISEASE_FIELDS, 'disease_slugs'),
+    # A date and its precision are one answer (``_PRECISION``).
+    'diagnosis_date': ('diagnosis_date_precision',),
+    'sct_date': ('sct_date_precision',),
+    'dlbcl_transformation_date': ('dlbcl_transformation_date_precision',),
 }
+
+_PRECISION = '_precision'
+
+
+def _date_of(precision_field):
+    """The date a ``<date>_precision`` field describes, or None for any other field."""
+    if precision_field.endswith(_PRECISION) and precision_field[:-len(_PRECISION)] in _confidence_names():
+        return precision_field[:-len(_PRECISION)]
+    return None
 
 
 def rejection_group(fields) -> set[str]:
@@ -791,9 +806,17 @@ def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
                 del kept[field]
         if kept:
             confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
-            if origin_fields & kept.keys():
-                origins.update(_field_origins(person, record, snapshot, kept, origin_fields,
-                                              measurements, observations, routing))
+            need = origin_fields & kept.keys()
+            if need:
+                everything = _row_origins(measurements + observations)
+                # A held rejection costs nothing when every provisional row the person has
+                # is one it was made against: whatever feeds the field is among them. Only
+                # a person with other codes pays for the search for the feeding rows.
+                settled = {f for f in need if f in rejections and everything <= rejections[f]}
+                origins.update({f: set(everything) for f in settled})
+                if need - settled:
+                    origins.update(_field_origins(person, record, snapshot, kept, need - settled,
+                                                  measurements, observations, routing))
     composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept,
                                                      shared=shared, origins=origins)
     if rejections:
@@ -874,6 +897,9 @@ def mirror_user_edit(record, edited_fields) -> None:
     if edited & {'disease', 'disease_slug'}:
         edited |= {*DISEASE_FIELDS, 'disease_slugs'}
     names = _confidence_names()
+    # A date and its precision are one answer: editing the date takes the precision's
+    # proposal back too, or a proposed "year" would be shown against the new date.
+    edited |= {f'{field}{_PRECISION}' for field in list(edited) if f'{field}{_PRECISION}' in names}
     try:
         with transaction.atomic():
             cleared = []
@@ -1087,6 +1113,11 @@ def overlay(record, lists=True):
         elif _is_empty(live):
             setattr(view, field.attname, getattr(provisional, field.attname))
             marks[field.name] = mark
+    # A precision describes its date: a proposed one is shown only with the proposed date
+    # (an approved 2020-05-12 with a proposed "year" must not read as "2020").
+    for field_name in [name for name in marks if _date_of(name) and _date_of(name) not in marks]:
+        setattr(view, field_name, getattr(record, field_name, None))
+        del marks[field_name]
     if added:
         # Which items of each list are proposals; the serializer carries it out.
         view.provisional_items = added

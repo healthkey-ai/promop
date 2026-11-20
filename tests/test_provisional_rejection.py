@@ -23,7 +23,7 @@ from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import Identity, PatientUser
 from tests.factories import MeasurementFactory, PatientRecordFactory
 from tests.test_provisional_composite import cancer
-from tests.test_provisional_computed import _height, _weight
+from tests.test_provisional_computed import _height, _vital, _weight
 from tests.test_provisional_derivation import (  # noqa: F401 (fixtures)
     _add_measurement, _add_observation, _concept, record, snomed,
 )
@@ -500,12 +500,41 @@ def test_the_view_gates_rejection_on_a_signed_in_person(monkeypatch):
     def request(auth, authenticator):
         return type('R', (), {'data': {}, 'user': human, 'auth': auth, 'successful_authenticator': authenticator})()
 
+    from oauth2_provider.models import Application
+    from patient_portal.api.providers.base import TokenClaims
+
+    def oauth(grant):
+        application = type('A', (), {'authorization_grant_type': grant})()
+        return type('T', (), {'application': application})()
+
     viewset._patch_record(request(None, SessionAuthentication()), None, None)
     assert seen[-1] is True                                      # a person at the editor
+    partner = TokenClaims(issuer='firebase', sub='abc', email='gate@example.test', name=None, raw={})
+    viewset._patch_record(request(partner, None), None, None)
+    assert seen[-1] is True                                      # a partner (host app) login
     viewset._patch_record(request(SERVICE_TOKEN, None), None, None)
     assert seen[-1] is False                                     # a service credential
+    viewset._patch_record(request(oauth(Application.GRANT_CLIENT_CREDENTIALS), None), None, None)
+    assert seen[-1] is False                                     # a client-credentials app (an ETL)
+    viewset._patch_record(request(oauth(Application.GRANT_AUTHORIZATION_CODE), None), None, None)
+    assert seen[-1] is False                                     # a token a person handed to an app
     viewset._patch_record(request(object(), TokenAuthentication()), None, None)
-    assert seen[-1] is False                                     # a token someone handed out
+    assert seen[-1] is False
+
+
+def test_a_partner_login_can_reject_through_the_view(snomed, record):
+    from patient_portal.api.providers.base import TokenClaims
+    propose_hemoglobin(record.person)
+    client = APIClient()
+    client.force_authenticate(
+        Identity.objects.create_user(email='rej-partner@example.test', is_staff=True),
+        token=TokenClaims(issuer='firebase', sub='abc', email='rej-partner@example.test', name=None, raw={}))
+
+    response = client.patch(url(record.person),
+                            {'hemoglobin_g_dl': None, 'rejected_proposals': ['hemoglobin_g_dl']}, format='json')
+
+    assert response.status_code == 200, response.content
+    assert ProposalRejection.objects.filter(person=record.person, field_name='hemoglobin_g_dl').exists()
 
 
 def test_a_verified_representative_can_reject_and_it_is_attributed(patient):
@@ -637,6 +666,116 @@ def test_too_many_code_groups_fall_back_to_every_row_and_can_only_lapse_more(sno
 
     origins = ProposalRejection.objects.get(person=record.person).origins
     assert len(origins) == 2                                                   # the weight's row too
+
+
+def test_a_held_rejection_costs_nothing_when_every_row_is_one_it_was_made_against(snomed, record, monkeypatch):
+    # The search for the rows that feed a field reads the rows per code group, on every
+    # derivation while the hold applies; a person whose provisional rows are all the ones
+    # the rejection was made against needs none of it.
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from omop_core.services.patient_record_service import _build_snapshot
+    monkeypatch.setattr(provisional_record, 'MAX_ATTRIBUTION_GROUPS', 0)     # isolate the origin search
+    counts = {}
+    for extra in (2, 30):
+        person = PatientRecordFactory().person
+        with suppress_patient_record_refresh():
+            hemoglobin(person, 11.5, date(2024, 6, 1))
+            for number in range(extra):
+                _vital(person, f'{1000 + number}-1', 70, 'kg', conf=75)
+        origins = provisional_record._row_origins(
+            list(Measurement.objects.filter(person=person, confidence__isnull=False)))
+        ProposalRejection.objects.create(person=person, field_name='hemoglobin_g_dl',
+                                         origins=[list(o) for o in sorted(origins)])
+        searched = []
+        real = provisional_record._field_origins
+        monkeypatch.setattr(provisional_record, '_field_origins',
+                            lambda *a, **k: searched.append(1) or real(*a, **k))
+        with CaptureQueriesContext(connection) as queries:
+            values, _ = provisional_record.provisional_values(
+                person, PatientRecord.objects.get(person=person), _build_snapshot(person))
+        counts[extra] = len(queries)
+        assert 'hemoglobin_g_dl' not in values and searched == []
+        monkeypatch.setattr(provisional_record, '_field_origins', real)
+    assert counts[2] == counts[30]                                           # not per code group
+
+
+def test_a_person_with_other_codes_pays_for_the_search_only_up_to_the_cap(snomed, record, monkeypatch):
+    assert provisional_record.MAX_ORIGIN_GROUPS == 40                        # as the confidence's own cap
+    reads = []
+    real = provisional_record._read_values
+    monkeypatch.setattr(provisional_record, '_read_values', lambda *a, **k: reads.append(1) or real(*a, **k))
+    monkeypatch.setattr(provisional_record, 'MAX_ATTRIBUTION_GROUPS', 0)
+    with suppress_patient_record_refresh():
+        _add_measurement(record.person, 82)
+        for number in range(5):
+            _vital(record.person, f'{2000 + number}-1', 70, 'kg', conf=75)
+    ProposalRejection.objects.create(person=record.person, field_name='hemoglobin_g_dl',
+                                     origins=[['measurement', '718-7', 3000963]])
+    from omop_core.services.patient_record_service import _build_snapshot
+    run = lambda: provisional_record.provisional_values(
+        record.person, stored(record.person), _build_snapshot(record.person))
+
+    monkeypatch.setattr(provisional_record, 'MAX_ORIGIN_GROUPS', 3)          # six groups: over the cap
+    run()
+    over = len(reads)
+    reads.clear()
+    monkeypatch.setattr(provisional_record, 'MAX_ORIGIN_GROUPS', 40)         # within it: a read per group
+    run()
+
+    assert over == 1 and len(reads) > over
+
+
+# --- a date and its precision are one answer -------------------------------------------
+
+def propose_fields(person, **fields):
+    values = {name: value for name, (value, _mark) in fields.items()}
+    marks = {name: mark for name, (_value, mark) in fields.items()}
+    PatientRecordProvisional.objects.update_or_create(person=person, defaults=values)
+    PatientRecordConfidence.objects.update_or_create(person=person, defaults=marks)
+
+
+def test_a_rejected_date_takes_its_precision_with_it():
+    held = provisional_record.rejection_group
+    assert held(['sct_date']) == {'sct_date', 'sct_date_precision'}
+    assert held(['dlbcl_transformation_date']) == {
+        'dlbcl_transformation_date', 'dlbcl_transformation_date_precision'}
+    assert 'diagnosis_date_precision' in held(['diagnosis_date'])
+
+
+def test_a_proposed_precision_is_not_shown_against_an_approved_date():
+    record = PatientRecordFactory(diagnosis_date=date(2020, 5, 12))
+    propose_fields(record.person, diagnosis_date_precision=('year', 80))
+
+    view, marks = provisional_record.overlay(stored(record.person))
+
+    assert marks == {} and view.diagnosis_date_precision is None
+    assert provisional_record.attestation_blockers(stored(record.person)) == []
+
+
+def test_a_proposed_precision_is_shown_with_its_proposed_date():
+    record = PatientRecordFactory(diagnosis_date=None)
+    propose_fields(record.person, diagnosis_date=(date(2020, 5, 12), 80), diagnosis_date_precision=('year', 80))
+
+    view, marks = provisional_record.overlay(stored(record.person))
+
+    assert marks == {'diagnosis_date': 80, 'diagnosis_date_precision': 80}
+    assert view.diagnosis_date_precision == 'year'
+
+
+def test_editing_a_date_takes_its_precision_proposal_back():
+    record = PatientRecordFactory(diagnosis_date=None)
+    propose_fields(record.person, diagnosis_date=(date(2020, 5, 12), 80), diagnosis_date_precision=('year', 80))
+    PatientRecord.objects.filter(person=record.person).update(
+        diagnosis_date=date(2021, 1, 1), user_edited_fields=['diagnosis_date'])
+
+    provisional_record.mirror_user_edit(stored(record.person), ['diagnosis_date'])
+
+    marks = PatientRecordConfidence.objects.get(person=record.person)
+    assert marks.diagnosis_date is None and marks.diagnosis_date_precision is None
+    provisional = PatientRecordProvisional.objects.get(person=record.person)
+    assert provisional.diagnosis_date == date(2021, 1, 1) and provisional.diagnosis_date_precision is None
+    assert provisional_record.overlay(stored(record.person))[1] == {}
 
 
 # --- what travels and what is erased ---------------------------------------------------
