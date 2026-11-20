@@ -10,7 +10,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0358_mapping_proposed_by"),
+        ("omop_core", "0360_provisional_json_confidence"),
     ]
 
     operations = [

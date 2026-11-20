@@ -43,7 +43,7 @@ def mark_fallbacks(apps, schema_editor):
 
 
 def unmark_fallbacks(apps, schema_editor):
-    # Rolling back 0359 drops the column; rolling back only this leaves the
+    # Rolling back 0361 drops the column; rolling back only this leaves the
     # marks, which describe real rows and are harmless.
     pass
 
@@ -51,7 +51,7 @@ def unmark_fallbacks(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0359_suggestion_fallback"),
+        ("omop_core", "0361_suggestion_fallback"),
     ]
 
     operations = [

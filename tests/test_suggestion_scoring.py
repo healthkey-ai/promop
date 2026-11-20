@@ -203,7 +203,7 @@ def test_the_note_a_ranker_that_cannot_run_leaves_is_what_marks_a_fallback(setti
     assert chosen['concept_id'] == albumin_goal.concept_id, 'the first retrieval hit stands in'
     assert suggestions.is_fallback_note(note)
     assert suggestions.is_fallback_note(FALLBACK_NOTE)
-    assert note.startswith('Best-match fallback'), 'migration 0360 matches the start of the note'
+    assert note.startswith('Best-match fallback'), 'migration 0362 matches the start of the note'
     chosen, note, _ = suggestions.rank_candidates('ALB', [candidate(albumin_goal)], 'albumin',
                                                   require_model_selection=True)
     assert chosen is None and not suggestions.is_fallback_note(chosen) and suggestions.is_fallback_note(note)
@@ -302,7 +302,7 @@ def test_the_backfill_marks_stored_fallbacks_and_nothing_else(albumin_goal):
     ]
     before = {m.pk: m.updated_at for m in marked}
 
-    migration = import_module('omop_core.migrations.0360_backfill_suggestion_fallback')
+    migration = import_module('omop_core.migrations.0362_backfill_suggestion_fallback')
     migration.mark_fallbacks(apps, None)
     migration.mark_fallbacks(apps, None)   # a replay changes nothing
 

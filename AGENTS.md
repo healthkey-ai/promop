@@ -1422,7 +1422,7 @@ row holds and whether its outcome is scored at all (#2743).
   "Best-match fallback … Ranking model unavailable". That is a destination to
   review, not the model's answer, so the row carries `suggestion_fallback`
   (forward Suggest and group Suggest set it from `suggestions.is_fallback_note`;
-  a real pick that replaces the fallback clears it; migration `0360` marked
+  a real pick that replaces the fallback clears it; migration `0362` marked
   the rows already written, best effort, from a note that begins with the
   fallback text: a fallback written onto a row that already had a note never
   carried it, and a review archived before the migration is not marked). The
