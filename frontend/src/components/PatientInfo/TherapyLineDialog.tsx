@@ -472,7 +472,7 @@ export default function TherapyLineDialog({
                 {selectedRegimen.title}
                 {selectedRegimen.concept_id && (
                   <span className="ml-2 text-xs text-muted-foreground">
-                    HemOnc {selectedRegimen.concept_id}
+                    OMOP {selectedRegimen.concept_id}
                   </span>
                 )}
               </span>

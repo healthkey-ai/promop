@@ -26,7 +26,6 @@ from omop_core.models import (
     Death, ConceptRelationship, PERSON_YEAR_PLACEHOLDERS,
     format_language_skills,
 )
-from omop_core.concept_fixtures import LOCAL_CONCEPT_ID_MIN
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc
 from omop_core.services.mappings import (
     CONCEPT_DISEASE_FIRST_OCCURRENCE,
@@ -2785,6 +2784,9 @@ def _asserted_line_name(episode):
 # substance class or an RxNorm brand name are not one drug: such a line keeps
 # its id but lists no component of its own.
 _LINE_IDENTITY_DOMAINS = frozenset({'Drug', 'Procedure'})
+# OHDSI reserves concept_id >= 2e9 for locally authored concepts (as in
+# concept_fixtures and backfill_concept_source, which keep their own copy).
+LOCAL_CONCEPT_ID_MIN = 2_000_000_000
 
 
 def _is_vocabulary_concept(concept) -> bool:
