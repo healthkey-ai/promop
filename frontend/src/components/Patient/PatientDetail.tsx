@@ -5,7 +5,7 @@ import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { attestationBlockers, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
+import { attestationBlockers, diseaseTypeOf, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -840,15 +840,8 @@ export default function PatientDetail({
     }
   }, [handleFieldChange, scheduleAutoSave]);
 
-  const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "mcl" | "other" => {
-    const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
-    if (d.includes("breast")) return "breast";
-    if (d.includes("mantle")) return "mcl";
-    if (d.includes("lymphoma")) return "lymphoma";
-    if (d.includes("myeloma")) return "myeloma";
-    if (d.includes("cll") || d.includes("chronic lymphocytic")) return "cll";
-    return "other";
-  };
+  // The same rule the attestation uses to know which disease section is on screen.
+  const getDiseaseType = () => diseaseTypeOf(editedInfo?.disease);
 
   const getDiseaseTabLabel = () =>
     ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()];
@@ -859,10 +852,12 @@ export default function PatientDetail({
   );
   // The proposals still on the page that stop the patient confirming (#2761).
   const attestationBlockerCount = useMemo(
-    // With no write descriptor (the fetch failed) the page cannot tell which marks the
-    // patient can clear, so it offers the button and the server's 409 decides.
-    () => (patientMode && !writableFields.error
-      ? attestationBlockers(editedInfo, writableFields.loading ? null : writableFields.descriptors).length
+    // With no write descriptor (still loading, or the fetch failed) the page cannot tell
+    // which marks the patient can clear: a calculated field would be counted that the
+    // server does not count, and the banner would flash a number that then falls. So it
+    // counts none, offers the button, and the server's 409 decides.
+    () => (patientMode && !writableFields.error && !writableFields.loading
+      ? attestationBlockers(editedInfo, writableFields.descriptors).length
       : 0),
     [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors],
   );

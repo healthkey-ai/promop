@@ -5,6 +5,7 @@ import SelectControl from '../controls/SelectControl';
 import Section from '../Section';
 import FlipiAssessment from '../FlipiAssessment';
 import GelfAssessment from '../GelfAssessment';
+import { MarkedControl } from '../ProvisionalBadge';
 import {
   STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
@@ -161,9 +162,17 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Ann Arbor Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Grade" name="tumor_grade" descriptor={descriptors.tumor_grade} type="select" value={formData?.tumor_grade} options={FL_TUMOR_GRADE_OPTIONS} onChange={onChange} vocabSource={flGradeSource} />
-          <div className="sm:col-span-2"><GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} /></div>
           <div className="sm:col-span-2">
-            <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
+            <MarkedControl name="gelf_criteria_options">
+              <GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} />
+            </MarkedControl>
+          </div>
+          <div className="sm:col-span-2">
+            {/* The score is what the control shows while the factor checklist is empty. The
+                checklist (flipi_score_options) is not a column that holds a proposal. */}
+            <MarkedControl name="flipi_score" via="the risk factors below">
+              <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
+            </MarkedControl>
           </div>
           <ClinicalField label="Bulky Disease" name="bulky_disease" descriptor={descriptors.bulky_disease} type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
           <ClinicalField label="Fever" name="b_symptom_fever" descriptor={descriptors.b_symptom_fever} type="select" value={formData?.b_symptom_fever} options={YES_NO_OPTIONS} onChange={onChange} />

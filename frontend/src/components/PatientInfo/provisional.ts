@@ -6,8 +6,26 @@
  */
 import patientVisibleFields from './patientVisibleFields.json';
 
-/** The scalar fields a patient tab renders (generated; see `omop_core/services/patient_visible_fields.py`). */
+/** The scalar fields the always-shown patient tabs render (generated; see `omop_core/services/patient_visible_fields.py`). */
 const VISIBLE: ReadonlySet<string> = new Set(patientVisibleFields.fields);
+
+export type DiseaseType = 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
+
+/** The disease type the page picks from a disease text: the first keyword found in the
+ *  lowercased text wins, and no match is `other`, which has no disease tab. The rules
+ *  are the generated file's, so the server reads the same ones. */
+export function diseaseTypeOf(disease: unknown): DiseaseType {
+  const text = typeof disease === 'string' ? disease.toLowerCase() : '';
+  const rule = (patientVisibleFields.disease_rules as string[][]).find(([keyword]) => text.includes(keyword));
+  return (rule ? rule[1] : 'other') as DiseaseType;
+}
+
+/** The scalar fields a patient sees for a record: the always-shown tabs plus the disease
+ *  tab's section for its disease. */
+function onScreen(info: Record<string, unknown> | null | undefined): Set<string> {
+  const byDisease = patientVisibleFields.disease_fields as Record<string, string[]>;
+  return new Set([...VISIBLE, ...(byDisease[diseaseTypeOf(info?.disease)] ?? [])]);
+}
 
 /** The record's proposal marks (field to confidence), or none. */
 export function marksOf(info: Record<string, unknown> | null | undefined): Record<string, number> {
@@ -39,7 +57,8 @@ export function withoutMarks(
  *
  *  The same rule as `attestation_blockers` on the server, which refuses the
  *  confirmation. A mark counts only for a field in `patientVisibleFields.json`, the
- *  scalar fields the patient tabs name: a field no tab shows is marked in the record
+ *  scalar fields the patient tabs name (the disease tab's own section being the one
+ *  for the record's disease): a field no tab shows is marked in the record
  *  but never on screen, and a list field has proposed items (`provisional_items`) and
  *  no tab edits it. Then, once the write descriptor has loaded, a field with no write
  *  path of its own (a calculated or mirrored value, a unit picker) is left out, since
@@ -52,8 +71,9 @@ export function attestationBlockers(
 ): string[] {
   const items = (info?.provisional_items ?? {}) as Record<string, unknown[]>;
   const known = descriptors && Object.keys(descriptors).length > 0 ? descriptors : null;
+  const shown = onScreen(info);
   return Object.keys(marksOf(info))
-    .filter((field) => !(field in items) && VISIBLE.has(field))
+    .filter((field) => !(field in items) && shown.has(field))
     .filter((field) => !known || !(field in known) || !!known[field].writable)
     .sort();
 }
