@@ -35,7 +35,8 @@ proposal, as a whole-number percentage (0-100). The percentage is not the 0-1
 float Suggest records on `SourceCodeConceptMapping.suggestion_confidence`: a
 two-digit number is what the page shows and what a threshold is set in
 (#1532), and an integer compares exactly. A proposal at 100 is still a
-proposal.
+proposal until something approves it; #1532's auto-approval, whose default
+threshold is 100%, is what would.
 
 The design keeps `patient_record` exactly as it is: a flat table of approved
 data, read by everything that reads it today. Provisional data lives in a
@@ -82,9 +83,9 @@ Three invariants hold everywhere:
 - **A proposal with no confidence.** An import proposal that nothing ranked
   (`suggestion_confidence` null) carries no number, so no provisional row can
   be written from it. Only a ranked proposal qualifies.
-- **A proposal below the floor.** `PROVISIONAL_CONFIDENCE_FLOOR` (default 70,
-  the threshold #1532 proposes for auto-approval) is the least confidence a
-  provisional row is written at. Below it the code stays unresolved as today.
+- **A proposal below the floor.** `PROVISIONAL_CONFIDENCE_FLOOR` (default 70;
+  not the auto-approval threshold of #1532, which defaults to 100%) is the least
+  confidence a provisional row is written at. Below it the code stays unresolved as today.
 
 ## Where provisional rows come from
 
@@ -96,11 +97,7 @@ explicit opt-in; none changes behaviour by default.
 | Generate OMOP (`_create_missing_clinical_rows`, `resolve_person_source_codes`) | creates and re-points rows for approved mappings only | also creates a row for a ranked proposal at or above the floor, with its confidence; re-resolve promotes or reverts provisional rows as the proposal moved |
 | `code-mappings/lookup/` (the ETL) | an unresolved entry carries `proposed_target_concept_id` as curator evidence, which the ETL must not write | with `include_provisional: true` in the request, such an entry also carries `provisional: true` and `confidence`; the ETL writes the row with that `confidence` through the bulk endpoints |
 | Bulk OMOP writes (`POST /api/v1/measurements/` etc.) | no `confidence` field | accept `confidence` on a row; refuse it on a row at concept 0 and refuse it from a session user (machine credentials and staff only) |
-| FHIR sync and `upload_fhir_bundle` (`resolve_source_code`) | a proposed mapping returns no concept | a new `accept_proposed=True` argument returns the proposal's concept and confidence; sync passes it when the organization or deployment opts in |
-
-`resolve_source_code_variant` already has a `provisional` keyword that means
-something else (one lookup sighting per batch, #2123). The new argument is
-`accept_proposed`, and the docstring says why the two are different.
+| FHIR sync and `upload_fhir_bundle` (`resolve_source_code`) | a proposed mapping returns no concept | unchanged: a patient chooses to import their FHIR data, so there is no organization opt-in and sync does not write provisional rows; a code with only a proposed mapping is stored at concept 0 and picked up by the sweep like any other unresolved row |
 
 Generate OMOP is the first writer to build, because it is the one HealthTree
 needs: the per-patient inventory (`PatientSourceCode`) is loaded, the
@@ -861,12 +858,13 @@ column name, joined on `person`.
 |---|---|---|
 | `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served, and a record read carries no overlay |
 | `PROVISIONAL_CONFIDENCE_FLOOR` | `70` | least confidence a provisional row is written at |
-| `Organization.accepts_provisional_data` | `False` | FHIR sync for this organization passes `accept_proposed` |
 
-The floor and the auto-approval threshold of #1532 are the same number in
-spirit: a proposal at or above the auto-approval threshold would become real,
-so the floor only matters for the band between the two. Build the floor first;
-#1532 can read it.
+The floor and the auto-approval threshold of #1532 are two settings. The
+threshold's default is 100% (decided on #1532, 2026-09-21), and a curator can set
+it lower per run. A proposal at or above it is approved and becomes real, so the
+provisional band is the confidence from the floor up to, but not including, the
+threshold: 70 to 99 by default, and empty if a curator sets the threshold at or
+below the floor. Auto-approval is not built; the floor does not depend on it.
 
 ## What consumers see
 
@@ -1122,11 +1120,14 @@ lookup contract below remains for a caller that does want to write rows itself.
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
 - JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table.
-- FHIR sync opt-in per organization. The PHR is the patient's source of truth, so
-  this is a data-quality decision about what sync writes into the PHR, not the
-  institution's consent.
-- Patient-facing display policy.
-- #1532 auto-approval reading the same floor.
+- ~~FHIR sync opt-in per organization~~ dropped (2026-11-20): a patient decides
+  whether to import their FHIR data, and an export never carries provisional data
+  (see "Provisional data is never exported").
+- ~~Patient-facing display policy~~ done: patients see approved and provisional
+  values, and each provisional value is marked (the "Provisional NN%" badge, "not yet
+  confirmed" in patient wording; open decisions 3 and 5).
+- #1532 auto-approval (default threshold 100%, curator-lowerable). It is a separate
+  setting from the floor; the provisional band is floor to threshold, exclusive.
 
 ### Provisional data is never exported
 
