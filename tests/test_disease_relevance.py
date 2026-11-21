@@ -43,8 +43,10 @@ def test_disease_fields_match_what_the_disease_tab_renders():
     sections = dict(zip(*[iter(re.split(r'\nfunction (\w+)\(', source)[1:])] * 2))
 
     def fields(*names):
+        # A MarkedControl names a base-record field the section happens to show (GELF,
+        # FLIPI); it is not part of the disease's own set, which is what is compared.
         return {a or b or c for name in names for a, b, c in re.findall(
-            r'\bname="(\w+)"|data-patient-field="(\w+)"|field\(\'[^\']+\', \'(\w+)\'', sections[name])}
+            r'(?<!MarkedControl )\bname="(\w+)"|data-patient-field="(\w+)"|field\(\'[^\']+\', \'(\w+)\'', sections[name])}
 
     assert disease_profiles.SEED_DISEASE_FIELDS == {
         'BC': fields('BreastCancerSection', 'StagingBiomarkersSection'),
