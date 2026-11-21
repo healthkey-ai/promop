@@ -8,12 +8,11 @@ Issue: #721
 > each patient tab has an Add Field link for staff and org admins, the link
 > opens the Field Concept Mapping dialog in create mode on that tab (and, from
 > the disease tab, scoped to the record's disease), and created fields render
-> read-only last on their tab. See
+> last on their tab, where their value can be entered (#2669). See
 > [Adding a field from a patient tab](field_concept_mapping_architecture.md#adding-a-field-from-a-patient-tab).
 > The checklist below is the original plan, kept for its data model,
 > migration and API items; its two UI items describe the inline control that
-> was removed. Not built: writing a created field's value from the patient
-> editor.
+> was removed.
 
 ## Delivery checklist
 

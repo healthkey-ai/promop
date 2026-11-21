@@ -110,6 +110,13 @@ export function __resetWritableFieldsCache() {
   inflight.clear();
 }
 
+/** Forget every cached answer. Call after a change to which fields exist or
+ *  are mapped (a field added or a mapping saved in Field Concept Mapping):
+ *  that changes what is writable for every patient, and a patient page
+ *  reached without a reload would otherwise render from the answer it was
+ *  given before. */
+export const invalidateAllWritableFields = __resetWritableFieldsCache;
+
 /** Invalidate the cached descriptor for one patient so the next render
  *  re-fetches it. Call after authoring a therapy line or any other action
  *  that may change field writability within a session. */
@@ -148,11 +155,18 @@ export function fetchWritableFields(
   return pending;
 }
 
+const NONE: FieldDescriptors = {};
+
 export function useWritableFields(personId?: number | string) {
   const key = keyFor(personId);
-  const [descriptors, setDescriptors] = useState<FieldDescriptors>(
-    () => cached.get(key) ?? {},
+  // Held with the key it answers. When the person changes (a view that
+  // learns its person only once the record loads), the answer for the old
+  // key must not be read as the new one's: an absent entry is read-only,
+  // and the deployment-wide answer says every mapped field is writable.
+  const [loaded, setLoaded] = useState<{ key: string; descriptors: FieldDescriptors }>(
+    () => ({ key, descriptors: cached.get(key) ?? NONE }),
   );
+  const descriptors = loaded.key === key ? loaded.descriptors : (cached.get(key) ?? NONE);
   const [loading, setLoading] = useState(!cached.has(key));
   const [error, setError] = useState(false);
 
@@ -162,14 +176,14 @@ export function useWritableFields(personId?: number | string) {
     if (ready) {
       Promise.resolve().then(() => {
         if (!alive) return;
-        setDescriptors(ready);
+        setLoaded({ key, descriptors: ready });
         setLoading(false);
       });
       return;
     }
     fetchWritableFields(personId)
       .then((d) => {
-        if (alive) setDescriptors(d);
+        if (alive) setLoaded({ key, descriptors: d });
       })
       .catch(() => {
         // An unreachable descriptor must not make fields look editable. Callers

@@ -4,8 +4,8 @@
  * and org admins outside patient mode, and the fields added that way shown
  * last on their tab.
  */
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import PatientDetail, { PatientDetailRoute } from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -26,7 +26,12 @@ vi.mock('@/components/PatientInfo/tabs/DiseaseTab', () => ({ default: () => <div
 vi.mock('@/components/PatientInfo/tabs/TreatmentTab', () => ({ default: () => <div>treatment fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/LabsTab', () => ({ default: () => <div>lab fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/GenomicsTab', () => ({ default: () => <div>genomics fields</div> }));
-vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({ default: () => <div>behavior fields</div> }));
+// Behavior also stands in for anything that re-reads the record mid-edit.
+vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({
+  default: ({ onRefresh }: { onRefresh?: () => void }) => (
+    <div>behavior fields<button onClick={onRefresh}>Refresh patient</button></div>
+  ),
+}));
 vi.mock('@/components/PatientInfo/tabs/WearableTab', () => ({ default: () => <div>wearable fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/ClinicalSummaryTab', () => ({ default: () => <div>history</div> }));
 vi.mock('./PatientOmopTab', () => ({ default: () => <div>omop rows</div> }));
@@ -51,6 +56,9 @@ const CUSTOM_FIELDS = [
   custom(3, 'frailty_index', 'Frailty index', 'labs'),
 ];
 
+// What the server lets this caller write on this patient.
+const writable = { kind: 'direct', writable: true, target: 'patient_record', custom: true };
+let descriptors: Record<string, unknown>;
 let record: Record<string, unknown>;
 // Disease Category management's mapping of disease names to categories.
 let diseaseMappings: Array<{ disease_name: string; category: string }>;
@@ -60,12 +68,14 @@ beforeEach(() => {
   __resetWritableFieldsCache();
   __resetDiseaseCategoryCaches();
   diseaseMappings = [];
+  descriptors = { m_protein_note: writable, her2_note: writable, frailty_index: writable };
+  (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {} });
   record = {
     person_id: 101, patient_name: 'Ada Lovelace', disease: 'Multiple Myeloma',
     custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Fit' },
   };
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
-    if (url.includes('writable-fields')) return Promise.resolve({ data: {} });
+    if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
     if (url.includes('custom-patient-fields')) return Promise.resolve({ data: CUSTOM_FIELDS });
     if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
     if (url.includes('/patient-info/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
@@ -205,7 +215,7 @@ describe('PatientDetail — added fields', () => {
     openTab('Multiple Myeloma');
     const added = await screen.findByTestId('custom-patient-fields');
     expect(within(added).getByText('M protein note')).toBeInTheDocument();
-    expect(within(added).getByText('IgG kappa')).toBeInTheDocument();
+    expect(within(added).getByDisplayValue('IgG kappa')).toBeInTheDocument();
     // Another disease's field is not part of this record.
     expect(screen.queryByText('HER2 note')).not.toBeInTheDocument();
     const fields = screen.getByText('disease fields');
@@ -227,7 +237,7 @@ describe('PatientDetail — added fields', () => {
     await renderPatient(DOCTOR);
     openTab('Labs');
     expect(await screen.findByText('Frailty index')).toBeInTheDocument();
-    expect(screen.getByText('Fit')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Fit')).toBeInTheDocument();
     openTab('Breast Cancer');
     expect(await screen.findByText('HER2 note')).toBeInTheDocument();
     expect(screen.queryByText('M protein note')).not.toBeInTheDocument();
@@ -245,5 +255,133 @@ describe('PatientDetail — added fields', () => {
     await screen.findByText('M protein note');
     const reads = (api.get as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => String(url).includes('custom-patient-fields'));
     expect(reads).toHaveLength(1);
+  });
+});
+
+/** Editing an added field (#2669): it saves with the record, under custom_fields. */
+describe('PatientDetail — editing an added field', () => {
+  afterEach(() => vi.useRealTimers());
+
+  const patches = () => (api.patch as ReturnType<typeof vi.fn>).mock.calls;
+
+  it('saves an edit through the record PATCH, sending only the field that was edited', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    await waitFor(() => expect(input).toBeEnabled());
+
+    fireEvent.change(input, { target: { value: 'IgA lambda' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Not the object the editor holds: its other keys are the server's, as
+    // they were when the record was read.
+    expect(patches()[0]).toEqual(['/patient-info/101/', {
+      custom_fields: { m_protein_note: 'IgA lambda' },
+    }]);
+    expect(screen.getByDisplayValue('IgA lambda')).toBeInTheDocument();
+
+    // A later save of something else does not send the added field again.
+    openTab('Labs');
+    fireEvent.change(await screen.findByDisplayValue('Fit'), { target: { value: 'Frail' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1][1]).toEqual({ custom_fields: { frailty_index: 'Frail' } });
+  });
+
+  it('sends two fields edited before one save together', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'IgA' } });
+    openTab('Labs');
+    fireEvent.change(await screen.findByDisplayValue('Fit'), { target: { value: 'Frail' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches().length).toBeGreaterThan(0));
+    expect(Object.assign({}, ...patches().map(([, body]) => body.custom_fields))).toEqual({
+      m_protein_note: 'IgA', frailty_index: 'Frail',
+    });
+  });
+
+  it("keeps an unsaved edit and takes everyone else's values when the record is re-read", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'IgA lambda' } });
+
+    // Before the save goes out, someone else's value for another added field
+    // arrives with a re-read of the record.
+    record = { ...record, custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Robust' } };
+    const reads = () => (api.get as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([url]) => String(url).includes('/patient-info/101/')).length;
+    const before = reads();
+    openTab('Behavior');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));
+    await waitFor(() => expect(reads()).toBe(before + 1));
+
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Only the field edited here: the stale copy of the other one is not sent back.
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: 'IgA lambda' } });
+    openTab('Labs');
+    expect(await screen.findByDisplayValue('Robust')).toBeInTheDocument();
+    openTab('Multiple Myeloma');
+    expect(await screen.findByDisplayValue('IgA lambda')).toBeInTheDocument();
+  });
+
+  it('sends null for a value that was cleared', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    await waitFor(() => expect(input).toBeEnabled());
+
+    fireEvent.change(input, { target: { value: '' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: null } });
+  });
+
+  it("shows the server's reason when it refuses an added field's value", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    (api.patch as ReturnType<typeof vi.fn>).mockRejectedValue({ response: { status: 400, data: {
+      custom_fields: { m_protein_note: ['Enter text.'] },
+    } } });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'x' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    expect(await screen.findByText(/m_protein_note: Enter text\./)).toBeInTheDocument();
+  });
+
+  it('offers no input to a caller the server does not let write', async () => {
+    descriptors = { m_protein_note: {
+      kind: 'direct', writable: false, read_only_for_caller: true,
+      reason: 'You have read-only access to this patient record.',
+    } };
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    expect(input).toBeDisabled();
+    expect(await screen.findByTestId('reason-m_protein_note')).toHaveTextContent('read-only access');
+  });
+
+  it('lets the patient edit an added field on their own record', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(
+      <MemoryRouter>
+        <PatientDetail personIdOverride="101" patientMode user={DOCTOR} />
+      </MemoryRouter>,
+    );
+    await screen.findByText('general fields');
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: 'IgG kappa, stable' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: 'IgG kappa, stable' } });
   });
 });

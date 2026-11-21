@@ -4,7 +4,7 @@ import { Check, AlertCircle } from "lucide-react";
 import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { fetchWritableFields, useWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
 import { marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
@@ -20,6 +20,7 @@ import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientField
 import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
 import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
+import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -111,11 +112,18 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
+  // Which of them this caller may edit on this patient (#2669). Until the
+  // record names its person there is no such answer, and none is read-only.
+  const { descriptors: writableFields } = useWritableFields(
+    editedInfo.person_id as number | string | undefined,
+  );
   const { categoryForDisease } = useAllDiseaseMappings();
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
   const dirtyFieldsRef = useRef(new Set<string>());
+  // The added fields edited and not yet saved (the keys of custom_fields).
+  const dirtyAddedFieldsRef = useRef(new Set<string>());
   const serverInfoRef = useRef<Record<string, unknown>>(initialInfo);
   const editedInfoRef = useRef<Record<string, unknown>>({});
   const editedNameRef = useRef("");
@@ -128,6 +136,12 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     const kept: string[] = [];
     for (const field of dirtyFieldsRef.current) {
       if (field === 'patient_name') continue;
+      if (field === ADDED_FIELDS && pending && dirtyAddedFieldsRef.current.size) {
+        // Only the keys still being edited go back over the server's object.
+        rebased[field] = mergeAddedFields(
+          initialInfo[field], pickAddedFields(pending[field], dirtyAddedFieldsRef.current));
+        continue;
+      }
       // A touched proposal is kept even on the proposed value: that is confirming it.
       if (pending && (pending[field] !== initialInfo[field] || field in marksOf(initialInfo))) {
         rebased[field] = pending[field];
@@ -195,11 +209,19 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       // fields to OMOP tables after the PATCH lands.
       const patchFields: Record<string, unknown> = {};
 
+      // What this save sends of the added fields: the keys edited, as they
+      // are now, never the whole object the editor holds (#2669).
+      const addedSent = pickAddedFields(info[ADDED_FIELDS], [...dirtyAddedFieldsRef.current]);
+
       if (personId) {
         // An untouched proposal equals the baseline and is never sent; a touched
         // one is the user's answer even on the proposed value (#2659).
         const proposed = marksOf(baseline);
         for (const [f, v] of Object.entries(info)) {
+          if (f === ADDED_FIELDS) {
+            if (Object.keys(addedSent).length) patchFields[f] = addedSent;
+            continue;
+          }
           const confirmed = f in proposed && dirtyFieldsRef.current.has(f);
           if (f === "patient_name" || LIFECYCLE.has(f) || (v === baseline[f] && !confirmed)) continue;
           const desc = descriptors[f];
@@ -243,6 +265,15 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       // The fields the save wrote, not the request body: rejected_proposals is no field.
       serverInfoRef.current = withoutMarks(serverInfoRef.current, Object.keys(patchFields));
       for (const f of Object.keys(patchFields)) {
+        if (f === ADDED_FIELDS) {
+          const now = pickAddedFields(pendingDataRef.current?.[f], Object.keys(addedSent));
+          for (const [name, value] of Object.entries(addedSent)) {
+            if (now[name] === value) dirtyAddedFieldsRef.current.delete(name);
+          }
+          serverInfoRef.current[f] = mergeAddedFields(serverInfoRef.current[f], addedSent);
+          if (!dirtyAddedFieldsRef.current.size) dirtyFieldsRef.current.delete(f);
+          continue;
+        }
         serverInfoRef.current[f] = info[f];
         if (pendingDataRef.current?.[f] === info[f]) dirtyFieldsRef.current.delete(f);
       }
@@ -290,6 +321,16 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     setEditedInfo(updated);
     scheduleAutoSave(updated);
   }, [scheduleAutoSave, readOnly]);
+
+  // An added field has no column: its value is a key of custom_fields. The
+  // editor holds that object whole and the save sends only the keys edited
+  // here (#2669).
+  const handleAddedFieldChange = useCallback((fieldName: string, value: unknown) => {
+    if (readOnly) return;
+    const base = pendingDataRef.current ?? editedInfoRef.current;
+    dirtyAddedFieldsRef.current.add(fieldName);
+    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }));
+  }, [handleFieldChange, readOnly]);
 
   const handleNameChange = useCallback((name: string) => {
     if (readOnly) return;
@@ -496,6 +537,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
               tabs={addedFieldTabs(tabKeys[activeTab])}
               diseases={diseaseCode ? [diseaseCode] : []}
               formData={editedInfo}
+              descriptors={editedInfo.person_id == null ? undefined : writableFields}
+              onChange={readOnly ? undefined : handleAddedFieldChange}
             />
           )}
         </div>

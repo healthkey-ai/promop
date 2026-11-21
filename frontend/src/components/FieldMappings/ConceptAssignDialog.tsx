@@ -124,7 +124,7 @@ const TIP = {
   value_type:
     "What kind of value the field holds.",
   field_mode:
-    "From OMOP data: the value is read from the patient's OMOP facts for the concept. Computed: the value comes from a formula over other fields. Either way the field is read-only on the patient tab.",
+    "Editable: the value is entered on the patient tab, or read from the patient's OMOP facts for the concept. Computed: the value comes from a formula over other fields and is read-only.",
   formula:
     "An expression over other PatientRecord fields, e.g. weight / (height / 100) ^ 2.",
   tab:
@@ -437,7 +437,8 @@ export function ConceptAssignDialog({
           {creating ? (
             <p className="mt-1 text-sm text-slate-500">
               A new PatientRecord field. Choosing its concept and saving creates the field with an approved
-              mapping. A patient shows a value for it once their record is next derived from their OMOP data.
+              mapping. It can then be filled in on the patient tab; a value already in a patient's OMOP data
+              appears once their record is next derived.
             </p>
           ) : (
             <p className="mt-1 text-sm text-slate-500">
@@ -511,7 +512,7 @@ export function ConceptAssignDialog({
                     onChange={(e) => setFieldMode(e.target.value as FieldMode)}
                     className={`${INPUT_CLASS} w-full`}
                   >
-                    <option value="editable">From OMOP data</option>
+                    <option value="editable">Editable</option>
                     <option value="computed">Computed from a formula</option>
                   </select>
                 </Field>

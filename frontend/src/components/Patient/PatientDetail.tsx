@@ -34,6 +34,7 @@ import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientField
 import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
 import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
+import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -405,6 +406,9 @@ export default function PatientDetail({
   const saveSeqRef = useRef(0);
   const saveRevisionRef = useRef(0);
   const dirtyFieldsRef = useRef(new Set<string>());
+  // The added fields edited and not yet saved. custom_fields is one object,
+  // so "dirty" alone cannot say which of its keys the user changed.
+  const dirtyAddedFieldsRef = useRef(new Set<string>());
   const confirmedWritesRef = useRef<Record<string, unknown>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
@@ -448,7 +452,10 @@ export default function PatientDetail({
       // proposal mark must not come back with the stale record.
       fresh = withoutMarks(fresh, Object.keys(confirmedWritesRef.current));
       for (const [field, value] of Object.entries(confirmedWritesRef.current)) {
-        if (fresh[field] === value) delete confirmedWritesRef.current[field];
+        // For added fields the confirmed write is the keys this editor saved;
+        // every other key is the server's.
+        if (field === ADDED_FIELDS) fresh[field] = mergeAddedFields(fresh[field], value);
+        else if (fresh[field] === value) delete confirmedWritesRef.current[field];
         else fresh[field] = value;
       }
     }
@@ -456,9 +463,13 @@ export default function PatientDetail({
     const unsaved: Record<string, unknown> = {};
     if (pending) {
       for (const field of dirtyFieldsRef.current) {
+        if (field === ADDED_FIELDS && dirtyAddedFieldsRef.current.size) {
+          // Keep only the keys still being edited on top of the fresh object.
+          unsaved[field] = mergeAddedFields(
+            fresh[field], pickAddedFields(pending.info[field], dirtyAddedFieldsRef.current));
         // A touched proposal is kept even when the user ended on the proposed
         // value: that is confirming it, and the refresh must not undo it.
-        if (!LIFECYCLE.has(field) && (pending.info[field] !== fresh[field] || field in marksOf(fresh))) {
+        } else if (!LIFECYCLE.has(field) && (pending.info[field] !== fresh[field] || field in marksOf(fresh))) {
           unsaved[field] = pending.info[field];
         } else {
           dirtyFieldsRef.current.delete(field);
@@ -549,7 +560,15 @@ export default function PatientDetail({
       // A proposal the user touched is sent even when they land on the same
       // value: that is confirming it, and it becomes approved data (#2659).
       const proposed = marksOf(baseline);
+      // What this save sends of the added fields: the keys edited, as they
+      // are now. Kept apart so a later edit to one of them stays dirty.
+      const addedSent = pickAddedFields(info[ADDED_FIELDS], [...dirtyAddedFieldsRef.current]);
+
       for (const [f, v] of Object.entries(info)) {
+        if (f === ADDED_FIELDS) {
+          if (Object.keys(addedSent).length) patchFields[f] = addedSent;
+          continue;
+        }
         const confirmed = f in proposed && dirtyFieldsRef.current.has(f);
         if (LIFECYCLE.has(f) || (v === baseline[f] && !confirmed)) continue;
         const desc = descriptors[f];
@@ -575,6 +594,18 @@ export default function PatientDetail({
           patientInfoRef.current = withoutMarks(patientInfoRef.current, Object.keys(patchFields));
         }
         for (const f of Object.keys(patchFields)) {
+          if (f === ADDED_FIELDS) {
+            const now = pickAddedFields(pendingDataRef.current?.info[f], Object.keys(addedSent));
+            for (const [name, value] of Object.entries(addedSent)) {
+              if (now[name] === value) dirtyAddedFieldsRef.current.delete(name);
+            }
+            if (patientInfoRef.current) {
+              patientInfoRef.current[f] = mergeAddedFields(patientInfoRef.current[f], addedSent);
+            }
+            confirmedWritesRef.current[f] = mergeAddedFields(confirmedWritesRef.current[f], addedSent);
+            if (!dirtyAddedFieldsRef.current.size) dirtyFieldsRef.current.delete(f);
+            continue;
+          }
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
@@ -625,7 +656,12 @@ export default function PatientDetail({
             }
             else if (typeof data.error === "string") detail = data.error;
             else {
-              const fieldErrors = Object.entries(data)
+              // An added field's refusal is nested under custom_fields, by
+              // its own name: {custom_fields: {frailty_index: ["Enter a number."]}}.
+              const { [ADDED_FIELDS]: added, ...columns } = data;
+              const nested = added && typeof added === "object" && !Array.isArray(added)
+                ? added as Record<string, unknown> : {};
+              const fieldErrors = [...Object.entries(columns), ...Object.entries(nested)]
                 .filter(([, v]) => Array.isArray(v))
                 .map(([k, v]) => `${k}: ${(v as string[]).join(", ")}`)
                 .join("; ");
@@ -720,6 +756,15 @@ export default function PatientDetail({
     scheduleAutoSave(updated, editedNameRef.current);
   }, [scheduleAutoSave]);
 
+
+  // An added field has no column: its value is a key of custom_fields. The
+  // editor holds that object whole and the save sends only the keys edited
+  // here (#2669).
+  const handleAddedFieldChange = useCallback((fieldName: string, value: unknown) => {
+    const base = pendingDataRef.current?.info ?? editedInfoRef.current;
+    dirtyAddedFieldsRef.current.add(fieldName);
+    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }));
+  }, [handleFieldChange]);
 
   const handleNameChange = useCallback((name: string) => {
     setEditedName(name);
@@ -1154,6 +1199,8 @@ export default function PatientDetail({
                     tabs={addedFieldTabs(fieldTab)}
                     diseases={diseaseCode ? [diseaseCode] : []}
                     formData={editedInfo}
+                    descriptors={writableFields.descriptors}
+                    onChange={handleAddedFieldChange}
                   />
                 )}
                 {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}

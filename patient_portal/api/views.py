@@ -295,6 +295,11 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
     # language_skills are PersonLanguageSkill rows, not PatientRecord columns.
     # Pop them before the serializer sees an unknown key.
     language_skills = patch_data.pop('language_skills', None) if 'language_skills' in patch_data else None
+    # Created fields have no column: their values ride under custom_fields,
+    # which the serializer treats as read-only, and are written by hand
+    # below along the same PatientRecord-first path (#2669).
+    from omop_core.services import custom_field_values
+    custom_payload = patch_data.pop('custom_fields', None) if 'custom_fields' in patch_data else None
     # Demographics (gender/race/ethnicity) are popped because the serializer's
     # GenderField is read-only and would silently drop the value.  They are
     # projected to Person separately, writing the raw display text as the
@@ -329,6 +334,16 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
             patch_data = {key: value for key, value in patch_data.items() if key not in rejected}
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
+        # Read against the locked row: only a key whose value moved is an edit.
+        custom_edits, custom_definitions = {}, {}
+        if custom_payload is not None:
+            try:
+                if isinstance(custom_payload, dict) and custom_payload:
+                    custom_definitions = custom_field_values.definitions(custom_payload)
+                custom_edits = custom_field_values.changed_values(
+                    patient_info, custom_payload, custom_definitions)
+            except custom_field_values.CustomValueError as error:
+                raise ValidationError({'custom_fields': {error.field_name: [error.message]}})
         # Validate location fields early, before serializer.save() writes
         # to PatientRecord — the model has a check constraint requiring
         # both lat/lng or neither, so a partial clear would fail at the DB.
@@ -421,6 +436,19 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
             except LanguageSkillError as exc:
                 raise ValidationError({'detail': str(exc)})
 
+        if custom_edits:
+            # PatientRecord first, pending until OMOP represents the value,
+            # then forward through each field's own mapping. A formula may
+            # read these, so they are stored before the recompute below.
+            previous_custom = custom_field_values.store(patient_info, custom_edits)
+            patient_info.save(update_fields=['custom_fields', 'user_edited_fields'])
+            _write_custom_field_revisions(patient_info, previous_custom, custom_edits, actor)
+            custom_field_values.acknowledge(patient_info, custom_field_values.project(
+                person, custom_edits, custom_definitions,
+                **_patient_authorship(actor, person)))
+            patient_info.save(update_fields=['user_edited_fields'])
+            previous_values['custom_fields'] = previous_custom
+
         if clinical_fields:
             from omop_core.services.patient_record_service import recompute_patient_record_fields
 
@@ -438,7 +466,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
             )
             recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
             patient_info.refresh_from_db()
-        elif profile_projected or touched_languages:
+        elif profile_projected or touched_languages or custom_edits:
             from omop_core.services.patient_record_service import recompute_patient_record_fields
             recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
             patient_info.refresh_from_db()
@@ -450,9 +478,9 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
             # the pass keeps them out until the proposal changes.
             from omop_core.services.provisional_record import reject_proposals
             direct_fields = direct_fields | reject_proposals(person, patient_info, rejected, actor)
-        if direct_fields:
+        if direct_fields or custom_edits:
             from omop_core.services.provisional_record import mirror_user_edit
-            mirror_user_edit(patient_info, direct_fields)
+            mirror_user_edit(patient_info, direct_fields | ({'custom_fields'} if custom_edits else set()))
 
     return patient_info, previous_values
 
@@ -1182,6 +1210,40 @@ def _write_record_revisions(patient_record, previous_values, user):
     if rows:
         RecordRevision.objects.bulk_create(rows)
     return rows
+
+
+def _write_custom_field_revisions(patient_record, previous, edits, user):
+    """Revision rows for created-field edits, named ``custom_fields.<name>``.
+
+    The same history ``_write_record_revisions`` keeps for a column
+    (PHR-S FM TI.1.2#04); a created field's value is a key of one JSON column,
+    so its rows are written from the edit itself.
+    """
+    from omop_core.models import RecordRevision
+    from omop_core.services.custom_field_values import pending_key
+
+    changed_by = (
+        str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
+        else 'system'
+    )
+    width = RecordRevision._meta.get_field('field').max_length
+
+    def history_name(name):
+        # A name too long to carry the prefix is recorded as itself, whole:
+        # cut short, two long names would share one history. A created field
+        # cannot be named as a column, so the bare name is not ambiguous.
+        prefixed = pending_key(name)
+        return prefixed if len(prefixed) <= width else name
+
+    RecordRevision.objects.bulk_create([
+        RecordRevision(
+            patient_record=patient_record, changed_by=changed_by,
+            field=history_name(name),
+            old_value=None if previous.get(name) is None else str(previous[name]),
+            new_value=None if value is None else str(value),
+        )
+        for name, value in edits.items()
+    ])
 
 
 def _delete_omop_clinical_rows(person):
@@ -5940,7 +6002,14 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         # Every entry says whose record it is part of: the base record, or the
         # extension of the diseases it names (#2331). ?disease= narrows the
         # answer to one profile; it describes the record and refuses nothing.
-        descriptor = disease_profiles.annotate(build_writable_field_descriptor())
+        # Created fields are fields of the record too (#2669): listed here so a
+        # client knows which it may edit, added at this endpoint because their
+        # values ride the PATCH under ``custom_fields`` and the save path reads
+        # the built-in descriptor on every request.
+        from omop_core.services import custom_field_values
+        descriptor = disease_profiles.annotate({
+            **build_writable_field_descriptor(), **custom_field_values.descriptor_entries(),
+        })
         named = [value for value in request.query_params.getlist('disease') if value.strip()]
         if named:
             with public_errors(disease_profiles.ScopeError, field='detail'):

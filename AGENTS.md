@@ -51,6 +51,11 @@ document for interactive edits, and the rules below assume it.
   A later sync or derivation pass may round-trip OMOP facts back into the
   record, and `user_edited_fields` is what keeps a pending edit from being
   overwritten when it does.
+- **A created field is edited the same way.** Its value has no column: the
+  PATCH carries it under `custom_fields`, it lands in
+  `PatientRecord.custom_fields`, is tracked in `user_edited_fields` as
+  `custom_fields.<name>`, and feeds forward through the field's own mapping
+  (`omop_core/services/custom_field_values.py`, #2669).
 - **Ingest goes the other way.** The ETL, FHIR sync and bulk OMOP endpoints
   write OMOP facts and derive the record from them. See
   [FHIR Upload Architecture](#fhir-upload-architecture) below.
