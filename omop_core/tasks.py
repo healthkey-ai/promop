@@ -182,6 +182,28 @@ def repoint_mapping_rows_task(mapping_id: int) -> dict[str, Any]:
     return {'mapping_id': mapping_id, **run_repoint(mapping_id)}
 
 
+class _MappingBusy(Exception):
+    """A re-point of the same mapping is running; try again shortly."""
+
+
+@shared_task(name='omop_core.unpoint_mapping_rows', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3)
+def unpoint_mapping_rows_task(mapping_id: int, old_concept_id: int) -> dict[str, Any]:
+    """Move a mapping's stored rows off a destination a curator removed (#2744).
+
+    Dispatched when Delete clears a destination. Idempotent: a repeat finds no
+    rows left at the old destination. Retried while a re-point of the same
+    mapping holds it; past that the destination stays on the mapping's
+    ``pending_repoint_concept_ids`` and the next approval moves the rows.
+    """
+    from omop_core.services.repoint_jobs import run_unpoint
+
+    result = run_unpoint(mapping_id, old_concept_id)
+    if result.pop('busy'):
+        raise _MappingBusy(f'mapping {mapping_id} is being re-pointed')
+    return {'mapping_id': mapping_id, 'old_concept_id': old_concept_id, **result}
+
+
 @shared_task(name='omop_core.relocate_mapping_rows', autoretry_for=(Exception,),
              retry_backoff=60, max_retries=3)
 def relocate_mapping_rows_task(mapping_id: int, from_table: str, to_table: str) -> dict[str, Any]:
