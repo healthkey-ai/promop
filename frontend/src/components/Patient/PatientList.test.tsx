@@ -355,3 +355,14 @@ it('fetches the list once even when every response carries a new filter_options 
   await new Promise((resolve) => setTimeout(resolve, 300));
   expect(api.get).toHaveBeenCalledTimes(1);
 });
+
+it('offers Add patient to staff and org admins only', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
+  const { unmount } = render(<MemoryRouter><PatientList /></MemoryRouter>);
+  expect(await screen.findByRole('button', { name: /Add patient/ })).toBeInTheDocument();
+  unmount();
+  mockUseAuth.mockReturnValue({ currentUser: { is_staff: false, group_access: [] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Patients');
+  expect(screen.queryByRole('button', { name: /Add patient/ })).not.toBeInTheDocument();
+});
