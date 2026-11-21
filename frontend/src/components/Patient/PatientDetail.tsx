@@ -394,7 +394,7 @@ export default function PatientDetail({
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
-  const { categoryForDisease } = useAllDiseaseMappings();
+  const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();
   const { categories: categoryObjects } = useCategoryObjects();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
@@ -873,7 +873,9 @@ export default function PatientDetail({
     [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors, recordCategory],
   );
 
-  if (loading) return <PatientDetailSkeleton />;
+  // Until the mappings are in, the record's category is a guess, and a tab that
+  // appears and then goes would move every tab after it.
+  if (loading || mappingsLoading) return <PatientDetailSkeleton />;
 
   if (fetchError && !patientInfo) {
     return (

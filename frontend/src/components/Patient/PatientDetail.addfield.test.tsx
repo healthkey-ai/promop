@@ -150,6 +150,15 @@ describe('PatientDetail — Add Field', () => {
     ]));
   });
 
+  it('reads a disease name with stray spaces as the server does', async () => {
+    record = { ...record, disease: ' Diffuse Large B-Cell Lymphoma ' };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    await renderPatient(STAFF);
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .queryByRole('button', { name: 'Follicular Lymphoma' })).toBeNull();
+    openTab('DLBCL');
+  });
+
   it('gives a category with no field yet a tab to the people who can add one, and to no one else', async () => {
     record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma' };
     diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];

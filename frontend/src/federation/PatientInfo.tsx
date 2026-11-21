@@ -117,7 +117,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const { descriptors: writableFields } = useWritableFields(
     editedInfo.person_id as number | string | undefined,
   );
-  const { categoryForDisease } = useAllDiseaseMappings();
+  const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();
   const { categories: categoryObjects } = useCategoryObjects();
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -398,7 +398,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     [editedInfo],
   );
 
-  if (isLoading) return <PatientInfoSkeleton />;
+  // The category is a guess until the mappings are in; see PatientDetail.
+  if (isLoading || mappingsLoading) return <PatientInfoSkeleton />;
 
   if (isError) {
     const httpStatus = (error as { response?: { status?: number } })?.response?.status;
