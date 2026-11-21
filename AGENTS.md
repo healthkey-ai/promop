@@ -737,6 +737,13 @@ mapping endpoint's reads with `_can_view_mappings` and its writes with
 that module); a mixed-verb view checks both. `AnalystRoleScopeTest` and
 `MappingApprovalRoleTest` in `patient_portal/tests.py` hold the roles to this.
 
+An org admin creates a patient record from the Patients page ("Add patient",
+`POST /api/v1/patients/`, #2773): the record alone, with an emailed invitation
+(the existing `patient-invitations` flow, where the patient sets their own
+password), or for themselves -- linked through `PatientUser`, with the `patient`
+role added at the organization beside `org_admin`. The organization must be one
+the caller administers (`get_admin_orgs`); machine credentials are refused.
+
 Adding a field to PatientRecord is an approval, not a mapping write: `POST
 /api/v1/custom-patient-fields/` creates the field with an approved mapping, so
 it is gated by `_can_approve_mappings` and an analyst or a doctor gets 403

@@ -84,7 +84,7 @@ from .org_views import (
     OrgPatientSignupView,
 )
 from .patient_invitations import (
-    PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
+    PatientCreateView, PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
 )
 from .patient_signup import PatientSignupView
 from .audit_views import AuditEventViewSet
@@ -149,6 +149,7 @@ urlpatterns = [
          name='v1-resolve-run-status'),
     path('auth/test/', auth_test, name='v1-auth-test'),
     path('patients/signup/', PatientSignupView.as_view(), name='v1-patient-signup'),
+    path('patients/', PatientCreateView.as_view(), name='v1-patient-create'),
     path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
     path('patient-invitations/lookup/', patient_invitation_lookup, name='v1-patient-invitation-lookup'),
     path('patient-invitations/accept/', accept_patient_invitation, name='v1-patient-invitation-accept'),

@@ -1,12 +1,13 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
+import { Upload, UserPlus, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
 import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
+import AddPatientDialog from './AddPatientDialog';
 
 import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
@@ -137,6 +138,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addNotice, setAddNotice] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
@@ -429,6 +432,15 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             >
               <Upload size={16} />
               Upload
+            </button>
+          )}
+          {canAdministerOrganizations && (
+            <button
+              onClick={() => setAddDialogOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+            >
+              <UserPlus size={16} />
+              Add patient
             </button>
           )}
           <div className="ml-auto flex gap-2">
@@ -749,6 +761,18 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         />
       </div>
 
+      {addNotice && <p role="status" className="fixed bottom-4 right-4 z-50 rounded-md bg-emerald-600 px-4 py-2 text-sm text-white shadow-lg">{addNotice}</p>}
+      {addDialogOpen && (
+        <AddPatientDialog
+          onClose={() => setAddDialogOpen(false)}
+          onCreated={({ personId, forSelf, message }) => {
+            setAddDialogOpen(false);
+            setAddNotice(message);
+            if (forSelf) navigate(`/patient/${personId}`);
+            else void fetchPatients();
+          }}
+        />
+      )}
       {deleteDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">
