@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { attestationBlockers, diseaseTypeOf, marksOf, rejectedProposals, withoutMarks } from './provisional';
+import { attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks } from './provisional';
 
 describe('rejectedProposals', () => {
   const proposed = { hemoglobin_g_dl: 82, smoking_status: 70 };
@@ -155,5 +155,30 @@ describe('attestationBlockers with the disease tab and the checklists (#2761)', 
   it('leaves out a calculated field once the descriptor says it has no write path', () => {
     const descriptors = { flipi_score: { writable: false }, b_symptom_fever: { writable: true } };
     expect(attestationBlockers(lymphoma({ flipi_score: 66, b_symptom_fever: 75 }), descriptors)).toEqual(['b_symptom_fever']);
+  });
+});
+
+describe('attestationBlockers with the record\'s Disease Category (#2332)', () => {
+  const marks = { provisional_fields: { b_symptom_fever: 75, esr: 70 }, disease: 'Follicular Lymphoma' };
+
+  it('counts the section of the category, whatever the disease text says', () => {
+    // A diffuse large B-cell lymphoma the name match would read as follicular, filed under a category with no section.
+    const dlbcl = { ...marks, disease: 'Diffuse Large B-Cell Lymphoma' };
+    expect(attestationBlockers(dlbcl, null)).toEqual(['b_symptom_fever', 'esr']);
+    expect(attestationBlockers(dlbcl, null, 'DLBCL')).toEqual(['esr']);
+    expect(attestationBlockers(dlbcl, null, 'FL')).toEqual(['b_symptom_fever', 'esr']);
+  });
+
+  it('counts only the always-shown tabs for the base record', () => {
+    expect(attestationBlockers(marks, null, '')).toEqual(['esr']);
+  });
+});
+
+describe('diseaseTypeOfCategory', () => {
+  it.each([
+    ['BC', 'breast'], ['FL', 'lymphoma'], ['MM', 'myeloma'], ['CLL', 'cll'], ['MCL', 'mcl'],
+    ['DLBCL', 'other'], ['', 'other'],
+  ])('reads %j as %s', (code, expected) => {
+    expect(diseaseTypeOfCategory(code)).toBe(expected);
   });
 });

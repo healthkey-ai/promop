@@ -134,27 +134,57 @@ describe('PatientDetail — Add Field', () => {
     ]);
   });
 
-  it("uses Disease Category management's category for the record's disease over the editor's name match", async () => {
-    // The editor shows a diffuse large B-cell lymphoma on its lymphoma tab;
-    // the record's category is DLBCL, not FL.
+  it("picks the disease tab by Disease Category management's category, not the name match", async () => {
+    // The old name match showed a diffuse large B-cell lymphoma on the follicular
+    // tab; the record's category is DLBCL, which has no hand-authored section, so
+    // its tab is the category's own and a field added there is scoped to DLBCL.
     record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma' };
     diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
     await renderPatient(STAFF);
-    openTab('Follicular Lymphoma');
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .queryByRole('button', { name: 'Follicular Lymphoma' })).toBeNull();
+    openTab('DLBCL');
     await waitFor(() => expect(hrefs()).toEqual([
       '/field-mappings?new=1&tab=disease&disease=DLBCL',
       '/field-mappings?new=1&tab=disease&disease=DLBCL',
     ]));
   });
 
-  it("names no disease for a record Disease Category management maps to Other", async () => {
+  it('gives a category with no field yet a tab to the people who can add one, and to no one else', async () => {
+    record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma' };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    await renderPatient(DOCTOR);
+    const tabs = () => within(screen.getByRole('navigation', { name: 'Patient info tabs' }));
+    expect(tabs().queryByRole('button', { name: 'DLBCL' })).toBeNull();
+  });
+
+  it('shows everyone the tab of a category once a field is placed on its extension', async () => {
+    record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma', custom_fields: { cd20_note: 'positive' } };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
+      if (url.includes('custom-patient-fields')) {
+        return Promise.resolve({ data: [...CUSTOM_FIELDS, custom(4, 'cd20_note', 'CD20 note', 'disease', ['DLBCL'])] });
+      }
+      if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
+      if (url.includes('/patient-info/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
+      return Promise.resolve({ data: [] });
+    });
+    await renderPatient(DOCTOR);
+    await waitFor(() => expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .getByRole('button', { name: 'DLBCL' })).toBeInTheDocument());
+    openTab('DLBCL');
+    expect(await screen.findByText('CD20 note')).toBeInTheDocument();
+    expect(screen.queryByText('M protein note')).toBeNull();
+  });
+
+  it('has no disease tab for a record Disease Category management maps to Other', async () => {
     record = { ...record, disease: 'Mantle Cell Lymphoma' };
     diseaseMappings = [{ disease_name: 'Mantle Cell Lymphoma', category: 'Other' }];
     await renderPatient(STAFF);
-    openTab('Mantle Cell Lymphoma');
-    await waitFor(() => expect(hrefs()).toEqual([
-      '/field-mappings?new=1&tab=disease', '/field-mappings?new=1&tab=disease',
-    ]));
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .queryByRole('button', { name: 'Mantle Cell Lymphoma' })).toBeNull();
+    expect(hrefs()).toEqual(['/field-mappings?new=1&tab=general', '/field-mappings?new=1&tab=general']);
   });
 
   it('has no Add Field on tabs that hold no PatientRecord fields', async () => {

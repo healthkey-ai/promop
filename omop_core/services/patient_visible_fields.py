@@ -15,7 +15,7 @@ quoted string in the tab components below, less ``not_for_patients``; those tabs
 on screen whatever the disease. ``disease_fields`` is the same scan of the disease
 tab, one entry per disease type: that tab shows one section for the patient's own
 disease, which the page decides from the disease text (``disease_rules``, first
-keyword found wins, read by ``provisional.ts`` and ``disease_type`` below), so the
+keyword found wins, the fallback for a disease name the Disease Category mapping does not hold: ``disease_type`` below, ``provisional.ts``), so the
 fields on screen are ``fields`` plus the entry for that type; ``disease_sections`` names
 the functions of the disease tab each type renders, so the frontend check can redo that
 scan. ``columns`` is every
@@ -82,6 +82,19 @@ DISEASE_RULES = (
     ('cll', 'cll'),
     ('chronic lymphocytic', 'cll'),
 )
+
+# The Disease Category whose extension each disease type's section renders
+# (``disease_profiles.SEED_DISEASE_FIELDS`` is keyed by these). The page picks
+# a record's section by its Disease Category and reads this to name the type
+# (#2332); ``disease_rules`` above is only the fallback for a disease name the
+# Disease Category mapping does not hold.
+DISEASE_TYPE_CATEGORY = {
+    'breast': 'BC',
+    'lymphoma': 'FL',
+    'myeloma': 'MM',
+    'cll': 'CLL',
+    'mcl': 'MCL',
+}
 
 # Functions of DiseaseTab.tsx that render no disease fields of their own.
 NOT_SECTIONS = ('DatePrecisionPicker', 'DiseaseTab')
@@ -178,6 +191,7 @@ def render(names: list[str], disease: dict[str, list[str]]) -> str:
         'fields': names,
         'disease_rules': [list(rule) for rule in DISEASE_RULES],
         'disease_sections': {kind: list(names) for kind, names in DISEASE_SECTIONS.items()},
+        'disease_categories': dict(DISEASE_TYPE_CATEGORY),
         'disease_fields': disease,
     }, indent=2) + '\n'
 
@@ -202,9 +216,15 @@ def disease_type(disease: object) -> str:
 
 
 def on_screen(disease: object) -> frozenset[str]:
-    """The stored fields a patient sees for a record with this disease text: what blocks."""
-    stored = _stored()
-    return names() | frozenset(stored['disease_fields'].get(disease_type(disease), ()))
+    """The stored fields a patient sees for a record with this disease text: what blocks.
+
+    The disease tab's section is the one for the record's Disease Category
+    (``disease_profiles.record_category``), the rule the page applies.
+    """
+    from omop_core.services.disease_profiles import record_category
+    category = record_category(disease)
+    kind = next((k for k, code in DISEASE_TYPE_CATEGORY.items() if code == category), 'other')
+    return names() | frozenset(_stored()['disease_fields'].get(kind, ()))
 
 
 def write(root: pathlib.Path = ROOT) -> list[str]:

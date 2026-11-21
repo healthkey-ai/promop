@@ -31,8 +31,8 @@ describe("DiseaseCategoryPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockHub.fetchDiseaseCategories.mockResolvedValue([
-      { value: "MM", label: "Multiple Myeloma" },
-      { value: "FL", label: "Follicular Lymphoma" },
+      { value: "MM", label: "Multiple Myeloma", extension_size: 19 },
+      { value: "FL", label: "Follicular Lymphoma", extension_size: 1 },
     ]);
     mockHub.fetchDiseaseCategoryMappings.mockResolvedValue([
       { id: 1, disease_name: "Smoldering myeloma", category: "MM" },
@@ -70,5 +70,13 @@ describe("DiseaseCategoryPage", () => {
       mockHub.createDiseaseCategory, mockHub.deleteDiseaseCategory,
       mockHub.createDiseaseCategoryMapping, mockHub.updateDiseaseCategoryMapping, mockHub.deleteDiseaseCategoryMapping,
     ]) expect(write).not.toHaveBeenCalled();
+  });
+
+  it("links each category to the fields of its extension (#2332)", async () => {
+    mockUseAuth.mockReturnValue({ currentUser: READER });
+    renderPage();
+    const mm = await screen.findByRole("link", { name: "19 fields" });
+    expect(mm).toHaveAttribute("href", "/field-mappings?disease=MM&set=extension");
+    expect(screen.getByRole("link", { name: "1 field" })).toHaveAttribute("href", "/field-mappings?disease=FL&set=extension");
   });
 });

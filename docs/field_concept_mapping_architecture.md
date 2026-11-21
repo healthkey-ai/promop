@@ -132,9 +132,26 @@ The record's Disease Category is what Disease Category management maps its
 disease to (`useAllDiseaseMappings`), with the editor's own disease-type
 match as the fallback for a name that mapping does not hold
 (`fieldScope.recordDiseaseCategory`); a disease mapped to `Other` has the
-base record only. Two limits remain with #2332: a record with several
-cancers is read by its primary disease, and a field placed on the disease
-tab shows only for a record the editor has a disease tab for.
+base record only. That category, not the disease name, picks the disease tab
+(#2332): a record shows the hand-authored section of its category (BC, FL, MM,
+CLL and MCL have one; `patientVisibleFields.json`'s `disease_categories` names
+them), and a category without one shows its created fields. The server's
+`disease_profiles.record_category` is the same rule, so the attestation counts
+the fields of the section on screen. The tab appears for a record when its
+category has a section or a field placed on its extension, and for whoever can
+add a field (staff and org admins) for any category, because the tab's Add
+Field link is how the first field of an empty extension is made.
+
+Inside the tab a control reads its field's membership
+(`DiseaseProfile.tsx`, `ClinicalField`): a field of another disease's
+extension that holds a value renders read-only with "Not part of the <disease>
+record", is never cleared, and renders nothing when it is empty. Controls
+that do not go through `ClinicalField` (GELF, FLIPI) are not held to
+membership; they belong to the lymphoma section. Two limits remain with
+#2332: a record with several cancers is read by its primary disease, and the
+disease-scoped choice lists (#1224) are not done. The keyword match survives
+only as the fallback for a disease name Disease Category management does not
+hold, so a record whose name is not mapped keeps the tab it had.
 
 A created field takes a value on the tab (#2669), along the
 [PatientRecord-first path](patient-record-first-writes.md#created-fields):

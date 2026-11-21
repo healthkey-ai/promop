@@ -15,6 +15,8 @@ export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'dire
 
 export interface FieldDescriptor {
   kind: FieldKind;
+  /** The Disease Categories whose extension the field is in; none is the base record (#2331). */
+  diseases?: string[];
   writable: boolean;
   reason?: string;
   /** Where the write lands. 'patient_record' for clinical fields, 'person'

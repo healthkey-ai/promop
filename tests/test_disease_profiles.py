@@ -741,3 +741,57 @@ def test_pruning_a_created_field_takes_its_memberships_with_it():
     disease_profiles.set_field_diseases('frailty_index', ['MM'])
     apply_payload({'mappings': [], 'custom_fields': []}, tables=('custom_fields',), prune=True)
     assert not CustomPatientField.objects.exists() and diseases_of('frailty_index') == []
+
+
+# ── Which disease section a record shows (#2332) ──────────────────────────
+
+@pytest.mark.parametrize('text, mapped, expected', [
+    # What Disease Category management maps the name to decides, in any case.
+    ('Diffuse large B-cell lymphoma', 'DLBCL', 'DLBCL'),
+    ('smoldering MYELOMA', 'MM', 'MM'),
+    # ...including the base record, even for a name the keyword rules would place.
+    ('Mantle Cell Lymphoma', 'Other', ''),
+    # A name the mapping does not hold falls back to the editor's keyword rules.
+    ('Follicular lymphoma', None, 'FL'),
+    ('Mantle cell lymphoma, relapsed', None, 'MCL'),
+    ('Glioblastoma', None, ''),
+    ('', None, ''),
+    (None, None, ''),
+])
+def test_a_records_category_is_its_mapping_then_the_keyword_fallback(text, mapped, expected):
+    if mapped:
+        DiseaseCategoryChoice.objects.get_or_create(code=mapped, defaults={'label': mapped})
+        DiseaseCategoryMapping.objects.create(disease_name=text, category=mapped)
+    assert disease_profiles.record_category(text) == expected
+
+
+def test_the_attestation_shows_the_section_of_the_category_not_the_disease_text():
+    from omop_core.services import patient_visible_fields as visible
+
+    follicular = visible.on_screen('Follicular lymphoma')
+    assert 'b_symptom_fever' in follicular
+    # A lymphoma the mapping files under a category with no section has none on screen.
+    DiseaseCategoryChoice.objects.get_or_create(code='DLBCL', defaults={'label': 'DLBCL'})
+    DiseaseCategoryMapping.objects.create(disease_name='Diffuse large B-cell lymphoma', category='DLBCL')
+    assert 'b_symptom_fever' not in visible.on_screen('Diffuse large B-cell lymphoma')
+    # Re-mapping the name changes the profile and nothing else.
+    DiseaseCategoryMapping.objects.filter(disease_name='Diffuse large B-cell lymphoma').update(category='FL')
+    assert 'b_symptom_fever' in visible.on_screen('Diffuse large B-cell lymphoma')
+
+
+def test_each_disease_type_names_the_category_whose_extension_its_section_renders():
+    from omop_core.services import patient_visible_fields as visible
+
+    assert set(visible.DISEASE_TYPE_CATEGORY) == set(visible.DISEASE_SECTIONS)
+    assert set(visible.DISEASE_TYPE_CATEGORY.values()) == set(disease_profiles.SEED_DISEASE_FIELDS)
+
+
+def test_the_category_list_says_how_big_each_extension_is(staff):
+    DiseaseCategoryChoice.objects.get_or_create(code='MM', defaults={'label': 'Myeloma'})
+    DiseaseCategoryChoice.objects.get_or_create(code='Lung', defaults={'label': 'Lung cancer'})
+    disease_profiles.set_field_diseases('bulky_disease', ['Lung'])
+
+    sizes = {row['value']: row['extension_size'] for row in staff.get('/api/v1/disease-categories/').data}
+
+    assert sizes['Lung'] == 1
+    assert sizes['MM'] == len(disease_profiles.SEED_DISEASE_FIELDS['MM'])

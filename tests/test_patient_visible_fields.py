@@ -95,6 +95,7 @@ def test_the_controls_that_bypass_field_are_found_by_the_scan():
     assert 'splenomegaly' not in data['disease_fields']['lymphoma']
 
 
+@pytest.mark.django_db
 def test_a_disease_field_is_on_screen_only_for_its_disease():
     assert 'b_symptom_fever' in visible.on_screen('Follicular Lymphoma')
     assert 'b_symptom_fever' not in visible.on_screen('Multiple Myeloma')
@@ -128,10 +129,12 @@ def test_the_disease_type_follows_the_pages_keyword_rules(text, expected):
 
 
 def test_the_pages_own_rule_is_the_generated_one():
-    # PatientDetail asks provisional.ts, which reads disease_rules from the file; it
+    # PatientDetail picks the section by the record's Disease Category (#2332) and
+    # falls back to provisional.ts's keyword rules, which come from the file; it
     # must not keep a second copy of the keywords.
     source = (visible.ROOT / 'frontend/src/components/Patient/PatientDetail.tsx').read_text()
-    assert re.search(r'getDiseaseType = \(\) => diseaseTypeOf\(', source)
+    assert re.search(r'getDiseaseType = \(\) => diseaseTypeOfCategory\(recordCategory\)', source)
+    assert re.search(r'recordDiseaseCategory\(.*?diseaseTypeOf\(editedInfo\?\.disease\)', source, re.S)
     assert 'd.includes("mantle")' not in source
 
 

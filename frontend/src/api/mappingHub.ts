@@ -43,9 +43,10 @@ export interface DiseaseTherapyRegimenItem {
 
 // --- Disease Categories ---
 
-export async function fetchDiseaseCategories(): Promise<{value: string; label: string}[]> {
+/** `extension_size` is the number of fields in the category's extension (#2332). */
+export async function fetchDiseaseCategories(): Promise<{value: string; label: string; extension_size?: number}[]> {
   const resp = await api.get('/v1/disease-categories/');
-  return resp.data as {value: string; label: string}[];
+  return resp.data as {value: string; label: string; extension_size?: number}[];
 }
 
 export async function createDiseaseCategory(data: { code: string; label: string }): Promise<{value: string; label: string}> {

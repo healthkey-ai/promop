@@ -6,6 +6,7 @@ import Section from '../Section';
 import FlipiAssessment from '../FlipiAssessment';
 import GelfAssessment from '../GelfAssessment';
 import { MarkedControl } from '../ProvisionalBadge';
+import { DiseaseProfileContext } from '../DiseaseProfile';
 import {
   STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
@@ -21,7 +22,12 @@ import {
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
+  /** The hand-authored section to render: the one for the record's Disease Category. */
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
+  /** The record's Disease Category and its name. With them, a field the category
+   *  does not own renders read-only and marked, or not at all when it is empty (#2332). */
+  category?: string;
+  categoryLabel?: string;
 }
 
 const PRECISION_OPTIONS = [
@@ -67,7 +73,7 @@ function DatePrecisionPicker({
   );
 }
 
-function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>) {
+function BreastCancerSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -375,7 +381,7 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
   );
 }
 
-export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
+export default function DiseaseTab({ formData, onChange, diseaseType, category, categoryLabel }: Props) {
   const diseaseSection = (() => {
     switch (diseaseType) {
       case 'breast':
@@ -393,10 +399,16 @@ export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
     }
   })();
 
-  return (
+  const sections = (
     <>
       {diseaseSection}
       {diseaseType === 'breast' && <StagingBiomarkersSection formData={formData} onChange={onChange} />}
     </>
+  );
+  if (category === undefined) return sections;
+  return (
+    <DiseaseProfileContext.Provider value={{ category, label: categoryLabel || category }}>
+      {sections}
+    </DiseaseProfileContext.Provider>
   );
 }
