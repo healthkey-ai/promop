@@ -394,9 +394,6 @@ export default function PatientDetail({
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
-  // Which of them this caller may edit on this patient; the tabs read the
-  // same cached answer for their own fields.
-  const { descriptors: writableFields } = useWritableFields(personId);
   const { categoryForDisease } = useAllDiseaseMappings();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
@@ -1202,7 +1199,7 @@ export default function PatientDetail({
                     tabs={addedFieldTabs(fieldTab)}
                     diseases={diseaseCode ? [diseaseCode] : []}
                     formData={editedInfo}
-                    descriptors={writableFields}
+                    descriptors={writableFields.descriptors}
                     onChange={handleAddedFieldChange}
                   />
                 )}
