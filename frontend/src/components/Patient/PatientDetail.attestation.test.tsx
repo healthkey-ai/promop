@@ -345,3 +345,64 @@ describe('Confirm my record with proposals on the page', () => {
     expect(screen.queryByRole('button', { name: 'Confirm Record' })).not.toBeInTheDocument();
   });
 });
+
+describe('Confirm my record with proposals on the disease tab and the checklists (#2761)', () => {
+  const descriptors = {
+    ...DESCRIPTORS,
+    b_symptom_fever: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'boolean' },
+    gelf_criteria_options: { kind: 'direct', writable: true, target: 'patient_record', value_kind: 'string' },
+  };
+
+  it('counts a proposal in the disease section the record shows', async () => {
+    serve({ ...BASE, disease: 'Follicular Lymphoma', b_symptom_fever: true, provisional_fields: { b_symptom_fever: 75 } }, descriptors);
+    await renderAsPatient();
+
+    expect(await screen.findByTestId('record-confirmation-blocked')).toHaveTextContent('1 value is marked');
+    expect(screen.queryByRole('button', { name: 'Confirm Record' })).not.toBeInTheDocument();
+  });
+
+  it('counts the GELF checklist on a lymphoma record', async () => {
+    serve({
+      ...BASE, disease: 'Follicular Lymphoma', gelf_criteria_options: 'large_mass',
+      provisional_fields: { gelf_criteria_options: 80 },
+    }, descriptors);
+    await renderAsPatient();
+
+    expect(await screen.findByTestId('record-confirmation-blocked')).toHaveTextContent('1 value is marked');
+  });
+
+  it('does not count a lymphoma field on a record whose page shows another disease', async () => {
+    serve({ ...BASE, disease: 'Multiple Myeloma', b_symptom_fever: true, provisional_fields: { b_symptom_fever: 75 } }, descriptors);
+    await renderAsPatient();
+
+    expect(await screen.findByRole('button', { name: 'Confirm Record' })).toBeInTheDocument();
+    expect(screen.queryByTestId('record-confirmation-blocked')).not.toBeInTheDocument();
+  });
+});
+
+describe('Confirm my record while the write descriptor loads', () => {
+  it('counts nothing until the descriptor is known, then only what the server would count', async () => {
+    // A calculated field (bmi) is counted by the page only once the descriptor says it has
+    // no write path, so a count shown earlier would flash a number that then falls.
+    let release: () => void = () => {};
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) {
+        return new Promise((resolve) => { release = () => resolve({ data: DESCRIPTORS }); });
+      }
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({ data: {
+          patient_info: { ...BASE, bmi: 24, hemoglobin_g_dl: '11.5', provisional_fields: { bmi: 80, hemoglobin_g_dl: 82 } },
+          user: null, patient_name: BASE.patient_name,
+        } });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAsPatient();
+
+    expect(screen.queryByTestId('record-confirmation-blocked')).not.toBeInTheDocument();
+
+    await act(async () => { release(); });
+
+    expect(await screen.findByTestId('record-confirmation-blocked')).toHaveTextContent('1 value is marked');
+  });
+});
