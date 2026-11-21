@@ -1169,6 +1169,29 @@ Each phase is its own PR against `dev`, with a migration in phase 0 only;
 rebase on `dev` immediately before `makemigrations` and again before merge
 (see [Migration conflicts](../AGENTS.md#migration-conflicts)).
 
+### Auto-approval threshold (#1532)
+
+Built as its own setting, separate from the provisional floor. A curator's Suggest
+run approves a proposal as it writes it when the ranker's confidence is at or above
+the run's threshold: **90 to 100, default 100, never below 90, or off**, compared as
+the score it is (100 means exactly 1.0, no rounding), remembered per curator between
+runs (`Identity.suggest_auto_approve_threshold` and `suggest_auto_approve_off`,
+prefilled in the Suggest controls, which carry an always-visible line saying what the
+run will do) and recorded on the run. Only staff and org admins get it, checked for
+every row; an analyst's runs never approve anything; and a deployment with no worker
+queue approves nothing. The approval is the curator's own path
+(`_upsert_source_code_mapping`), so approval clears the confidence on provisional rows
+exactly as a hand approval does. The Code Mapping list can be filtered to the rows
+Suggest approved by itself, and `AGENTS.md` ("Auto-approving a Suggest result") says
+how to undo one.
+
+Because the minimum is 90 and the floor is 70, the provisional band (floor up to, not
+including, the threshold) is never empty: a proposal of 70 to 89 can only ever be
+provisional, and one of 90 to 99 stays provisional unless the curator lowered the
+threshold to meet it. The Anthropic ranker's qualitative labels score 0.85, 0.55 and
+0.25, so with that ranker alone nothing reaches 90 and nothing is auto-approved;
+Jev's probabilities do.
+
 ## Alternatives considered
 
 - **Companion columns on `patient_record`** (a `<field>_` beside each field).

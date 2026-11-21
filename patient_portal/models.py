@@ -89,6 +89,22 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     locked_until = models.DateTimeField(
         null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
     )
+    suggest_auto_approve_threshold = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        help_text=(
+            "The confidence (whole percent, 90-100) at or above which this curator's Code Mapping "
+            "Suggest runs approve a ranker's proposal as they write it (#1532). Sticky between "
+            "runs. Null means the default, 100. Read only for an account that may approve mappings "
+            "(omop_core.services.suggest_auto_approve)."
+        ),
+    )
+    suggest_auto_approve_off = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            "The curator turned Suggest auto-approval off (#1532). Stricter than any threshold, so "
+            "it breaks no minimum; the threshold above is kept and returns when they turn it on."
+        ),
+    )
 
     objects = IdentityManager()
 
@@ -106,6 +122,12 @@ class Identity(AbstractBaseUser, PermissionsMixin):
             models.UniqueConstraint(
                 fields=["issuer", "sub"],
                 name="uq_identity_issuer_sub",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(suggest_auto_approve_threshold__isnull=True)
+                           | models.Q(suggest_auto_approve_threshold__gte=90,
+                                      suggest_auto_approve_threshold__lte=100)),
+                name="ck_identity_suggest_auto_approve_threshold",
             ),
         ]
 

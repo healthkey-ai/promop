@@ -141,11 +141,24 @@ const suggestProgressCount = (run: SuggestRunProgress) => {
   return run.done > 0 ? run.done : run.retrieved;
 };
 
+/** What the run approved on its own, when it did (#1532); empty otherwise. */
+const autoApprovedNote = (run: SuggestRunProgress) =>
+  (run.auto_approved
+    ? ` ${run.auto_approved} of them approved automatically (confidence ${run.auto_approve_threshold}% or more).`
+    : "")
+  + (run.auto_approve_errors
+    ? ` ${run.auto_approve_errors} approval(s) failed and were left proposed.`
+    : "")
+  + (run.auto_approve?.state === "disabled" && run.auto_approve.reason === "no_worker"
+    ? " Auto-approval did not run: this deployment has no worker queue."
+    : "");
+
 const describeSuggestRun = (run: SuggestRunProgress) => {
   if (run.state === "failure") return run.error || "The suggest run failed.";
   if (run.state === "success") {
     if (run.total === 0) return "Done — nothing on this tab was awaiting a suggestion.";
     return `Done — wrote ${run.destinations} new destination(s) across ${run.total} code(s).`
+      + autoApprovedNote(run)
       // A run is capped well below a tab's backlog, so without this the curator
       // cannot tell from the page that another run is warranted.
       + (run.remaining ? ` ${run.remaining} still awaiting a suggestion — run Suggest again.` : "");
@@ -479,6 +492,8 @@ export default function CodeMappingPage() {
   const [seenOnly, setSeenOnly] = useState(true);
   // Only the codes a curator has left a note on (#2423).
   const [withNotes, setWithNotes] = useState(false);
+  // Only the codes a Suggest run approved by itself (#1532).
+  const [autoApprovedOnly, setAutoApprovedOnly] = useState(false);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
   const [groupRunning, setGroupRunning] = useState<string | null>(null);
@@ -493,6 +508,39 @@ export default function CodeMappingPage() {
     umls: true, lexical: true, vectors: true,
   });
   const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
+  // The confidence at or above which a run approves what it writes (#1532). Offered
+  // only to an account that may approve; the server prefills what that curator last
+  // set (100 until they set one) and remembers whatever the next run sends.
+  const autoApprove = reference.suggest_auto_approve;
+  const [autoApproveThreshold, setAutoApproveThreshold] = useState<number | "">(100);
+  // Off is the curator's own choice, stricter than any threshold; the number is kept
+  // while it is off and returns when they turn it on again.
+  const [autoApproveOff, setAutoApproveOff] = useState(false);
+  // Set once the curator touches either control, so a reference that arrives after
+  // they started typing cannot put the saved value back over theirs.
+  const autoApproveTouched = useRef(false);
+  // Once the server has answered it decides who is offered the control; until then an
+  // approver by role sees it (with the saved value still loading), so what they type
+  // is theirs and the reference arriving later does not put the saved value over it.
+  const showAutoApprove = referenceReady ? !!autoApprove?.allowed : canApprove;
+  const autoApproveMin = autoApprove?.min ?? 90;
+  const autoApproveMax = autoApprove?.max ?? 100;
+  const validAutoApprove = !showAutoApprove || autoApproveOff || (
+    autoApproveThreshold !== "" && Number.isInteger(autoApproveThreshold)
+    && autoApproveThreshold >= autoApproveMin && autoApproveThreshold <= autoApproveMax);
+  // The line under the Suggest controls, always shown to an approver: what this run will do.
+  const autoApproveLine = !referenceReady
+    ? "Loading your auto-approval setting…"
+    : !validAutoApprove
+      ? `Choose an auto-approval confidence between ${autoApproveMin} and ${autoApproveMax}, or turn it off.`
+      : !autoApprove?.available
+        ? `Auto-approval is unavailable here: ${autoApprove?.unavailable_reason ?? ""}`
+        : autoApproveOff
+          ? "Auto-approval off: every suggestion stays proposed for review."
+          : rankingModel === "anthropic" && (autoApprove.anthropic_max_percent ?? 85) < Number(autoApproveThreshold)
+            ? `Auto-approval is on at ${autoApproveThreshold}%, but the Anthropic ranker scores at most `
+              + `${autoApprove.anthropic_max_percent ?? 85}%, so this run will approve nothing. Choose Jev or Both to use it.`
+            : `Auto-approves at ${autoApproveThreshold}% or above and re-points patient data.`;
   const [inlineMappingId, setInlineMappingId] = useState<number | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
@@ -541,6 +589,7 @@ export default function CodeMappingPage() {
     if (organizationFilter) params.organization = organizationFilter;
     if (rollup) params.rollup = 1;
     if (withNotes) params.with_notes = "1";
+    if (autoApprovedOnly) params.auto_approved = "1";
     // Grouping can start without a click, when the tab the server opens on
     // changes, and a grouped queue refuses any other sort with a 400.
     const sorts = rollup ? sortsAcrossGrouping(effectiveSorts) : effectiveSorts;
@@ -559,6 +608,10 @@ export default function CodeMappingPage() {
           setReferenceReady(true);
           setReferenceError("");
           setSuggestionLimit((current) => current === "" ? current : Math.min(current, data?.suggest_max_per_run || 100));
+          if (data?.suggest_auto_approve?.allowed && !autoApproveTouched.current) {
+            setAutoApproveThreshold(data.suggest_auto_approve.threshold);
+            setAutoApproveOff(!!data.suggest_auto_approve.off);
+          }
       }).catch(() => {
         setReferenceError("Could not load mapping options. Refresh to retry.");
       }).finally(() => { referenceRequest.current = null; });
@@ -573,7 +626,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, effectiveSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, direction,
+  }, [activeVocabulary, debouncedSearch, pages, effectiveSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, autoApprovedOnly, direction,
     unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
@@ -809,6 +862,7 @@ export default function CodeMappingPage() {
           label: groupKey(entry), section, queue_sections: "1",
           seen_only: seenOnly ? "1" : "0",
           ...(withNotes ? { with_notes: "1" } : {}),
+          ...(autoApprovedOnly ? { auto_approved: "1" } : {}),
           // The server picks the default tab until one is clicked, so sending
           // activeVocabulary would fetch across every vocabulary on first load.
           ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
@@ -826,7 +880,7 @@ export default function CodeMappingPage() {
       setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
       setError("Could not load the codes in that group.");
     }
-  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly, withNotes]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly, withNotes, autoApprovedOnly]);
 
   const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
     const cacheKey = expansionKey(entry, section);
@@ -851,6 +905,7 @@ export default function CodeMappingPage() {
         section, queue_sections: "1",
         seen_only: seenOnly ? "1" : "0",
         ...(withNotes ? { with_notes: "1" } : {}),
+        ...(autoApprovedOnly ? { auto_approved: "1" } : {}),
         ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
         ...(organizationFilter ? { organization: organizationFilter } : {}),
         ...(action === "suggest" ? {
@@ -1011,6 +1066,10 @@ export default function CodeMappingPage() {
       setError(`Choose a number of suggestions between 1 and ${maxSuggestions}.`);
       return;
     }
+    if (!validAutoApprove) {
+      setError(`Choose an auto-approval confidence between ${autoApproveMin} and ${autoApproveMax}.`);
+      return;
+    }
     // Replace is only valid when a specific vocabulary is selected (the backend
     // rejects replace without source_vocabulary_id to prevent global deletes).
     const effectiveReplace = replaceExisting && !overallTab;
@@ -1043,6 +1102,10 @@ export default function CodeMappingPage() {
           ranking_model: rankingModel,
           replace: effectiveReplace,
           include_activity: true,
+          // Only an approver is offered it; the server ignores it for anyone else.
+          ...(showAutoApprove
+            ? { auto_approve_threshold: autoApproveOff ? "off" : autoApproveThreshold }
+            : {}),
         },
       );
       suggestRunRef.current = started.run_id;
@@ -1141,6 +1204,7 @@ export default function CodeMappingPage() {
         ? `Wrote ${run.destinations} new destination(s) across ${run.total} queued code(s)`
           + (byStrategy ? ` (${byStrategy})` : "")
           + (where ? ` — ${where}.` : ".")
+          + autoApprovedNote(run)
           + (run.remaining ? ` ${run.remaining} still awaiting a suggestion — run Suggest again.` : "")
         : "No queued codes on this tab awaiting a suggestion.",
     );
@@ -1235,6 +1299,13 @@ export default function CodeMappingPage() {
             title="Filter all source tabs and sections to codes a curator has left a note on"
             onChange={(event) => { setPages({}); setExpandedGroups({}); setWithNotes(event.target.checked); }} />
           with notes
+        </label>}
+        {column === "source_code" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
+          <input type="checkbox" checked={autoApprovedOnly}
+            aria-label={`${section}: only codes Suggest approved by itself`}
+            title="Filter all source tabs and sections to codes a Suggest run approved by itself (auto-approved)"
+            onChange={(event) => { setPages({}); setExpandedGroups({}); setAutoApprovedOnly(event.target.checked); }} />
+          auto-approved (Suggest)
         </label>}
         {sortable ? (
           <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
@@ -1690,8 +1761,10 @@ export default function CodeMappingPage() {
           <button
             type="button"
             onClick={() => void runSuggest()}
-            disabled={suggesting || !hasRetrieval || !validSuggestionLimit || overallTab}
-            title={overallTab ? "Select a specific vocabulary tab to run suggestions." : "Propose destinations for queued source codes on this tab."}
+            disabled={suggesting || !referenceReady || !hasRetrieval || !validSuggestionLimit || !validAutoApprove || overallTab}
+            title={overallTab ? "Select a specific vocabulary tab to run suggestions."
+              : !referenceReady ? "Loading mapping options…"
+              : "Propose destinations for queued source codes on this tab."}
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Sparkles size={13} />
@@ -1746,7 +1819,68 @@ export default function CodeMappingPage() {
               <option value="both">Both</option>
             </select>
           </label>
+          {showAutoApprove && (
+            <label
+              className="inline-flex items-center gap-1 text-xs text-slate-600"
+              title={
+                `Suggestions the ranker is at least this confident in are approved as they are written; `
+                + `lower ones stay proposed for review. ${autoApproveMax} approves only a score of exactly 1.0. `
+                + `The lowest you can set is ${autoApproveMin}. Your choice is remembered for your next run.`
+              }
+            >
+              Auto-approve at
+              <input
+                aria-label="Auto-approve confidence"
+                aria-describedby="auto-approve-warning"
+                type="number"
+                min={autoApproveMin}
+                max={autoApproveMax}
+                value={autoApproveThreshold}
+                disabled={autoApproveOff}
+                onChange={(event) => {
+                  autoApproveTouched.current = true;
+                  setAutoApproveThreshold(event.target.value === "" ? "" : Number(event.target.value));
+                }}
+                className={
+                  "h-7 w-14 rounded-md border px-1.5 text-xs disabled:opacity-50 "
+                  + (validAutoApprove ? "border-slate-300" : "border-rose-400 bg-rose-50")
+                }
+              />
+              %
+            </label>
+          )}
+          {showAutoApprove && (
+            <label className="inline-flex items-center gap-1 text-xs text-slate-600"
+              title="Turn auto-approval off: every suggestion stays proposed for review. Remembered for your next run.">
+              <input
+                type="checkbox"
+                aria-label="Auto-approval off"
+                checked={autoApproveOff}
+                onChange={(event) => { autoApproveTouched.current = true; setAutoApproveOff(event.target.checked); }}
+                className="h-3.5 w-3.5 rounded border-slate-300"
+              />
+              Off
+            </label>
+          )}
         </div>
+        {/* Always visible to an approver, not a tooltip: an approval re-points patient
+            data, so the state this run starts in is stated where Suggest is clicked. */}
+        {/* Not a live region: it changes on every keystroke in the number box, and announcing
+            each one would be noise. The number box points at it with aria-describedby. */}
+        {showAutoApprove && (
+          <p
+            id="auto-approve-warning"
+            data-testid="auto-approve-warning"
+            className={
+              "mb-2 text-xs "
+              + (referenceReady && !validAutoApprove ? "text-rose-700"
+                : referenceReady && autoApprove?.available && !autoApproveOff ? "font-medium text-amber-800"
+                  : "text-slate-600")
+            }
+          >
+            {autoApproveLine}
+          </p>
+        )}
 
         </>}
 
@@ -1881,7 +2015,9 @@ export default function CodeMappingPage() {
             <DownloadMenu rows={sectionRows} section={section} />
             {!collapsed && renderTable(sectionRows, withNotes
               ? `No ${section.toLowerCase()} mappings with a curator note here. Uncheck "with notes" to see every code.`
-              : `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
+              : autoApprovedOnly
+                ? `No ${section.toLowerCase()} mappings were auto-approved by Suggest here. Uncheck "auto-approved (Suggest)" to see every code.`
+                : `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
           </section>;
         })}
       </div>

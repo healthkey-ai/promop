@@ -176,11 +176,13 @@ function suggestRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
+function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow], referenceData: object | Promise<object> = reference) {
   mockGet.mockImplementation((url: string) => {
     if (url.endsWith("/canonical-unit/")) return Promise.resolve({ data: { unit: "", revision: 0, available_units: ["mg/dL", "g/L"], example_units: ["mg/dL"], can_edit: true } });
     if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
-    if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+    if (url === "/v1/code-mappings/reference/") {
+      return referenceData instanceof Promise ? referenceData.then((data) => ({ data })) : Promise.resolve({ data: referenceData });
+    }
     const detail = url.match(/^\/v1\/code-mappings\/(\d+)\/$/);
     if (detail) {
       const row = rows.find((candidate) => candidate.mapping_id === Number(detail[1]));
@@ -265,6 +267,184 @@ describe("CodeMappingPage", () => {
       "title",
       `Deployed commit ${reference.release_commit}`,
     );
+  });
+
+  describe("Suggest auto-approval (#1532)", () => {
+    const control = (overrides: Record<string, unknown> = {}) => ({
+      ...reference,
+      suggest_auto_approve: {
+        allowed: true, available: true, unavailable_reason: "", threshold: 95, off: false, min: 90, max: 100,
+        anthropic_max_percent: 85, ...overrides,
+      },
+    });
+    const approverReference = control();
+    afterEach(() => { mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER }); });
+    const prefilled = async (referenceData: object = approverReference) => {
+      renderPage([proposedRow], referenceData);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      await waitFor(() => expect(threshold).toHaveValue(95));
+      return threshold;
+    };
+    // The Anthropic ranker's labels top out at 85%, so most of these use Jev, which can approve.
+    const useJev = () => fireEvent.change(screen.getByLabelText("Ranker"), { target: { value: "jev" } });
+
+    it("offers no threshold to an account that may not approve", async () => {
+      renderPage([proposedRow], control({ allowed: false, threshold: 100 }));
+      await screen.findByLabelText("Number of suggestions");
+      expect(screen.queryByLabelText("Auto-approve confidence")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("auto-approve-warning")).not.toBeInTheDocument();
+    });
+
+    it("prefills the curator's last choice and sends the one chosen with the run", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({
+        total: 3, destinations: 3, auto_approved: 2, auto_approve_threshold: 92,
+      }) });
+      const threshold = await prefilled();
+
+      fireEvent.change(threshold, { target: { value: "92" } });
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        "/v1/code-mappings/suggest/",
+        expect.objectContaining({ auto_approve_threshold: 92 }),
+      ));
+      // The progress strip and the banner both say how many it approved on its own.
+      expect(await screen.findAllByText(/2 of them approved automatically \(confidence 92% or more\)/)).toHaveLength(2);
+    });
+
+    it("states, always and not only in a tooltip, what the run is about to do", async () => {
+      const threshold = await prefilled();
+      useJev();
+      const warning = screen.getByTestId("auto-approve-warning");
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above and re-points patient data.");
+      expect(threshold).toHaveAttribute("aria-describedby", warning.id);
+      // Not a live region: it would announce on every keystroke.
+      expect(warning).not.toHaveAttribute("role");
+
+      fireEvent.change(threshold, { target: { value: "92" } });
+      expect(warning).toHaveTextContent("Auto-approves at 92% or above and re-points patient data.");
+      fireEvent.change(threshold, { target: { value: "89" } });
+      expect(warning).toHaveTextContent("Choose an auto-approval confidence between 90 and 100, or turn it off.");
+    });
+
+    it("says so when the ranker chosen cannot reach the threshold, so nothing will be approved", async () => {
+      await prefilled();
+      const warning = screen.getByTestId("auto-approve-warning");
+      expect(warning).toHaveTextContent("the Anthropic ranker scores at most 85%, so this run will approve nothing");
+
+      useJev();
+
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above");
+    });
+
+    it("can be turned off, and says so, sending off with the run", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ total: 1, destinations: 1 }) });
+      const threshold = await prefilled();
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto-approval off" }));
+
+      expect(threshold).toBeDisabled();
+      expect(screen.getByTestId("auto-approve-warning")).toHaveTextContent("Auto-approval off");
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        "/v1/code-mappings/suggest/", expect.objectContaining({ auto_approve_threshold: "off" })));
+    });
+
+    it("starts off when the curator last turned it off", async () => {
+      renderPage([proposedRow], control({ off: true }));
+      const checkbox = await screen.findByRole("checkbox", { name: "Auto-approval off" });
+      await waitFor(() => expect(checkbox).toBeChecked());
+      expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled();
+      expect(screen.getByLabelText("Auto-approve confidence")).toBeDisabled();
+    });
+
+    it("does not let an out-of-range number block a run that is off", async () => {
+      const threshold = await prefilled();
+      fireEvent.change(threshold, { target: { value: "89" } });
+      expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto-approval off" }));
+
+      expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled();
+    });
+
+    it("treats a server that does not send the off flag as not off", async () => {
+      const older = control();
+      delete (older.suggest_auto_approve as { off?: boolean }).off;
+      await prefilled(older);
+      expect(screen.getByRole("checkbox", { name: "Auto-approval off" })).not.toBeChecked();
+    });
+
+    it("says when this deployment cannot auto-approve", async () => {
+      await prefilled(control({ available: false, unavailable_reason: "this deployment has no worker queue." }));
+      expect(screen.getByTestId("auto-approve-warning"))
+        .toHaveTextContent("Auto-approval is unavailable here: this deployment has no worker queue.");
+    });
+
+    it("says on a finished run when it could not auto-approve for want of a worker", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({
+        total: 2, destinations: 2,
+        auto_approve: { state: "disabled", threshold: null, reason: "no_worker" },
+      }) });
+      await prefilled();
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+      expect((await screen.findAllByText(/Auto-approval did not run: this deployment has no worker queue/)).length).toBeGreaterThan(0);
+    });
+
+    it("keeps what the curator typed when the saved setting arrives after they started typing", async () => {
+      // An approver sees the control as soon as the page opens; the reference (and the
+      // saved value in it) can arrive later. Their keystrokes are theirs.
+      mockUseAuth.mockReturnValue({ currentUser: { id: 9, is_staff: true } });
+      let release!: () => void;
+      const gate = new Promise<object>((resolve) => { release = () => resolve(approverReference); });
+      renderPage([proposedRow], gate);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      expect(threshold).toHaveValue(100);
+      expect(screen.getByTestId("auto-approve-warning")).toHaveTextContent("Loading your auto-approval setting");
+      fireEvent.change(threshold, { target: { value: "93" } });
+
+      release();
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled());
+      expect(screen.getByLabelText("Auto-approve confidence")).toHaveValue(93);
+    });
+
+    it("does not run Suggest until the saved setting has loaded", async () => {
+      mockUseAuth.mockReturnValue({ currentUser: { id: 9, is_staff: true } });
+      let release!: () => void;
+      const gate = new Promise<object>((resolve) => { release = () => resolve(approverReference); });
+      renderPage([proposedRow], gate);
+      const button = await screen.findByRole("button", { name: "Suggest" });
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(mockPost).not.toHaveBeenCalled();
+
+      release();
+
+      await waitFor(() => expect(button).not.toBeDisabled());
+      await waitFor(() => expect(screen.getByLabelText("Auto-approve confidence")).toHaveValue(95));
+    });
+
+    it("will not start a run below the minimum", async () => {
+      const threshold = await prefilled();
+
+      fireEvent.change(threshold, { target: { value: "89" } });
+
+      expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
+    });
+
+    it("sends no threshold for an account that may not approve", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ total: 1, destinations: 1 }) });
+      renderPage([proposedRow]);
+      await screen.findByLabelText("Number of suggestions");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled());
+
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalled());
+      const [, body] = mockPost.mock.calls[0];
+      expect(body).not.toHaveProperty("auto_approve_threshold");
+    });
   });
 
   it("flags a source code whose units imply several LOINC axis sets", async () => {
@@ -2625,6 +2805,29 @@ describe("server mapping pages", () => {
     fireEvent.click(filter);
     await waitFor(() => expect(screen.queryByText("MACHINE CODE")).not.toBeInTheDocument());
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1", page_0: 1 }) });
+  });
+
+  it("filters the list to what Suggest approved by itself, off by default", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      const auto = { ...proposedRow, source_code: "AUTO CODE", origin_system: "suggest v0.4 auto-approved 100%" };
+      const other = { ...proposedRow, mapping_id: 9902, source_code: "OTHER CODE" };
+      const results = config?.params?.auto_approved === "1" ? [auto] : [auto, other];
+      return Promise.resolve({ data: browseData({
+        results, total: results.length,
+        pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: results.length } },
+      }) });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("OTHER CODE");
+    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes Suggest approved by itself" });
+    expect(filter).not.toBeChecked();
+    expect(mockGet).not.toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ auto_approved: "1" }) });
+
+    fireEvent.click(filter);
+
+    await waitFor(() => expect(screen.queryByText("OTHER CODE")).not.toBeInTheDocument());
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ auto_approved: "1", page_0: 1 }) });
   });
 
   it("shows and filters hospital organization on vendor tabs", async () => {

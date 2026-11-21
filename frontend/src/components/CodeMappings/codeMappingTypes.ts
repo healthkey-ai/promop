@@ -165,6 +165,23 @@ export interface Reference {
   wearable_source_systems?: WearableSourceSystem[];
   /** Whether the proposer may not approve their own proposal (#2726). */
   separate_approver?: boolean;
+  /**
+   * The Suggest auto-approval control (#1532): offered only when `allowed` (an account that
+   * may approve), prefilled with the curator's last choice (100 until they set one).
+   */
+  suggest_auto_approve?: {
+    allowed: boolean;
+    /** False under the inline dispatcher (no worker queue): runs there approve nothing. */
+    available: boolean;
+    unavailable_reason: string;
+    threshold: number;
+    /** The curator turned it off; `threshold` is kept for when they turn it on. */
+    off: boolean;
+    min: number;
+    max: number;
+    /** The most the Anthropic ranker can score; below every threshold, so it alone approves nothing. */
+    anthropic_max_percent?: number;
+  };
 }
 
 export interface WearableSourceSystem {
@@ -459,6 +476,14 @@ export type SuggestRunProgress = {
   landed_in: Record<string, number>;
   error: string;
   ranking_model?: string;
+  /** The confidence at or above which this run approved what it wrote; null when it approved nothing (#1532). */
+  auto_approve_threshold?: number | null;
+  /** How many proposals the run approved as it wrote them. */
+  auto_approved?: number;
+  /** Approvals that failed unexpectedly and were left proposed. */
+  auto_approve_errors?: number;
+  /** What the run did about auto-approval: on (with a threshold), off, or disabled with a reason. */
+  auto_approve?: { state: "on" | "off" | "disabled"; threshold: number | null; reason: string };
 };
 
 /**
