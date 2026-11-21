@@ -57,3 +57,18 @@ export function attestationBlockers(
     .filter((field) => !known || !(field in known) || !!known[field].writable)
     .sort();
 }
+
+/** The proposals the user rejected in this save (#2671): the fields of `patch` that the
+ *  record showed a proposal on (`proposed`, its marks) and that are now cleared. The
+ *  server rejects a proposal only for a field named here, so a save that merely carries
+ *  a blank (a stale page, a whole-record echo) rejects nothing. Sent as
+ *  `rejected_proposals` beside the fields themselves. */
+export function rejectedProposals(
+  patch: Record<string, unknown>,
+  proposed: Record<string, number>,
+): string[] {
+  return Object.entries(patch)
+    .filter(([field, value]) => field in proposed && (value === null || value === ''))
+    .map(([field]) => field)
+    .sort();
+}

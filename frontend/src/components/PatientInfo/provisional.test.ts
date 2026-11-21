@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { attestationBlockers, marksOf, withoutMarks } from './provisional';
+import { attestationBlockers, marksOf, rejectedProposals, withoutMarks } from './provisional';
+
+describe('rejectedProposals', () => {
+  const proposed = { hemoglobin_g_dl: 82, smoking_status: 70 };
+
+  it('names a field the record showed a proposal on that is now cleared', () => {
+    expect(rejectedProposals({ hemoglobin_g_dl: null, smoking_status: '' }, proposed))
+      .toEqual(['hemoglobin_g_dl', 'smoking_status']);
+  });
+
+  it('names nothing for a value, a field with no proposal, or zero and false', () => {
+    expect(rejectedProposals({ hemoglobin_g_dl: 13, sodium_meq_l: null, smoking_status: false }, proposed)).toEqual([]);
+    expect(rejectedProposals({ hemoglobin_g_dl: 0 }, proposed)).toEqual([]);
+  });
+});
 
 describe('provisional marks', () => {
   it('reads none from a record without them', () => {

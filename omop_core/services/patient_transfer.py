@@ -55,6 +55,7 @@ from omop_core.models import (
     PersonalRepresentative,
     PersonLanguageSkill,
     ProcedureOccurrence,
+    ProposalRejection,
     ProvenanceRecord,
     RecordRevision,
     Specimen,
@@ -166,6 +167,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(TrialSearchPreferences, 'person_id'),
     PatientTable(PatientRecord, 'person_id'),
     PatientTable(TherapyHistoryAttestation, 'person_id'),
+    PatientTable(ProposalRejection, 'person_id'),
     PatientTable(PatientStatement, 'person_id'),
     PatientTable(RecordRevision, 'patient_record__person_id'),
     PatientTable(SurveyResponse, 'participant_id'),
@@ -461,6 +463,9 @@ class _Copier:
             references.append((attname, row[field_attname], row[attname]))
         if model is RecordRevision and values['changed_by'] != 'system':
             values['changed_by'] = None
+        if model is ProposalRejection:
+            # The rejecting account is the source instance's: the same Identity id is another person here.
+            values['rejected_by'] = ''
         if model is PatientStatement and row['subject'] == PatientStatement.SUBJECT_THERAPY_LINE:
             # A line is keyed by its Episode id, and Episodes are renumbered here.
             episode = self.ids.get(Episode, {}).get(int(row['subject_key'])) if row['subject_key'].isdigit() else None

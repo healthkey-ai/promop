@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils import timezone
 from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
@@ -4677,6 +4678,45 @@ class PatientRecordConfidence(models.Model):
 
     class Meta:
         db_table = 'patient_record_confidence'
+
+
+class ProposalRejection(models.Model):
+    """A user's explicit rejection of the value a proposal gives one field (#2671).
+
+    The record shows a proposed value on a field it leaves empty. Clearing that
+    field is how the user says the proposal is wrong; the record has nothing to
+    clear, so the answer is kept here, per person and field, and the provisional
+    pass leaves the field empty (``provisional_record.held_rejections``).
+
+    ``origins`` are the provisional rows that decided the field when it was
+    rejected, as sorted ``[table, source_value, concept_id]`` triples. The
+    rejection holds while every row that decides the field now is one of them:
+    new readings of the same code under the same concept stay rejected, while a
+    code that is now mapped to another concept, or a different code that now
+    feeds the field, is a new proposal and is shown again. It deletes nothing:
+    the mapping and the clinical rows are untouched, and the user can still type
+    a value of their own. A row is not removed when the field is later approved or
+    typed over: it simply has no proposal to hold, and is ignored.
+
+    ``rejected_by`` is the Identity id (as text) of whoever rejected, so a doctor
+    rejecting for a patient leaves a trace; ``rejected_at`` is when. Both describe
+    the last rejection of the field, and neither means anything on another instance
+    (``copy_patient`` clears ``rejected_by``).
+    """
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='proposal_rejections')
+    field_name = models.CharField(max_length=100)
+    origins = models.JSONField(default=list)
+    rejected_by = models.CharField(max_length=120, blank=True, default='')
+    rejected_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'proposal_rejection'
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'field_name'], name='uq_proposal_rejection_field'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.field_name}'
 
 
 class FieldConceptMapping(models.Model):

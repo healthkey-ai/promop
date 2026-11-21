@@ -936,21 +936,107 @@ edit is still marked Provisional:
   it as approved data and drops its mark (the PATCH path above), and the disease group goes
   together. For a number or text field that means retyping a value; for a select or a
   boolean, picking another option and then the shown one again (choosing the option that is
-  already selected sends no change), so the banner says so. **Explicitly rejecting a
-  proposal is still open (#2671), so a patient who disagrees must enter their own value:**
-  a PATCH of `null` on a number (or other non-text) field the approved record already
-  leaves empty is a no-op and the mark stays. A text or select field is different: `''` is
-  accepted as an edit, which clears the mark and stores `''` in the approved record, an
-  answer of "nothing" and not a rejection. A patient who does not know the right value
-  therefore stays blocked on a number field until a clinician or the mapping settles it.
-  Tests pin both behaviours. A real "reject" needs a rule for how a rejection persists
-  without freezing the field against later approved data (`user_edited_fields` would), so
-  it is its own change.
+  already selected sends no change), so the banner says so. A patient who disagrees and
+  does not know the right value **rejects the proposal** instead: see "Rejecting a
+  proposal" below, which also lifts the block.
 - **What is stored.** `validated`, `validated_by` and `validation_date` still say only
   that the patient pressed the button; the endpoint guarantees that no value from the
   list above was marked Provisional when they did. A proposal that arrives later (a
   sweep) does not undo an earlier confirmation, and the page says so; it blocks the next
   one. Confirmations made before this change are not revisited.
+
+**Rejecting a proposal (#2671).** A user who sees a wrong proposed value clears the field.
+The editor sends `null` (or `''`) for a field the real record already leaves empty, which
+used to change nothing, so the proposal came back at the next derivation. Now such a clear
+is a rejection, in `apply_patient_record_patch` (`proposal_clears`, `reject_proposals` in
+`provisional_record.py`), when **all** of these hold:
+
+- **A signed-in person at the editor asked for it** (`allow_reject`, set only by
+  `PatientRecordViewSet._patch_record` for a session or partner-authenticated user, never a
+  machine credential or a token someone handed out). The survey mapping, an ETL sending
+  `{field: null}` and every other caller leave a blank exactly as it always was: stored,
+  or a no-op for `null` on an empty field.
+- **The client declared it.** The body names the cleared field in `rejected_proposals`
+  (`rejectedProposals` in `PatientInfo/provisional.ts`, sent by the page and the federated
+  view: the fields it showed a proposal on and that are now cleared). A stale page or a
+  client that sends a whole representation carries blanks it never chose and declares
+  nothing, so it rejects nothing; a malformed list is a 400. A client that does not send
+  the key (an older or third-party one) therefore cannot reject.
+- **The field is a scalar the record marks**, and the real record leaves it empty.
+
+What follows from it:
+
+- **Not an edit, not an approval.** Nothing is written to `patient_record` (no `''`, no
+  `user_edited_fields` entry) and no clinical row or mapping is deleted or changed.
+  Entering a value, including the proposed one, is still an approval.
+- **What is not a rejection.** A value (including the echo of the displayed one); a blank
+  for a field that shows no proposal; clearing a real value (the ordinary clear); a
+  calculated field (it goes when its inputs do), a list field (their proposed items are not
+  the user's to write) and a unit (it goes with its value). With `PROVISIONAL_DATA_ENABLED`
+  off nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
+  (`RECORDED_EMPTY_FIELDS`) are the exception to "`''` is blank": their `''` is a recorded
+  answer ("Record no GELF criteria" is Not Met, "Record no risk factors" a FLIPI of 0), so
+  `''` is saved as before and only `null` ("Mark not assessed") rejects. Another control
+  that sends `''` on purpose belongs in that set.
+- **Where it is kept.** `ProposalRejection` (one row per person and field, migration
+  `0364`): the field, the provisional rows that fed it when it was rejected, as
+  `(table, source_value, concept_id)` triples, and who (`rejected_by`, the Identity id as
+  text, so a doctor or a representative rejecting for a patient leaves a trace) and when
+  (`rejected_at`). `user_edited_fields` cannot hold it: derivation drops an entry whose value
+  matches, and for a clear of an empty field it always does. A clear marker row in OMOP
+  cannot either, because it hides only rows with the same source value and concept, and a
+  proposal's rows carry the hospital's own code. It is patient data (`copy_patient` carries
+  it with `rejected_by` cleared, since an Identity id means nothing on another instance;
+  erasure removes it) and is never exported. A row is **not deleted** when the field is later
+  approved or the user types a value: it then has no proposal to hold and is ignored.
+- **What it does.** The pass (`_provisional_values`) drops a rejected field from the
+  proposals before it reads the lists and calculated fields, so a BMI from a rejected
+  weight goes with it, and the same request rewrites the provisional pair
+  (`mirror_user_edit`), so the page and the confirmation banner follow at once. A field
+  goes with the ones that are the same proposal: a weight's unit, a lab's aliases and their
+  unit, and rejecting the disease or its slug rejects the whole disease group and the
+  `disease_slugs` list.
+- **The rows it is held against.** The rows that feed the field, not every provisional row of
+  the person (`_field_origins`, found only for a field that has a rejection): the code groups
+  the field changes without, or, when several codes agree and none decides it alone, those
+  that give the same value on their own. The disease group and the medication list use the
+  condition or drug rows they read. **This search re-runs on every derivation pass while the
+  hold applies**, about two queries per code group, so it is bounded: when every provisional
+  row the person has is one the rejection was made against it is skipped altogether (nothing
+  else can feed the field), and a person with more than `MAX_ORIGIN_GROUPS` (40, as the
+  confidence's own cap) code groups, or a field no group explains, falls back to every
+  measurement and observation row, which can only lapse a rejection more often. An unrelated
+  new proposal never lapses one below the cap.
+- **A date and its precision.** They are one answer: rejecting `diagnosis_date`, `sct_date`
+  or `dlbcl_transformation_date` rejects its `<date>_precision` (`REJECTION_FOLLOWERS`);
+  the overlay shows a proposed precision only with its proposed date (an approved
+  2020-05-12 beside a proposed precision "year" does not read as "2020"); and editing the
+  date takes its precision's proposal back (`mirror_user_edit`).
+- **When a rejection lapses.** It holds while every provisional row that feeds the field
+  is one of the rows that fed it when it was rejected (`held_rejections`): the same
+  source code under the same concept. A new reading of that code stays rejected. A code now
+  mapped to another concept, or another code that now feeds the field, is a new proposal
+  and shows again, marked. Approval is not a case: an approved mapping makes the value real
+  data, which a rejected proposal never blocks.
+- **An accidental clear.** The page's date control emits `null` when emptied, and its
+  select's "Unknown" emits `''` after the two-second autosave, so a user can reject a
+  proposal without meaning to. There is no control that restores a rejected proposal, and
+  the page shows nothing where it was; **typing a value in the field is the only way back**
+  (until a different code or concept proposes the field again). A text clear that is
+  retried or submitted twice, after the first has removed the mark, arrives as an ordinary
+  blank on a field with no proposal and is stored as `''`: an edit, with the same empty
+  result. The General tab's **Disease Category** select sends `disease: null` when the
+  category changes to one that does not contain the disease, or is cleared; with a proposed
+  disease on display that is declared as a rejection of the whole disease group, which is the
+  meaning of the change (the proposed disease does not fit the category the user chose), and
+  is left as it is. A "show proposal again"
+  control would need the record read to list the rejections and a way to delete one; it is
+  left for later.
+- **Access.** Whoever may write the record: the patient's own, a verified representative's,
+  a doctor's or an org admin's, staff's (`can_write_patient`, `patient_person_for`); an
+  analyst is refused as for any patient write. A member whose permission for the record is
+  withdrawn is refused on `/me/` by the record-off rule, which counts a declared rejection
+  as the change it is, and through the id route by `can_write_patient`.
 
 **PHR APIs and lists.** The same audiences see the same proposals on the PHR
 labs and other APIs and on the patient list, with `confidence` on each, never a
@@ -1071,8 +1157,8 @@ without a click:
 | Computed fields use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) | done (#2666, #2672); JSON-input fields, FLC pair, age left |
 | Proposals are stored with a confidence on the mapping, kept on approval, recomputed by Calc | [#2668](https://github.com/healthkey-ai/promop/issues/2668) | done (#2670) |
 | Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
-| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
-| The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display; gaps: disease tab and bypassing controls do not block, and a proposal cannot be rejected (#2671); see "Confirming a record that shows proposals" |
+| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0364`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
+| The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display; gaps: disease tab and bypassing controls do not block; a patient lifts a block by entering a value or by rejecting the proposal (#2671); see "Confirming a record that shows proposals" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |
 

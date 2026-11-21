@@ -119,6 +119,7 @@ describe('Confirm my record with proposals on the page', () => {
     expect(banner).toHaveTextContent('1 value is marked Provisional');
     expect(banner).toHaveTextContent('enter your own answer in its field');
     expect(banner).toHaveTextContent('pick another and then it again');
+    expect(banner).toHaveTextContent('clear it to reject it');
     expect(screen.queryByRole('button', { name: 'Confirm Record' })).not.toBeInTheDocument();
   });
 

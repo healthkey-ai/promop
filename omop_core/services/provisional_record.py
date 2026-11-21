@@ -42,6 +42,11 @@ The list fields (``PROVISIONAL_JSON_FIELDS``: ``disease_slugs``,
 already hold some of the items: real items are never replaced, a provisional item
 is added when no real item says the same, and the provisional column stores only
 the added items (see ``list_proposals`` and ``overlay``).
+
+A user can reject a proposal on a scalar field by clearing it (#2671): the pass
+then leaves the field empty while every row that decides it is one that was
+rejected (``ProposalRejection``, ``proposal_clears``, ``reject_proposals``,
+``held_rejections``).
 """
 from __future__ import annotations
 
@@ -55,7 +60,8 @@ from django.db import transaction
 
 from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
 from omop_core.models import (
-    Observation, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
+    Measurement, Observation, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
+    ProposalRejection,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +124,23 @@ def _read_values(person, record, view) -> dict:
     return values
 
 
+def _origin(table, source_value, concept_id) -> tuple:
+    """One provisional row's identity for a rejection: its table, source code and concept."""
+    return (table, source_value or '', concept_id or 0)
+
+
+def _group_origins(rows, table, source_field, concept_field) -> set:
+    return {_origin(table, getattr(row, source_field), getattr(row, concept_field)) for row in rows}
+
+
+def _row_origins(rows) -> set:
+    """``_origin`` triples of provisional measurement and observation rows."""
+    return (_group_origins([r for r in rows if isinstance(r, Measurement)], 'measurement',
+                           'measurement_source_value', 'measurement_concept_id')
+            | _group_origins([r for r in rows if isinstance(r, Observation)], 'observation',
+                             'observation_source_value', 'observation_concept_id'))
+
+
 def _attribute(person, record, snapshot, kept, measurements, observations, routing) -> dict:
     """The confidence of each kept field: the lowest among the code groups deciding it."""
     from omop_core.services.patient_record_service import _derived_value_matches
@@ -148,6 +171,63 @@ def _attribute(person, record, snapshot, kept, measurements, observations, routi
     for field in kept:
         confidence.setdefault(field, lowest)
     return confidence
+
+
+# A rejection is held against the rows that feed its field, found only for the fields
+# that have one. The search reads the rows again per code group (about two queries each,
+# on every derivation while the hold applies and the person has codes beyond those it was
+# made against), so it is bounded like the confidence above: past this many groups the
+# fallback is every measurement and observation row, which can only lapse more.
+MAX_ORIGIN_GROUPS = MAX_ATTRIBUTION_GROUPS
+
+
+def _field_origins(person, record, snapshot, kept, fields, measurements, observations, routing) -> dict:
+    """``_origin`` triples of the provisional rows that feed each of *fields* (kept values).
+
+    A group of rows (one source code) feeds a field when the field changes without it
+    (it decides it) or, when no single group decides it (several codes agree), when that
+    group alone gives the same value. Rows of other codes, and of other fields, are not
+    among them, so a rejection is not undone by an unrelated proposal. A field no such
+    group explains, or a person with more than ``MAX_ORIGIN_GROUPS`` groups, falls back
+    to every provisional measurement and observation row: it can only lapse more.
+    """
+    from omop_core.services.patient_record_service import _derived_value_matches
+    fields = [field for field in fields if field in kept]
+    if not fields:
+        return {}
+    groups = defaultdict(list)
+    for row in measurements:
+        groups['m', row.measurement_source_value].append(row)
+    for row in observations:
+        groups['o', row.observation_source_value].append(row)
+    everything = _row_origins(measurements + observations)
+    if len(groups) > MAX_ORIGIN_GROUPS:
+        return {field: set(everything) for field in fields}
+    origins = {}
+    for group in groups.values():
+        gone = {id(row) for row in group}
+        without = _read_values(person, record, _view(
+            snapshot,
+            [row for row in measurements if id(row) not in gone],
+            [row for row in observations if id(row) not in gone],
+            routing,
+        ))
+        for field in fields:
+            if not _derived_value_matches(field, without.get(field), kept[field]):
+                origins.setdefault(field, set()).update(_row_origins(group))
+    undecided = [field for field in fields if field not in origins]
+    if undecided:
+        for group in groups.values():
+            alone = _read_values(person, record, _view(
+                snapshot,
+                [row for row in group if isinstance(row, Measurement)],
+                [row for row in group if isinstance(row, Observation)],
+                routing,
+            ))
+            for field in undecided:
+                if _derived_value_matches(field, alone.get(field), kept[field]):
+                    origins.setdefault(field, set()).update(_row_origins(group))
+    return {field: origins.get(field) or set(everything) for field in fields}
 
 
 # The calculated fields a provisional input can move, and the stored fields
@@ -334,7 +414,7 @@ def _provisional_disease(person, snapshot, shared):
     return found
 
 
-def _disease_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[dict, dict]:
+def _disease_proposals(person, record, snapshot, blocked=(), shared=None, origins=None) -> tuple[dict, dict]:
     """(values, confidences) of the disease fields a provisional cancer decides.
 
     The real reader (``_get_disease_data``) runs over the provisional
@@ -370,10 +450,13 @@ def _disease_proposals(person, record, snapshot, blocked=(), shared=None) -> tup
     if not _is_empty(record.disease) and record.disease_slug != read.get('disease_slug'):
         return {}, {}
     values = {field: read[field] for field in DISEASE_FIELDS if not _is_empty(read.get(field))}
+    if origins is not None:
+        row = _origin('condition_occurrence', primary.condition_source_value, primary.condition_concept_id)
+        origins.update({field: {row} for field in values})
     return values, {field: primary.confidence for field in values}
 
 
-def _medication_proposals(snapshot) -> tuple[dict, dict]:
+def _medication_proposals(snapshot, origins=None) -> tuple[dict, dict]:
     """(values, confidences) of ``concomitant_medications`` from provisional drug rows.
 
     The list is the real reader's own (``recent_medications``) over the
@@ -385,11 +468,15 @@ def _medication_proposals(snapshot) -> tuple[dict, dict]:
     names, rows = recent_medications(snapshot.provisional_drug_exposures)
     if not names:
         return {}, {}
+    if origins is not None:
+        origins['concomitant_medications'] = _group_origins(
+            rows, 'drug_exposure', 'drug_source_value', 'drug_concept_id')
     return ({'concomitant_medications': ', '.join(names)},
             {'concomitant_medications': min(row.confidence for row in rows)})
 
 
-def composite_proposals(person, record, snapshot, blocked=(), taken=(), shared=None) -> tuple[dict, dict]:
+def composite_proposals(person, record, snapshot, blocked=(), taken=(), shared=None,
+                        origins=None) -> tuple[dict, dict]:
     """(values, confidences) the composite readers add from provisional conditions and drugs.
 
     Each reader runs over provisional rows only, exactly as the real refresh
@@ -402,8 +489,8 @@ def composite_proposals(person, record, snapshot, blocked=(), taken=(), shared=N
     from omop_core.services.patient_record_service import _is_empty
     names = _confidence_names()
     values, confidences = {}, {}
-    for reader in (lambda: _disease_proposals(person, record, snapshot, blocked, shared),
-                   lambda: _medication_proposals(snapshot)):
+    for reader in (lambda: _disease_proposals(person, record, snapshot, blocked, shared, origins),
+                   lambda: _medication_proposals(snapshot, origins)):
         try:
             with transaction.atomic():
                 found, marks = reader()
@@ -603,8 +690,18 @@ def list_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[d
     return values, confidences
 
 
-def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
-    """(values, confidences) the provisional rows add to *record*, by field name."""
+def provisional_values(person, record, snapshot, user_edited=(), origins=None,
+                       hold_rejections=True, origin_fields=()) -> tuple[dict, dict]:
+    """(values, confidences) the provisional rows add to *record*, by field name.
+
+    A field the user rejected (``ProposalRejection``) is left out while the
+    rejection holds (``held_rejections``); ``hold_rejections=False`` reads the
+    proposals as if none had been rejected, which is how a rejection finds what it
+    is made against. *origins*, when a dict, is filled with the rows that feed the
+    proposed fields (``_origin`` triples): the composite fields always, the others only
+    those of *origin_fields* and of a field the person has rejected, since finding them
+    reads the rows again per code group.
+    """
     from omop_core.services.patient_record_service import canonical_disease_names
     if not _has_provisional_rows(snapshot):
         return {}, {}
@@ -613,12 +710,76 @@ def provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, 
              for name in (_usable_concept_name(c.condition_concept) if c.condition_concept_id else None,
                           c.condition_source_value)}
     with canonical_disease_names(names):
-        return _provisional_values(person, record, snapshot, user_edited)
+        return _provisional_values(person, record, snapshot, user_edited, origins, hold_rejections,
+                                   origin_fields)
 
 
-def _provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict, dict]:
+# Fields that go with a rejected one: a rejected weight leaves no unit to show, and
+# the disease and its slug describe one cancer, so rejecting either rejects the
+# group (the same grouping a typed edit has, ``mirror_user_edit``).
+REJECTION_FOLLOWERS = {
+    'weight': ('weight_units',),
+    'height': ('height_units',),
+    'disease': (*DISEASE_FIELDS, 'disease_slugs'),
+    'disease_slug': (*DISEASE_FIELDS, 'disease_slugs'),
+    # A date and its precision are one answer (``_PRECISION``).
+    'diagnosis_date': ('diagnosis_date_precision',),
+    'sct_date': ('sct_date_precision',),
+    'dlbcl_transformation_date': ('dlbcl_transformation_date_precision',),
+}
+
+_PRECISION = '_precision'
+
+
+def _date_of(precision_field):
+    """The date a ``<date>_precision`` field describes, or None for any other field."""
+    if precision_field.endswith(_PRECISION) and precision_field[:-len(_PRECISION)] in _confidence_names():
+        return precision_field[:-len(_PRECISION)]
+    return None
+
+
+def rejection_group(fields) -> set[str]:
+    """*fields* and every field that goes with a rejection of them.
+
+    Besides ``REJECTION_FOLLOWERS``, a lab's aliases and their unit follow the
+    canonical field (the page shows ``hemoglobin_level`` beside
+    ``hemoglobin_g_dl``, marked as the same proposal).
+    """
+    from omop_core.services.patient_record_service import _LAB_FIELD_ALIASES, _lab_alias_units
+    group = set(fields)
+    for field in list(group):
+        group.update(REJECTION_FOLLOWERS.get(field, ()))
+        group.update(_LAB_FIELD_ALIASES.get(field, ()))
+        group.update(_lab_alias_units(field, 1))
+    return group
+
+
+def held_rejections(rejections, origins) -> set[str]:
+    """The fields the user rejected whose rejection still holds: leave them empty.
+
+    *rejections* maps a rejected field to the ``_origin`` triples that fed it then;
+    *origins* maps a field to those that feed it now. A rejection holds while every
+    row that feeds the field now is one that fed it when it was rejected: the same
+    source code under the same concept. A new reading of that code stays rejected. A
+    code now mapped to another concept, or another code that now feeds the field, is a
+    new proposal and shows again. A field nothing proposes now has nothing to hold. The
+    fields that go with a held one are held too.
+    """
+    held = {field for field, stored in rejections.items()
+            if field in origins and origins[field] <= stored}
+    return rejection_group(held)
+
+
+def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
+                        hold_rejections=True, origin_fields=()) -> tuple[dict, dict]:
     from omop_core.services.patient_record_service import _is_empty
     shared = {}
+    origins = {} if origins is None else origins
+    rejections = {}
+    if hold_rejections and settings.PROVISIONAL_DATA_ENABLED:
+        rejections = {r.field_name: {tuple(origin) for origin in r.origins or []}
+                      for r in ProposalRejection.objects.filter(person=person)}
+    origin_fields = set(origin_fields) | set(rejections)
     measurements = _usable_vitals(_after_clears(snapshot, snapshot.provisional_measurements, 'measurement'))
     observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
     confidence_names = _confidence_names()
@@ -645,7 +806,29 @@ def _provisional_values(person, record, snapshot, user_edited=()) -> tuple[dict,
                 del kept[field]
         if kept:
             confidences = _attribute(person, record, snapshot, kept, measurements, observations, routing)
-    composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept, shared=shared)
+            need = origin_fields & kept.keys()
+            if need:
+                everything = _row_origins(measurements + observations)
+                # A held rejection costs nothing when every provisional row the person has
+                # is one it was made against: whatever feeds the field is among them. Only
+                # a person with other codes pays for the search for the feeding rows.
+                settled = {f for f in need if f in rejections and everything <= rejections[f]}
+                origins.update({f: set(everything) for f in settled})
+                if need - settled:
+                    origins.update(_field_origins(person, record, snapshot, kept, need - settled,
+                                                  measurements, observations, routing))
+    composite, composite_marks = composite_proposals(person, record, snapshot, blocked, taken=kept,
+                                                     shared=shared, origins=origins)
+    if rejections:
+        # A field the user rejected stays empty while the rejection holds (#2671).
+        # Dropping it here, before the lists and calculated fields are read, takes
+        # a calculation made from it (BMI from a rejected weight) with it.
+        held = held_rejections(rejections, {f: o for f, o in origins.items() if f in kept or f in composite})
+        for field in held:
+            for proposals, marks in ((kept, confidences), (composite, composite_marks)):
+                proposals.pop(field, None)
+                marks.pop(field, None)
+        blocked = blocked | held
     listed, listed_marks = list_proposals(person, record, snapshot, blocked, shared)
     if not (kept or composite or listed):
         return {}, {}
@@ -714,6 +897,9 @@ def mirror_user_edit(record, edited_fields) -> None:
     if edited & {'disease', 'disease_slug'}:
         edited |= {*DISEASE_FIELDS, 'disease_slugs'}
     names = _confidence_names()
+    # A date and its precision are one answer: editing the date takes the precision's
+    # proposal back too, or a proposed "year" would be shown against the new date.
+    edited |= {f'{field}{_PRECISION}' for field in list(edited) if f'{field}{_PRECISION}' in names}
     try:
         with transaction.atomic():
             cleared = []
@@ -742,6 +928,90 @@ def mirror_user_edit(record, edited_fields) -> None:
                 confidence.save(update_fields=cleared)
     except Exception:  # noqa: BLE001 -- the user's edit is already saved; this is the side picture
         logger.exception('Provisional mirror failed for person_id=%s; the edit is saved.', record.person_id)
+
+
+def _is_blank(value) -> bool:
+    """An explicit clear: null, or text with nothing in it (never 0, False or a list)."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+# Fields whose empty string is a recorded answer, not a blank: a checklist saved with
+# nothing ticked ("Record no GELF criteria" is Not Met, "Record no risk factors" is a
+# FLIPI of 0), against null, "Mark not assessed". For these only null rejects a proposal;
+# '' stays a value the user records, as it was before #2671. A new control that sends
+# '' on purpose belongs here.
+RECORDED_EMPTY_FIELDS = frozenset({'gelf_criteria_options', 'flipi_score_options'})
+
+
+def _is_rejection(field, value) -> bool:
+    return value is None if field in RECORDED_EMPTY_FIELDS else _is_blank(value)
+
+
+def proposal_clears(record, patch_data, declared) -> list[str]:
+    """The fields of a PATCH that explicitly reject a proposal the record read shows (#2671).
+
+    A proposal is laid over a field the real record leaves empty, so a client that
+    clears the displayed value sends a blank for a field the record already holds empty.
+    That is no edit, and it is not an echo either: the editor sends back what it
+    displays, which for such a field is the proposed value. A field is rejected only
+    when all of these hold, so nothing a client sends by accident or for another reason
+    can reject a proposal the person never saw:
+
+    - the client *declared* it (``rejected_proposals`` in the body: the fields whose
+      shown proposal it cleared), so a stale client that never saw the proposal, or one
+      that sends a whole representation, rejects nothing;
+    - its value is blank: null, or text with nothing in it, except for a field in
+      ``RECORDED_EMPTY_FIELDS`` whose empty string is a recorded answer and only null
+      counts;
+    - the overlay marks it, and the real record leaves it empty.
+
+    Calculated fields clear with their inputs, list fields are never rejected (their
+    proposed items are not the user's to write, ``views._drop_proposed_list_items``),
+    and neither is a unit (a picker that goes with its value, ``rejection_group``).
+    Who may reject is the caller's rule (``views.apply_patient_record_patch``,
+    ``allow_reject``). Nothing is read when no declared field is blank, and nothing is
+    marked with ``PROVISIONAL_DATA_ENABLED`` off.
+    """
+    candidates = [field for field in declared
+                  if field in patch_data and _is_rejection(field, patch_data[field])]
+    if not candidates:
+        return []
+    marks = overlay(record, lists=False)[1]
+    if not marks:
+        return []
+    from omop_core.services.patient_record_service import _is_empty
+    return sorted(
+        field for field in set(candidates)
+        if field in marks and field not in COMPUTED_INPUTS and field not in PROVISIONAL_JSON_FIELDS
+        and not field.endswith('_units') and _is_empty(getattr(record, field, None))
+    )
+
+
+def reject_proposals(person, record, fields, actor=None) -> set[str]:
+    """Keep the user's rejection of the proposals now on *fields*; every field to take out of view.
+
+    Each field is remembered with the provisional rows that feed it today
+    (``ProposalRejection``), so the pass leaves it empty from now on, until a
+    different code or concept proposes it (``held_rejections``), and with who rejected
+    it (*actor*'s Identity id) and when. Nothing is deleted or approved. The caller
+    mirrors the returned fields out of the provisional picture (``mirror_user_edit``),
+    which also drops a calculation made from them. A field no proposal feeds any more
+    has nothing to hold; it is still returned, so a stale displayed value goes.
+    """
+    from django.utils import timezone
+    from omop_core.services.patient_record_service import _build_snapshot
+    origins = {}
+    provisional_values(person, record, _build_snapshot(person), origins=origins,
+                       hold_rejections=False, origin_fields=fields)
+    by = str(actor.pk) if getattr(actor, 'pk', None) is not None else ''
+    for field in fields:
+        found = origins.get(field)
+        if found:
+            ProposalRejection.objects.update_or_create(
+                person=person, field_name=field,
+                defaults={'origins': [list(origin) for origin in sorted(found)],
+                          'rejected_by': by, 'rejected_at': timezone.now()})
+    return rejection_group(fields)
 
 
 def _settle_computed(record, provisional, confidence, edited) -> list[str]:
@@ -843,6 +1113,11 @@ def overlay(record, lists=True):
         elif _is_empty(live):
             setattr(view, field.attname, getattr(provisional, field.attname))
             marks[field.name] = mark
+    # A precision describes its date: a proposed one is shown only with the proposed date
+    # (an approved 2020-05-12 with a proposed "year" must not read as "2020").
+    for field_name in [name for name in marks if _date_of(name) and _date_of(name) not in marks]:
+        setattr(view, field_name, getattr(record, field_name, None))
+        del marks[field_name]
     if added:
         # Which items of each list are proposals; the serializer carries it out.
         view.provisional_items = added
@@ -855,7 +1130,8 @@ def attestation_blockers(record) -> list[str]:
     A patient's "Confirm my record" says what they saw is accurate. While the
     page lays a proposal over a field (``overlay``), part of what they see is
     unapproved, so the attestation is refused until each marked field is entered
-    again, which saves it as approved data. The answer is the scalar fields the
+    again, which saves it as approved data, or rejected (``proposal_clears``), which
+    takes its mark off. The answer is the scalar fields the
     overlay marks that a patient tab renders (``patient_visible_fields``) and the
     patient can edit: a field no tab shows is marked in the record read but not on
     screen, so blocking on it could never be lifted, and the list fields

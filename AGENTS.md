@@ -1685,10 +1685,14 @@ a field, regenerate, or `tests/test_patient_visible_fields.py` and the frontend 
 the list fields, the disease and treatment tabs and the controls that bypass `Field` do
 not block: a gap the plan lists, and a block on a field the patient cannot see could never
 be lifted. A block is lifted by entering your own answer in the field (an edit saves it as
-approved data; for a select, pick another option and then the shown one again): a proposal
-cannot be rejected explicitly yet (#2671), so a patient who disagrees must enter their own
-value. A PATCH of `null` on an empty number field is a no-op; `''` on a text or select
-field is accepted and stores `''` in the approved record. The fields the General tab shows
+approved data; for a select, pick another option and then the shown one again) or by
+rejecting the proposal: a blank value (`null`, or `''` for text and select, except the GELF
+and FLIPI checklists, whose `''` is a recorded answer and only `null` rejects) for a marked
+scalar field the record leaves empty, named in the body's `rejected_proposals` by a signed-in
+person at the editor (`allow_reject`; never the survey mapping or a machine credential), is
+stored as a `ProposalRejection` (#2671) and writes nothing to the approved record; the pass
+then leaves the field empty until a different code or concept proposes it
+(`held_rejections`; see the plan, "Rejecting a proposal"). The fields the General tab shows
 only outside patient mode (`validated`, ...) are excluded (`NOT_FOR_PATIENTS`). `attestationBlockers` in
 `frontend/src/components/PatientInfo/provisional.ts` is the same rule over the marks the
 page holds: change one and change the other. With `PROVISIONAL_DATA_ENABLED` off nothing
