@@ -251,7 +251,7 @@ class PatientCreateView(APIView):
             except ValidationError:
                 return Response({'error': 'Enter a valid email address.'},
                                 status=status.HTTP_400_BAD_REQUEST)
-        if not (given_name or family_name or email):
+        if not for_self and not (given_name or family_name or email):
             return Response({'error': 'Enter a name or an email address.'},
                             status=status.HTTP_400_BAD_REQUEST)
 

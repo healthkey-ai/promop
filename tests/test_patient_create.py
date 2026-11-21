@@ -130,7 +130,7 @@ def test_admin_creates_record_for_self_and_gains_patient_role():
 
 def test_self_record_leaves_unverified_email_off_person():
     admin = _admin(_org(), verified=False)
-    resp = _client(admin).post(URL, {'for_self': True, 'given_name': 'Ada'}, format='json')
+    resp = _client(admin).post(URL, {'for_self': True}, format='json')
     assert resp.status_code == 201
     assert Person.objects.get(person_id=resp.data['person_id']).email is None
 
