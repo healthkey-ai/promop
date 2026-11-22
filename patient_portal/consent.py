@@ -435,3 +435,75 @@ def accept_document(
             key=document.key, version=version, language=text.language, decision=ACCEPTED, recorded_at=when,
         )
     return acceptance
+
+
+# ------------------------------------------------------------------ history
+
+
+def consent_history(person) -> list[dict]:
+    """Every answer and acceptance the member has, newest first: what it was
+    (``kind`` consent or document, its ``key`` and the ``title`` of the
+    wording answered), the decision, the version and language, the frequency,
+    who recorded it (``source``) and when. The history endpoint, the record
+    export's PDF and its FHIR Consent resources all read this. ``current`` is
+    true on the row that is the member's position for that key."""
+    events = [
+        {
+            'kind': 'consent', 'key': e.purpose.key, 'title': e.text.title if e.text else e.purpose.key,
+            'decision': e.decision, 'version': e.version, 'language': e.language, 'frequency': e.frequency,
+            'source': e.source, 'recorded_at': e.recorded_at, 'order': e.id,
+        }
+        for e in ConsentEvent.objects.filter(person=person).select_related('purpose', 'text')
+    ]
+    acceptances = [
+        {
+            'kind': 'document', 'key': a.document.key, 'title': a.text.title if a.text else a.document.name,
+            'decision': ACCEPTED, 'version': a.version, 'language': a.language, 'frequency': '',
+            'source': a.source, 'recorded_at': a.accepted_at, 'order': a.id,
+        }
+        for a in DocumentAcceptance.objects.filter(person=person).select_related('document', 'text')
+    ]
+    rows = sorted(events + acceptances, key=lambda r: (r['recorded_at'], r['order']), reverse=True)
+    seen = set()
+    for row in rows:
+        row['current'] = (row['kind'], row['key']) not in seen
+        seen.add((row['kind'], row['key']))
+        del row['order']
+    return rows
+
+
+# FHIR R4 Consent.status for a member's position; an answer superseded by a
+# later one is inactive.
+_FHIR_STATUS = {
+    ConsentEvent.GRANTED: 'active', ACCEPTED: 'active', ConsentEvent.DECLINED: 'rejected',
+    ConsentEvent.WITHDRAWN: 'inactive', ConsentEvent.ASK_LATER: 'proposed',
+}
+
+
+def consent_fhir_resources(person, patient_ref: str) -> list[dict]:
+    """The member's answers and acceptances as FHIR R4 Consent resources, one
+    per row of ``consent_history``, for their own record export: a full
+    access request includes what they agreed to."""
+    import uuid
+
+    resources = []
+    for row in consent_history(person):
+        system = 'urn:promop:consent-purpose' if row['kind'] == 'consent' else 'urn:promop:legal-document'
+        permits = row['decision'] in (ConsentEvent.GRANTED, ACCEPTED)
+        resources.append({
+            'resourceType': 'Consent',
+            'id': str(uuid.uuid4()),
+            'status': _FHIR_STATUS[row['decision']] if row['current'] else 'inactive',
+            'scope': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/consentscope',
+                                  'code': 'patient-privacy', 'display': 'Privacy Consent'}]},
+            'category': [{'coding': [{'system': 'http://loinc.org', 'code': '59284-0', 'display': 'Patient Consent'}]}],
+            'patient': {'reference': patient_ref},
+            'dateTime': row['recorded_at'].isoformat(),
+            'policyRule': {
+                'coding': [{'system': system, 'code': row['key'], 'version': row['version']}],
+                'text': f"{row['title']} (version {row['version']}): {row['decision']}"
+                        + (f", {row['frequency']}" if row['frequency'] else ''),
+            },
+            'provision': {'type': 'permit' if permits else 'deny'},
+        })
+    return resources

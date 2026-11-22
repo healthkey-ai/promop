@@ -21,7 +21,7 @@ from rest_framework.response import Response
 
 from patient_portal import consent as svc
 from patient_portal.api.permissions import MemberWritePermission
-from patient_portal.models import ConsentEvent, ConsentPurpose, DocumentAcceptance, LegalDocument
+from patient_portal.models import ConsentEvent, ConsentPurpose, LegalDocument
 
 from .views import PhrView
 
@@ -163,19 +163,9 @@ class ConsentDocumentsView(PhrView):
 
 
 class ConsentHistoryView(PhrView):
+    # The endpoint's rows keep their shape; the title and current flag are
+    # for the record export.
+    FIELDS = ('kind', 'key', 'decision', 'version', 'language', 'frequency', 'source', 'recorded_at')
+
     def build(self, person, record):
-        events = [
-            {
-                'kind': 'consent', 'key': e.purpose.key, 'decision': e.decision, 'version': e.version,
-                'language': e.language, 'frequency': e.frequency, 'source': e.source, 'recorded_at': e.recorded_at,
-            }
-            for e in ConsentEvent.objects.filter(person=person).select_related('purpose')
-        ]
-        acceptances = [
-            {
-                'kind': 'document', 'key': a.document.key, 'decision': svc.ACCEPTED, 'version': a.version,
-                'language': a.language, 'frequency': '', 'source': a.source, 'recorded_at': a.accepted_at,
-            }
-            for a in DocumentAcceptance.objects.filter(person=person).select_related('document')
-        ]
-        return {'history': sorted(events + acceptances, key=lambda r: r['recorded_at'], reverse=True)}
+        return {'history': [{k: row[k] for k in self.FIELDS} for row in svc.consent_history(person)]}
