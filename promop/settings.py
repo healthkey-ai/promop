@@ -257,7 +257,7 @@ LOGGING = {
 AUDIT_EVENT_RETENTION_DAYS = int(os.environ.get('AUDIT_EVENT_RETENTION_DAYS', '2190'))
 
 # Patient invitations never accepted are deleted this many days after they
-# were sent, once expired or cancelled, with the email they put on the person
+# were last sent, once expired or cancelled, undoing the email they put on the person
 # (`purge_unaccepted_invitations`, run daily; patient_portal.invitation_retention).
 # 0 keeps them. A privacy policy that promises to delete what is held about
 # people invited who never joined sets its period here.
