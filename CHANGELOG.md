@@ -11,8 +11,9 @@ All notable changes to PRomop are documented here.
 - **The member's record export includes their permissions and contact
   choices** — the PDF gains a "Permissions and contact choices" section (the
   answers now, the documents accepted, every answer with who recorded it), and
-  the FHIR file one R4 `Consent` per answer and acceptance, so a full access
-  request is answered. The staff export is unchanged (#2784).
+  the FHIR file one R4 `Consent` per answer and acceptance, with the legacy
+  `PatientConsent` flags (the HealthKit data-sharing switch) too, so a full
+  access request is answered. The staff export is unchanged (#2784).
 
 - **`INVITE_TTL_DAYS`** — how long a patient invitation link lasts, in days
   (default 7, as before; 1 to 90, anything else stops startup), from the

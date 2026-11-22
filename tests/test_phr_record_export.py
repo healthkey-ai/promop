@@ -355,12 +355,15 @@ def test_the_fhir_export_carries_every_answer_as_a_consent(agreed):
     consents = [e['resource'] for e in bundle['entry'] if e['resource']['resourceType'] == 'Consent']
 
     by = {(c['policyRule']['coding'][0]['code'], c['status']): c for c in consents}
-    assert set(by) == {('my_record', 'active'), ('contact_updates', 'inactive'), ('terms', 'active')}
-    # The grant of updates is superseded by the withdrawal: both are there, neither active.
-    updates = [c for c in consents if c['policyRule']['coding'][0]['code'] == 'contact_updates']
-    assert sorted(c['provision']['type'] for c in updates) == ['deny', 'permit']
-    assert {c['status'] for c in updates} == {'inactive'}
+    assert set(by) == {('my_record', 'active'), ('contact_updates', 'active'), ('contact_updates', 'inactive'),
+                       ('terms', 'active')}
+    # The withdrawal is the member's position now, a "no" that stands; the grant it replaced is inactive.
+    assert by[('contact_updates', 'active')]['provision']['type'] == 'deny'
+    assert by[('contact_updates', 'inactive')]['provision']['type'] == 'permit'
     assert by[('my_record', 'active')]['policyRule']['text'] == 'My record (version 0.4): granted'
+    # The wording's version is in the policy, not the coding.
+    assert by[('my_record', 'active')]['policy'] == [{'uri': 'urn:promop:consent-purpose:my_record:0.4'}]
+    assert 'version' not in by[('my_record', 'active')]['policyRule']['coding'][0]
     assert by[('terms', 'active')]['policyRule']['coding'][0]['system'] == 'urn:promop:legal-document'
     assert all(c['patient'] == {'reference': f"Patient/{patient['id']}"} for c in consents)
     assert bundle['total'] == len(bundle['entry'])
@@ -386,3 +389,21 @@ def test_the_history_endpoint_keeps_its_shape(agreed):
     rows = signed_in(agreed).get('/api/v1/phr/consent/history/').json()['history']
     assert [r['key'] for r in rows][:2] == ['terms', 'contact_updates']
     assert set(rows[0]) == {'kind', 'key', 'decision', 'version', 'language', 'frequency', 'source', 'recorded_at'}
+
+
+def test_the_export_includes_the_legacy_data_sharing_choice(agreed):
+    """The HealthKit switch still sets PatientConsent: an access request sees it too."""
+    from patient_portal.models import PatientConsent, PatientUser
+
+    client = signed_in(agreed)
+    link = PatientUser.objects.get(person=agreed.person)
+    PatientConsent.objects.create(patient_user=link, consent_type='data_sharing', consent_granted=True)
+
+    bundle = json.loads(client.get(EXPORT + '?format=fhir').content)
+    legacy = [e['resource'] for e in bundle['entry'] if e['resource']['resourceType'] == 'Consent'
+              and e['resource']['policyRule']['coding'][0]['system'] == 'urn:promop:legacy-consent']
+    assert [(c['policyRule']['coding'][0]['code'], c['status'], c['provision']['type']) for c in legacy] == [
+        ('data_sharing', 'active', 'permit')]
+    assert 'Data Sharing' in pdf_text(client.get(EXPORT + '?format=pdf').content)
+    # The history endpoint is consent v2's and keeps its rows.
+    assert 'legacy' not in {r['kind'] for r in client.get('/api/v1/phr/consent/history/').json()['history']}

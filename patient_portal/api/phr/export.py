@@ -506,7 +506,7 @@ def _labs(person, record, labels, styles, diagnosed) -> list:
 def _consent(person, record, labels, styles, diagnosed) -> list:
     from reportlab.platypus import Paragraph
 
-    history = consent_history(person)
+    history = consent_history(person, include_legacy=True)
     if not history:
         return []
 
@@ -518,11 +518,11 @@ def _consent(person, record, labels, styles, diagnosed) -> list:
         return timezone.localtime(row['recorded_at']).date().isoformat()
 
     out = []
-    now = [r for r in history if r['current'] and r['kind'] == 'consent']
+    now = [r for r in history if r['current'] and r['kind'] in ('consent', 'legacy')]
     if now:
         out.append(Paragraph(labels['consent_now'], styles['h2']))
         rows = [[labels['what'], labels['answer'], labels['version'], labels['date']]]
-        rows += [[r['title'], answer(r), r['version'], day(r)] for r in now]
+        rows += [[r['title'], answer(r), r['version'] or '—', day(r)] for r in now]
         out.append(_table(rows, [240, 110, 70, 80], styles))
     documents = [r for r in history if r['current'] and r['kind'] == 'document']
     if documents:
@@ -532,7 +532,8 @@ def _consent(person, record, labels, styles, diagnosed) -> list:
         out.append(_table(rows, [310, 90, 100], styles))
     out.append(Paragraph(labels['consent_history'], styles['h2']))
     rows = [[labels['date'], labels['what'], labels['answer'], labels['version'], labels['recorded_by']]]
-    rows += [[day(r), r['title'], answer(r), r['version'], labels['by'].get(r['source'], r['source'])] for r in history]
+    rows += [[day(r), r['title'], answer(r), r['version'] or '—', labels['by'].get(r['source'], r['source'])]
+             for r in history]
     out.append(_table(rows, [70, 200, 90, 60, 90], styles))
     return out
 
