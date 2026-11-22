@@ -36,6 +36,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from patient_portal.consent import requires_depth, withdraw_orphaned_dependents
 from patient_portal.models import ConsentPurpose, ConsentText, LegalDocument, LegalDocumentVersion
 
 PURPOSE_SETTINGS = (
@@ -102,6 +103,12 @@ class Command(BaseCommand):
             for purpose in ConsentPurpose.objects.exclude(requires=''):
                 if purpose.requires not in keys:
                     raise CommandError(f'Purpose {purpose.key} requires {purpose.requires!r}, which is not a purpose.')
+            try:
+                requires_depth(ConsentPurpose.objects.all())
+            except ValueError as e:
+                raise CommandError(f'Purposes require each other in a cycle: {e}.') from None
+            # Answers given before a purpose required another follow the rule now.
+            orphaned = withdraw_orphaned_dependents()
             for spec in data.get('documents', []):
                 document, _ = LegalDocument.objects.update_or_create(
                     key=_required(spec, 'key'), defaults=_settings(spec, DOCUMENT_SETTINGS),
@@ -115,6 +122,8 @@ class Command(BaseCommand):
                     )
                     added, kept = added + created, kept + (not created)
         self.stdout.write(f'{added} text version(s) added, {kept} already present and left unchanged.')
+        if orphaned:
+            self.stdout.write(f'{orphaned} grant(s) withdrawn whose required purpose is not granted.')
         unpublished = [
             f'purpose {p.key}' for p in ConsentPurpose.objects.filter(is_active=True)
             if not p.texts.filter(published_at__lte=now).exists()

@@ -96,10 +96,17 @@ both (#2782).
   grant), each dependent still granted is withdrawn in the same transaction:
   a `system` event under the version the member granted, in the history and
   the ledger. A dependent's own dependents follow it.
-- A batch (sign-up, `POST consent/`) records a purpose after the one it
-  requires, whatever order the client sent.
-- `load_consent_texts` refuses a `requires` naming the purpose itself or no
-  purpose. `requires` is in the consent and sign-up policy payloads.
+- A batch (sign-up, `POST consent/`) works whatever order the client sent:
+  answers that end a grant go first, a dependent before what it requires (so
+  withdrawing both at once works), then grants, what is required first, at
+  any depth.
+- A dependent's system withdrawal is never dated before the grant it ends.
+- One person's answers are recorded one at a time (a transaction-scoped
+  advisory lock), so a grant cannot race the withdrawal it needs.
+- `load_consent_texts` refuses a `requires` naming no purpose, or purposes
+  requiring each other in a cycle, and withdraws (as system events) grants a
+  newly set `requires` no longer allows: answers given before the rule follow
+  it. `requires` is in the consent and sign-up policy payloads.
 
 ## The API
 

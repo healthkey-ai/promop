@@ -118,3 +118,69 @@ def test_a_purpose_cannot_require_itself_or_an_unknown_one(tmp_path):
         load({'key': 'research', 'requires': 'research', 'texts': [{'version': '1', 'title': 'R', 'body': 'b'}]})
     with pytest.raises(CommandError, match="requires 'my_record', which is not a purpose"):
         load({'key': 'research', 'requires': 'my_record', 'texts': [{'version': '1', 'title': 'R', 'body': 'b'}]})
+
+
+def test_withdrawing_my_record_and_a_dependent_in_one_batch_works(member, purposes):
+    """Review of #2783: the cascade must not pre-empt the member's own withdrawal of the dependent."""
+    grant(member['person'], 'my_record', 'community')
+    r = member['client'].post(URL, {'decisions': [
+        {'purpose': 'my_record', 'decision': 'withdrawn', 'version': '1.0'},
+        {'purpose': 'community', 'decision': 'withdrawn', 'version': '1.0'},
+    ]}, format='json')
+    assert r.status_code == 200, r.content
+    assert standing(member['person']) == {'my_record': 'withdrawn', 'community': 'withdrawn'}
+    # The member's own answer, not the system's.
+    event = ConsentEvent.objects.filter(person=member['person'], purpose__key='community').latest('recorded_at', 'id')
+    assert event.source == ConsentEvent.MEMBER
+
+
+def test_a_batch_grants_a_chain_of_requirements_in_any_order(member, purposes):
+    r = member['client'].post(URL, {'decisions': [
+        {'purpose': 'research_contact', 'decision': 'granted', 'version': '1.0'},
+        {'purpose': 'research', 'decision': 'granted', 'version': '1.0'},
+        {'purpose': 'my_record', 'decision': 'granted', 'version': '1.0'},
+    ]}, format='json')
+    assert r.status_code == 200, r.content
+    assert standing(member['person']) == {'my_record': 'granted', 'research': 'granted', 'research_contact': 'granted'}
+
+
+def test_a_back_dated_withdrawal_still_ends_a_later_dependent_grant(member, purposes):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    person, t0 = member['person'], timezone.now() - timedelta(days=10)
+    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED, version='1.0', recorded_at=t0)
+    svc.record_consent(person, 'community', ConsentEvent.GRANTED, version='1.0', recorded_at=t0 + timedelta(days=2))
+
+    svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, version='1.0', source=ConsentEvent.STAFF,
+                       recorded_at=t0 + timedelta(days=1))
+
+    assert standing(person)['community'] == 'withdrawn'
+
+
+def test_requires_in_a_cycle_is_refused(tmp_path):
+    path = tmp_path / 'consent.json'
+    path.write_text(json.dumps({'purposes': [
+        {'key': 'a', 'requires': 'b', 'texts': [{'version': '1', 'title': 'A', 'body': 'b'}]},
+        {'key': 'b', 'requires': 'a', 'texts': [{'version': '1', 'title': 'B', 'body': 'b'}]},
+    ]}))
+    with pytest.raises(CommandError, match='cycle'):
+        call_command('load_consent_texts', str(path), publish=True)
+
+
+def test_setting_requires_later_withdraws_grants_it_no_longer_allows(member, purposes, tmp_path):
+    """Answers given before a purpose required another follow the rule once it does."""
+    person = member['person']
+    ConsentPurpose.objects.filter(key='community').update(requires='')
+    grant(person, 'my_record', 'community')
+    svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, version='1.0')
+    assert standing(person)['community'] == 'granted'
+
+    path = tmp_path / 'consent.json'
+    path.write_text(json.dumps({'purposes': [{'key': 'community', 'requires': 'my_record'}]}))
+    out = __import__('io').StringIO()
+    call_command('load_consent_texts', str(path), publish=True, stdout=out)
+
+    assert standing(person)['community'] == 'withdrawn'
+    assert '1 grant(s) withdrawn' in out.getvalue()
