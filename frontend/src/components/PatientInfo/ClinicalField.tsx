@@ -3,6 +3,7 @@ import Field from './Field';
 import { today } from '@/api/clinicalFacts';
 import type { VocabSource } from '@/hooks/useVocabulary';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { useFieldMembership } from './DiseaseProfile';
 
 interface Props {
   label: string;
@@ -58,7 +59,10 @@ export default function ClinicalField({
   onDateChange,
   showReason = true,
 }: Props) {
-  const writable = !!descriptor?.writable;
+  const empty = value === undefined || value === null || value === ''
+    || (Array.isArray(value) && value.length === 0);
+  const membership = useFieldMembership(descriptor, !empty);
+  const writable = !!descriptor?.writable && membership.member;
   // A tab that shares one date across its fields passes it in — a blood panel is
   // drawn once. A tab whose results come from different specimens, as a pathology
   // report's do, can leave it out and get a date per field rather than one date
@@ -75,9 +79,13 @@ export default function ClinicalField({
     ? (descriptor?.multiple ? 'multiselect' : 'select')
     : type;
 
+  // The record's disease does not own this field and it holds no value: nothing to show.
+  if (membership.hidden) return null;
+
   if (!writable) {
     const reason =
-      descriptor?.reason
+      (membership.member ? undefined : `Not part of the ${membership.label} record.`)
+      ?? descriptor?.reason
       ?? (absent
         // Not a PatientRecord column at all: the API neither returns it nor
         // accepts it, so the box could never show a value and never save one.

@@ -1,3 +1,5 @@
+import patientVisibleFields from "@/components/PatientInfo/patientVisibleFields.json";
+import { diseaseTypeOfCategory, type DiseaseType } from "@/components/PatientInfo/provisional";
 import type { DiseaseCategoryOption, DiseaseSet, FieldScoped } from "@/types/fieldScope";
 
 /** The category every unrecognised disease falls into. It has no extension. */
@@ -50,13 +52,16 @@ export function resolveDiseaseFilter(value: string, options: DiseaseCategoryOpti
 }
 
 /**
- * The Disease Category of each disease the patient editor has a tab for, by
- * the editor's disease type, as `disease_profiles.SEED_DISEASE_FIELDS` names
- * them. A record of any other disease has the base record only.
+ * The Disease Category of each disease type the patient editor has a
+ * hand-authored section for, from the generated list the server shares
+ * (`patient_visible_fields.DISEASE_TYPE_CATEGORY`). A record of any other
+ * category has the base record, plus whatever fields are placed on its
+ * extension.
  */
-const DISEASE_TYPE_CATEGORY: Record<string, string> = {
-  breast: "BC", lymphoma: "FL", myeloma: "MM", cll: "CLL", mcl: "MCL",
-};
+const DISEASE_TYPE_CATEGORY = patientVisibleFields.disease_categories as Record<string, string>;
+
+/** The hand-authored section a Disease Category has, as a disease type. */
+export const handSectionFor = (category: string): DiseaseType => diseaseTypeOfCategory(category);
 
 /**
  * A record's Disease Category code, or "" when its record is the base
@@ -70,6 +75,17 @@ const DISEASE_TYPE_CATEGORY: Record<string, string> = {
 export const recordDiseaseCategory = (mapped: string | null, diseaseType: string): string => {
   if (mapped) return mapped === OTHER_DISEASE ? "" : mapped;
   return DISEASE_TYPE_CATEGORY[diseaseType] ?? "";
+};
+
+/**
+ * Whether a field is part of the record of Disease Category `category`: the
+ * base record's fields are part of every record, and an extension field only
+ * of the categories it names (#2332). A field the descriptor does not know
+ * has no scope and is a member.
+ */
+export const isMemberOf = (scoped: { diseases?: string[] } | undefined, category: string): boolean => {
+  const diseases = scoped?.diseases ?? [];
+  return diseases.length === 0 || diseases.includes(category);
 };
 
 const LAB_FIELD_TABS = ["labs", "blood"];

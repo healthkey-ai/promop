@@ -6,7 +6,7 @@ import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, useWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
+import { diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
@@ -17,8 +17,8 @@ import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
-import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
-import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
+import { addedFieldTabs, fieldDiseases, recordDiseaseCategory } from "@/utils/fieldScope";
+import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
 
@@ -117,7 +117,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const { descriptors: writableFields } = useWritableFields(
     editedInfo.person_id as number | string | undefined,
   );
-  const { categoryForDisease } = useAllDiseaseMappings();
+  const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();
+  const { categories: categoryObjects } = useCategoryObjects();
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
@@ -377,17 +378,19 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     }
   }, [handleFieldChange]);
 
-  const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "other" => {
-    const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
-    if (d.includes("breast")) return "breast";
-    if (d.includes("lymphoma")) return "lymphoma";
-    if (d.includes("myeloma")) return "myeloma";
-    if (d.includes("cll") || d.includes("chronic lymphocytic")) return "cll";
-    return "other";
-  };
+  // The record's Disease Category picks the disease tab, the rule the provider
+  // editor and the server's attestation apply (#2332); only a name the mapping
+  // does not hold falls back to the keyword match.
+  const recordCategory = recordDiseaseCategory(
+    typeof editedInfo?.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
+    diseaseTypeOf(editedInfo?.disease),
+  );
+  const getDiseaseType = () => diseaseTypeOfCategory(recordCategory);
+  const categoryLabel = categoryObjects.find((c) => c.value === recordCategory)?.label ?? recordCategory;
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", other: "Disease Specific" })[getDiseaseType()];
+    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()]
+    ?? (categoryLabel || "Disease Specific");
 
   // The host app shows a patient their own record; wording is the patient's.
   const provisionalValue = useMemo(
@@ -395,7 +398,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     [editedInfo],
   );
 
-  if (isLoading) return <PatientInfoSkeleton />;
+  // The category is a guess until the mappings are in; see PatientDetail.
+  if (isLoading || mappingsLoading) return <PatientInfoSkeleton />;
 
   if (isError) {
     const httpStatus = (error as { response?: { status?: number } })?.response?.status;
@@ -417,11 +421,11 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   }
 
   const diseaseType = getDiseaseType();
-  const diseaseCode = recordDiseaseCategory(
-    typeof editedInfo.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
-    diseaseType,
+  const diseaseCode = recordCategory;
+  const showDiseaseTab = recordCategory !== "" && (
+    diseaseType !== "other"
+    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(recordCategory))
   );
-  const showDiseaseTab = diseaseType !== "other";
   // Keyed rather than positional: a host that cannot serve wearable uploads
   // drops that tab, and arithmetic indices would silently shift every tab after it.
   const TAB_LABELS: Record<string, string> = {
@@ -510,6 +514,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
               formData={editedInfo}
               onChange={handleFieldChange}
               diseaseType={diseaseType}
+              category={recordCategory}
+              categoryLabel={categoryLabel}
             />
           )}
           {activeTab === treatmentIdx && (

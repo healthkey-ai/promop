@@ -20,11 +20,20 @@ export function diseaseTypeOf(disease: unknown): DiseaseType {
   return (rule ? rule[1] : 'other') as DiseaseType;
 }
 
+/** The disease type whose section renders a Disease Category's extension, or `other` for a
+ *  category that has no hand-authored section. */
+export function diseaseTypeOfCategory(category: string): DiseaseType {
+  const byType = patientVisibleFields.disease_categories as Record<string, string>;
+  return (Object.keys(byType).find((type) => byType[type] === category) ?? 'other') as DiseaseType;
+}
+
 /** The scalar fields a patient sees for a record: the always-shown tabs plus the disease
- *  tab's section for its disease. */
-function onScreen(info: Record<string, unknown> | null | undefined): Set<string> {
+ *  tab's section for its disease. `category` is the record's Disease Category (`''` for the
+ *  base record alone), which picks the section (#2332); without it the disease text does. */
+function onScreen(info: Record<string, unknown> | null | undefined, category?: string): Set<string> {
   const byDisease = patientVisibleFields.disease_fields as Record<string, string[]>;
-  return new Set([...VISIBLE, ...(byDisease[diseaseTypeOf(info?.disease)] ?? [])]);
+  const type = category === undefined ? diseaseTypeOf(info?.disease) : diseaseTypeOfCategory(category);
+  return new Set([...VISIBLE, ...(byDisease[type] ?? [])]);
 }
 
 /** The record's proposal marks (field to confidence), or none. */
@@ -64,14 +73,18 @@ export function withoutMarks(
  *  path of its own (a calculated or mirrored value, a unit picker) is left out, since
  *  it clears with the field it follows, and a field the descriptor does not know
  *  counts. Editing a field removes its mark from `info`, so the count falls as the
- *  patient enters values. */
+ *  patient enters values.
+ *
+ *  `category` is the record's Disease Category as the page resolves it (`recordDiseaseCategory`);
+ *  the server's `disease_profiles.record_category` is the same rule. */
 export function attestationBlockers(
   info: Record<string, unknown> | null | undefined,
   descriptors?: Record<string, { writable?: boolean }> | null,
+  category?: string,
 ): string[] {
   const items = (info?.provisional_items ?? {}) as Record<string, unknown[]>;
   const known = descriptors && Object.keys(descriptors).length > 0 ? descriptors : null;
-  const shown = onScreen(info);
+  const shown = onScreen(info, category);
   return Object.keys(marksOf(info))
     .filter((field) => !(field in items) && shown.has(field))
     .filter((field) => !known || !(field in known) || !!known[field].writable)

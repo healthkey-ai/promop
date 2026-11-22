@@ -1789,8 +1789,9 @@ overlay's scalar marks (`overlay(record, lists=False)`) in
 descriptor says have no write path of their own (calculated, mirrored, unit pickers). That
 one file, imported by the frontend and read by the server, is generated from the General,
 Labs, Behavior and Wearable tab components, plus, per disease type, the sections of the
-disease tab (`disease_fields`; the page and the server pick the section from the disease
-text by the same `disease_rules`, `diseaseTypeOf` / `disease_type`)
+disease tab (`disease_fields`; the page and the server pick the section from the record's
+Disease Category, `recordDiseaseCategory` / `disease_profiles.record_category`, with the
+keyword `disease_rules` only as the fallback for a name the mapping does not hold)
 (`python -m omop_core.services.patient_visible_fields --write`); when a tab adds or drops
 a field, or the disease tab gets a section, regenerate or map it, or
 `tests/test_patient_visible_fields.py` and the frontend check fail. A control outside `Field`

@@ -1,6 +1,6 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Plus, Search, Trash2 } from 'lucide-react';
 import {
   fetchDiseaseCategories,
@@ -15,7 +15,7 @@ import {
 import { useAuth } from '@/hooks/useAuth';
 import { isStaffOrOrgAdmin } from '@/utils/roles';
 
-interface CategoryOption { value: string; label: string }
+interface CategoryOption { value: string; label: string; extension_size?: number }
 
 export default function DiseaseCategoryPage() {
   const navigate = useNavigate();
@@ -202,6 +202,16 @@ export default function DiseaseCategoryPage() {
             <span key={cat.value} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs">
               <span className="font-medium">{cat.value}</span>
               <span className="text-muted-foreground">{cat.label}</span>
+              {cat.value !== 'Other' && (
+                // The category's extension: the fields that belong to this disease and no other.
+                <Link
+                  to={`/field-mappings?disease=${encodeURIComponent(cat.value)}&set=extension`}
+                  className="rounded-full bg-background px-1.5 py-0.5 text-[11px] text-primary hover:underline"
+                  title={`Fields of the ${cat.label} extension`}
+                >
+                  {cat.extension_size ?? 0} {cat.extension_size === 1 ? 'field' : 'fields'}
+                </Link>
+              )}
               {canEdit && (
                 <button
                   className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"

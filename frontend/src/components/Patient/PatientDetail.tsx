@@ -5,7 +5,7 @@ import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { attestationBlockers, diseaseTypeOf, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
+import { attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -31,8 +31,8 @@ import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider, returnedTab } from "@/components/PatientInfo/fieldMappingLinks";
 import AddFieldLink from "@/components/PatientInfo/AddFieldLink";
 import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
-import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
-import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
+import { addedFieldTabs, fieldDiseases, recordDiseaseCategory } from "@/utils/fieldScope";
+import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
 
@@ -394,7 +394,8 @@ export default function PatientDetail({
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
-  const { categoryForDisease } = useAllDiseaseMappings();
+  const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();
+  const { categories: categoryObjects } = useCategoryObjects();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
 
@@ -840,11 +841,21 @@ export default function PatientDetail({
     }
   }, [handleFieldChange, scheduleAutoSave]);
 
-  // The same rule the attestation uses to know which disease section is on screen.
-  const getDiseaseType = () => diseaseTypeOf(editedInfo?.disease);
+  // The record's Disease Category picks the disease tab (#2332), by the rule the
+  // attestation uses to know which section is on screen
+  // (`disease_profiles.record_category` on the server): what Disease Category
+  // management maps the disease to, and only a name it does not hold falls back to
+  // the editor's old keyword match.
+  const recordCategory = recordDiseaseCategory(
+    typeof editedInfo?.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
+    diseaseTypeOf(editedInfo?.disease),
+  );
+  const getDiseaseType = () => diseaseTypeOfCategory(recordCategory);
+  const categoryLabel = categoryObjects.find((c) => c.value === recordCategory)?.label ?? recordCategory;
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()];
+    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()]
+    ?? categoryLabel;
 
   const provisionalValue = useMemo(
     () => ({ marks: marksOf(editedInfo), patientMode }),
@@ -857,12 +868,14 @@ export default function PatientDetail({
     // server does not count, and the banner would flash a number that then falls. So it
     // counts none, offers the button, and the server's 409 decides.
     () => (patientMode && !writableFields.error && !writableFields.loading
-      ? attestationBlockers(editedInfo, writableFields.descriptors).length
+      ? attestationBlockers(editedInfo, writableFields.descriptors, recordCategory).length
       : 0),
-    [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors],
+    [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors, recordCategory],
   );
 
-  if (loading) return <PatientDetailSkeleton />;
+  // Until the mappings are in, the record's category is a guess, and a tab that
+  // appears and then goes would move every tab after it.
+  if (loading || mappingsLoading) return <PatientDetailSkeleton />;
 
   if (fetchError && !patientInfo) {
     return (
@@ -889,7 +902,15 @@ export default function PatientDetail({
   // The disease-specific tab only appears when a recognised disease is selected.
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const diseaseType = getDiseaseType();
-  const showDiseaseTab = diseaseType !== "other";
+  // A tab for the record's category when it has a hand-authored section or a field
+  // placed on its extension: a category a curator adds gets its tab without a deploy.
+  // Someone who can add fields gets it for any category, even an empty one, because
+  // the tab's Add Field link is how its first field is made.
+  const showDiseaseTab = recordCategory !== "" && (
+    diseaseType !== "other"
+    || canViewOmop
+    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(recordCategory))
+  );
   const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
@@ -933,10 +954,7 @@ export default function PatientDetail({
   const fieldTab = fieldTabs[activeTab];
   // The record's Disease Category, which scopes a field added from the
   // disease tab and decides which disease-specific added fields it shows.
-  const diseaseCode = recordDiseaseCategory(
-    typeof editedInfo.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
-    diseaseType,
-  );
+  const diseaseCode = recordCategory;
   // Offered to whoever sees the fields' globes; nobody else gets its markup.
   const addFieldLink = canViewOmop && fieldTab && personId ? (
     <AddFieldLink
@@ -1151,6 +1169,8 @@ export default function PatientDetail({
                     formData={editedInfo}
                     onChange={handleFieldChange}
                     diseaseType={diseaseType}
+                    category={recordCategory}
+                    categoryLabel={categoryLabel}
                   />
                 )}
                 {activeTab === treatmentIdx && (

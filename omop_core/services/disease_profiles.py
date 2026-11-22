@@ -195,6 +195,30 @@ def resolver() -> Callable[[object], str | None]:
     return resolve
 
 
+def record_category(disease: object) -> str:
+    """The Disease Category whose extension a record with this disease text has.
+
+    ``''`` is the base record alone: no disease, a disease the mapping files
+    under ``Other``, or one nothing recognises. The order is the patient
+    editor's (``recordDiseaseCategory`` in ``fieldScope.ts``), so the page and
+    the attestation agree on which disease section is on screen: what Disease
+    Category management maps the name to, case-insensitively, decides; only a
+    name the mapping does not hold falls back to the keyword rules the editor
+    used before categories picked the tab (``patient_visible_fields.disease_type``).
+    """
+    from omop_core.models import DiseaseCategoryMapping
+    from omop_core.services import patient_visible_fields as visible
+
+    text = str(disease or '').strip()
+    if not text:
+        return ''
+    mapped = (DiseaseCategoryMapping.objects.filter(disease_name__iexact=text)
+              .values_list('category', flat=True).first())
+    if mapped:
+        return '' if mapped == OTHER else mapped
+    return visible.DISEASE_TYPE_CATEGORY.get(visible.disease_type(text), '')
+
+
 def clean_codes(codes: Iterable[str]) -> list[str]:
     """The diseases a scope may name, de-duplicated and sorted.
 

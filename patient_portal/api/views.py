@@ -11164,8 +11164,18 @@ def disease_category_list(request):
             return Response([
                 {'value': c.value, 'label': c.label} for c in DiseaseCategory
             ])
+        # ``extension_size`` is how many fields the category's extension holds
+        # (#2332): the Disease Category page links it to those fields.
+        from omop_core.services import disease_profiles
+        sizes: dict[str, int] = {}
+        names = disease_profiles.field_names()
+        for field_name, diseases in disease_profiles.memberships().items():
+            if field_name in names:
+                for code in diseases:
+                    sizes[code] = sizes.get(code, 0) + 1
         return Response([
-            {'value': r.code, 'label': r.label} for r in rows
+            {'value': r.code, 'label': r.label, 'extension_size': sizes.get(r.code, 0)}
+            for r in rows
         ])
     # POST
     denied = _require_mapping_admin(request)

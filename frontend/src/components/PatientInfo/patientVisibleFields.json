@@ -428,6 +428,13 @@
       "MCLSection"
     ]
   },
+  "disease_categories": {
+    "breast": "BC",
+    "lymphoma": "FL",
+    "myeloma": "MM",
+    "cll": "CLL",
+    "mcl": "MCL"
+  },
   "disease_fields": {
     "breast": [
       "androgen_receptor_status",
