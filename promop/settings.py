@@ -328,6 +328,10 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
 # All env-configurable per organizational policy.
+# How long a patient invitation link lasts, in days: the link's expires_at and
+# the email's "This link expires in N days". A deployment inviting members by
+# campaign may want longer. Org (staff) invitations keep their own 7 days.
+INVITE_TTL_DAYS = max(1, int(os.environ.get('INVITE_TTL_DAYS', '7')))
 AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
 AUTH_LOCKOUT_SECONDS = int(os.environ.get('AUTH_LOCKOUT_SECONDS', '900'))     # #03 lockout duration (15 min)
 PASSWORD_HISTORY_SIZE = int(os.environ.get('PASSWORD_HISTORY_SIZE', '5'))     # #05 last-N passwords that may not be reused

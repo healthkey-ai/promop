@@ -146,3 +146,19 @@ def test_self_and_invite_together_refused():
     c = _client(_admin(_org()))
     resp = c.post(URL, {'for_self': True, 'invite': True, 'email': 'a@b.co'}, format='json')
     assert resp.status_code == 400
+
+
+@pytest.mark.parametrize('days', [7, 30])
+def test_an_invitation_lasts_the_deployments_invite_ttl(settings, days):
+    """INVITE_TTL_DAYS (#2780): the link's expiry, and what the email says of it."""
+    from django.utils import timezone
+
+    settings.INVITE_TTL_DAYS = days
+    mail.outbox = []
+    resp = _client(_admin(_org())).post(URL, {
+        'given_name': 'Rae', 'email': 'rae@example.com', 'invite': True}, format='json')
+    assert resp.status_code == 201, resp.data
+    inv = PatientInvitation.objects.get(person_id=resp.data['person_id'])
+    left = inv.expires_at - timezone.now()
+    assert days - 1 < left.total_seconds() / 86400 <= days
+    assert f'This link expires in {days} days.' in mail.outbox[0].body

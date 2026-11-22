@@ -34,9 +34,6 @@ from .serializers import PatientInvitationSerializer
 
 logger = logging.getLogger(__name__)
 
-INVITE_TTL_DAYS = 7
-
-
 class PatientInvitationEmailError(Exception):
     """Raised when an invitation email cannot be handed to the email backend."""
 
@@ -54,7 +51,7 @@ def _send_patient_invitation_email(invitation) -> None:
         f"Your care team has invited you to access your health record on PROMOP.\n\n"
         f"Click the link below to create your account and set a password:\n\n"
         f"  {accept_url}\n\n"
-        f"This link expires in {INVITE_TTL_DAYS} days.\n\n"
+        f"This link expires in {settings.INVITE_TTL_DAYS} days.\n\n"
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
         f"— The HealthKey team"
     )
@@ -160,7 +157,7 @@ def _issue_invitation(request, person, patient_record, email):
         refresh_patient_record(person)
 
         token = secrets.token_hex(32)  # 64 hex chars
-        expires_at = timezone.now() + timezone.timedelta(days=INVITE_TTL_DAYS)
+        expires_at = timezone.now() + timezone.timedelta(days=settings.INVITE_TTL_DAYS)
         invitation = PatientInvitation.objects.select_for_update().filter(
             person=person, accepted_at__isnull=True, cancelled_at__isnull=True,
         ).first()
