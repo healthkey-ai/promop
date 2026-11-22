@@ -83,6 +83,24 @@ A deployment that gates a purpose must therefore settle where its members'
 country comes from (an ISO code on sign-up is the obvious choice) before
 enabling the gate.
 
+### A purpose that requires another
+
+`requires` names the key of the purpose this one depends on: a consent form
+that lets a member share their answers in community figures, or for
+research, only while they keep their record says `requires: my_record` on
+both (#2782).
+
+- It cannot be granted while the purpose it requires is not; the member is
+  told to grant that first (a migration is not held to this).
+- When a grant of the required purpose ends (withdrawn, or declined after a
+  grant), each dependent still granted is withdrawn in the same transaction:
+  a `system` event under the version the member granted, in the history and
+  the ledger. A dependent's own dependents follow it.
+- A batch (sign-up, `POST consent/`) records a purpose after the one it
+  requires, whatever order the client sent.
+- `load_consent_texts` refuses a `requires` naming the purpose itself or no
+  purpose. `requires` is in the consent and sign-up policy payloads.
+
 ## The API
 
 All under `/api/v1/phr/`, for the signed-in member and their own record only.

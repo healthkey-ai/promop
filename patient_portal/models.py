@@ -803,6 +803,11 @@ class ConsentPurpose(models.Model):
         help_text="Withdrawing it deletes the member's health answers straight away and keeps the account "
                   '(patient_portal.erasure.erase_record).',
     )
+    requires = models.SlugField(
+        max_length=50, blank=True, default='',
+        help_text='The key of the purpose this one depends on. It cannot be granted while that one is not, and is '
+                  'withdrawn with it (a system event) when that grant ends.',
+    )
     sort_order = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -827,6 +832,8 @@ class ConsentPurpose(models.Model):
                 raise ValidationError({name: f'Must be a list of strings of at most {limit} characters.'})
         if self.asks_frequency and not self.frequency_options:
             raise ValidationError({'frequency_options': 'A purpose that asks a frequency needs options.'})
+        if self.requires and self.requires == self.key:
+            raise ValidationError({'requires': 'A purpose cannot require itself.'})
 
     def available_in(self, country) -> bool:
         if not self.gated_by_country:

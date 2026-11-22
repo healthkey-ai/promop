@@ -40,7 +40,7 @@ from patient_portal.models import ConsentPurpose, ConsentText, LegalDocument, Le
 
 PURPOSE_SETTINGS = (
     'kind', 'answers', 'asks_frequency', 'frequency_options', 'stage',
-    'gated_by_country', 'enabled_countries', 'erases_record_on_withdrawal', 'sort_order', 'is_active',
+    'gated_by_country', 'enabled_countries', 'erases_record_on_withdrawal', 'requires', 'sort_order', 'is_active',
 )
 DOCUMENT_SETTINGS = ('name', 'sort_order', 'is_active')
 TEXT_FIELDS = ('title', 'summary', 'body')
@@ -98,6 +98,10 @@ class Command(BaseCommand):
                                   'published_at': _published_at(text, publish)},
                     )
                     added, kept = added + created, kept + (not created)
+            keys = set(ConsentPurpose.objects.values_list('key', flat=True))
+            for purpose in ConsentPurpose.objects.exclude(requires=''):
+                if purpose.requires not in keys:
+                    raise CommandError(f'Purpose {purpose.key} requires {purpose.requires!r}, which is not a purpose.')
             for spec in data.get('documents', []):
                 document, _ = LegalDocument.objects.update_or_create(
                     key=_required(spec, 'key'), defaults=_settings(spec, DOCUMENT_SETTINGS),

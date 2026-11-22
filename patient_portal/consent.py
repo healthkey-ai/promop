@@ -321,10 +321,16 @@ def record_consent(
             raise ValidationError(f'{purpose.key} is not available in your country.')
     if decision not in purpose.allowed_decisions():
         raise ValidationError(f'{purpose.key} does not take the answer {decision!r}.')
+    # A purpose that depends on another applies only while that one is
+    # granted; a migration replays history and is not held to it.
+    if decision == ConsentEvent.GRANTED and purpose.requires and source != ConsentEvent.MIGRATION:
+        if not _granted(person, purpose.requires):
+            raise ValidationError(f'{purpose.key} needs {purpose.requires} to be granted first.')
     when = recorded_at or timezone.now()
     member_withdrawal = decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER
-    latest = (latest_events(person).get(purpose.id)
-              if member_withdrawal or purpose.erases_record_on_withdrawal else None)
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose=purpose).order_by('-recorded_at', '-id').first()
+    )
     # Any answer that ends a standing grant ends it, "declined" as much as
     # "withdrawn"; for a purpose the record depends on, the record goes too.
     # Only an answer that becomes the member's position does: an older one,
@@ -373,7 +379,36 @@ def record_consent(
         if ends_grant and purpose.erases_record_on_withdrawal:
             from patient_portal.erasure import erase_record
             erase_record(person, actor=recorded_by, purpose=purpose.key)
+        # What depends on it stops with it, on the record and in the ledger.
+        if ends_grant:
+            _withdraw_dependents(person, purpose, when=when, recorded_by=recorded_by, email=addr)
     return event
+
+
+def _granted(person, key: str) -> bool:
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose__key=key)
+        .order_by('-recorded_at', '-id').values_list('decision', flat=True).first()
+    )
+    return latest == ConsentEvent.GRANTED
+
+
+def _withdraw_dependents(person, purpose: ConsentPurpose, *, when, recorded_by, email) -> None:
+    """Withdraw each purpose that requires ``purpose`` and is still granted,
+    under the version the member granted, as a system event. Each in turn
+    withdraws its own dependents."""
+    dependents = list(ConsentPurpose.objects.filter(requires=purpose.key).prefetch_related('texts'))
+    if not dependents:
+        return
+    latest = latest_events(person)
+    for dependent in dependents:
+        standing = latest.get(dependent.id)
+        if standing is None or standing.decision != ConsentEvent.GRANTED:
+            continue
+        record_consent(
+            person, dependent, ConsentEvent.WITHDRAWN, version=standing.version, language=standing.language,
+            recorded_by=recorded_by, source=ConsentEvent.SYSTEM, recorded_at=when, email=email,
+        )
 
 
 def record_decisions(person, items, *, language: str = DEFAULT_LANGUAGE, recorded_by=None,
@@ -383,6 +418,10 @@ def record_decisions(person, items, *, language: str = DEFAULT_LANGUAGE, recorde
     the PHR consent view and by sign-up; the caller's transaction makes the
     batch all or nothing."""
     events = []
+    # A purpose is recorded after the one it requires, whatever order the
+    # client sent them in, so granting both at once works.
+    named = {p.key for p, _ in items}
+    items = sorted(items, key=lambda pair: bool(pair[0].requires) and pair[0].requires in named)
     for purpose, item in items:
         frequency = item.get('frequency') or ''
         events.append(record_consent(
