@@ -9,9 +9,9 @@ All notable changes to PRomop are documented here.
 ### Added
 
 - **`INVITE_TTL_DAYS`** — how long a patient invitation link lasts, in days
-  (default 7, as before), from the environment. The invitation's expiry and
-  the email's "This link expires in N days" follow it; org (staff)
-  invitations keep 7 days (#2780).
+  (default 7, as before; 1 to 90, anything else stops startup), from the
+  environment. The invitation's expiry and the email's "This link expires in
+  N days" follow it; org (staff) invitations keep 7 days (#2780).
 
 - **Facts about the patient for questionnaires** — with PROlog 0.7.0 a
   questionnaire may declare facts and show a question only when one holds;

@@ -43,6 +43,10 @@ def _patient_display_name(person) -> str:
     return name or f"Patient {person.person_id}"
 
 
+def _days(n: int) -> str:
+    return '1 day' if n == 1 else f'{n} days'
+
+
 def _send_patient_invitation_email(invitation) -> None:
     accept_url = f"{settings.APP_BASE_URL}/accept-patient-invite?token={invitation.token}"
     subject = "You've been invited to access your health record on PROMOP"
@@ -51,7 +55,7 @@ def _send_patient_invitation_email(invitation) -> None:
         f"Your care team has invited you to access your health record on PROMOP.\n\n"
         f"Click the link below to create your account and set a password:\n\n"
         f"  {accept_url}\n\n"
-        f"This link expires in {settings.INVITE_TTL_DAYS} days.\n\n"
+        f"This link expires in {_days(settings.INVITE_TTL_DAYS)}.\n\n"
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
         f"— The HealthKey team"
     )

@@ -148,8 +148,8 @@ def test_self_and_invite_together_refused():
     assert resp.status_code == 400
 
 
-@pytest.mark.parametrize('days', [7, 30])
-def test_an_invitation_lasts_the_deployments_invite_ttl(settings, days):
+@pytest.mark.parametrize('days,says', [(1, '1 day'), (7, '7 days'), (30, '30 days')])
+def test_an_invitation_lasts_the_deployments_invite_ttl(settings, days, says):
     """INVITE_TTL_DAYS (#2780): the link's expiry, and what the email says of it."""
     from django.utils import timezone
 
@@ -161,4 +161,20 @@ def test_an_invitation_lasts_the_deployments_invite_ttl(settings, days):
     inv = PatientInvitation.objects.get(person_id=resp.data['person_id'])
     left = inv.expires_at - timezone.now()
     assert days - 1 < left.total_seconds() / 86400 <= days
-    assert f'This link expires in {days} days.' in mail.outbox[0].body
+    assert f'This link expires in {says}.' in mail.outbox[0].body
+
+
+@pytest.mark.parametrize('raw', ['0', '91', '3000', 'thirty', ''])
+def test_an_invite_ttl_outside_1_to_90_days_stops_startup(raw):
+    from django.core.exceptions import ImproperlyConfigured
+
+    from promop.settings import _invite_ttl_days
+
+    with pytest.raises(ImproperlyConfigured, match='INVITE_TTL_DAYS'):
+        _invite_ttl_days(raw)
+
+
+def test_the_invite_ttl_defaults_to_7_days_and_takes_up_to_90():
+    from promop.settings import _invite_ttl_days
+
+    assert [_invite_ttl_days(v) for v in ('7', '1', '90', ' 30 ')] == [7, 1, 90, 30]

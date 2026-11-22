@@ -326,12 +326,28 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-# Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
-# All env-configurable per organizational policy.
 # How long a patient invitation link lasts, in days: the link's expires_at and
 # the email's "This link expires in N days". A deployment inviting members by
 # campaign may want longer. Org (staff) invitations keep their own 7 days.
-INVITE_TTL_DAYS = max(1, int(os.environ.get('INVITE_TTL_DAYS', '7')))
+# The link claims the account, so a value outside 1-90 stops startup rather
+# than silently issuing links that live for years.
+INVITE_TTL_MAX_DAYS = 90
+
+
+def _invite_ttl_days(raw: str) -> int:
+    try:
+        days = int(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f'INVITE_TTL_DAYS must be a whole number of days, not {raw!r}.') from None
+    if not 1 <= days <= INVITE_TTL_MAX_DAYS:
+        raise ImproperlyConfigured(f'INVITE_TTL_DAYS must be between 1 and {INVITE_TTL_MAX_DAYS} days, not {days}.')
+    return days
+
+
+INVITE_TTL_DAYS = _invite_ttl_days(os.environ.get('INVITE_TTL_DAYS', '7'))
+
+# Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
+# All env-configurable per organizational policy.
 AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
 AUTH_LOCKOUT_SECONDS = int(os.environ.get('AUTH_LOCKOUT_SECONDS', '900'))     # #03 lockout duration (15 min)
 PASSWORD_HISTORY_SIZE = int(os.environ.get('PASSWORD_HISTORY_SIZE', '5'))     # #05 last-N passwords that may not be reused
