@@ -326,6 +326,26 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+# How long a patient invitation link lasts, in days: the link's expires_at and
+# the email's "This link expires in N days". A deployment inviting members by
+# campaign may want longer. Org (staff) invitations keep their own 7 days.
+# The link claims the account, so a value outside 1-90 stops startup rather
+# than silently issuing links that live for years.
+INVITE_TTL_MAX_DAYS = 90
+
+
+def _invite_ttl_days(raw: str) -> int:
+    try:
+        days = int(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f'INVITE_TTL_DAYS must be a whole number of days, not {raw!r}.') from None
+    if not 1 <= days <= INVITE_TTL_MAX_DAYS:
+        raise ImproperlyConfigured(f'INVITE_TTL_DAYS must be between 1 and {INVITE_TTL_MAX_DAYS} days, not {days}.')
+    return days
+
+
+INVITE_TTL_DAYS = _invite_ttl_days(os.environ.get('INVITE_TTL_DAYS', '7'))
+
 # Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
 # All env-configurable per organizational policy.
 AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
@@ -927,6 +947,10 @@ PROLOG_PARTICIPANT_RESOLVER = 'patient_portal.services.prolog_participant_id'
 # Mints the person for a respondent who is not signed in (PROlog RUN-2). The
 # counterpart to resolve_or_create_person, which needs an Identity.
 PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person'
+# What promop knows about a signed-in patient that a questionnaire may declare
+# as a fact and show a question by (PROlog DEF-14, RUN-23): the catalogue in
+# patient_portal.prolog_facts.
+PROLOG_FACTS_PROVIDER = 'patient_portal.prolog_facts.facts_for'
 
 # Deployment-supplied content, mounted read-only. Empty by default: a PRomop
 # that offers no surveys loads none.

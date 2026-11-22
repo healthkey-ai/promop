@@ -130,6 +130,11 @@ class TherapyLineDetail(models.Model):
     maintenance_end_date = models.DateField(blank=True, null=True)
     maintenance_end_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
     maintenance_ongoing = models.BooleanField(blank=True, null=True)
+    response_assessed = models.BooleanField(
+        blank=True, null=True,
+        help_text="False when the patient said the line's response had not been assessed yet; true when they "
+                  'gave one. A check-in asks again while it is false (patient_portal.prolog_facts).',
+    )
     expected_end_date = models.DateField(blank=True, null=True)
     expected_end_date_precision = models.CharField(max_length=5, choices=PRECISIONS, blank=True, null=True)
     source_references = models.JSONField(default=list, blank=True)
