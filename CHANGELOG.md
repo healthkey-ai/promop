@@ -8,6 +8,17 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Facts about the patient for questionnaires** — with PROlog 0.7.0 a
+  questionnaire may declare facts and show a question only when one holds;
+  promop supplies them (`PROLOG_FACTS_PROVIDER`,
+  `patient_portal.prolog_facts`) when a signed-in patient starts a response.
+  The first is `latest_therapy_line_response`: whether the response of their
+  latest line of therapy had been assessed, from the new
+  `TherapyLineDetail.response_assessed` (migration `omop_oncology` 0012),
+  which a record mapping writes from the patient's answer. A check-in can then
+  ask about that response again. See
+  [PROlog surveys](docs/prolog-surveys.md#what-v070-added).
+
 - **Nothing is added to a record while its permission is withdrawn** —
   `consent.record_permitted(person)` is false while a member's latest answer
   to an `erases_record_on_withdrawal` purpose is anything but a grant (they
@@ -229,6 +240,9 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **PROlog 0.7.0** (from 0.6.0) — facts about the participant, supplied by
+  the host (DEF-14, RUN-23), and `prolog_surveys` migration `0004` (the
+  response's facts). See [PROlog surveys](docs/prolog-surveys.md#what-v070-added).
 - **PROlog 0.6.0** (from 0.5.0) — `participation.repeatable`: a repeatable
   instrument (a regular check-in) starts a new response after a finished one,
   saying when the last was completed, instead of showing it as completed. No

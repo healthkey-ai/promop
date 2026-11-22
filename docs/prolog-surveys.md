@@ -22,6 +22,7 @@ database by this project's migrations, and every response is bound to an
 | `promop/urls.py` | `api/v1/prolog/` → the runner's own tree (`health/`, `run/…`) |
 | `patient_portal.services.prolog_participant_id` | `PROLOG_PARTICIPANT_RESOLVER` — the signed-in patient's `person_id`, or `None` |
 | `patient_portal.services.create_unidentified_person` | `PROLOG_PARTICIPANT_FACTORY` — mints the person for a respondent who is not signed in |
+| `patient_portal.prolog_facts.facts_for` | `PROLOG_FACTS_PROVIDER` — the facts a questionnaire declares that promop knows about the signed-in patient (see "What v0.7.0 added") |
 | `REST_FRAMEWORK.DEFAULT_THROTTLE_RATES` | the `run.*` scopes, per hashed client key |
 | `RUNNER_DIST` | the built runner front end, when `PROLOG_RUNNER_DIST` names one |
 
@@ -177,6 +178,26 @@ The app accepts a range of Django and DRF versions rather than pinning against
 this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
+
+### What v0.7.0 added
+
+**Facts about the participant** (PROlog DEF-14, RUN-23), and `prolog_surveys`
+migration `0004` (a `facts` column on the response):
+
+- A questionnaire may declare facts and show a question, a section or a branch
+  of an `any` group only when one holds:
+  `{"fact": "latest_therapy_line_response", "op": "eq", "value": "not_assessed"}`.
+- PROlog asks `PROLOG_FACTS_PROVIDER` once, when a signed-in patient starts
+  their own response; never for an invitation link or a respondent who is not
+  signed in. The response keeps the facts for its life. The runner is served
+  the definition with each fact condition settled, never the facts.
+- promop's catalogue (`patient_portal/prolog_facts.py`):
+
+  | Fact | Values | From |
+  |---|---|---|
+  | `latest_therapy_line_response` | `assessed`, `not_assessed` | the latest line of therapy for the primary cancer: `TherapyLineDetail.response_assessed`, which a record mapping writes from the patient's answer about the line's response |
+
+  A fact promop cannot tell is left out, so every condition on it is false.
 
 ### What v0.6.0 added
 

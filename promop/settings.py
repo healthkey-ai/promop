@@ -927,6 +927,10 @@ PROLOG_PARTICIPANT_RESOLVER = 'patient_portal.services.prolog_participant_id'
 # Mints the person for a respondent who is not signed in (PROlog RUN-2). The
 # counterpart to resolve_or_create_person, which needs an Identity.
 PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person'
+# What promop knows about a signed-in patient that a questionnaire may declare
+# as a fact and show a question by (PROlog DEF-14, RUN-23): the catalogue in
+# patient_portal.prolog_facts.
+PROLOG_FACTS_PROVIDER = 'patient_portal.prolog_facts.facts_for'
 
 # Deployment-supplied content, mounted read-only. Empty by default: a PRomop
 # that offers no surveys loads none.
