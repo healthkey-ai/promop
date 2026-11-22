@@ -111,13 +111,13 @@ def verify_content_digest(request, raw_bytes: bytes) -> str | None:
     return None
 
 
-def signed_fhir_response(person, filename: str | None = None, extra=None):
+def signed_fhir_response(person, filename: str | None = None, add_resources=None):
     """The person's signed bundle as the HTTP response both exports return.
 
     The digest and signature headers cover the body byte for byte, which is why
     this is a plain HttpResponse and not a DRF Response: a renderer would
     re-serialize the body and the digest would no longer match it. A
-    ``filename`` makes it a download; ``extra`` adds resources to the bundle
+    ``filename`` makes it a download; ``add_resources`` adds resources to the bundle
     before it is signed (see ``build_fhir_bundle``). The record is the member's own health
     data, so it is never cached.
     """
@@ -125,7 +125,7 @@ def signed_fhir_response(person, filename: str | None = None, extra=None):
 
     from omop_core.services.fhir_export import serialize_signed_fhir_bundle
 
-    body, digest, signature = serialize_signed_fhir_bundle(person, extra)
+    body, digest, signature = serialize_signed_fhir_bundle(person, add_resources)
     response = HttpResponse(body, content_type='application/fhir+json')
     response[EXPORT_DIGEST_HEADER] = digest
     response[EXPORT_SIGNATURE_HEADER] = signature

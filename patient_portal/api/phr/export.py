@@ -143,7 +143,7 @@ class RecordExportView(PhrView):
         if fmt == 'fhir':
             response = signed_fhir_response(
                 person, filename='my-record.fhir.json',
-                extra=lambda patient_ref: consent_fhir_resources(person, patient_ref),
+                add_resources=lambda patient_ref: consent_fhir_resources(person, patient_ref),
             )
         else:
             response = pdf_response(person, record, language_of(request))
