@@ -8,6 +8,13 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Patient invitations never accepted are deleted after a retention period**
+  — `PATIENT_INVITATION_RETENTION_DAYS` (0, the default, keeps them) and
+  `purge_unaccepted_invitations` (run daily; `--days`, `--dry-run`): an
+  invitation sent more than N days ago and expired or cancelled goes, with the
+  address it put on a person who never made an account; the person stays
+  (#2786).
+
 - **`INVITE_TTL_DAYS`** — how long a patient invitation link lasts, in days
   (default 7, as before; 1 to 90, anything else stops startup), from the
   environment. The invitation's expiry and the email's "This link expires in
