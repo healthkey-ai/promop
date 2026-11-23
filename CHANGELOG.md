@@ -409,6 +409,13 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Wearables: the Garmin panels show on your own record in the provider
+  console** — an account that is a patient and also staff, an org admin or a
+  doctor never gets patient mode, so "Sync from Garmin Connect" and "Garmin
+  account" were hidden on its own record although the server allowed both.
+  They now show wherever the page is the signed-in person's own record, and
+  the return from Garmin's consent page lands on that record (#2816).
+
 - **A reset request's response time no longer says whether the account
   exists** — only an existing account waited for the mail provider, so the
   time to answer told an address with an account from one without. The email

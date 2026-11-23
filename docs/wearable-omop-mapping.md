@@ -489,8 +489,10 @@ deletable like a file.
   otherwise write to their record with a key of its own. `GarminSyncThrottle` allows 20
   attempts an hour per user.
 - **Whose record.** The rows go to the caller's own record. The tab therefore shows the panel
-  only to a patient on their own record (`canSyncOwnDevice`, set from `patientMode`; a read-only
-  embed and a clinician on a patient's page get none), and sends the `person_id` the page is
+  only to a person on their own record (`canSyncOwnDevice`: patient mode, or a provider-console
+  page whose person is the one the account's patient link names, `roles.isOwnRecord`, #2816, so
+  an org admin who is also a patient gets it on their own page; a read-only embed and a
+  clinician on a patient's page get none), and sends the `person_id` the page is
   showing: the server answers 403 when that is not the caller's own, so a sync started from
   someone else's page is refused and not filed quietly under the caller.
 - **The key is used and dropped.** It is sent with one request and kept nowhere: not in the
