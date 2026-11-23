@@ -3,7 +3,7 @@
 One call for what a producer otherwise does in two: ask
 ``code-mappings/lookup/`` for the concept, then post the row. A row whose
 source code has an approved mapping is written at that mapping's concept by
-the bulk upsert; one that has none is left out, or stored at concept 0.
+the bulk upsert; one that has none is left out and reported.
 """
 from decimal import Decimal
 
@@ -14,7 +14,7 @@ from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from omop_core.models import (
-    Concept, Measurement, Observation, ProvenanceRecord, SourceCodeAxisVariant, SourceCodeConceptMapping,
+    Measurement, Observation, ProvenanceRecord, SourceCodeAxisVariant, SourceCodeConceptMapping,
 )
 from patient_portal.models import Identity
 from tests.factories import (
@@ -122,7 +122,7 @@ def test_a_proposed_target_is_never_written(client, row, steps):
     assert not Measurement.objects.filter(measurement_concept_id=proposed.concept_id).exists()
     assert resp.data['unmapped'] == [{
         'source_vocabulary_id': VOCABULARY, 'source_code': 'heart_rate', 'reason': 'unmapped',
-        'status': 'proposed', 'stored': False, 'mapping_id': queued.pk, 'rows': [1],
+        'status': 'proposed', 'mapping_id': queued.pk, 'rows': [1],
     }]
 
 
@@ -138,7 +138,7 @@ def test_an_unknown_code_is_queued_and_the_call_succeeds(client, row):
     assert queued.status == 'proposed'
     [entry] = resp.data['unmapped']
     assert entry['rows'] == [0, 1] and entry['mapping_id'] == queued.pk
-    assert entry['reason'] == 'unmapped' and entry['stored'] is False
+    assert entry['reason'] == 'unmapped' and entry['status'] == 'proposed'
 
 
 def test_ids_keep_the_requests_positions(client, row, steps):
@@ -180,38 +180,6 @@ def test_provenance_is_recorded_for_the_written_rows(client, row, steps):
     assert record.object_id == resp.data['ids'][0]
 
 
-# --- unmapped=store ---------------------------------------------------------
-
-
-def test_store_writes_an_unmapped_row_at_concept_zero(client, row, steps):
-    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
-
-    resp = _post(client, [row(), row('nope', value='7')], query='?skip_refresh=true&unmapped=store')
-
-    assert resp.status_code == 201, resp.data
-    assert resp.data['created'] == 2 and resp.data['resolved'] == 1 and resp.data['skipped'] == 0
-    assert Measurement.objects.get(pk=resp.data['ids'][1]).measurement_concept_id == 0
-    [entry] = resp.data['unmapped']
-    assert entry['stored'] is True and entry['rows'] == [1]
-
-
-def test_store_without_concept_zero_is_refused_before_anything_is_written(client, row, steps):
-    Concept.objects.filter(concept_id=0).delete()
-
-    resp = _post(client, [row(), row('nope')], query='?skip_refresh=true&unmapped=store')
-
-    assert resp.status_code == 400, resp.data
-    assert 'unmapped' in resp.data
-    assert not Measurement.objects.exists()
-
-
-def test_an_unknown_policy_is_a_400(client, row, steps):
-    resp = _post(client, [row()], query='?unmapped=zero')
-
-    assert resp.status_code == 400
-    assert not Measurement.objects.exists()
-
-
 # --- which table ----------------------------------------------------------
 
 
@@ -225,16 +193,13 @@ def sleep(db):
 
 
 def test_a_code_filed_under_another_table_is_not_written_here(client, row, sleep):
-    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    resp = _post(client, [row('sleep', value='7.5')])
 
-    for query in ('?skip_refresh=true', '?skip_refresh=true&unmapped=store'):
-        resp = _post(client, [row('sleep', value='7.5')], query=query)
-
-        assert resp.status_code == 200, resp.data
-        assert not Measurement.objects.exists()
-        [entry] = resp.data['unmapped']
-        assert entry['reason'] == 'other_table' and entry['omop_table'] == 'observation'
-        assert entry['stored'] is False and entry['status'] == 'approved'
+    assert resp.status_code == 200, resp.data
+    assert not Measurement.objects.exists()
+    [entry] = resp.data['unmapped']
+    assert entry['reason'] == 'other_table' and entry['omop_table'] == 'observation'
+    assert entry['status'] == 'approved'
 
 
 def test_the_named_table_takes_it(client, person, type_concept, sleep):
@@ -302,7 +267,9 @@ def test_what_a_row_must_and_must_not_carry(client, row, steps):
     del no_vocabulary['source_vocabulary_id']
     no_code = row(code='  ')
 
-    resp = _post(client, [row(), with_concept, no_vocabulary, no_code, 'not a row'])
+    provisional = row(confidence=0.9)
+
+    resp = _post(client, [row(), with_concept, no_vocabulary, no_code, 'not a row', provisional])
 
     assert resp.status_code == 400, resp.data
     assert resp.data[0] == {}
@@ -310,6 +277,7 @@ def test_what_a_row_must_and_must_not_carry(client, row, steps):
     assert list(resp.data[2]) == ['source_vocabulary_id']
     assert list(resp.data[3]) == ['measurement_source_value']
     assert list(resp.data[4]) == ['non_field_errors']
+    assert list(resp.data[5]) == ['confidence']
     assert not Measurement.objects.exists()
 
 
@@ -394,3 +362,205 @@ def test_queries_do_not_grow_with_the_rows(client, row, steps):
 
     cost(8, 2)   # the first call queues 'nope' and loads caches
     assert cost(9, 3) == cost(10, 25)
+
+
+# --- review of #2815 ------------------------------------------------------
+
+
+@pytest.mark.parametrize('path, table, prefix, date_field', [
+    ('measurements', 'measurement', 'measurement', 'measurement_date'),
+    ('observations', 'observation', 'observation', 'observation_date'),
+    ('conditions', 'condition', 'condition', 'condition_start_date'),
+    ('drug-exposures', 'drug_exposure', 'drug', 'drug_exposure_start_date'),
+    ('procedures', 'procedure', 'procedure', 'procedure_date'),
+])
+def test_every_clinical_endpoint_has_it(client, person, type_concept, path, table, prefix, date_field):
+    from omop_core.mapping.code_resolution import CLINICAL_TABLES
+
+    model, concept_column, source_column = CLINICAL_TABLES[table]
+    concept = ConceptFactory(concept_code=f'ANY-{table}', concept_name=table)
+    _mapping('CODE-1', concept, vocabulary='LocalLab', table=table)
+    type_field = 'drug_type_concept' if table == 'drug_exposure' else f'{prefix}_type_concept'
+
+    resp = _post(client, [
+        {'person': person.person_id, 'source_vocabulary_id': 'LocalLab', source_column: 'CODE-1',
+         date_field: '2026-11-20', type_field: type_concept.concept_id},
+        {'person': person.person_id, 'source_vocabulary_id': 'LocalLab', source_column: 'CODE-2',
+         date_field: '2026-11-20', type_field: type_concept.concept_id},
+    ], url=f'/api/v1/{path}/upsert_if_mapped/')
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data['created'] == 1 and resp.data['ids'][1] is None
+    stored = model.objects.get(pk=resp.data['ids'][0])
+    assert getattr(stored, concept_column) == concept.concept_id
+    assert [entry['source_code'] for entry in resp.data['unmapped']] == ['CODE-2']
+
+
+def test_an_empty_list_is_an_empty_answer(client):
+    resp = _post(client, [])
+
+    assert resp.status_code == 200, resp.data
+    assert resp.data['ids'] == [] and resp.data['created'] == 0 and resp.data['unmapped'] == []
+
+
+def test_a_service_credential_writes_and_its_rows_are_attributed(db, row, steps, settings):
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.read system/etl.write'
+    service = Identity.objects.create(issuer='urn:service', sub='mapped-writes-etl')
+    client = APIClient()
+    client.force_authenticate(user=service, token='service-token')
+
+    resp = _post(client, [row(), row('nope')], HTTP_X_PROVENANCE_SOURCE='open-wearables')
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data['created'] == 1 and resp.data['skipped'] == 1
+    assert ProvenanceRecord.objects.filter(source='open-wearables').count() == 1
+
+
+def test_a_read_only_service_credential_is_refused(db, row, steps, settings):
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.read'
+    service = Identity.objects.create(issuer='urn:service', sub='mapped-writes-reader')
+    client = APIClient()
+    client.force_authenticate(user=service, token='service-token')
+
+    resp = _post(client, [row('nope')])
+
+    assert resp.status_code == 403
+    assert not SourceCodeConceptMapping.objects.filter(source_code='nope').exists()
+
+
+def test_an_admin_of_another_organization_resolves_nothing(db, row, steps):
+    from omop_core.models import GroupAccess
+
+    elsewhere = OrganizationFactory()
+    admin = Identity.objects.create_user(email='other-admin-2813@example.org', password='test')
+    GroupAccess.objects.create(identity=admin, org=elsewhere, role='org_admin')
+    client = APIClient()
+    client.force_authenticate(admin)
+
+    resp = _post(client, [row('nope'), row()])
+
+    assert resp.status_code == 403, resp.data
+    assert not SourceCodeConceptMapping.objects.filter(source_code='nope').exists()
+    assert not Measurement.objects.exists()
+
+
+def test_an_approved_mapping_unusable_here_is_reported_with_its_table(client, row):
+    from omop_core.mapping.code_resolution import IDENTITY_ORIGIN
+
+    finding = ConceptFactory(
+        concept_code='44054006', concept_name='Diabetes',
+        vocabulary__vocabulary_id='SNOMED', domain=DomainFactory(domain_id='Condition'))
+    identity = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='SNOMED', source_code='44054006', target_concept=finding,
+        source_concept=finding, destination_vocabulary_id='SNOMED', domain_id='Condition',
+        omop_table='condition', status='approved', origin='import', origin_system=IDENTITY_ORIGIN)
+
+    resp = _post(client, [row('44054006', source_vocabulary_id='SNOMED')])
+
+    assert resp.status_code == 200, resp.data
+    assert not Measurement.objects.exists()
+    assert resp.data['unmapped'] == [{
+        'source_vocabulary_id': 'SNOMED', 'source_code': '44054006',
+        'reason': 'destination_domain_or_validity_mismatch', 'status': 'approved',
+        'omop_table': 'condition', 'mapping_id': identity.pk, 'rows': [0],
+    }]
+
+
+def test_a_curated_mappings_table_decides_whatever_the_concepts_domain(client, row, person, type_concept):
+    concept = ConceptFactory(concept_code='REFILED-1', concept_name='Refiled')   # a Measurement concept
+    _mapping('refiled', concept, table='observation')
+
+    here = _post(client, [row('refiled')])
+    there = _post(client, [{
+        'person': person.person_id, 'source_vocabulary_id': VOCABULARY,
+        'observation_source_value': 'refiled', 'observation_date': '2026-11-20',
+        'observation_type_concept': type_concept.concept_id, 'value_as_number': '1',
+    }], url=OBSERVATIONS_URL)
+
+    assert here.status_code == 200 and here.data['unmapped'][0]['reason'] == 'other_table'
+    assert here.data['unmapped'][0]['omop_table'] == 'observation'
+    assert not Measurement.objects.exists()
+    assert there.status_code == 201, there.data
+    assert Observation.objects.get().observation_concept_id == concept.concept_id
+
+
+def test_a_cached_direct_hit_follows_the_concepts_domain(client, row):
+    concept = ConceptFactory(concept_code='718-7', concept_name='Hemoglobin')    # a Measurement concept
+    _mapping('718-7', concept, vocabulary='LOINC', table='observation', origin_system='athena-direct')
+
+    resp = _post(client, [row('718-7', source_vocabulary_id='LOINC')])
+
+    assert resp.status_code == 201, resp.data
+    assert Measurement.objects.get().measurement_concept_id == concept.concept_id
+
+
+@pytest.mark.parametrize('change, field', [
+    ({'source_vocabulary_id': 'Open\x00Wearables'}, 'source_vocabulary_id'),
+    ({'source_vocabulary_id': 'V' * 256}, 'source_vocabulary_id'),
+    ({'measurement_source_value': 'st\x00eps'}, 'measurement_source_value'),
+    ({'measurement_source_value': 'C' * 101}, 'measurement_source_value'),
+    ({'source_text': 'Steps\x00'}, 'source_text'),
+])
+def test_what_reaches_the_resolver_is_checked_first(client, row, steps, change, field):
+    resp = _post(client, [{**row('fresh-code'), **change}])
+
+    assert resp.status_code == 400, resp.data
+    assert list(resp.data[0]) == [field]
+    assert SourceCodeConceptMapping.objects.count() == 1    # the fixture's own
+
+
+@pytest.mark.parametrize('person_value', ['--5', '²', '5.0', ' ', [], {}, True, 1.5])
+def test_a_malformed_person_is_a_400(client, row, steps, person_value):
+    resp = _post(client, [{**row(), 'person': person_value}])
+
+    assert resp.status_code == 400, resp.data
+    assert not Measurement.objects.exists()
+
+
+def test_a_first_sighting_in_the_wrong_table_is_not_written(client, row):
+    """A direct vocabulary hit is cached under the table of whoever asked first."""
+    DomainFactory(domain_id='Drug', domain_name='Drug')
+    drug = ConceptFactory(concept_code='1191', concept_name='aspirin',
+                          vocabulary__vocabulary_id='RxNorm', domain=DomainFactory(domain_id='Drug'))
+
+    first = _post(client, [row('1191', source_vocabulary_id='RxNorm')])
+    again = _post(client, [row('1191', source_vocabulary_id='RxNorm')])
+
+    for resp in (first, again):
+        assert resp.status_code == 200, resp.data
+        [entry] = resp.data['unmapped']
+        assert entry['reason'] == 'other_table' and entry['omop_table'] == 'drug_exposure'
+    assert not Measurement.objects.filter(measurement_concept_id=drug.concept_id).exists()
+
+
+def test_a_code_longer_than_the_column_resolves_and_is_stored_cut_to_it(client, row):
+    identifier = 'HKQuantityTypeIdentifierWalkingDoubleSupportPercentage'    # 54 characters
+    concept = ConceptFactory(concept_code='HK-WEAR-DBL-SUPPORT', concept_name='Double support')
+    _mapping(identifier, concept, vocabulary='Apple')
+
+    resp = _post(client, [row(identifier, source_vocabulary_id='Apple', value='28')])
+    again = _post(client, [row(identifier, source_vocabulary_id='Apple', value='28')])
+
+    assert resp.status_code == 201, resp.data
+    stored = Measurement.objects.get()
+    assert stored.measurement_concept_id == concept.concept_id
+    assert stored.measurement_source_value == identifier[:50]
+    assert again.data['created'] == 0 and again.data['ids'] == resp.data['ids']
+
+
+def test_key_ambiguous_names_the_requests_positions(client, row, steps):
+    _post(client, [row()])                                   # one stored row, no key
+
+    resp = _post(client, [row('nope'), row(source_record_key='ow:a'), row(source_record_key='ow:b')])
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data['ids'][0] is None
+    assert resp.data['key_ambiguous'] and set(resp.data['key_ambiguous']) <= {1, 2}
+
+
+def test_the_unmapped_parameter_is_not_an_option(client, row, steps):
+    """Nothing here stores an unresolved row: that is the bulk write's, with the inventory."""
+    resp = _post(client, [row('nope')], query='?skip_refresh=true&unmapped=store')
+
+    assert resp.status_code == 200, resp.data
+    assert not Measurement.objects.exists()

@@ -9716,7 +9716,6 @@ class _OmopMappedWriteMixin:
                 ), 'max_rows': OMOP_BULK_MAX_ROWS},
                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
-        unmapped = mapped_writes.policy(request.query_params.get('unmapped'))
         # Their report names rows by their place in the batch that was written,
         # which is not the request's once unmapped rows are left out.
         if any(name in request.query_params
@@ -9731,6 +9730,15 @@ class _OmopMappedWriteMixin:
         if errors:
             return Response(errors, status=status.HTTP_400_BAD_REQUEST)
 
+        if not rows:
+            # Nothing to resolve and nobody to authorize: the bulk write's own
+            # answer to an empty list.
+            data = {'created': 0, 'updated': 0, 'unattributed_matches': 0, 'ids': [],
+                    'resolved': 0, 'skipped': 0, 'unmapped': []}
+            if model_name in _KEYED_MODELS:
+                data['key_ambiguous'] = []
+            return Response(data, status=status.HTTP_200_OK)
+
         # Before any code is resolved: resolving writes (a queue entry, a
         # sighting), and only a caller who may write this person gets that far.
         person = self._mapped_write_person(rows)
@@ -9740,8 +9748,7 @@ class _OmopMappedWriteMixin:
 
         plan = mapped_writes.plan(
             rows, model_name=model_name, source_field=source_field,
-            concept_field=concept_field, organization=provenance.organization,
-            unmapped=unmapped)
+            concept_field=concept_field, organization=provenance.organization)
 
         size = len(rows)
         if plan.rows:
@@ -9764,7 +9771,7 @@ class _OmopMappedWriteMixin:
             if model_name in _KEYED_MODELS:
                 data['key_ambiguous'] = []
             http_status = status.HTTP_200_OK
-        data.update(resolved=plan.resolved, skipped=size - len(plan.rows),
+        data.update(resolved=len(plan.rows), skipped=size - len(plan.rows),
                     unmapped=plan.unmapped)
         response = Response(data, status=http_status)
         # Resolving records a sighting, so the answer is not one to cache.
@@ -9791,7 +9798,9 @@ class _OmopMappedWriteMixin:
                 )},
                 status=status.HTTP_400_BAD_REQUEST)
         raw = named.pop()
-        person = Person.objects.filter(pk=int(raw)).first() if raw.lstrip('-').isdigit() else None
+        # ASCII digits only: str.isdigit() also accepts characters int() refuses.
+        person = (Person.objects.filter(pk=int(raw)).first()
+                  if re.fullmatch(r'-?[0-9]{1,18}', raw) else None)
         if person is None:
             return Response({'detail': 'person does not exist.'},
                             status=status.HTTP_400_BAD_REQUEST)

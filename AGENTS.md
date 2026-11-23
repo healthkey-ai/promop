@@ -3152,6 +3152,12 @@ the writer is `_upsert_source_code_mapping`. Full description:
 and returns a `unit_conversion` block on resolved mappings when `source_unit` is
 provided.
 
+A producer that writes the row as soon as it has the answer does not need the
+lookup: the clinical endpoints' `upsert_if_mapped` action resolves by the same
+rules and writes in one request. See
+[Resolve and Upsert in One Call](#resolve-and-upsert-in-one-call-upsert_if_mapped).
+The `unit_conversion` preview is the lookup's alone.
+
 ### Request fields (per entry in `codes`)
 
 | Field | Type | Required | Description |
@@ -3612,7 +3618,7 @@ POST /api/v1/measurements/upsert_if_mapped/
   201 {"created": 1, "updated": 0, "unattributed_matches": 0, "key_ambiguous": [],
        "ids": [10605646, null], "resolved": 1, "skipped": 1,
        "unmapped": [{"source_vocabulary_id": "OpenWearables", "source_code": "hrv",
-                     "reason": "unmapped", "status": "proposed", "stored": false,
+                     "reason": "unmapped", "status": "proposed",
                      "mapping_id": 45, "rows": [1]}]}
 ```
 
@@ -3625,30 +3631,46 @@ headers, `?skip_refresh=true`, `?upsert=false`, one person, one transaction,
 
 - **A row carries no concept.** The source code is the row's source value
   (`measurement_source_value` and its siblings), the column a mapping finds
-  its rows by. `source_vocabulary_id` is required on every row;
+  its rows by. It may be as long as a mapping's code (100 characters), longer
+  than the 50-character column: the code is resolved whole and the row is
+  stored cut to the column, which is how a re-point matches such rows
+  (`_source_value_match`). Five seeded HealthKit identifiers need this.
+  `source_vocabulary_id` is required on every row;
   `source_text` is optional evidence for a new queue entry. Neither is
-  stored. A row that sends the concept is a 400: the server sets it. A list
-  or one object is accepted; the response is always the batch's.
+  stored. A row that sends the concept is a 400: the server sets it. So is
+  one that sends `confidence`: what is written here is approved, never
+  provisional. A list or one object is accepted; the response is always the
+  batch's.
 - **Resolved by the lookup's resolver** (`resolve_source_code_variant`,
   source system `code-mapping-api`), once per distinct code in the batch: an
   approved mapping, a direct vocabulary hit, an approved axis variant for the
   row's `unit_source_value`, and, for a code nobody has mapped, the queue
-  entry and sighting a lookup would have made. A proposed target is never
-  written. The organization for Epic and Cerner local codes is the request's
+  entry a lookup would have made, with one sighting per code per request
+  (a lookup counts one per entry). A proposed target is never written. The organization for Epic and Cerner local codes is the request's
   (`X-Provenance-Organization-ID`, or the credential's own); without one such
   a code is a 400, before anything is resolved.
-- **An unmapped row is not an error.** `?unmapped=skip` (the default) leaves
-  it out; `?unmapped=store` writes it at concept 0, the state an approval's
-  re-point looks for (400 when concept 0 is not loaded). Either way the call
-  succeeds and `unmapped` lists each code once with the request indices of
-  its rows, its `reason`, the queue row's `status` and `mapping_id`, and
-  whether the rows were `stored`. Any other value of `unmapped` is a 400.
+- **An unmapped row is not an error, and is not written.** The call succeeds
+  and `unmapped` lists each code once with the request indices of its rows,
+  its `reason`, and the queue row's `status` and `mapping_id`. An empty list
+  is a 200 with nothing in it. Because only written rows reach the
+  serializer, an invalid row for an unmapped code is not reported until its
+  code is mapped.
+- **Nothing is stored at concept 0 here.** A producer that keeps unresolved
+  rows (so that an approval's re-point finds them) posts those to the bulk
+  write with concept 0, as before, and uploads the patient's source-code
+  inventory: without the inventory a concept-0 row is later resolved by its
+  code alone, whatever code system it came from. An option to do it in this
+  call was left out for that reason.
 - **Reasons.** `unmapped`: no approved mapping.
   `destination_domain_or_validity_mismatch`: an approved identity mapping
   whose concept cannot be used in this table, as the lookup reports it.
-  `other_table`: the code resolves, but its mapping files it under another
-  clinical table and its concept's domain is not this table's; it is never
-  written here, with either policy, and `omop_table` names where to send it.
+  `other_table`: the code resolves, but its rows are filed in another
+  clinical table; `omop_table` names where to send it.
+- **Which table a code's rows are filed in** is the mapping's `omop_table`,
+  where an approval's re-point and a relocation look for them (#2386). One
+  exception: a cached direct vocabulary hit (`origin_system`
+  `athena-direct`) is filed under whichever table its first caller asked
+  about, so for those the concept's domain decides (`_home_table`).
 - **The response is the bulk write's**, with `ids` aligned to the request
   rows and `null` for a row that was not written, plus `resolved` (rows
   written at a mapped concept), `skipped` (rows not written) and `unmapped`.
@@ -3657,17 +3679,35 @@ headers, `?skip_refresh=true`, `?upsert=false`, one person, one transaction,
   batch's. `Cache-Control: no-store`: resolving records a sighting.
 - **Who.** `EtlWritePermission`, what the lookup asks, and then
   `_authorize_person_write` on the batch's person, what the write asks,
-  checked before any code is resolved. A signed-in patient gets 403. The
-  viewset's own permission class is not used: it lets session patients POST.
+  checked before any code is resolved. That is the lookup's audience and no
+  wider: a service credential with a write scope or `system/etl.write`, a
+  staff or org-admin session, or an OAuth token with a write scope, each
+  only for a person it may write. A patient's own session gets 403; the
+  viewset's permission class, which lets session patients POST, is not used.
+- **Checked before resolving.** What reaches the resolver is validated
+  first, since the serializer only sees the rows that are written: NUL
+  characters, a `source_vocabulary_id` over 255 characters and a code over
+  100 are per-row 400s, so a code no mapping could hold is never queued.
 - **Resolving is not rolled back.** The queue entries and sightings are made
   before the rows are validated and written, in their own transactions, as
   with a lookup followed by a write that then fails.
 - **Cost.** One resolver call per distinct code, and one variant read per
   distinct unit of a code that has variants; flat in the number of rows.
-  `tests/test_upsert_if_mapped.py` holds it to that.
+  `tests/test_upsert_if_mapped.py` holds it to that. A producer sending one
+  record per call should pass `?skip_refresh=true` and derive afterwards
+  ([Deferring the PatientRecord Derivation](#deferring-the-patientrecord-derivation)):
+  each call otherwise re-derives the whole record. **A code the queue has
+  never seen costs what it costs a lookup**: the resolver asks Suggest for a
+  proposal (a ranking call, seconds), serially, before any row of the batch
+  is written. A first batch from a new source with many unseen codes can
+  outrun the request; each queued code commits on its own, so a retry gets
+  further. A source whose codes are seeded (the wearable vocabularies) never
+  pays it.
 - **Not here.** Text terms (no code system) stay on the lookup endpoint, as
   does the `unit_conversion` preview: a written measurement is converted to
-  an approved mapping's curated unit as on any bulk write.
+  an approved mapping's curated unit as on any bulk write, which finds that
+  mapping by source value and table alone, not by the mapping that resolved
+  the row (a limit of the bulk write, unchanged here).
   `warn_concept_duplicates` and `reject_concept_duplicates` are refused,
   since their report indexes the written batch.
 

@@ -46,6 +46,8 @@ The delivery should build on these existing seams:
   not be extended.
 - `SourceCodeConceptMapping` (SCCM) and
   `POST /api/v1/code-mappings/lookup/` are the governed source-code resolver.
+  The clinical endpoints' `upsert_if_mapped` action (#2813) resolves through
+  the same rules and writes the mapped rows in the same request.
   SCCM already has review state, encounter count, first/last seen timestamps,
   and the mapping ID needed for curation.
 - `OrgDetail.tsx` already has an organization Stats tab. Import reporting

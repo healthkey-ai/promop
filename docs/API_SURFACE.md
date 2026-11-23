@@ -44,6 +44,8 @@ genomic findings.
 | `PATCH /api/v1/patient-records/{person_id}/` | Interactive clinical and profile edits; backend handles onward projection |
 | `POST /api/v1/patient-records/upload_fhir/` | Bulk ingest from an EHR / FHIR R4 Bundle |
 | `POST/PATCH/DELETE /api/v1/conditions/`, `/api/v1/measurements/`, etc. | Granular clinical facts with explicit concepts, dates, units, and provenance |
+| `POST /api/v1/code-mappings/lookup/` | Resolve source codes to OMOP concepts through the curated mappings, without writing ([Code Mapping API](code-mapping-api.md)) |
+| `POST /api/v1/measurements/upsert_if_mapped/` (and `observations`, `conditions`, `drug-exposures`, `procedures`) | Coded rows sent without a concept: the server resolves each source code as the lookup does and upserts the rows that are mapped, in one request ([Code Mapping API](code-mapping-api.md#resolving-and-writing-in-one-call)) |
 | `PATCH /api/v1/persons/{person_id}/` | Supported direct Person demographic/profile updates |
 
 Authorization and patient/organization scope apply to every path. Use
