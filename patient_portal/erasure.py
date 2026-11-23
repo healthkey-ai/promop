@@ -72,6 +72,7 @@ def close_account(person: Person, identity: Identity | None = None, *, actor: Id
         # A linked Garmin account keeps sending until Garmin is told; the
         # token that can tell it is deleted with the person (#2802).
         _forget_garmin(person)
+        _forget_open_wearables(person)
         # Survey responses PROTECT the person and EpisodeEvent has a bare
         # integer key, so both go first; then the person's cascade does the rest.
         with suppress_patient_record_refresh():
@@ -94,6 +95,7 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
     with transaction.atomic():
         files = _document_files(person)
         _forget_garmin(person)
+        _forget_open_wearables(person)
         # One derivation at the end, not one per deleted row (AGENTS.md, Bulk OMOP Row Deletes).
         with suppress_patient_record_refresh():
             old = PatientRecord.objects.filter(person=person).first()
@@ -119,6 +121,17 @@ def _forget_garmin(person: Person) -> None:
     from omop_core.services import garmin_oauth
 
     garmin_oauth.forget(person)
+
+
+def _forget_open_wearables(person: Person) -> None:
+    """Sign the member's phones out: an app left signed in would go on syncing
+    into a record that was just erased (#2810)."""
+    from omop_core.models import OpenWearablesConnection
+
+    # Under the patient's lock, which a sync holds while it writes, so the
+    # erasure waits for a batch in flight instead of failing on its rows.
+    Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
+    OpenWearablesConnection.objects.filter(person=person).delete()
 
 
 def _scrub_person(person: Person) -> None:

@@ -4,6 +4,7 @@ import ClinicalField from '../ClinicalField';
 import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
+import OpenWearablesLink from './OpenWearablesLink';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 const ACTIVITY_TREND_OPTIONS = ['improving', 'stable', 'declining', 'insufficient_data'];
@@ -60,6 +61,18 @@ interface UploadRecord {
   duplicates_skipped: number;
   sample_summary: { metric: string; date: string; value: number }[];
   uploaded_at: string;
+}
+
+/** What the upload history calls the device an upload came from. */
+const DEVICE_LABELS: Record<string, string> = {
+  garmin: 'Garmin',
+  apple: 'Apple',
+  android: 'Android',
+};
+
+/** A device type the list does not name is shown as the server sent it. */
+function deviceLabel(deviceType: string): string {
+  return Object.prototype.hasOwnProperty.call(DEVICE_LABELS, deviceType) ? DEVICE_LABELS[deviceType] : deviceType;
 }
 
 function formatSyncDate(raw: unknown): string {
@@ -394,6 +407,10 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           Garmin then sends the data by itself (#2802). */}
       {canSyncOwnDevice && <GarminAccountLink disabled={uploading || syncing || deletingId !== null} />}
 
+      {/* A phone app built on Open Wearables, connected with a one-time code:
+          it then sends what it reads from Apple Health or Health Connect. */}
+      {canSyncOwnDevice && <OpenWearablesLink disabled={uploading || syncing || deletingId !== null} />}
+
       {/* Garmin Connect: the same rows as a .fit upload, read through Garmin's API */}
       {canSyncOwnDevice && (
         <GarminConnectSync
@@ -420,7 +437,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
                   className="flex w-full items-center gap-3 px-2 py-2.5 text-left text-sm hover:bg-gray-50 rounded"
                 >
                   <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">
-                    {upload.device_type === 'garmin' ? 'Garmin' : 'Apple'}
+                    {deviceLabel(upload.device_type)}
                   </span>
                   <span className="flex-1 truncate text-gray-700">{upload.filename}</span>
                   <span className="text-xs text-gray-500">

@@ -8,6 +8,19 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: sync Apple Health and Health Connect from a phone app, with
+  no extra server** — PRomop now answers the paths the Open Wearables mobile
+  SDK calls (`/api/v1/sdk/users/{id}/sync`, `/api/v1/token/refresh` and the
+  rest), so an app built on that SDK is pointed at a PRomop deployment and
+  syncs straight into the patient's record (#2810). The patient makes a
+  one-time code under "Phone health app" on the Wearables tab and types it
+  into the app. The SDK's raw records become one value per metric per day by
+  the `export.zip` parser's rule, each record counted once. Between a sync
+  and an upload for the same day, the larger figure stands for a summed
+  metric and the sync's for an averaged one. HealthKit works as installed;
+  Android (Health Connect or Samsung Health) is written once its mappings are
+  approved. `OPEN_WEARABLES_SYNC_ENABLED=false` switches it off.
+
 - **Wearables: connect a Garmin account by OAuth** — where a deployment has a
   Garmin Connect Developer Program app (`GARMIN_CLIENT_ID`,
   `GARMIN_CLIENT_SECRET`, `GARMIN_WEBHOOK_SECRET`, `GARMIN_TOKEN_KEY`), the Wearables tab gains

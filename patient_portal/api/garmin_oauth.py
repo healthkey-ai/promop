@@ -257,7 +257,7 @@ def oauth_callback(request):
 
 # ── Webhook ─────────────────────────────────────────────────────────────────
 
-def _fold_history(person, label, result):
+def _fold_history(person, label, result, device_type='garmin'):
     """One history row per patient per month of pushes, not one per push.
 
     Garmin pushes whenever the watch syncs. The writer records each write as
@@ -267,7 +267,7 @@ def _fold_history(person, label, result):
     entry a later push replaced named a row that is gone.
     """
     rows = list(WearableUpload.objects.filter(
-        person=person, device_type='garmin', filename=label).order_by('id'))
+        person=person, device_type=device_type, filename=label).order_by('id'))
     if not rows:
         return
     newest = rows[-1]
@@ -361,22 +361,23 @@ def _ingest(garmin_user_id, samples, readings):
     return person if changed else None
 
 
-def _derive(person):
+def _derive(person, source='garmin_push'):
     """Re-derive a patient's record after a push: off the request where a
     worker exists (Garmin wants its 200 quickly), here when queueing fails,
-    because the next identical push would find nothing changed and not ask."""
+    because the next identical push would find nothing changed and not ask.
+    ``source`` names the caller in the log (the phone sync shares this)."""
     from omop_core.services.derivation_jobs import get_dispatcher
 
     try:
         get_dispatcher().dispatch(person)
         return
     except Exception:
-        logger.exception('garmin_push_dispatch_failed person_id=%s', person.person_id)
+        logger.exception('%s_dispatch_failed person_id=%s', source, person.person_id)
     try:
         from omop_core.services.patient_record_service import refresh_patient_record
         refresh_patient_record(person)
     except Exception:
-        logger.exception('garmin_push_derivation_failed person_id=%s', person.person_id)
+        logger.exception('%s_derivation_failed person_id=%s', source, person.person_id)
 
 
 def _answer(data, status_code=200):

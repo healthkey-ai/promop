@@ -373,6 +373,20 @@ def resolve_wearable_mappings(device_type):
     """
     from omop_core.models import SourceCodeConceptMapping
 
+    if device_type == 'android':
+        # Health Connect (#2810): the SCCM source_code is the record type
+        # (StepsRecord) and the row's own metric_key names the metric, as the
+        # HL7 PHR seed fills it. Those rows are seeded proposed, so nothing
+        # resolves until a curator approves them.
+        return {
+            row.metric_key: row.target_concept
+            for row in SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id='HealthConnect', status='approved', organization__isnull=True,
+                metric_key__in=WEARABLE_CONCEPT_CODE, target_concept__isnull=False,
+            # Two approved rows for one metric: the later one is the answer.
+            ).select_related('target_concept').order_by('id')
+        }
+
     source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'
 
     # Query all approved mappings for this device vocabulary.

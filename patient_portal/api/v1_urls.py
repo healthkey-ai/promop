@@ -7,7 +7,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
-from . import garmin_oauth
+from . import garmin_oauth, open_wearables
 from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
@@ -253,6 +253,23 @@ urlpatterns = [
     # the other spelling with the app's page.
     re_path(r'^garmin/oauth/callback/?$', garmin_oauth.oauth_callback, name='v1-garmin-oauth-callback'),
     re_path(r'^garmin/webhooks/(?P<secret>[^/]+)/?$', garmin_oauth.webhook, name='v1-garmin-webhook'),
+    # A phone app built on the Open Wearables SDK (#2810). The first two are
+    # the signed-in patient's. The rest are the paths the SDK itself calls
+    # under {host}/api/v1/, with no final slash, so both spellings answer: a
+    # POST cannot follow the redirect that would add one.
+    path('open-wearables/connection/', open_wearables.connection, name='v1-open-wearables-connection'),
+    path('open-wearables/invitation-code/', open_wearables.invitation_code,
+         name='v1-open-wearables-invitation-code'),
+    re_path(r'^invitation-code/redeem/?$', open_wearables.redeem, name='v1-open-wearables-redeem'),
+    re_path(r'^token/refresh/?$', open_wearables.refresh, name='v1-open-wearables-refresh'),
+    re_path(r'^sdk/users/(?P<user_id>[0-9a-fA-F-]{36})/sync/?$', open_wearables.sync,
+            name='v1-open-wearables-sync'),
+    re_path(r'^sdk/users/(?P<user_id>[0-9a-fA-F-]{36})/sync/status/?$', open_wearables.sync_status,
+            name='v1-open-wearables-sync-status'),
+    re_path(r'^sdk/users/(?P<user_id>[0-9a-fA-F-]{36})/logs/?$', open_wearables.logs,
+            name='v1-open-wearables-logs'),
+    re_path(r'^users/(?P<user_id>[0-9a-fA-F-]{36})/connections/(?P<provider>[A-Za-z_]{1,32})/?$',
+            open_wearables.disconnect, name='v1-open-wearables-disconnect'),
     path('public/mapping-votes/', mapping_votes.PublicVotePageView.as_view(),
          name='v1-public-mapping-vote-page'),
     path('public/mapping-votes/export/', mapping_votes.PublicVoteExportView.as_view(),

@@ -3580,6 +3580,112 @@ class GarminConnection(models.Model):
         return f'Garmin connection for person {self.person_id}'
 
 
+class OpenWearablesConnection(models.Model):
+    """A patient's link to a phone app built on the Open Wearables SDK (#2810).
+
+    The SDK posts HealthKit and Health Connect records to fixed paths under
+    ``{host}/api/v1/``. This deployment serves those paths itself, so there is
+    no Open Wearables server: the app's "host" is this site. ``user_id`` is
+    the id the SDK is signed in with and puts in every path. It is random and
+    says nothing about the person.
+
+    A phone joins with a short code the patient makes on the Wearables tab
+    (``code_hash``, single use, minutes to live), which the app exchanges for
+    tokens (``OpenWearablesDevice``).
+
+    System data: never copied between instances, and it goes with the person.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='open_wearables_connection',
+    )
+    user_id = models.UUIDField(unique=True, editable=False)
+    # The pending connection code, as a keyed digest; '' when there is none.
+    code_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    code_expires_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='open_wearables_connections',
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    # When a sync last stored or confirmed data.
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    # {provider: ISO instant of the newest record received}: where the SDK
+    # resumes a live sync from, as its sync status endpoint reports it.
+    synced_until = models.JSONField(default=dict, blank=True)
+    # The IANA zone the patient's browser was in when they made the code.
+    # HealthKit rarely says where a record was taken, and a step at 23:30
+    # belongs to that evening, not to the next day in UTC.
+    time_zone = models.CharField(max_length=64, blank=True, default='')
+
+    class Meta:
+        db_table = 'open_wearables_connection'
+
+    def __str__(self):
+        return f'Open Wearables connection for person {self.person_id}'
+
+
+class OpenWearablesDevice(models.Model):
+    """One phone signed in to a connection: the refresh token it holds.
+
+    Only a digest of the token is kept. Removing the row signs the phone out:
+    its access tokens name this row and stop working with it.
+    """
+    connection = models.ForeignKey(
+        OpenWearablesConnection, on_delete=models.CASCADE, related_name='devices',
+    )
+    refresh_hash = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'open_wearables_device'
+
+    def __str__(self):
+        return f'Open Wearables device {self.pk} of connection {self.connection_id}'
+
+
+class OpenWearablesDay(models.Model):
+    """What the phone has sent so far for one metric on one day.
+
+    The SDK sends raw records, a day's worth in many batches and sometimes the
+    same record twice (a retry, a re-export after a reinstall). Only the day's
+    value is stored as patient data, so this keeps the running total and count
+    and, while the day is open, the short key and value of each record counted
+    (``seen``): a repeat is then harmless, and a record a Health Connect
+    writer updated in place moves the total by the difference. No record's
+    time is kept.
+
+    A day nothing more is expected for is closed (``close_idle_days``): its
+    keys are dropped and later records for it are ignored, so the keys do not
+    accumulate. Deleting the sync's history row closes its days too.
+    """
+    connection = models.ForeignKey(
+        OpenWearablesConnection, on_delete=models.CASCADE, related_name='days',
+    )
+    device_type = models.CharField(max_length=10)       # 'apple' | 'android'
+    metric_key = models.CharField(max_length=40)
+    day = models.DateField()
+    total = models.FloatField(default=0)
+    count = models.PositiveIntegerField(default=0)
+    seen = models.JSONField(default=dict, blank=True)
+    closed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'open_wearables_day'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['connection', 'device_type', 'metric_key', 'day'],
+                name='uq_open_wearables_day',
+            ),
+        ]
+        indexes = [models.Index(fields=['closed', 'updated_at'], name='ix_ow_day_open_age')]
+
+    def __str__(self):
+        return f'{self.device_type} {self.metric_key} {self.day} of connection {self.connection_id}'
+
+
 class TherapyHistoryAttestation(models.Model):
     """The patient's explicit confirmation that the listed lines are complete.
 

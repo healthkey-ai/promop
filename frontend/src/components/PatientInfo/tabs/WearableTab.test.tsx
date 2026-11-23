@@ -154,6 +154,26 @@ describe('WearableTab — upload history', () => {
     expect(screen.getByText('Garmin')).toBeInTheDocument();
   });
 
+  it.each([
+    ['garmin', 'Garmin'],
+    ['apple', 'Apple'],
+    // What a phone app syncs from Health Connect is filed as android.
+    ['android', 'Android'],
+    // A device type the tab has no name for is shown as the server sent it.
+    ['oura', 'oura'],
+    ['toString', 'toString'],
+  ])('labels a %s upload %s', async (deviceType, label) => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: url.includes('writable-fields') ? DESCRIPTORS : [{
+        id: 3, device_type: deviceType, filename: 'Phone health app 2026-11', samples_created: 4,
+        duplicates_skipped: 0, sample_summary: [], uploaded_at: '2026-11-20T10:00:00Z',
+      }],
+    }));
+    renderTab();
+    const row = (await screen.findByText('Phone health app 2026-11')).closest('button')!;
+    expect(row.firstElementChild).toHaveTextContent(new RegExp(`^${label}$`));
+  });
+
   it('expands upload to show sample details on click', async () => {
     mockGet.mockResolvedValue({
       data: [
@@ -506,6 +526,36 @@ describe('WearableTab — Garmin Connect sync', () => {
     renderOwn();
     expect(await screen.findByRole('button', { name: 'Connect Garmin' })).toBeInTheDocument();
     // Beside it, not in place of, the sync by Personal API key.
+    expect(screen.getByText('Sync from Garmin Connect')).toBeInTheDocument();
+  });
+
+  it('offers the phone health app panel to a patient on their own record, where it is set up (#2810)', async () => {
+    const first = renderTab();
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    // A clinician's view of the record never asks for the patient's connection.
+    expect(mockGet.mock.calls.some(([url]) => String(url).includes('/v1/open-wearables/'))).toBe(false);
+    expect(screen.queryByText('Phone health app')).not.toBeInTheDocument();
+    first.unmount();
+
+    // Asked for on the patient's own record, and not shown where the answer is not a status.
+    const second = renderOwn();
+    await waitFor(() => expect(
+      mockGet.mock.calls.some(([url]) => String(url).includes('/v1/open-wearables/connection/'))).toBe(true));
+    expect(screen.queryByText('Phone health app')).not.toBeInTheDocument();
+    second.unmount();
+
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: String(url).includes('/v1/open-wearables/connection/')
+        ? {
+          enabled: true, connected: false, devices: 0, code_pending: false, last_sync_at: null, providers: [],
+          host: 'https://records.example.org',
+        }
+        : [],
+    }));
+    renderOwn();
+    expect(await screen.findByRole('button', { name: 'Get a connection code' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Phone health app' })).toBeInTheDocument();
+    // Beside the Garmin ways in, not in place of them.
     expect(screen.getByText('Sync from Garmin Connect')).toBeInTheDocument();
   });
 
