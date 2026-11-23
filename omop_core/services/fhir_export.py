@@ -342,7 +342,7 @@ def _build_encounter(visit: VisitOccurrence, patient_ref: str) -> dict[str, Any]
 # Main export function
 # ---------------------------------------------------------------------------
 
-def build_fhir_bundle(person: Person) -> dict[str, Any]:
+def build_fhir_bundle(person: Person, add_resources=None) -> dict[str, Any]:
     """
     Build a FHIR R4 Bundle of type "searchset" from a patient's OMOP data.
 
@@ -358,6 +358,9 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
 
     Args:
         person: An OMOP Person model instance.
+        add_resources: Optional ``callable(patient_ref) -> list of resources`` added
+            to the bundle: the member's own export adds their Consent
+            resources (patient_portal.consent.consent_fhir_resources).
 
     Returns:
         A JSON-serializable dict representing a FHIR R4 Bundle.
@@ -431,6 +434,9 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     for visit in visits:
         entries.append(_make_entry(_build_encounter(visit, patient_ref)))
 
+    for resource in (add_resources(patient_ref) if add_resources else []):
+        entries.append(_make_entry(resource))
+
     return {
         "resourceType": "Bundle",
         "type": "searchset",
@@ -444,7 +450,7 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     }
 
 
-def serialize_signed_fhir_bundle(person: Person) -> tuple[bytes, str, str]:
+def serialize_signed_fhir_bundle(person: Person, add_resources=None) -> tuple[bytes, str, str]:
     """Build, serialize, digest, and sign a FHIR bundle for content integrity.
 
     Returns ``(body_bytes, sha256_hex, hmac_signature_hex)`` where the digest and
@@ -457,7 +463,7 @@ def serialize_signed_fhir_bundle(person: Person) -> tuple[bytes, str, str]:
     import json as _json
     from patient_portal.api.fhir.integrity import export_signature, sha256_hex
 
-    bundle = build_fhir_bundle(person)
+    bundle = build_fhir_bundle(person, add_resources)
     # Canonical, deterministic serialization so the digest is reproducible.
     body_bytes = _json.dumps(
         bundle, sort_keys=True, separators=(',', ':'), default=str

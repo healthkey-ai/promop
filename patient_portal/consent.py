@@ -557,3 +557,102 @@ def accept_document(
             key=document.key, version=version, language=text.language, decision=ACCEPTED, recorded_at=when,
         )
     return acceptance
+
+
+# ------------------------------------------------------------------ history
+
+
+def consent_history(person, *, include_legacy: bool = False) -> list[dict]:
+    """Every answer and acceptance the member has, newest first: what it was
+    (``kind`` consent or document, its ``key`` and the ``title`` of the
+    wording answered), the decision, the version and language, the frequency,
+    who recorded it (``source``) and when. The history endpoint, the record
+    export's PDF and its FHIR Consent resources all read this. ``current`` is
+    true on the row that is the member's position for that key.
+
+    ``include_legacy`` adds the legacy flags (``PatientConsent``: data
+    sharing, which the HealthKit switch still sets, clinical trial, research)
+    as kind ``legacy``, each the member's current position with no version:
+    the record export does, so an access request sees every choice held."""
+    events = [
+        {
+            'kind': 'consent', 'key': e.purpose.key, 'title': e.text.title if e.text else e.purpose.key,
+            'decision': e.decision, 'version': e.version, 'language': e.language, 'frequency': e.frequency,
+            'source': e.source, 'recorded_at': e.recorded_at, 'order': e.id,
+        }
+        for e in ConsentEvent.objects.filter(person=person).select_related('purpose', 'text')
+    ]
+    acceptances = [
+        {
+            'kind': 'document', 'key': a.document.key, 'title': a.text.title if a.text else a.document.name,
+            'decision': ACCEPTED, 'version': a.version, 'language': a.language, 'frequency': '',
+            'source': a.source, 'recorded_at': a.accepted_at, 'order': a.id,
+        }
+        for a in DocumentAcceptance.objects.filter(person=person).select_related('document', 'text')
+    ]
+    legacy = []
+    if include_legacy:
+        from patient_portal.models import PatientConsent
+
+        legacy = [
+            {
+                'kind': 'legacy', 'key': c.consent_type, 'title': c.get_consent_type_display(),
+                'decision': ConsentEvent.GRANTED if c.consent_granted else ConsentEvent.DECLINED,
+                'version': '', 'language': '', 'frequency': '', 'source': ConsentEvent.MEMBER,
+                'recorded_at': c.consent_date, 'order': c.id,
+            }
+            for c in PatientConsent.objects.filter(patient_user__person=person)
+        ]
+    rows = sorted(events + acceptances + legacy, key=lambda r: (r['recorded_at'], r['order']), reverse=True)
+    seen = set()
+    for row in rows:
+        row['current'] = (row['kind'], row['key']) not in seen
+        seen.add((row['kind'], row['key']))
+        del row['order']
+    return rows
+
+
+# A member's current answer stands (active), a yes or a no as provision.type
+# says; "ask me later" is proposed; an answer a later one replaced is inactive.
+_SYSTEMS = {
+    'consent': 'urn:promop:consent-purpose',
+    'document': 'urn:promop:legal-document',
+    'legacy': 'urn:promop:legacy-consent',
+}
+
+
+def consent_fhir_resources(person, patient_ref: str) -> list[dict]:
+    """The member's answers and acceptances as FHIR R4 Consent resources, one
+    per row of ``consent_history``, for their own record export: a full
+    access request includes what they agreed to."""
+    import uuid
+
+    resources = []
+    for row in consent_history(person, include_legacy=True):
+        system = _SYSTEMS[row['kind']]
+        permits = row['decision'] in (ConsentEvent.GRANTED, ACCEPTED)
+        if not row['current']:
+            status = 'inactive'
+        else:
+            status = 'proposed' if row['decision'] == ConsentEvent.ASK_LATER else 'active'
+        versioned = f"{system}:{row['key']}" + (f":{row['version']}" if row['version'] else '')
+        resources.append({
+            'resourceType': 'Consent',
+            'id': str(uuid.uuid4()),
+            'status': status,
+            'scope': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/consentscope',
+                                  'code': 'patient-privacy', 'display': 'Privacy Consent'}]},
+            'category': [{'coding': [{'system': 'http://loinc.org', 'code': '59284-0', 'display': 'Patient Consent'}]}],
+            'patient': {'reference': patient_ref},
+            'dateTime': row['recorded_at'].isoformat(),
+            # The wording answered, by version (Coding.version would be the
+            # code system's, not the text's).
+            'policy': [{'uri': versioned}],
+            'policyRule': {
+                'coding': [{'system': system, 'code': row['key']}],
+                'text': row['title'] + (f" (version {row['version']})" if row['version'] else '')
+                        + f": {row['decision']}" + (f", {row['frequency']}" if row['frequency'] else ''),
+            },
+            'provision': {'type': 'permit' if permits else 'deny'},
+        })
+    return resources

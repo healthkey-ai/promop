@@ -8,6 +8,13 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The member's record export includes their permissions and contact
+  choices** — the PDF gains a "Permissions and contact choices" section (the
+  answers now, the documents accepted, every answer with who recorded it), and
+  the FHIR file one R4 `Consent` per answer and acceptance, with the legacy
+  `PatientConsent` flags (the HealthKit data-sharing switch) too, so a full
+  access request is answered. The staff export is unchanged (#2784).
+
 - **A consent purpose that requires another** (`requires`, migration
   `patient_portal` 0030) — it cannot be granted while the purpose it requires
   is not, and is withdrawn with it (a `system` event, in the history and the

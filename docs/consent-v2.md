@@ -130,6 +130,17 @@ each permission on its own; settings withdraws with `"decision": "withdrawn"`;
 Every request to these paths is classified `consent` in the audit trail by
 `AuditLogMiddleware`.
 
+The member's record export (`GET record/export/`) includes the same history,
+from `consent_history(person)`, so a full access request is answered (#2784):
+the PDF ends with a "Permissions and contact choices" section (the answers
+now, the documents accepted, every answer with who recorded it), and the FHIR
+file carries one R4 `Consent` per answer and acceptance (`policyRule` names the
+purpose or document; `policy[].uri` its version; the member's current answer
+is `active`, a yes or a no as `provision.type` says, "ask me later"
+`proposed`, and an answer later replaced `inactive`). Both include the legacy
+`PatientConsent` flags too (data sharing, which the HealthKit switch still
+sets; clinical trial; research). The staff FHIR export does not carry them.
+
 ## Not here
 
 Account deletion, and withdrawing a purpose that erases the record
