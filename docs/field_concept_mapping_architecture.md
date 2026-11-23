@@ -175,11 +175,16 @@ and never the model.
     `FieldChoiceCode`, as before. The proposal migration 0368 made from that
     code is not a decision; holding projection until each is approved would stop
     writing concepts that are written today;
-  - **rejected or withdrawn** does not fall back to that code: a reviewer turned
-    it down.
+  - **a decision once made and gone** (an approval withdrawn or superseded), or
+    a **rejection of the primary code's own concept**, does not fall back to that
+    code: a reviewer answered for it. Rejecting some other proposal for the
+    choice leaves the code in place.
 
   A spelling that two choices of one field (the same label in two contexts)
-  resolve differently, or one to a concept and one to none, writes none.
+  resolve to different concepts, or one to a concept and one to an explicit "no
+  concept" decision, writes none; a choice with no code and no decision says
+  nothing, as before. Where a live choice and a retired one share a spelling, the
+  live one decides.
 - **Not here.** `main_concept` and `context_recipe` decisions are recorded and
   reviewed but nothing projects them yet; no read path (deriving a record from
   `value_as_concept_id`) uses them. The two-person rule is not applied (as for

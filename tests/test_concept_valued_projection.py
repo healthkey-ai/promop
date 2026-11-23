@@ -282,6 +282,30 @@ class TestApprovedAnswerConcepts:
         fvm.approve(fvm.propose(other, vocabulary_id='SNOMED', concept_code='103338009'))
         assert 'Watch and wait' not in self._concept_map()[1]
 
+    def test_rejecting_another_proposal_keeps_the_legacy_code(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.reject(fvm.propose(self._choice(), vocabulary_id='SNOMED', concept_code='103338009'))
+        assert self._concept_map()[1]['Watch and wait'] == 4190466
+
+    def test_a_context_with_no_code_does_not_cancel_a_coded_one(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        FieldChoice.objects.create(field_name='disease_activity', display='Watch and wait',
+                                   context_key='pathology')
+        assert self._concept_map()[1]['Watch and wait'] == 4190466
+
+    def test_a_live_choice_wins_over_a_retired_one_sharing_its_label(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_choices, field_value_mappings as fvm
+        old = FieldChoice.objects.create(field_name='disease_activity', display='Watch and wait',
+                                         context_key='older')
+        fvm.approve(fvm.propose(old, vocabulary_id='SNOMED', concept_code='103338009'))
+        field_choices.set_retired(old, True)
+        assert self._concept_map()[1]['Watch and wait'] == 4190466
+
     def test_a_retired_choice_still_projects(
         self, disease_activity_mapping, disease_activity_choices,
     ):
