@@ -189,10 +189,20 @@ export interface WearableSourceSystem {
   label: string;
 }
 
-/** An approval queued the move of stored clinical rows; a job does it. */
+/**
+ * What an approval did to stored clinical rows. From a mapping tab the move of
+ * every patient's rows is queued for a job (`queued`). From a patient's page
+ * that patient's rows move in the request (`patient_id`, `rows_updated`) and
+ * every other patient waits for Generate OMOP (#2791). `held` means another
+ * update had the patient's rows locked, so none moved and they stay queued.
+ */
 export interface RepointResult {
   queued: boolean;
   from_concept_ids: number[];
+  patient_id?: number;
+  rows_updated?: number;
+  rows_collapsed?: number;
+  held?: boolean;
 }
 
 /** What to tell the curator after a save that queued a re-point, if anything. */
@@ -200,6 +210,24 @@ export function repointBanner(sourceCode: string, repoint: RepointResult | null)
   return repoint?.queued
     ? `${sourceCode}: saved. Patient records with this code are being updated to the new concept in the background.`
     : null;
+}
+
+/** What to tell the curator after an approval saved from a patient's page, if it was one. */
+export function patientRepointBanner(sourceCode: string, repoint: RepointResult | null): string | null {
+  if (!repoint || repoint.queued || repoint.patient_id == null) return null;
+  if (repoint.held) {
+    return `${sourceCode}: approved. Another update holds this patient's rows, so none were moved. `
+      + "Run Generate OMOP for this patient once it has finished.";
+  }
+  const moved = repoint.rows_updated ?? 0;
+  // Zero is also what a guard returns that held rows back (another code
+  // system, another hospital's rows), and a code that is only in the
+  // patient's inventory has no row yet: Generate OMOP handles both.
+  return moved === 0
+    ? `${sourceCode}: approved. None of this patient's stored rows were moved. `
+      + "Run Generate OMOP to create or resolve rows for this code."
+    : `${sourceCode}: approved. ${moved} of this patient's rows ${moved === 1 ? "was" : "were"} moved to the `
+      + "approved concept. Other patients are updated when Generate OMOP runs for them.";
 }
 
 export interface MappingForm {

@@ -434,6 +434,29 @@ def test_a_patient_page_rejection_reverts_that_patient_only(client, world):
 
 
 @pytest.mark.parametrize('chosen', ['same', 'other'])
+def test_a_patient_page_approval_makes_that_patients_rows_real_in_the_request(client, world, chosen):
+    """#2791: the approval is saved from one patient's page, so that patient's
+    provisional and unresolved rows become real at once. Another patient's
+    provisional row keeps its proposal until Generate OMOP runs for them."""
+    other = PersonFactory()
+    mapping = proposal(world['proposed'])
+    mine = row(world['person'], world['proposed'].pk, confidence=90)
+    unresolved = row(world['person'], NO_MATCHING_CONCEPT_ID, measurement_date='2024-02-01')
+    theirs = row(other, world['proposed'].pk, confidence=90)
+    target = world['proposed'] if chosen == 'same' else world['chosen']
+
+    response = patch(client, mapping, {
+        'status': 'approved', 'destination_concept_id': target.pk,
+        'patient_id': world['person'].person_id})
+
+    assert state(mine.pk) == (target.pk, None)
+    assert state(unresolved.pk) == (target.pk, None)
+    assert state(theirs.pk) == (world['proposed'].pk, 90)
+    assert response.data['repoint']['rows_updated'] == 2
+    assert PatientRecord.objects.get(person=world['person']).derivation_version == 0
+
+
+@pytest.mark.parametrize('chosen', ['same', 'other'])
 def test_approval_makes_the_rows_real_once_the_job_runs(
         client, world, django_capture_on_commit_callbacks, chosen):
     mapping = proposal(world['proposed'])

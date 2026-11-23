@@ -14,6 +14,7 @@ import {
   type Reference,
   type RepointResult,
   emptyReference,
+  patientRepointBanner,
   repointBanner,
 } from "../CodeMappings/codeMappingTypes";
 
@@ -243,14 +244,16 @@ export default function PatientSourceCodesTab({ personId }: Props) {
 
   const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
     handleDialogClose();
-    const message = repointBanner(saved.source_code, repoint);
-    if (message) {
-      setBanner(message);
-    } else if (saved.status === "approved") {
-      setBanner("Mapping approved. Run Generate OMOP to apply to clinical rows.");
-    } else {
-      setBanner("Mapping saved.");
-    }
+    // An approval from this page moves this patient's rows as it saves; the
+    // response says how many (#2791). An approved save that reports no move
+    // had nothing waiting, and a code with no row yet still needs Generate OMOP.
+    setBanner(
+      repointBanner(saved.source_code, repoint)
+      ?? patientRepointBanner(saved.source_code, repoint)
+      ?? (saved.status === "approved"
+        ? "Mapping approved. Run Generate OMOP to apply to clinical rows."
+        : "Mapping saved."),
+    );
     void fetchSourceCodes();
   };
 
