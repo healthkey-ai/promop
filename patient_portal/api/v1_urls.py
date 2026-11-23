@@ -7,6 +7,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
+from . import garmin_oauth
 from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
@@ -242,6 +243,11 @@ urlpatterns = [
          name='v1-mapping-vote-share-votes-export'),
     path('code-mappings/<int:mapping_id>/votes/', mapping_votes.code_mapping_votes,
          name='v1-code-mapping-votes'),
+    # A Garmin account linked by OAuth, and Garmin's push (#2802).
+    path('garmin/connection/', garmin_oauth.connection, name='v1-garmin-connection'),
+    path('garmin/oauth/start/', garmin_oauth.oauth_start, name='v1-garmin-oauth-start'),
+    path('garmin/oauth/callback/', garmin_oauth.oauth_callback, name='v1-garmin-oauth-callback'),
+    path('garmin/webhooks/<str:secret>/', garmin_oauth.webhook, name='v1-garmin-webhook'),
     path('public/mapping-votes/', mapping_votes.PublicVotePageView.as_view(),
          name='v1-public-mapping-vote-page'),
     path('public/mapping-votes/export/', mapping_votes.PublicVoteExportView.as_view(),

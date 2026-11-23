@@ -35039,3 +35039,443 @@ class PatientDiseaseManagementFieldsTest(TestCase):
         for field in ('disease_management', 'disease_status', 'care_setting'):
             self.assertEqual(descriptor[field]['kind'], 'direct', field)
             self.assertTrue(descriptor[field]['writable'], field)
+
+
+@override_settings(
+    GARMIN_CLIENT_ID='client-id', GARMIN_CLIENT_SECRET='client-secret-NOT-REAL',
+    GARMIN_WEBHOOK_SECRET='hook-secret-0123456789', GARMIN_REDIRECT_URI='',
+    APP_BASE_URL='https://promop.example.test',
+)
+class GarminOAuthEndpointTest(TestCase):
+    """A Garmin account linked by OAuth, and Garmin's push (#2802).
+
+    Garmin's own endpoints are patched: tests/test_garmin_oauth.py covers what
+    is sent to them. These cover who may connect, what a callback stores, what
+    a push writes and to whom, and disconnecting.
+    """
+
+    STATUS = '/api/v1/garmin/connection/'
+    START = '/api/v1/garmin/oauth/start/'
+    CALLBACK = '/api/v1/garmin/oauth/callback/'
+    HOOK = '/api/v1/garmin/webhooks/hook-secret-0123456789/'
+    GARMIN_USER = 'd3315b1072421d0dd7c8f6b8e1de4df8'
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+        cls.day = timezone.now().date() - timedelta(days=2)
+        cls.other_person = Person.objects.create(person_id=99002, family_name='Other', given_name='Olga')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_identity = Identity.objects.create_user(email='olga-other@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_identity, person=cls.other_person)
+        cls.provider = Identity.objects.create_user(email='garmin-provider@test.com', password='pw')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _as(self, identity):
+        c = APIClient()
+        c.force_login(identity)
+        return c
+
+    def _tokens(self, access='access-AAAA', refresh='refresh-RRRR'):
+        from omop_core.services.garmin_oauth import Tokens
+        now = timezone.now()
+        return Tokens(access_token=access, refresh_token=refresh,
+                      access_expires_at=now + timedelta(hours=24),
+                      refresh_expires_at=now + timedelta(days=90))
+
+    def _state(self, person=None, identity=None):
+        from omop_core.services import garmin_oauth
+        return garmin_oauth.new_state((person or self.person).person_id, (identity or self.identity).pk)
+
+    def _callback(self, client=None, garmin_user=None, permissions=('HEALTH_EXPORT',), **query):
+        """Garmin redirects back; returns (response, the patched exchange)."""
+        from unittest import mock
+        query.setdefault('state', self._state())
+        with mock.patch('omop_core.services.garmin_oauth.exchange_code', return_value=self._tokens()) as exchange, \
+                mock.patch('omop_core.services.garmin_oauth.fetch_user_id',
+                           return_value=garmin_user or self.GARMIN_USER), \
+                mock.patch('omop_core.services.garmin_oauth.fetch_permissions', return_value=list(permissions)):
+            response = (client or self._as(self.identity)).get(self.CALLBACK, query)
+        return response, exchange
+
+    def _connect(self, person=None, garmin_user=None, **fields):
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        row = GarminConnection(person=person or self.person, garmin_user_id=garmin_user or self.GARMIN_USER,
+                               permissions=['HEALTH_EXPORT'])
+        garmin_oauth.store_tokens(row, self._tokens())
+        for name, value in fields.items():
+            setattr(row, name, value)
+        row.save()
+        return row
+
+    def _push(self, body, url=None, dispatcher=None):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        with use_dispatcher(dispatcher or FakeDispatcher()) as used:
+            response = APIClient().post(url or self.HOOK, data=json.dumps(body), content_type='application/json')
+        return response, used
+
+    def _daily(self, steps, user=None, day=None, **more):
+        return {'userId': user or self.GARMIN_USER, 'userAccessToken': 'ignored',
+                'calendarDate': (day or self.day).isoformat(), 'steps': steps, **more}
+
+    def _steps(self, person=None, day=None):
+        from omop_core.models import Observation
+        return sorted(float(v) for v in Observation.objects.filter(
+            person=person or self.person, observation_concept=self.wearable_concepts['steps'],
+            observation_date=day or self.day).values_list('value_as_number', flat=True))
+
+    # ── Status and start ────────────────────────────────────────────────────
+
+    def test_status_says_whether_it_is_set_up_and_whether_the_patient_is_connected(self):
+        response = self._as(self.identity).get(self.STATUS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'configured': True, 'connected': False, 'connected_at': None,
+                                         'last_push_at': None, 'permissions': []})
+        self._connect()
+        data = self._as(self.identity).get(self.STATUS).data
+        self.assertTrue(data['connected'])
+        self.assertEqual(data['permissions'], ['HEALTH_EXPORT'])
+        # Never a token, and never the Garmin user id.
+        self.assertEqual(set(data), {'configured', 'connected', 'connected_at', 'last_push_at', 'permissions'})
+        with override_settings(GARMIN_WEBHOOK_SECRET=''):
+            self.assertFalse(self._as(self.identity).get(self.STATUS).data['configured'])
+
+    def test_start_returns_garmins_consent_page_for_the_callers_own_record(self):
+        from urllib.parse import parse_qs, urlsplit
+        from omop_core.services import garmin_oauth
+        response = self._as(self.identity).post(self.START)
+        self.assertEqual(response.status_code, 200, response.data)
+        url = urlsplit(response.data['authorize_url'])
+        self.assertEqual(url.netloc, 'connect.garmin.com')
+        params = {key: values[0] for key, values in parse_qs(url.query).items()}
+        self.assertEqual(params['client_id'], 'client-id')
+        self.assertEqual(params['redirect_uri'], 'https://promop.example.test/api/v1/garmin/oauth/callback/')
+        person_id, identity_id, _verifier = garmin_oauth.read_state(params['state'])
+        self.assertEqual((person_id, identity_id), (self.person.person_id, self.identity.pk))
+        self.assertNotIn('client-secret-NOT-REAL', response.data['authorize_url'])
+
+    def test_only_a_signed_in_patient_may_start_read_or_end_a_connection(self):
+        for method, url in (('get', self.STATUS), ('delete', self.STATUS), ('post', self.START)):
+            # Nobody signed in.
+            self.assertIn(getattr(APIClient(), method)(url).status_code, (401, 403), (method, url))
+            # Signed in, but no patient record of their own.
+            self.assertEqual(getattr(self._as(self.provider), method)(url).status_code, 403, (method, url))
+            # A credential presented without the person at the keyboard.
+            delegated = APIClient()
+            delegated.force_authenticate(user=self.identity)
+            self.assertEqual(getattr(delegated, method)(url).status_code, 403, (method, url))
+
+    def test_start_is_refused_when_it_is_not_set_up_or_the_record_is_off(self):
+        from unittest import mock
+        with override_settings(GARMIN_CLIENT_ID=''):
+            response = self._as(self.identity).post(self.START)
+        self.assertEqual(response.status_code, 503)
+        with mock.patch('patient_portal.api.garmin_oauth.record_permitted', return_value=False):
+            self.assertEqual(self._as(self.identity).post(self.START).status_code, 403)
+
+    # ── Callback ────────────────────────────────────────────────────────────
+
+    def test_the_callback_stores_the_connection_with_its_tokens_encrypted(self):
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        state = self._state()
+        response, exchange = self._callback(code='the-code', state=state,
+                                            permissions=('HEALTH_EXPORT', 'ACTIVITY_EXPORT'))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/?garmin=connected')
+        self.assertIn('no-store', response['Cache-Control'])
+        self.assertEqual(response['Referrer-Policy'], 'no-referrer')
+        # The verifier sent with the code is the one this state's challenge came from.
+        exchange.assert_called_once_with('the-code', garmin_oauth.read_state(state)[2])
+        row = GarminConnection.objects.get(person=self.person)
+        self.assertEqual(row.garmin_user_id, self.GARMIN_USER)
+        self.assertEqual(row.permissions, ['HEALTH_EXPORT', 'ACTIVITY_EXPORT'])
+        self.assertEqual(row.connected_by_id, self.identity.pk)
+        self.assertNotIn('access-AAAA', row.access_token)
+        self.assertNotIn('refresh-RRRR', row.refresh_token)
+        self.assertEqual(garmin_oauth.decrypt(row.access_token), 'access-AAAA')
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'refresh-RRRR')
+
+    def test_the_callback_needs_no_session_but_refuses_another_persons(self):
+        from omop_core.models import GarminConnection
+        # The browser came back without its session cookie: the state says whose it is.
+        response, _ = self._callback(client=APIClient(), code='c')
+        self.assertEqual(response['Location'], '/?garmin=connected')
+        GarminConnection.objects.all().delete()
+        # Somebody else is signed in on this browser: nothing is attached to anyone.
+        response, exchange = self._callback(client=self._as(self.other_identity), code='c')
+        self.assertEqual(response['Location'], '/?garmin=error')
+        exchange.assert_not_called()
+        self.assertFalse(GarminConnection.objects.exists())
+
+    def test_a_declined_or_forged_callback_connects_nothing(self):
+        from omop_core.models import GarminConnection
+        declined, exchange = self._callback()                       # no code: the patient said no
+        self.assertEqual(declined['Location'], '/?garmin=denied')
+        exchange.assert_not_called()
+        for state in ('', 'forged', self._state()[:-3] + 'abc'):
+            forged, exchange = self._callback(code='c', state=state)
+            self.assertEqual(forged['Location'], '/?garmin=error', state)
+            exchange.assert_not_called()
+        # A state for an account that is not this person's own.
+        mismatched, _ = self._callback(client=APIClient(), code='c',
+                                       state=self._state(person=self.other_person, identity=self.identity))
+        self.assertEqual(mismatched['Location'], '/?garmin=error')
+        self.assertFalse(GarminConnection.objects.exists())
+        self.assertEqual(self.client.post(self.CALLBACK).status_code, 405)
+
+    def test_garmin_refusing_the_code_connects_nothing(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        with mock.patch('omop_core.services.garmin_oauth.exchange_code',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.DENIED, 400)):
+            response = self._as(self.identity).get(self.CALLBACK, {'code': 'c', 'state': self._state()})
+        self.assertEqual(response['Location'], '/?garmin=error')
+        self.assertFalse(GarminConnection.objects.exists())
+
+    def test_one_garmin_account_feeds_one_record(self):
+        from omop_core.models import GarminConnection
+        self._connect(person=self.other_person)
+        response, _ = self._callback(code='c')
+        self.assertEqual(response['Location'], '/?garmin=in_use')
+        self.assertEqual(list(GarminConnection.objects.values_list('person_id', flat=True)),
+                         [self.other_person.person_id])
+
+    def test_connecting_again_replaces_the_connection_and_a_different_account_ends_the_old_one(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        self._connect()
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            same, _ = self._callback(code='c')
+            self.assertEqual(same['Location'], '/?garmin=connected')
+            deregister.assert_not_called()
+            different, _ = self._callback(code='c', garmin_user='another-garmin-account')
+            self.assertEqual(different['Location'], '/?garmin=connected')
+            deregister.assert_called_once_with('access-AAAA')
+        self.assertEqual(GarminConnection.objects.get().garmin_user_id, 'another-garmin-account')
+
+    # ── Disconnect ──────────────────────────────────────────────────────────
+
+    def test_disconnecting_tells_garmin_and_removes_the_connection(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        self._connect()
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'disconnected': True, 'garmin_notified': True})
+        deregister.assert_called_once_with('access-AAAA')
+        self.assertFalse(GarminConnection.objects.exists())
+        # Already gone: the same answer, and no call to Garmin.
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            again = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(again.data, {'disconnected': True, 'garmin_notified': False})
+        deregister.assert_not_called()
+
+    def test_disconnecting_happens_here_even_when_garmin_cannot_be_told(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        self._connect()
+        self._connect(person=self.other_person, garmin_user='olgas-garmin')
+        with mock.patch('omop_core.services.garmin_oauth.deregister',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.UNREACHABLE)):
+            response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.data, {'disconnected': True, 'garmin_notified': False})
+        # Only the caller's own.
+        self.assertEqual(list(GarminConnection.objects.values_list('garmin_user_id', flat=True)), ['olgas-garmin'])
+
+    # ── Webhook ─────────────────────────────────────────────────────────────
+
+    def test_the_webhook_answers_only_at_its_secret_path(self):
+        self._connect()
+        body = {'dailies': [self._daily(5000)]}
+        for url in ('/api/v1/garmin/webhooks/wrong/', '/api/v1/garmin/webhooks/hook-secret-012345678/'):
+            response, _ = self._push(body, url=url)
+            self.assertEqual(response.status_code, 404, url)
+            self.assertEqual(response.content, b'')
+        with override_settings(GARMIN_WEBHOOK_SECRET=''):
+            self.assertEqual(self._push(body)[0].status_code, 404)
+        self.assertEqual(self._steps(), [])
+        self.assertEqual(APIClient().get(self.HOOK).status_code, 405)
+        # Not on the legacy prefix.
+        self.assertIn(self._push(body, url='/api/garmin/webhooks/hook-secret-0123456789/')[0].status_code, (404, 405))
+        self.assertEqual(self._steps(), [])
+
+    def test_a_push_is_written_to_the_patient_connected_as_that_garmin_user(self):
+        from omop_core.models import GarminConnection, Measurement, WearableUpload
+        self._connect()
+        response, dispatcher = self._push({'dailies': [
+            self._daily(8123, restingHeartRateInBeatsPerMinute=52, activeKilocalories=450),
+            self._daily(777, user='nobody-here-is-this-garmin-user'),
+        ]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [8123.0])
+        self.assertEqual(self._steps(person=self.other_person), [])
+        self.assertTrue(Measurement.objects.filter(
+            person=self.person, measurement_concept=self.wearable_concepts['resting_hr'],
+            measurement_date=self.day, value_as_number=52).exists())
+        # Derived off the request, once, for the patient who changed.
+        self.assertEqual(dispatcher.calls, [self.person.person_id])
+        self.assertIsNotNone(GarminConnection.objects.get().last_push_at)
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'garmin')
+        self.assertTrue(upload.filename.startswith('Garmin Connect push '))
+        self.assertIsNone(upload.uploaded_by)
+        # Nothing was created for anybody else.
+        self.assertEqual(WearableUpload.objects.count(), 1)
+
+    def test_a_later_push_replaces_the_days_value_and_the_history_stays_one_row(self):
+        from omop_core.models import WearableUpload
+        self._connect()
+        self._push({'dailies': [self._daily(4000)]})
+        response, dispatcher = self._push({'dailies': [self._daily(9000)]})
+        self.assertEqual(response.status_code, 200)
+        # The day's total so far, not a second row summed beside the first.
+        self.assertEqual(self._steps(), [9000.0])
+        self.assertEqual(dispatcher.calls, [self.person.person_id])
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.samples_created, 2)
+        self.assertEqual([entry['value'] for entry in upload.sample_summary], [4000.0, 9000.0])
+        # The same push again changes nothing, derives nothing and adds no history.
+        response, dispatcher = self._push({'dailies': [self._daily(9000)]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [9000.0])
+        self.assertEqual(dispatcher.calls, [])
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).count(), 1)
+        # The patient can delete the day's push from the history like an upload.
+        deleted = self._as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(self._steps(), [])
+
+    def test_a_push_leaves_another_devices_rows_alone(self):
+        from omop_core.models import Observation, WearableUpload
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+        from omop_core.services.pk import next_pk_batch
+        concept = self.wearable_concepts['steps']
+        pk = next_pk_batch(Observation, 'observation_id', 1)[0]
+        Observation.objects.create(
+            observation_id=pk, person=self.person, observation_concept=concept, observation_date=self.day,
+            observation_type_concept_id=WEARABLE_TYPE_CONCEPT_ID, value_as_number=3000,
+            observation_source_value=concept.concept_code)
+        WearableUpload.objects.create(
+            person=self.person, device_type='apple', filename='export.zip', samples_created=1,
+            sample_summary=[{'metric': 'steps', 'date': self.day.isoformat(), 'value': 3000.0,
+                             'row_id': pk, 'row_table': 'observation'}])
+        self._connect()
+        self._push({'dailies': [self._daily(9000)]})
+        self.assertEqual(self._steps(), [3000.0, 9000.0])
+
+    def test_a_push_for_a_record_that_is_off_is_dropped(self):
+        from unittest import mock
+        self._connect()
+        with mock.patch('patient_portal.api.garmin_oauth.record_permitted', return_value=False):
+            response, dispatcher = self._push({'dailies': [self._daily(5000)]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [])
+        self.assertEqual(dispatcher.calls, [])
+
+    def test_a_deregistration_removes_the_connection_and_a_permission_change_is_recorded(self):
+        from omop_core.models import GarminConnection
+        self._connect()
+        self._connect(person=self.other_person, garmin_user='olgas-garmin')
+        response, _ = self._push({
+            'deregistrations': [{'userId': self.GARMIN_USER, 'userAccessToken': 'x'}],
+            'userPermissionsChange': [{'userId': 'olgas-garmin', 'permissions': ['ACTIVITY_EXPORT']}],
+            # Data in the same body for the user who left is not stored.
+            'dailies': [self._daily(5000)],
+        })
+        self.assertEqual(response.status_code, 200)
+        row = GarminConnection.objects.get()
+        self.assertEqual((row.person_id, row.permissions), (self.other_person.person_id, ['ACTIVITY_EXPORT']))
+        self.assertEqual(self._steps(), [])
+
+    def test_a_body_that_is_not_json_is_refused_and_one_with_nothing_in_it_is_accepted(self):
+        self._connect()
+        bad = APIClient().post(self.HOOK, data='{not json', content_type='application/json')
+        self.assertEqual(bad.status_code, 400)
+        deep = APIClient().post(self.HOOK, data='[' * 100000, content_type='application/json')
+        self.assertEqual(deep.status_code, 400)
+        for body in ({}, [], {'dailies': []}, {'epochs': [{'userId': self.GARMIN_USER, 'steps': 5}]}):
+            self.assertEqual(self._push(body)[0].status_code, 200, body)
+        self.assertEqual(self._steps(), [])
+
+    def test_a_push_larger_than_a_form_is_accepted_up_to_the_webhooks_own_limit(self):
+        from unittest import mock
+        self._connect()
+        # A day of heart-rate samples, as a daily summary carries: past the form limit.
+        padding = {str(offset): 60 for offset in range(0, 86400, 15)}
+        body = {'dailies': [self._daily(5000, timeOffsetHeartRateSamples=padding)]}
+        with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=1024):
+            self.assertEqual(self._push(body)[0].status_code, 200)
+        self.assertEqual(self._steps(), [5000.0])
+        with mock.patch('patient_portal.api.garmin_oauth.MAX_PUSH_BYTES', 1024):
+            self.assertEqual(self._push(body)[0].status_code, 413)
+
+    def test_one_consent_cannot_be_used_to_try_codes_without_end(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        from patient_portal.api.garmin_oauth import CALLBACK_TRIES_PER_STATE
+        state = self._state()
+        with mock.patch('omop_core.services.garmin_oauth.exchange_code',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.DENIED, 400)) as exchange:
+            for attempt in range(CALLBACK_TRIES_PER_STATE + 3):
+                response = APIClient().get(self.CALLBACK, {'code': f'guess-{attempt}', 'state': state})
+                self.assertEqual(response['Location'], '/?garmin=error')
+        self.assertEqual(exchange.call_count, CALLBACK_TRIES_PER_STATE)
+        # Another consent is its own count.
+        response, _ = self._callback(code='c')
+        self.assertEqual(response['Location'], '/?garmin=connected')
+        self.assertTrue(GarminConnection.objects.exists())
+
+    def test_a_failure_of_our_own_asks_garmin_to_send_the_push_again(self):
+        from unittest import mock
+        self._connect()
+        self._connect(person=self.other_person, garmin_user='olgas-garmin')
+        calls = []
+
+        def flaky(garmin_user_id, samples):
+            calls.append(garmin_user_id)
+            if garmin_user_id == self.GARMIN_USER:
+                raise RuntimeError('database went away')
+            return None
+
+        with mock.patch('patient_portal.api.garmin_oauth._ingest', side_effect=flaky):
+            response, _ = self._push({'dailies': [self._daily(1), self._daily(2, user='olgas-garmin')]})
+        self.assertEqual(response.status_code, 503)
+        # The other user in the body was still handled.
+        self.assertEqual(sorted(calls), sorted([self.GARMIN_USER, 'olgas-garmin']))
+
+    def test_old_tokens_are_renewed_when_a_push_shows_the_account_is_live(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        row = self._connect(tokens_updated_at=timezone.now() - timedelta(days=45))
+        with mock.patch('omop_core.services.garmin_oauth.refresh_tokens',
+                        return_value=self._tokens(access='access-NEW', refresh='refresh-NEW')) as refresh:
+            self._push({'dailies': [self._daily(5000)]})
+            refresh.assert_called_once_with('refresh-RRRR')
+            # Fresh now: the next push does not refresh again.
+            self._push({'dailies': [self._daily(6000)]})
+            refresh.assert_called_once()
+        row.refresh_from_db()
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'refresh-NEW')
+        # Garmin refusing the refresh does not lose the push or the connection.
+        GarminConnection.objects.filter(pk=row.pk).update(tokens_updated_at=timezone.now() - timedelta(days=45))
+        with mock.patch('omop_core.services.garmin_oauth.refresh_tokens',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.DENIED, 400)) as refresh:
+            response, _ = self._push({'dailies': [self._daily(7000)]})
+            self._push({'dailies': [self._daily(7500)]})
+            refresh.assert_called_once()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [7500.0])
+        self.assertTrue(GarminConnection.objects.filter(pk=row.pk).exists())

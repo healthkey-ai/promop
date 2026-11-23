@@ -610,6 +610,21 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # omop_core/mapping/anthropic_client.py).
 ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
+
+# Garmin Connect Developer Program app (#2802): a patient links their Garmin
+# account by OAuth and Garmin pushes their data to the webhook. All three must
+# be set before the Wearables tab offers "Connect Garmin".
+#   GARMIN_CLIENT_ID / GARMIN_CLIENT_SECRET: the app's consumer key and secret.
+#   GARMIN_WEBHOOK_SECRET: a long random string, the last path segment of the
+#     URL registered with Garmin for every push type:
+#     <APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/
+# The redirect URL registered with Garmin is
+# <APP_BASE_URL>/api/v1/garmin/oauth/callback/ unless GARMIN_REDIRECT_URI says
+# otherwise; it must match the registration exactly.
+GARMIN_CLIENT_ID = os.environ.get('GARMIN_CLIENT_ID', '')
+GARMIN_CLIENT_SECRET = os.environ.get('GARMIN_CLIENT_SECRET', '')
+GARMIN_WEBHOOK_SECRET = os.environ.get('GARMIN_WEBHOOK_SECRET', '')
+GARMIN_REDIRECT_URI = os.environ.get('GARMIN_REDIRECT_URI', '')
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
 # loinc.org release API. LOINC is licensed, so there is no anonymous access and

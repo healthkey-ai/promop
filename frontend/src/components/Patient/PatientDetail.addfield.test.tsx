@@ -245,6 +245,20 @@ describe('PatientDetail — Add Field', () => {
     openTab('General');
     expect(screen.getByRole('heading', { level: 2, name: 'General' })).toBeInTheDocument();
   });
+
+  it("opens on the Wearables tab when Garmin's consent page sends the patient back (#2802)", async () => {
+    render(
+      <MemoryRouter initialEntries={['/patient/101?garmin=connected']}>
+        <Routes>
+          <Route path="/patient/:personId" element={<PatientDetailRoute user={STAFF} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Ada Lovelace');
+    expect(screen.getByRole('heading', { level: 2, name: /Wearable/ })).toBeInTheDocument();
+    openTab('General');
+    expect(screen.getByRole('heading', { level: 2, name: 'General' })).toBeInTheDocument();
+  });
 });
 
 describe('PatientDetail — added fields', () => {

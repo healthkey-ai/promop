@@ -8,6 +8,15 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: connect a Garmin account by OAuth** — where a deployment has a
+  Garmin Connect Developer Program app (`GARMIN_CLIENT_ID`,
+  `GARMIN_CLIENT_SECRET`, `GARMIN_WEBHOOK_SECRET`), the Wearables tab gains
+  "Garmin account": the patient approves access once on Garmin's page and
+  Garmin then pushes their daily summaries, sleep, HRV, pulse ox, respiration
+  and VO2 max to `POST /api/v1/garmin/webhooks/<secret>/`, written through the
+  same writer and replace-the-day rule as the key-based sync (#2802). Tokens
+  are stored encrypted and used only to tell Garmin about a disconnect.
+
 - **Wearables: sync from Garmin Connect with the patient's own Personal API
   key** — the Wearables tab gains "Sync from Garmin Connect": paste a Garmin
   Connect Personal API key, pick 7, 30 or 90 days, and the daily steps,

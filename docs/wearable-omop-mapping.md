@@ -586,6 +586,71 @@ history is read unnested in SQL, for the days being written only.
 - Nothing ties a key to the patient: a sync with somebody else's key files their data, as an
   upload of somebody else's `.fit` file does.
 
+## Garmin account by OAuth
+
+The sync above pulls with a key the patient pastes. A deployment that holds a Garmin Connect
+Developer Program app offers a second way (#2802): the patient approves the app once on Garmin's
+consent page, and Garmin then **pushes** their data to this server whenever their watch syncs with
+Garmin Connect. The Starter tier of the program is push only, so there is no on-demand read and no
+history: data starts with the first sync after connecting.
+
+```
+Wearables tab ── POST garmin/oauth/start/ ──► Garmin consent page
+                                                   │ (patient approves)
+record page ◄── /?garmin=connected ◄── GET garmin/oauth/callback/?code&state
+                                                   │ code → tokens, user id, permissions
+                                                   ▼
+                                           GarminConnection (per patient)
+
+watch ─► Garmin Connect ─► POST garmin/webhooks/<secret>/ ─► read_push ─► the shared writer
+                           {"dailies":[{userId, ...}], ...}   by userId     (replace_daily)
+```
+
+### Setting it up
+
+| Variable | What |
+|---|---|
+| `GARMIN_CLIENT_ID`, `GARMIN_CLIENT_SECRET` | the app's consumer key and secret from the developer portal |
+| `GARMIN_WEBHOOK_SECRET` | a long random string, e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+
+In the developer portal, register the redirect URL `<APP_BASE_URL>/api/v1/garmin/oauth/callback/`
+and, for each push type (Dailies, Sleeps, HRV, Pulse Ox, Respiration, User Metrics,
+Deregistrations, User Permissions), the URL
+`<APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/`, with delivery set to push. The
+Wearables tab shows "Garmin account" only when all three variables are set.
+
+### What a push becomes
+
+| Push type | Field | Metric key | Note |
+|---|---|---|---|
+| `dailies` | `steps` | `steps` | |
+| `dailies` | `distanceInMeters` | `distance` | stored in km |
+| `dailies` | `moderateIntensityDurationInSeconds` + `vigorousIntensityDurationInSeconds` | `active_minutes` | minutes |
+| `dailies` | `activeKilocalories` | `active_energy` | |
+| `dailies` | `bmrKilocalories` | `basal_energy` | |
+| `dailies` | `restingHeartRateInBeatsPerMinute` | `resting_hr` | |
+| `sleeps` | deep + light + REM seconds, else `durationInSeconds` | `sleep_duration` | hours |
+| `hrv` | `lastNightAvg` | `hrv_rmssd` | Garmin's overnight HRV is RMSSD (#438) |
+| `pulseox` | mean of `timeOffsetSpo2Values` | `spo2` | |
+| `allDayRespiration` | mean of `timeOffsetEpochToBreaths` | `respiratory_rate` | several entries a day are averaged |
+| `userMetrics` | `vo2Max` | `vo2_max` | |
+
+An entry's day is its `calendarDate`, else the local day its `startTimeInSeconds` falls on. Garmin
+sends a day's summary again as the day goes on; each one replaces the last through the same
+[replace rule](#a-days-total-replaces-what-garmin-uploads-wrote-for-the-day) the sync uses, and the
+day's pushes fold into one row of the upload history. Other push types are answered and ignored.
+
+These field names are Garmin's published Health API names. The full specification sits behind the
+developer portal, so check the reader against the portal's sample pushes before relying on a type.
+
+### Limits
+
+- A push carries no signature. The webhook answers only at its secret path and routes by Garmin
+  user id to the patient connected as that user; entries for anyone else are dropped.
+- The tokens are stored encrypted and used only to tell Garmin when a patient disconnects.
+- No history, no activities, body composition or stress. A `.fit` upload after a push for the same
+  day stacks beside it, as it does after a sync (#442).
+
 ## Derived values (not directly exported by either device)
 
 Two metrics are computed rather than read, and this is where the two adapters deliberately

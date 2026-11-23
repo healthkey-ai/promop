@@ -1139,6 +1139,88 @@ session), `patient_portal.tests.GarminSyncEndpointTest`, `WearableTab.test.tsx`.
 
 ---
 
+## Wearables — Garmin Account by OAuth
+
+A deployment with a Garmin Connect Developer Program app lets a patient link
+their Garmin account once; Garmin then **pushes** that account's data here as
+the watch syncs (#2802). It sits beside the key-based sync above, which pulls.
+The Starter tier is push only: no on-demand read and no history. Rules in
+`omop_core/services/garmin_oauth.py`, routes in
+`patient_portal/api/garmin_oauth.py`, on `/api/v1/` only. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#garmin-account-by-oauth).
+
+| Route | Who | What |
+|---|---|---|
+| `GET garmin/connection/` | a signed-in patient | `{configured, connected, connected_at, last_push_at, permissions}`; never a token or the Garmin user id |
+| `DELETE garmin/connection/` | a signed-in patient | disconnect: Garmin's registration is deleted, the row removed |
+| `POST garmin/oauth/start/` | a signed-in patient | `{authorize_url}`, Garmin's consent page |
+| `GET garmin/oauth/callback/` | Garmin's redirect | stores the connection, redirects to `/?garmin=connected\|denied\|in_use\|error` |
+| `POST garmin/webhooks/<secret>/` | Garmin | pushed summaries, deregistrations, permission changes |
+
+- **Configuration, per deployment**: `GARMIN_CLIENT_ID`, `GARMIN_CLIENT_SECRET`
+  and `GARMIN_WEBHOOK_SECRET` (a long random string). All three or the tab
+  offers nothing (`configured()`). The web service needs all three; a worker
+  needs none (no task reads Garmin). Registered with Garmin: the redirect URL
+  `<APP_BASE_URL>/api/v1/garmin/oauth/callback/` (`GARMIN_REDIRECT_URI`
+  overrides it; it must match the registration exactly) and, for every push
+  type, `<APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/`.
+- **Who.** Start, status and disconnect want the person signed in
+  (`is_interactive_session`) with a record of their own, as the key sync does;
+  start also refuses a record that is off. The callback needs no session: whose
+  connection it is comes from the signed `state`, and a browser signed in as
+  somebody else is refused.
+- **Nothing is stored for the round trip.** `state` is signed (15 minutes) and
+  names the person and the account that started; the PKCE verifier is derived
+  from the state's nonce with a key from `SECRET_KEY`, so a state seen in a URL
+  cannot redeem the code. A `SECRET_KEY` rotation mid-consent means starting
+  again.
+- **`GarminConnection`** (system data, one per person, gone with the person):
+  the Garmin user id (unique: one Garmin account feeds one record, a second
+  record's callback gets `in_use`), the permissions granted, and the access
+  and refresh tokens **encrypted** with a key derived from `SECRET_KEY`
+  (`SECRET_KEY_FALLBACKS` still decrypt), so a dump restored on another
+  deployment holds nothing usable. Other stored tokens in this codebase are
+  plain (#60); these are not. Tokens that cannot be read mean connecting again.
+- **The tokens are for one thing: telling Garmin about a disconnect**, which
+  Garmin's terms require of a partner that offers one. Push needs no token. A
+  refresh rotates the refresh token, so both are saved together under the
+  row's lock, and a push for an account whose tokens are 30 days old renews
+  them (`_keep_tokens_alive`): nothing else would, and the refresh token lasts
+  about 90. Disconnect removes the row whatever Garmin answers and says
+  whether Garmin was told (`garmin_notified`).
+- **The webhook trusts only its path.** A push is not signed, so the secret in
+  the URL is what says it is Garmin: anything else is an empty 404. Entries
+  are routed by `userId` to the patient whose connection names it and dropped
+  for anyone else, so a body can never reach a record by naming a person.
+  Garmin resends whatever is not answered 200: a body that is not JSON is a
+  400, a failure of this server's own is a 503 (writing is idempotent), and a
+  body with nothing storable is a 200.
+- **What a push writes.** `read_push` maps `dailies` (steps, distance, active
+  minutes, active and basal energy, resting heart rate), `sleeps`, `hrv`
+  (RMSSD), `pulseox` and `allDayRespiration` (averaged over the day's
+  readings) and `userMetrics` (VO2 max) onto the same metric keys as the key
+  sync; other types are accepted and ignored. Rows go through the shared
+  writer with `replace_daily`, so a later push for a day replaces the earlier
+  one and a `.fit` upload of that day. A record that is off stores nothing.
+  The derivation is dispatched (`derivation_jobs`), off the request where a
+  worker exists.
+- **History.** One "Garmin Connect push <date>" upload row per patient per day
+  of pushes (`_fold_history`); a push that changes nothing leaves none. It is
+  deleted from the history like any upload.
+- **Deregistration and permissions.** A pushed `deregistrations` entry removes
+  the connection; `userPermissionsChange` updates the stored permissions. The
+  tab warns when `HEALTH_EXPORT` was not granted.
+- **Not verified against a live push.** The push field names are Garmin's
+  published Health API names, but the specification sits behind the developer
+  portal: check `read_push` against the portal's sample pushes before relying
+  on a type.
+- **Not built**: ping/pull and backfill (Enterprise tier), activities, body
+  composition, stress. Erasing a patient removes the row but does not tell
+  Garmin; its pushes are then dropped.
+
+Tests: `tests/test_garmin_oauth.py`, `patient_portal.tests.GarminOAuthEndpointTest`,
+`GarminAccountLink.test.tsx`.
+
 ## Code Mapping Suggest
 
 Suggest proposes a destination concept for queue rows that have none. Two rules

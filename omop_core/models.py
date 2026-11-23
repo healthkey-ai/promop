@@ -3533,6 +3533,47 @@ class WearableUpload(models.Model):
         return f'{self.device_type} upload {self.filename} ({self.samples_created} samples)'
 
 
+class GarminConnection(models.Model):
+    """A patient's Garmin Connect account, linked by OAuth (#2802).
+
+    The patient approved this deployment's Garmin Connect Developer Program app
+    on Garmin's consent page; Garmin then pushes that account's summaries here,
+    each naming ``garmin_user_id``. That id is how a push finds its patient, so
+    one Garmin account is linked to at most one record.
+
+    The tokens are stored encrypted (``garmin_oauth.encrypt``, a key derived
+    from SECRET_KEY) and are needed for one thing after connecting: telling
+    Garmin the patient disconnected. They never leave the server.
+
+    System data: it belongs to this deployment's app registration, so it is
+    never copied between instances, and it goes with the person.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='garmin_connection',
+    )
+    garmin_user_id = models.CharField(max_length=64, unique=True)
+    access_token = models.TextField(blank=True, default='')
+    refresh_token = models.TextField(blank=True, default='')
+    access_expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_expires_at = models.DateTimeField(null=True, blank=True)
+    tokens_updated_at = models.DateTimeField(null=True, blank=True)
+    # What the patient granted on the consent page, e.g. ["HEALTH_EXPORT"].
+    permissions = models.JSONField(default=list, blank=True)
+    connected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='garmin_connections',
+    )
+    connected_at = models.DateTimeField(auto_now_add=True)
+    # When Garmin last pushed data for this account.
+    last_push_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'garmin_connection'
+
+    def __str__(self):
+        return f'Garmin connection for person {self.person_id}'
+
+
 class TherapyHistoryAttestation(models.Model):
     """The patient's explicit confirmation that the listed lines are complete.
 
