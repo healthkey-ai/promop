@@ -1458,7 +1458,7 @@ def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv
     }
 
 
-def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
+def resolve_person_source_codes(person, *, source_values=None, omop_tables=None, derive=True):
     """Re-resolve clinical rows for *person* with unresolved or prior targets.
 
     The work is :func:`_resolve_groups`; this wrapper makes the person's record
@@ -1468,6 +1468,11 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     the commits (on Celery with a broker; inline with a statement_timeout
     otherwise) and a failure to queue it never masks the error that stopped the
     resolve.
+
+    *derive* false leaves the derivation to the caller, who runs it whether or
+    not a row changed (a patient's own Generate OMOP, #2822). The record is
+    still made stale, so a caller that then fails to derive leaves it for
+    ``backfill_patient_records``.
     """
     touched: set[int] = set()
     failed = False
@@ -1480,8 +1485,9 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
         if touched:
             try:
                 PatientRecord.objects.filter(person_id__in=touched).update(derivation_version=0)
-                from omop_core.services.derivation_jobs import get_dispatcher
-                get_dispatcher().dispatch(person)
+                if derive:
+                    from omop_core.services.derivation_jobs import get_dispatcher
+                    get_dispatcher().dispatch(person)
             except Exception:
                 if not failed:
                     raise

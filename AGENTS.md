@@ -1926,13 +1926,14 @@ what happens next (`omop_core/services/repoint_jobs.py`):
   the mapping is saved all the same, the result says `held: true`, and the
   rows stay queued for that job or for Generate OMOP.
 - **The patient's record is re-derived on a worker after commit** when a row
-  moved or a duplicate was collapsed. It has to be asked for here: Generate
-  OMOP derives only for rows it moves itself, and this patient has none left.
+  moved or a duplicate was collapsed. It has to be asked for here: the
+  Patients list's Generate OMOP derives only for rows it moves itself, and
+  this patient has none left.
   With no `CELERY_BROKER_URL` nothing is derived: 12-32s on a bulk-loaded
   patient would run in the save request, past the web server's timeout and
-  after the commit, so the record stays stale for `backfill_patient_records`,
-  as after any other re-point. A queue outage costs the same and never the
-  save.
+  after the commit, so the record stays stale until the tab's own Generate
+  OMOP (below), which always derives, or `backfill_patient_records`. A queue
+  outage costs the same and never the save.
 - A save that only proposes, rejects or un-approves moves no rows to a
   destination, from either place. `patient_id` is validated before anything
   is written (`_mapping_patient_scope`): an unknown patient is a 400 and one
@@ -1940,6 +1941,63 @@ what happens next (`omop_core/services/repoint_jobs.py`):
 - The tab's banner reports the count ("3 of this patient's rows were moved to
   the approved concept"), or that none were moved or that another update
   holds them, each with what Generate OMOP still has to do.
+
+### Generate OMOP on a patient's Source Codes tab
+
+The tab has a Generate OMOP button for staff and org admins (#2822). It is
+for that patient only: `POST /api/v1/patient-records/<id>/resolve-source-codes/`
+starts a `SourceCodeResolveRun` that
+
+1. resolves the patient's rows against the current mappings
+   (`resolve_person_source_codes`): rows waiting on an approved or moved
+   mapping are re-pointed, and a code the patient has only in the inventory
+   gets its row, and
+2. then derives that patient's `PatientRecord`, whether or not a row changed,
+   so a record an earlier save left stale is brought up to date.
+
+- **One run, two steps** (`resolve_jobs.run_bulk_resolve(refresh_record=True)`).
+  The resolver is told not to queue its own derivation (`derive=False`) and
+  the run derives instead, from the person as stored after the resolve: on a
+  worker directly, under the task's time limit; with no broker through the
+  inline dispatcher, in the request, under its 25s statement timeout. The run
+  is `completed` only after the derivation, so the tab polls
+  `resolve-runs/<id>/` and nothing else.
+- **A record that cannot be derived** is one of the run's `errors`, stored in
+  `error_detail` with `step: 'record'` and the exception's class, never its
+  text, which is kept out of the log as well. The status endpoint counts
+  those as `record_refresh_errors`. The rows stay resolved; the tab says the
+  record could not be refreshed. A resolve that stops partway is still
+  derived from: what it committed is in the tables.
+- **One resolver per person.** Every resolve run, this one and the Patients
+  list's, now goes through `provisional_sweep.locked_resolve`, as the sweep
+  and the post-ingest resolve do: the resolver creates an inventory code's
+  row after checking that none exists, so two resolvers on one person could
+  each create it. A person another resolver holds past the lock's 10s wait is
+  an error for that person (`step: 'busy'`, `busy_errors` on the status
+  endpoint): their rows are left alone and the tab says another update is at
+  work.
+- **The Patients list's run** is otherwise unchanged: it derives only for a
+  patient whose rows it changed, through the dispatcher. `refresh_record` is
+  sent to the task only when set, so a worker on the previous release during
+  a deploy still takes the list's runs. A patient's run started in that
+  window is refused by the old worker and stays `pending`; the tab's time
+  limit ends the watch.
+- **The tab** (`PatientSourceCodesTab`, `generateOmop.ts`) disables the button
+  while the run is going, reports what the run did, re-reads the list and has
+  the page re-read the record (`onRecordRefreshed`). Three failed polls in a
+  row, or 15 minutes (`GENERATE_WATCH_MS`, the task time limit), end the
+  watch, not the run. A refusal is worded by its status, never with the
+  server's text (its 403 describes the caller's grants); a request that died
+  may still have run, so the list and the record are re-read.
+- **The tab stays mounted once opened** (`PatientDetail`, hidden under the
+  other tabs, outside the panel keyed by tab). The watch lives in the tab, so
+  a curator who starts a run and moves to Labs still gets the record re-read
+  when it ends, and finds the button disabled and the result on return.
+- A run redelivered after its worker died reports only what the second
+  attempt did; the rows the first moved are moved all the same.
+
+Tests: `tests/test_patient_generate_omop.py`,
+`PatientSourceCodesTab.generate.test.tsx`, `PatientDetail.sourcecodes.test.tsx`.
 
 ### A code's rows follow its mapping to another table
 
