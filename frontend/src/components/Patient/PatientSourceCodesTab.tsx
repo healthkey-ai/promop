@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import api from "../../api/axios";
 import { useAuth } from "../../hooks/useAuth";
 import type {
   PatientSourceCode,
+  ResolveRunStatus,
   SourceCodesResponse,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
@@ -17,8 +18,23 @@ import {
   patientRepointBanner,
   repointBanner,
 } from "../CodeMappings/codeMappingTypes";
+import { GENERATE_POLL_MS, GENERATE_POLL_RETRIES, generateOmopOutcome } from "./generateOmop";
 
-type Props = { personId: string };
+type Props = {
+  personId: string;
+  /** Called when Generate OMOP has refreshed this patient's record, so the
+   *  page can re-read it (#2822). */
+  onRecordRefreshed?: () => void | Promise<void>;
+};
+
+const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+const errorDetail = (err: unknown): string | undefined => {
+  const data = err && typeof err === "object" && "response" in err
+    ? (err as { response?: { data?: { detail?: string; error?: string } } }).response?.data
+    : undefined;
+  return data?.detail || data?.error;
+};
 
 const STATUS_BADGE: Record<string, { bg: string; text: string; label: string }> = {
   approved: { bg: "bg-green-100", text: "text-green-800", label: "Approved" },
@@ -156,7 +172,7 @@ function SourceCodeTable({
   );
 }
 
-export default function PatientSourceCodesTab({ personId }: Props) {
+export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: Props) {
   const { currentUser } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
   const canWrite = canWriteMappings(currentUser);
@@ -165,6 +181,10 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const [banner, setBanner] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  // The run this tab is watching. Leaving the tab stops the watch, not the run.
+  const generationRef = useRef<{ cancelled: boolean } | null>(null);
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
     unmapped: false,
     proposed: false,
@@ -192,12 +212,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
       setData(res.data);
       setError(null);
     } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err as { response?: { data?: { detail?: string; error?: string } } })
-              .response?.data
-          : undefined;
-      setError(detail?.detail || detail?.error || "Failed to load source codes.");
+      setError(errorDetail(err) || "Failed to load source codes.");
     } finally {
       setLoading(false);
     }
@@ -228,6 +243,67 @@ export default function PatientSourceCodesTab({ personId }: Props) {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => () => {
+    if (generationRef.current) generationRef.current.cancelled = true;
+  }, []);
+
+  /**
+   * Generate OMOP for this patient (#2822): the server resolves their rows
+   * against the current mappings and then derives their record, as one run.
+   * The tab watches the run, then re-reads the list and has the page re-read
+   * the record.
+   */
+  const handleGenerate = async () => {
+    if (generating) return;
+    const watch = { cancelled: false };
+    generationRef.current = watch;
+    setGenerating(true);
+    setGenerateError(null);
+    setBanner(null);
+    try {
+      let runId: string;
+      try {
+        const started = await api.post<{ run_id: string }>(
+          `/v1/patient-records/${personId}/resolve-source-codes/`, {},
+        );
+        runId = started.data.run_id;
+      } catch (err) {
+        if (!watch.cancelled) setGenerateError(errorDetail(err) || "Generate OMOP could not be started.");
+        return;
+      }
+      let run: ResolveRunStatus | null = null;
+      let failedPolls = 0;
+      while (!watch.cancelled) {
+        try {
+          const polled = (await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`)).data;
+          failedPolls = 0;
+          if (polled.state === "completed" || polled.state === "failed") {
+            run = polled;
+            break;
+          }
+        } catch {
+          failedPolls += 1;
+          if (failedPolls >= GENERATE_POLL_RETRIES) break;
+        }
+        await wait(GENERATE_POLL_MS);
+      }
+      if (watch.cancelled) return;
+      if (!run) {
+        setGenerateError(
+          "Lost contact with Generate OMOP. It may still be running; reload the page in a minute to see the result.",
+        );
+        return;
+      }
+      const outcome = generateOmopOutcome(run);
+      if (outcome.ok) setBanner(outcome.message);
+      else setGenerateError(outcome.message);
+      // A run that stopped early has still committed what it did.
+      await Promise.all([fetchSourceCodes(), onRecordRefreshed?.()]);
+    } finally {
+      if (!watch.cancelled) setGenerating(false);
+    }
+  };
 
   const handleRowClick = (sc: PatientSourceCode) => {
     setBanner(null);
@@ -315,7 +391,41 @@ export default function PatientSourceCodesTab({ personId }: Props) {
             </span>
           )}
         </div>
+        {canApprove && (
+          <button
+            type="button"
+            onClick={() => void handleGenerate()}
+            disabled={generating}
+            aria-busy={generating}
+            title="Resolve this patient's rows against the current mappings, then refresh this patient's record. No other patient is changed."
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {generating ? (
+              <>
+                <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                Generating OMOP…
+              </>
+            ) : (
+              <>
+                <RefreshCw aria-hidden="true" size={16} />
+                Generate OMOP
+              </>
+            )}
+          </button>
+        )}
       </div>
+
+      {generating && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Generating this patient&rsquo;s OMOP rows, then refreshing their record. Other patients are not changed.
+        </p>
+      )}
+
+      {generateError && (
+        <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+          {generateError}
+        </div>
+      )}
 
       {!canWrite && (
         <p role="status" className="text-sm text-muted-foreground">
@@ -325,7 +435,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
 
       {/* Save banner */}
       {banner && (
-        <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
+        <div role="status" className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
           {banner}
         </div>
       )}

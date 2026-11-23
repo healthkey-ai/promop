@@ -6725,8 +6725,12 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     def resolve_source_codes(self, request: Request, pk: str | None = None) -> Response:
         """POST /api/v1/patient-records/{person_id}/resolve-source-codes/
 
-        Queue a source-code resolution for one person.  Returns 202 with a
-        run_id that the client polls via ``/v1/resolve-runs/{run_id}/``.
+        Generate OMOP for one person: their rows are resolved against the
+        current mappings, then their PatientRecord is derived, whether or not a
+        row changed (#2822). Returns 202 with a run_id that the client polls
+        via ``/v1/resolve-runs/{run_id}/``; the run is complete only once the
+        record has been derived, and reports a record that could not be as
+        ``record_refresh_errors``. No other person's rows are touched.
         """
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
         if err:
@@ -6741,7 +6745,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         from omop_core.services.resolve_jobs import create_and_dispatch_resolve_run
 
         run = create_and_dispatch_resolve_run(
-            [person.person_id], user=request.user,
+            [person.person_id], user=request.user, refresh_record=True,
         )
         return Response(
             {'run_id': str(run.id), 'total': 1},
@@ -6831,6 +6835,7 @@ def resolve_run_status(request: Request, run_id) -> Response:
         )
 
     from omop_core.models import SourceCodeResolveRun
+    from omop_core.services.resolve_jobs import record_refresh_errors
 
     try:
         run = SourceCodeResolveRun.objects.get(id=run_id)
@@ -6849,6 +6854,9 @@ def resolve_run_status(request: Request, run_id) -> Response:
         'skipped': run.skipped,
         'already_resolved': run.already_resolved,
         'errors': run.errors,
+        # Of those errors, the patients whose rows were resolved and whose
+        # record could not then be derived (a patient's own Generate OMOP).
+        'record_refresh_errors': record_refresh_errors(run),
         'code_details': run.code_details if run.state in ('completed', 'failed') else [],
     })
 

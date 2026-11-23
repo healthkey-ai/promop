@@ -1195,9 +1195,9 @@ def test_a_bulk_resolve_that_starts_after_its_run_was_closed_reopens_and_complet
     seen = []
     real = resolve_jobs.resolve_person_source_codes
 
-    def resolve(p):
+    def resolve(p, **kwargs):
         seen.append(SourceCodeResolveRun.objects.values_list('state', 'finished_at').get(pk=run.pk))
-        return real(p)
+        return real(p, **kwargs)
     monkeypatch.setattr(resolve_jobs, 'resolve_person_source_codes', resolve)
 
     resolve_jobs.run_bulk_resolve(run.id, [person.person_id])         # the task that was only delayed

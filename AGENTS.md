@@ -1928,6 +1928,43 @@ what happens next (`omop_core/services/repoint_jobs.py`):
   the approved concept"), or that none were moved or that another update
   holds them, each with what Generate OMOP still has to do.
 
+### Generate OMOP on a patient's Source Codes tab
+
+The tab has a Generate OMOP button for staff and org admins (#2822). It is
+for that patient only: `POST /api/v1/patient-records/<id>/resolve-source-codes/`
+starts a `SourceCodeResolveRun` that
+
+1. resolves the patient's rows against the current mappings
+   (`resolve_person_source_codes`): rows waiting on an approved or moved
+   mapping are re-pointed, and a code the patient has only in the inventory
+   gets its row, and
+2. then derives that patient's `PatientRecord`, whether or not a row changed,
+   so a record an earlier save left stale is brought up to date.
+
+- **One run, two steps** (`resolve_jobs.run_bulk_resolve(refresh_record=True)`).
+  The resolver is told not to queue its own derivation (`derive=False`) and
+  the run derives instead: on a worker directly, under the task's time limit;
+  with no broker through the inline dispatcher, in the request, under its 25s
+  statement timeout. The run is `completed` only after the derivation, so the
+  tab polls `resolve-runs/<id>/` and nothing else.
+- **A record that cannot be derived** is one of the run's `errors`, stored in
+  `error_detail` with `step: 'record'` and the exception's class, never its
+  text. The status endpoint counts those as `record_refresh_errors`. The rows
+  stay resolved and the record stays stale; the tab says the record could not
+  be refreshed. A resolve that stops partway is still derived from: what it
+  committed is in the tables.
+- **The Patients list's run is unchanged**: it derives only for a patient
+  whose rows it changed, through the dispatcher. `refresh_record` is sent to
+  the task only when set, so a worker on the previous release during a deploy
+  still takes those runs.
+- **The tab** (`PatientSourceCodesTab`, `generateOmop.ts`) disables the button
+  while the run is going, reports what the run did, re-reads the list and has
+  the page re-read the record (`onRecordRefreshed`). Three failed polls in a
+  row end the watch, not the run.
+
+Tests: `tests/test_patient_generate_omop.py`,
+`PatientSourceCodesTab.generate.test.tsx`.
+
 ### A code's rows follow its mapping to another table
 
 A curator who changes a mapping's Domain re-files it under another clinical

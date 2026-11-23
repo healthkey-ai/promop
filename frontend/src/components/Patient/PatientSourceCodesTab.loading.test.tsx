@@ -64,11 +64,12 @@ describe("PatientSourceCodesTab loading (#1789)", () => {
     expect(screen.queryByRole("button", { name: /Show all/ })).not.toBeInTheDocument();
   });
 
-  it("leaves Generate OMOP to the patient list batch action", async () => {
+  // #1816 left Generate OMOP to the patient list; #2822 brought it back, for this patient only.
+  it("offers Generate OMOP for this patient beside the summary", async () => {
     vi.mocked(api.get).mockImplementation((url: string) =>
       Promise.resolve({ data: url.includes("source-codes") ? response(1) : {} }) as never);
     render(<PatientSourceCodesTab personId="1" />);
     expect(await screen.findByText("CODE-0")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Generate OMOP" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate OMOP" })).toBeEnabled();
   });
 });
