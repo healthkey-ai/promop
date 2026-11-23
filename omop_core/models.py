@@ -5051,10 +5051,49 @@ class FieldDiseaseMembership(models.Model):
 
 
 class FieldChoice(models.Model):
-    """One allowed value for a PatientRecord field (curator-managed)."""
+    """One allowed value for a PatientRecord field (curator-managed).
+
+    Identity is ``(field_name, context_key, code)``, not the display text
+    (#1224): ``display`` is the label a person reads and a curator may change
+    it, ``code`` is what the value is called everywhere else and never changes
+    with the label. ``context_key`` separates answers that share a field but
+    not a meaning (stage ``I`` in the ISS system and in Ann Arbor); it is
+    blank for a value with one meaning. Which diseases offer a value is
+    ``FieldChoiceDisease``; no rows there means every disease.
+
+    ``value`` is the canonical storage value, blank when it is the display
+    text, which is what a row seeded before this held. ``value_type`` says how
+    ``value`` is read (``text``, ``integer``, ``decimal`` or ``boolean``).
+    Earlier display texts, and any other spelling a source uses, are
+    ``FieldChoiceAlias`` rows. A retired value stays so stored data resolves,
+    and is no longer offered. Writers go through
+    ``omop_core.services.field_choices``.
+    """
+    VALUE_TYPE_CHOICES = [
+        ('text', 'Text'), ('integer', 'Integer'),
+        ('decimal', 'Decimal'), ('boolean', 'Boolean'),
+    ]
+
     field_name = models.CharField(max_length=100, db_index=True)
     display = models.CharField(max_length=200)
     sort_order = models.IntegerField(default=0)
+    code = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='Stable identifier within the field and context; never changes with the label.',
+    )
+    context_key = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='Separates answers of one field that mean different things (a staging system); blank when there is one meaning.',
+    )
+    value = models.CharField(
+        max_length=200, blank=True, default='',
+        help_text='Canonical storage value; blank means the display text.',
+    )
+    value_type = models.CharField(max_length=10, choices=VALUE_TYPE_CHOICES, default='text')
+    retired_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the value stopped being offered. It still resolves stored data.',
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
     )
@@ -5062,11 +5101,90 @@ class FieldChoice(models.Model):
 
     class Meta:
         db_table = 'field_choice'
-        unique_together = [('field_name', 'display')]
         ordering = ['field_name', 'sort_order', 'display']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'context_key', 'display'],
+                name='uq_field_choice_display',
+            ),
+            models.UniqueConstraint(
+                fields=['field_name', 'context_key', 'code'],
+                name='uq_field_choice_code',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.field_name}: {self.display}"
+
+    @property
+    def stored_value(self) -> str:
+        """The text written to the PatientRecord column for this choice."""
+        return self.value or self.display
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            from omop_core.services.field_choices import next_code
+            self.code = next_code(self)
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'code' not in update_fields:
+                kwargs['update_fields'] = [*update_fields, 'code']
+        super().save(*args, **kwargs)
+
+
+class FieldChoiceAlias(models.Model):
+    """Another spelling of a choice: an earlier label or a source's wording.
+
+    ``field_name`` and ``context_key`` repeat the choice's own so the
+    database can hold the rule that one spelling names one choice within a
+    field and context. ``alias_key`` is the spelling folded for comparison
+    (case and runs of whitespace); ``alias`` keeps it as written.
+    """
+    choice = models.ForeignKey(FieldChoice, related_name='aliases', on_delete=models.CASCADE)
+    field_name = models.CharField(max_length=100)
+    context_key = models.CharField(max_length=100, blank=True, default='')
+    alias = models.CharField(max_length=200)
+    alias_key = models.CharField(max_length=200)
+    source = models.CharField(
+        max_length=20, default='curator',
+        help_text='"label" for an earlier display text, "migration" for one seeded from it, else "curator".',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_choice_alias'
+        ordering = ['field_name', 'alias_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'context_key', 'alias_key'],
+                name='uq_field_choice_alias',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.choice_id}: {self.alias}"
+
+
+class FieldChoiceDisease(models.Model):
+    """A disease that offers a choice; a choice with no rows is offered to all.
+
+    ``disease`` is a ``DiseaseCategoryChoice`` code held as text, as on
+    ``FieldDiseaseMembership``, and ``Other`` is refused: its profile is the
+    base record. A choice is part of a disease's record only through these
+    rows, so changing them never changes a stored value.
+    """
+    choice = models.ForeignKey(FieldChoice, related_name='disease_scope', on_delete=models.CASCADE)
+    disease = models.CharField(max_length=30, help_text='DiseaseCategoryChoice code, e.g. MM.')
+
+    class Meta:
+        db_table = 'field_choice_disease'
+        ordering = ['choice_id', 'disease']
+        constraints = [
+            models.UniqueConstraint(fields=['choice', 'disease'], name='uq_field_choice_disease'),
+        ]
+        indexes = [models.Index(fields=['disease'], name='ix_field_choice_disease')]
+
+    def __str__(self):
+        return f"{self.choice_id}: {self.disease}"
 
 
 class FieldChoiceCode(models.Model):

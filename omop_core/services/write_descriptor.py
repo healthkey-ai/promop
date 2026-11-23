@@ -141,7 +141,14 @@ def _unmapped_group(field):
 def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
     """Return curator-managed displays and their preferred code for every field."""
     result: dict[str, list[tuple[str, str | None]]] = {}
+    seen: set[tuple[str, str]] = set()
     for choice in FieldChoice.objects.prefetch_related('codes').all():
+        # One answer offered in several contexts (stage I in two staging
+        # systems) is one text to accept here; which meaning a record means
+        # is the scope's business, not this list's.
+        if (choice.field_name, choice.display) in seen:
+            continue
+        seen.add((choice.field_name, choice.display))
         primary = next((code.code for code in choice.codes.all() if code.is_primary), None)
         result.setdefault(choice.field_name, []).append((choice.display, primary))
     return result

@@ -606,11 +606,19 @@ def get_all_field_descriptors() -> list[dict]:
 
     # 3b. Load field choices (curator-managed value sets).
     choices_by_field: dict[str, list[dict]] = {}
-    for fc in FieldChoice.objects.prefetch_related('codes').all():
+    for fc in FieldChoice.objects.prefetch_related('codes', 'disease_scope').all():
         choices_by_field.setdefault(fc.field_name, []).append({
             'id': fc.id,
             'display': fc.display,
             'sort_order': fc.sort_order,
+            # Stable identity and scope (#1224); a client that ignores them
+            # sees the shape it always had.
+            'code': fc.code,
+            'context_key': fc.context_key,
+            'value': fc.stored_value,
+            'value_type': fc.value_type,
+            'retired': fc.retired_at is not None,
+            'diseases': sorted(d.disease for d in fc.disease_scope.all()),
             'codes': [
                 {'code': c.code, 'vocabulary_id': c.vocabulary_id,
                  'display': c.display, 'is_primary': c.is_primary}

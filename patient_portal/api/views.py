@@ -16724,10 +16724,17 @@ def field_choice_list(request):
     from .serializers import FieldChoiceSerializer
 
     if request.method == 'GET':
-        qs = FieldChoice.objects.prefetch_related('codes').all()
+        qs = FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope').all()
         field_name = request.query_params.get('field_name')
         if field_name:
             qs = qs.filter(field_name=field_name)
+        disease = request.query_params.get('disease')
+        if disease:
+            # What a record of that Disease Category is offered: its own
+            # choices and the unscoped ones, retired values left out.
+            from omop_core.services import field_choices
+            qs = qs.filter(retired_at__isnull=True)
+            qs = [c for c in qs if field_choices._in_scope(c, disease)]
         return Response(FieldChoiceSerializer(qs, many=True).data)
 
     if not _can_manage_mappings(request.user):
@@ -16746,7 +16753,7 @@ def field_choice_detail(request, pk):
     from omop_core.models import FieldChoice
     from .serializers import FieldChoiceSerializer
     try:
-        choice = FieldChoice.objects.prefetch_related('codes').get(pk=pk)
+        choice = FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope').get(pk=pk)
     except FieldChoice.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
