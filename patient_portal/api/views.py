@@ -6730,7 +6730,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         row changed (#2822). Returns 202 with a run_id that the client polls
         via ``/v1/resolve-runs/{run_id}/``; the run is complete only once the
         record has been derived, and reports a record that could not be as
-        ``record_refresh_errors``. No other person's rows are touched.
+        ``record_refresh_errors``, and a patient another resolver was holding
+        as ``busy_errors``. No other person's rows are touched.
         """
         person, patient_info, err = self._resolve_patient_with_auth(request, pk)
         if err:
@@ -6835,7 +6836,7 @@ def resolve_run_status(request: Request, run_id) -> Response:
         )
 
     from omop_core.models import SourceCodeResolveRun
-    from omop_core.services.resolve_jobs import record_refresh_errors
+    from omop_core.services.resolve_jobs import busy_errors, record_refresh_errors
 
     try:
         run = SourceCodeResolveRun.objects.get(id=run_id)
@@ -6857,6 +6858,9 @@ def resolve_run_status(request: Request, run_id) -> Response:
         # Of those errors, the patients whose rows were resolved and whose
         # record could not then be derived (a patient's own Generate OMOP).
         'record_refresh_errors': record_refresh_errors(run),
+        # ...and the patients another resolver was holding, whose rows this
+        # run therefore left alone.
+        'busy_errors': busy_errors(run),
         'code_details': run.code_details if run.state in ('completed', 'failed') else [],
     })
 

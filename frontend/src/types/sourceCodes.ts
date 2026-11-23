@@ -72,5 +72,7 @@ export interface ResolveRunStatus {
   /** Of `errors`: patients whose rows were resolved and whose record could not
    *  then be derived. Only a patient's own Generate OMOP derives (#2822). */
   record_refresh_errors?: number;
+  /** Of `errors`: patients another resolver was holding, whose rows this run left alone. */
+  busy_errors?: number;
   code_details: ResolveCodeDetail[];
 }

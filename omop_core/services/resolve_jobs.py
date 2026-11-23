@@ -10,6 +10,12 @@ rows it changed. A run started from one patient's Source Codes tab
 resolve and whether or not a row changed, so the run is finished only when the
 record is: the tab polls one thing, and a record an earlier save left stale is
 brought up to date.
+
+Every run takes the per-person resolve lock (``provisional_sweep.locked_resolve``),
+as the sweep and the post-ingest resolve do: the resolver creates a row for an
+inventory code after checking that none exists, so two resolvers on one person
+at once can each create it. A person another resolver holds for longer than the
+lock's wait is an error for that person (``step: 'busy'``), not a second resolve.
 """
 
 from __future__ import annotations
@@ -21,23 +27,34 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.mapping.code_resolution import resolve_person_source_codes
 from omop_core.models import Person, SourceCodeResolveRun
+from omop_core.services.provisional_sweep import PersonBusy, locked_resolve
 
 logger = logging.getLogger(__name__)
 
 BULK_RESOLVE_MAX_PERSONS = 500
 
-# ``step`` on an ``error_detail`` entry for a record that could not be derived.
-# The rows the resolve wrote are committed by then, so it is reported apart
-# from a resolve that failed.
+# ``step`` on an ``error_detail`` entry, for the two errors a client words
+# differently from "the resolve failed". RECORD: the record could not be
+# derived; the rows the resolve wrote are committed by then. BUSY: another
+# resolver held the person, so this run changed none of their rows.
 RECORD_STEP = 'record'
+BUSY_STEP = 'busy'
+
+
+def _step_errors(run: SourceCodeResolveRun, step: str) -> int:
+    return sum(1 for entry in run.error_detail or []
+               if isinstance(entry, dict) and entry.get('step') == step)
 
 
 def record_refresh_errors(run: SourceCodeResolveRun) -> int:
     """How many of *run*'s patients had their rows resolved and their record not derived."""
-    return sum(1 for entry in run.error_detail or []
-               if isinstance(entry, dict) and entry.get('step') == RECORD_STEP)
+    return _step_errors(run, RECORD_STEP)
+
+
+def busy_errors(run: SourceCodeResolveRun) -> int:
+    """How many of *run*'s patients another resolver was holding."""
+    return _step_errors(run, BUSY_STEP)
 
 
 def _refresh_record(person: Person) -> None:
@@ -98,7 +115,7 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None,
             person = None
             try:
                 person = Person.objects.get(person_id=pid)
-                result = resolve_person_source_codes(person, derive=not refresh_record)
+                result = locked_resolve(person, derive=not refresh_record)
                 total_resolved += result['resolved']
                 total_created += result.get('created', 0)
                 total_provisional += result.get('provisional', 0)
@@ -111,6 +128,10 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None,
             except Person.DoesNotExist:
                 total_errors += 1
                 error_details.append({'person_id': pid, 'error': 'Person not found'})
+            except PersonBusy:
+                total_errors += 1
+                error_details.append({'person_id': pid, 'step': BUSY_STEP,
+                                      'error': 'Another update is resolving this patient.'})
             except Exception as exc:
                 total_errors += 1
                 error_details.append({'person_id': pid, 'error': str(exc)})
@@ -118,13 +139,17 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None,
 
             if refresh_record and person is not None:
                 try:
+                    # The resolve can take minutes; derive from the person as stored now.
+                    person.refresh_from_db()
                     _refresh_record(person)
                 except Exception as exc:  # noqa: BLE001 -- the run reports it; the rows are committed
                     total_errors += 1
                     # The class only: a derivation error's text can quote a value.
                     error_details.append({'person_id': pid, 'step': RECORD_STEP,
                                           'error': type(exc).__name__})
-                    logger.exception('Could not refresh the record of a person in run %s', run_id)
+                    # No traceback either: it ends with the same text.
+                    logger.error('Could not refresh the record of a person in run %s (%s).',
+                                 run_id, type(exc).__name__)
 
             run.done = i + 1
             run.resolved = total_resolved

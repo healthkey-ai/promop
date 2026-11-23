@@ -389,6 +389,7 @@ export default function PatientDetail({
   const [patientName, setPatientName] = useState("");
   const [editedName, setEditedName] = useState("");
   const [chosenTab, setChosenTab] = useState(0);
+  const [sourceCodesOpened, setSourceCodesOpened] = useState(false);
   // Coming back from Field Concept Mapping after Add field (#721): the tab
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
@@ -952,6 +953,8 @@ export default function PatientDetail({
     : Object.keys(fieldTabs).map(Number).find((i) => fieldTabs[i] === returnTab) ?? -1;
   const activeTab = returnIdx >= 0 ? returnIdx : chosenTab;
   const setActiveTab = (index: number) => {
+    // Once opened, the Source Codes tab stays mounted; see where it renders.
+    if (index === sourceCodesIdx || activeTab === sourceCodesIdx) setSourceCodesOpened(true);
     setReturnTab(null);
     setChosenTab(index);
   };
@@ -1114,7 +1117,7 @@ export default function PatientDetail({
               </div>
 
               <ProvisionalContext.Provider value={provisionalValue}>
-              <div key={activeTab} className="animate-tab-in px-8 pb-10">
+              <div key={activeTab} hidden={activeTab === sourceCodesIdx} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
                   <>
                     {patientMode && (
@@ -1208,7 +1211,6 @@ export default function PatientDetail({
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={patientMode || isOwnRecord(user, personId)} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
-                {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab key={personId} personId={personId} onRecordRefreshed={reloadPatientInfo} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
                 {/* Fields added through Field Concept Mapping render last on
                     their tab, then the tab's second Add Field (#721). */}
@@ -1224,6 +1226,15 @@ export default function PatientDetail({
                 )}
                 {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
               </div>
+              {/* Outside the panel above, which is keyed by tab and so remounts
+                  on every switch: once opened, the Source Codes tab stays
+                  mounted (hidden) so the Generate OMOP run it watches can
+                  still re-read this page's record (#2822). */}
+              {sourceCodesIdx >= 0 && (sourceCodesOpened || activeTab === sourceCodesIdx) && personId && (
+                <div hidden={activeTab !== sourceCodesIdx} className="animate-tab-in px-8 pb-10">
+                  <PatientSourceCodesTab personId={personId} onRecordRefreshed={reloadPatientInfo} />
+                </div>
+              )}
               </ProvisionalContext.Provider>
             </div>
           </>

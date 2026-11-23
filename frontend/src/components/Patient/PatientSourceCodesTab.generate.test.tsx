@@ -6,13 +6,16 @@ import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { generateOmopOutcome } from "./generateOmop";
 
 const auth = vi.hoisted(() => ({ currentUser: { email: "admin@example.com", is_staff: true } as Record<string, unknown> }));
+const knobs = vi.hoisted(() => ({ watchMs: 60_000 }));
 
 vi.mock("../../hooks/useAuth", () => ({ useAuth: () => auth }));
 
-// The real interval is two seconds; the watch itself is what is under test.
+// The real interval is two seconds and the real limit fifteen minutes; the
+// watch itself is what is under test.
 vi.mock("./generateOmop", async (original) => ({
   ...(await original<typeof import("./generateOmop")>()),
   GENERATE_POLL_MS: 1,
+  get GENERATE_WATCH_MS() { return knobs.watchMs; },
 }));
 
 vi.mock("../../api/axios", () => ({
@@ -27,13 +30,16 @@ const sourceCodes = {
 
 const run = (overrides: Partial<ResolveRunStatus> = {}): ResolveRunStatus => ({
   run_id: "run-1", state: "completed", total: 1, done: 1, resolved: 0, created: 0, provisional: 0,
-  reverted: 0, skipped: 0, already_resolved: 0, errors: 0, record_refresh_errors: 0, code_details: [],
+  reverted: 0, skipped: 0, already_resolved: 0, errors: 0, record_refresh_errors: 0, busy_errors: 0,
+  code_details: [],
   ...overrides,
 });
 
 const RUN_URL = "/v1/resolve-runs/run-1/";
 const sourceCodeReads = () =>
   vi.mocked(api.get).mock.calls.filter(([url]) => String(url).includes("source-codes")).length;
+const polls = () => vi.mocked(api.get).mock.calls.filter(([url]) => url === RUN_URL).length;
+const pause = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 /** Answer the run's polls with *polls*, in order; the last one repeats. */
 function serve(polls: Array<ResolveRunStatus | Error>) {
@@ -58,6 +64,7 @@ const start = async (onRecordRefreshed = vi.fn()) => {
 beforeEach(() => {
   vi.clearAllMocks();
   auth.currentUser = { email: "admin@example.com", is_staff: true };
+  knobs.watchMs = 60_000;
 });
 
 describe("Generate OMOP on a patient's Source Codes tab (#2822)", () => {
@@ -119,15 +126,75 @@ describe("Generate OMOP on a patient's Source Codes tab (#2822)", () => {
     );
   });
 
-  it("shows why it could not start, and watches nothing", async () => {
+  it("says a refusal in its own words, never the server's diagnostic, and watches nothing", async () => {
     serve([run()]);
-    vi.mocked(api.post).mockRejectedValue({ response: { data: { detail: "Only administrators can perform this action." } } });
+    vi.mocked(api.post).mockRejectedValue({
+      response: { status: 403, data: { detail: "Only administrators can perform this action. | identity=7 | grants=[]" } },
+    });
     const onRecordRefreshed = await start();
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("Only administrators can perform this action.");
-    expect(vi.mocked(api.get).mock.calls.some(([url]) => url === RUN_URL)).toBe(false);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Only staff and organization admins can run Generate OMOP for this patient.");
+    expect(alert).not.toHaveTextContent("identity=7");
+    expect(polls()).toBe(0);
     expect(onRecordRefreshed).not.toHaveBeenCalled();
+    expect(sourceCodeReads()).toBe(1);
     expect(screen.getByRole("button", { name: "Generate OMOP" })).toBeEnabled();
+  });
+
+  it("re-reads the list and the record when the request died, since it may have run", async () => {
+    serve([run()]);
+    vi.mocked(api.post).mockRejectedValue(new Error("Network Error"));
+    const onRecordRefreshed = await start();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Generate OMOP did not answer. It may have run all the same: check the list and the record before running it again.",
+    );
+    await waitFor(() => expect(sourceCodeReads()).toBe(2));
+    expect(onRecordRefreshed).toHaveBeenCalledTimes(1);
+    expect(polls()).toBe(0);
+  });
+
+  it("says another update holds the patient's rows", async () => {
+    serve([run({ errors: 1, busy_errors: 1 })]);
+    await start();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Another update is working on this patient's rows, so this run changed none. "
+      + "Run Generate OMOP again once it has finished.",
+    );
+  });
+
+  it("stops watching a run that never finishes", async () => {
+    knobs.watchMs = 30;
+    serve([run({ state: "pending", done: 0 })]);
+    const onRecordRefreshed = await start();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Generate OMOP is taking longer than expected. It may still be running; "
+      + "reload the page in a few minutes to see the result.",
+    );
+    expect(screen.getByRole("button", { name: "Generate OMOP" })).toBeEnabled();
+    expect(onRecordRefreshed).not.toHaveBeenCalled();
+    const asked = polls();
+    await pause(20);
+    expect(polls()).toBe(asked);
+  });
+
+  it("stops asking once the tab is gone", async () => {
+    serve([run({ state: "running", done: 0 })]);
+    const onRecordRefreshed = vi.fn();
+    const { unmount } = render(<PatientSourceCodesTab personId="48095" onRecordRefreshed={onRecordRefreshed} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Generate OMOP" }));
+    await waitFor(() => expect(polls()).toBeGreaterThan(1));
+
+    unmount();
+    await pause(10);
+    const asked = polls();
+    await pause(20);
+
+    expect(polls()).toBe(asked);
+    expect(onRecordRefreshed).not.toHaveBeenCalled();
   });
 
   it("rides out one failed poll", async () => {
@@ -142,13 +209,21 @@ describe("Generate OMOP on a patient's Source Codes tab (#2822)", () => {
     const onRecordRefreshed = await start();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Lost contact with Generate OMOP. It may still be running; reload the page in a minute to see the result.",
+      "Lost contact with Generate OMOP. It may still be running; reload the page in a few minutes to see the result.",
     );
-    expect(vi.mocked(api.get).mock.calls.filter(([url]) => url === RUN_URL)).toHaveLength(3);
+    expect(polls()).toBe(3);
     expect(onRecordRefreshed).not.toHaveBeenCalled();
   });
 
-  it("is offered to staff and org admins only", async () => {
+  it("is offered to an org admin", async () => {
+    serve([run()]);
+    auth.currentUser = { email: "admin@example.com", is_staff: false, is_org_admin: true };
+    render(<PatientSourceCodesTab personId="48095" />);
+
+    expect(await screen.findByRole("button", { name: "Generate OMOP" })).toBeEnabled();
+  });
+
+  it("is not offered to anyone else", async () => {
     serve([run()]);
     auth.currentUser = { email: "analyst@example.com", is_staff: false };
     render(<PatientSourceCodesTab personId="48095" />);
@@ -174,8 +249,16 @@ describe("generateOmopOutcome", () => {
     });
   });
 
+  it("does not call a run finished when the resolve and the record both failed", () => {
+    expect(generateOmopOutcome(run({ errors: 2, record_refresh_errors: 1 }))).toEqual({
+      ok: false,
+      message: "Generate OMOP stopped on an error, so some rows may not have been updated "
+        + "and the patient record was not refreshed. Run it again.",
+    });
+  });
+
   it("reads a run from a server that does not report record errors", () => {
-    const { record_refresh_errors: _omitted, ...older } = run({ created: 1 });
+    const { record_refresh_errors: _omitted, busy_errors: _busy, ...older } = run({ created: 1 });
     expect(generateOmopOutcome(older).ok).toBe(true);
   });
 });

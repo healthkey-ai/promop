@@ -12,9 +12,10 @@ from rest_framework.test import APIClient
 
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
 from omop_core.models import (
-    Measurement, PatientRecord, PatientSourceCode, SourceCodeConceptMapping, SourceCodeResolveRun,
+    Measurement, PatientRecord, PatientSourceCode, Person, SourceCodeConceptMapping,
+    SourceCodeResolveRun,
 )
-from omop_core.services import resolve_jobs
+from omop_core.services import provisional_sweep, resolve_jobs
 from omop_core.services.derivation_jobs import FakeDispatcher, InlineDispatcher, use_dispatcher
 from omop_core.services.resolve_jobs import create_and_dispatch_resolve_run, run_bulk_resolve
 from tests.factories import ConceptFactory, PatientRecordFactory, PersonFactory
@@ -128,7 +129,7 @@ def test_only_the_named_patient_is_resolved_and_derived(target, fake):
 
 # ---- failures -----------------------------------------------------------------------
 
-def test_a_record_that_cannot_be_derived_is_reported_and_the_rows_stay(target):
+def test_a_record_that_cannot_be_derived_is_reported_and_the_rows_stay(target, caplog):
     person = _person(with_code=True)
     _approved(target)
 
@@ -146,21 +147,70 @@ def test_a_record_that_cannot_be_derived_is_reported_and_the_rows_stay(target):
     # Left stale, so a later derivation or backfill picks it up.
     assert PatientRecord.objects.get(person=person).derivation_version == 0
 
+    # Nor to the log, which is also what an error tracker is sent.
+    assert 'RuntimeError' in caplog.text and '13.2' not in caplog.text
+
     body = _staff_client().get(f'/api/v1/resolve-runs/{run.id}/').json()
-    assert (body['state'], body['errors'], body['record_refresh_errors']) == ('completed', 1, 1)
-    assert '13.2' not in str(body)
+    assert (body['state'], body['errors'], body['record_refresh_errors'], body['busy_errors']) == (
+        'completed', 1, 1, 0)
 
 
-def test_a_resolve_that_fails_still_has_its_committed_rows_derived(target, fake):
+def test_a_resolve_that_fails_is_still_followed_by_the_derivation(target, fake):
+    """A resolve can stop after committing some groups; those are still to be derived from."""
     person = _person()
 
-    with mock.patch.object(resolve_jobs, 'resolve_person_source_codes', side_effect=ValueError('boom')):
+    with mock.patch.object(provisional_sweep, 'resolve_person_source_codes', side_effect=ValueError('boom')):
         run = create_and_dispatch_resolve_run([person.person_id], refresh_record=True)
 
     run.refresh_from_db()
     assert (run.state, run.errors) == (SourceCodeResolveRun.COMPLETED, 1)
-    assert resolve_jobs.record_refresh_errors(run) == 0
+    assert (resolve_jobs.record_refresh_errors(run), resolve_jobs.busy_errors(run)) == (0, 0)
     assert fake.calls == [person.person_id]
+
+
+def test_the_record_is_derived_from_the_person_as_stored_after_the_resolve(target):
+    """A resolve can take minutes; a person updated meanwhile is not derived from the old copy."""
+    person = _person()
+    real = provisional_sweep.resolve_person_source_codes
+    seen = []
+
+    def resolve(p, **kwargs):
+        Person.objects.filter(pk=p.pk).update(year_of_birth=1931)
+        return real(p, **kwargs)
+
+    class Dispatcher(FakeDispatcher):
+        def dispatch(self, derived):
+            seen.append(derived.year_of_birth)
+            return super().dispatch(derived)
+
+    with mock.patch.object(provisional_sweep, 'resolve_person_source_codes', side_effect=resolve), \
+            use_dispatcher(Dispatcher()):
+        create_and_dispatch_resolve_run([person.person_id], refresh_record=True)
+
+    assert seen == [1931]
+
+
+# ---- one resolver per person --------------------------------------------------------
+
+@pytest.mark.parametrize('refresh_record', [True, False])
+def test_a_person_another_resolver_holds_is_reported_busy_and_left_alone(
+        target, fake, monkeypatch, refresh_record):
+    """Two resolvers on one person can each create the row for an inventory code."""
+    person = _person(with_code=True)
+    _approved(target)
+    monkeypatch.setattr(provisional_sweep, '_try_lock', lambda person_id: False)
+    monkeypatch.setattr(provisional_sweep, 'LOCK_WAIT_SECONDS', 0)
+
+    run = create_and_dispatch_resolve_run([person.person_id], refresh_record=refresh_record)
+
+    run.refresh_from_db()
+    assert (run.state, run.created, run.errors) == (SourceCodeResolveRun.COMPLETED, 0, 1)
+    assert (resolve_jobs.busy_errors(run), resolve_jobs.record_refresh_errors(run)) == (1, 0)
+    assert not Measurement.objects.filter(person=person).exists()
+    # The patient's own run still brings the record up to date.
+    assert fake.calls == ([person.person_id] if refresh_record else [])
+    body = _staff_client().get(f'/api/v1/resolve-runs/{run.id}/').json()
+    assert (body['errors'], body['busy_errors']) == (1, 1)
 
 
 def test_a_patient_who_no_longer_exists_is_an_error_and_nothing_is_derived(target, fake):
@@ -186,6 +236,21 @@ def test_on_a_worker_the_record_is_derived_in_the_run_not_queued_again(target, f
     assert fake.calls == []
     run.refresh_from_db()
     assert (run.state, run.done, run.errors) == (SourceCodeResolveRun.COMPLETED, 1, 0)
+
+
+def test_on_a_worker_a_failed_derivation_is_reported_not_raised(target, fake, settings):
+    person = _person(with_code=True)
+    _approved(target)
+    run = SourceCodeResolveRun.objects.create(total=1)
+    settings.CELERY_BROKER_URL = 'redis://example.invalid/0'
+
+    with mock.patch('omop_core.services.patient_record_service.refresh_patient_record',
+                    side_effect=KeyError('hgb')):
+        run_bulk_resolve(run.id, [person.person_id], refresh_record=True)
+
+    run.refresh_from_db()
+    assert (run.state, run.done, run.created, run.errors) == (SourceCodeResolveRun.COMPLETED, 1, 1, 1)
+    assert run.error_detail == [{'person_id': person.person_id, 'step': 'record', 'error': 'KeyError'}]
 
 
 @pytest.mark.parametrize('refresh_record, kwargs', [(True, {'refresh_record': True}), (False, {})])
@@ -239,6 +304,22 @@ def test_the_patients_endpoint_derives_when_nothing_changed(target, fake):
 
     assert response.status_code == 202
     assert fake.calls == [person.person_id]
+
+
+def test_someone_who_is_not_an_administrator_starts_nothing(target, fake):
+    person = _person(with_code=True)
+    _approved(target)
+    user = get_user_model().objects.create_user(email='not-an-admin@example.test')
+    client = APIClient()
+    client.force_authenticate(user)
+
+    response = client.post(
+        f'/api/v1/patient-records/{person.person_id}/resolve-source-codes/', {}, format='json')
+
+    assert response.status_code in (403, 404)
+    assert not SourceCodeResolveRun.objects.exists()
+    assert not Measurement.objects.filter(person=person).exists()
+    assert fake.calls == []
 
 
 def test_the_patients_list_endpoint_still_derives_only_what_changed(target, fake):

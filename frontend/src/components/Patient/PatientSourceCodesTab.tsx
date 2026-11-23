@@ -18,7 +18,15 @@ import {
   patientRepointBanner,
   repointBanner,
 } from "../CodeMappings/codeMappingTypes";
-import { GENERATE_POLL_MS, GENERATE_POLL_RETRIES, generateOmopOutcome } from "./generateOmop";
+import {
+  GENERATE_LOST,
+  GENERATE_POLL_MS,
+  GENERATE_POLL_RETRIES,
+  GENERATE_SLOW,
+  GENERATE_WATCH_MS,
+  generateOmopOutcome,
+  generateStartFailure,
+} from "./generateOmop";
 
 type Props = {
   personId: string;
@@ -261,6 +269,8 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
     setGenerating(true);
     setGenerateError(null);
     setBanner(null);
+    // A run that stopped early has still committed what it did.
+    const reread = () => Promise.all([fetchSourceCodes(), onRecordRefreshed?.()]);
     try {
       let runId: string;
       try {
@@ -269,12 +279,18 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
         );
         runId = started.data.run_id;
       } catch (err) {
-        if (!watch.cancelled) setGenerateError(errorDetail(err) || "Generate OMOP could not be started.");
+        if (watch.cancelled) return;
+        const failure = generateStartFailure(
+          (err as { response?: { status?: number } } | null)?.response?.status,
+        );
+        setGenerateError(failure.message);
+        if (failure.mayHaveRun) await reread();
         return;
       }
       let run: ResolveRunStatus | null = null;
       let failedPolls = 0;
-      while (!watch.cancelled) {
+      const giveUpAt = Date.now() + GENERATE_WATCH_MS;
+      while (!watch.cancelled && Date.now() < giveUpAt) {
         try {
           const polled = (await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`)).data;
           failedPolls = 0;
@@ -290,16 +306,13 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
       }
       if (watch.cancelled) return;
       if (!run) {
-        setGenerateError(
-          "Lost contact with Generate OMOP. It may still be running; reload the page in a minute to see the result.",
-        );
+        setGenerateError(failedPolls >= GENERATE_POLL_RETRIES ? GENERATE_LOST : GENERATE_SLOW);
         return;
       }
       const outcome = generateOmopOutcome(run);
       if (outcome.ok) setBanner(outcome.message);
       else setGenerateError(outcome.message);
-      // A run that stopped early has still committed what it did.
-      await Promise.all([fetchSourceCodes(), onRecordRefreshed?.()]);
+      await reread();
     } finally {
       if (!watch.cancelled) setGenerating(false);
     }
@@ -415,12 +428,6 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
         )}
       </div>
 
-      {generating && (
-        <p role="status" className="text-sm text-muted-foreground">
-          Generating this patient&rsquo;s OMOP rows, then refreshing their record. Other patients are not changed.
-        </p>
-      )}
-
       {generateError && (
         <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
           {generateError}
@@ -433,10 +440,21 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
         </p>
       )}
 
-      {/* Save banner */}
-      {banner && (
-        <div role="status" className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
-          {banner}
+      {/* Progress and save banner, for whoever can save or run. The region is
+          mounted before it has text: a live region inserted together with
+          its text is not reliably announced. */}
+      {canWrite && (
+        <div role="status" className="space-y-4">
+          {generating && (
+            <p className="text-sm text-muted-foreground">
+              Generating this patient&rsquo;s OMOP rows, then refreshing their record. Other patients are not changed.
+            </p>
+          )}
+          {banner && (
+            <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
+              {banner}
+            </div>
+          )}
         </div>
       )}
 

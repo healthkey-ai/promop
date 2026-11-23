@@ -6,6 +6,40 @@ export const GENERATE_POLL_MS = 2000;
 /** Polls in a row that may fail before the tab stops watching a run. */
 export const GENERATE_POLL_RETRIES = 3;
 
+/**
+ * How long the tab watches one run. A run whose worker was lost, or that no
+ * worker ever took, stays unfinished on the server; the tab must not spin
+ * for ever on it. It is the worker's task time limit: a run still unfinished
+ * after it is not being worked on.
+ */
+export const GENERATE_WATCH_MS = 15 * 60 * 1000;
+
+/** The run was started (or may have been) and the tab no longer knows how it ended. */
+export const GENERATE_LOST =
+  "Lost contact with Generate OMOP. It may still be running; reload the page in a few minutes to see the result.";
+
+export const GENERATE_SLOW =
+  "Generate OMOP is taking longer than expected. It may still be running; reload the page in a few minutes to see the result.";
+
+/**
+ * Why a run could not be started, from the HTTP status of the refusal. The
+ * server's own text is not shown: its 403 describes the caller's grants.
+ * No status, or a 5xx, is a request that died, which with no worker is after
+ * the rows were written; the tab re-reads the list and the record for those.
+ */
+export function generateStartFailure(status: number | undefined): { message: string; mayHaveRun: boolean } {
+  if (status === 403) {
+    return { message: "Only staff and organization admins can run Generate OMOP for this patient.", mayHaveRun: false };
+  }
+  if (status !== undefined && status < 500) {
+    return { message: "Generate OMOP could not be started.", mayHaveRun: false };
+  }
+  return {
+    message: "Generate OMOP did not answer. It may have run all the same: check the list and the record before running it again.",
+    mayHaveRun: true,
+  };
+}
+
 export type GenerateOmopOutcome = {
   /** False when the run failed or left something undone; shown as an alert. */
   ok: boolean;
@@ -39,16 +73,28 @@ export function generateOmopOutcome(run: ResolveRunStatus): GenerateOmopOutcome 
       message: "Generate OMOP did not finish. Some rows may have been updated; run it again.",
     };
   }
-  if ((run.record_refresh_errors ?? 0) > 0) {
+  const recordErrors = run.record_refresh_errors ?? 0;
+  if ((run.busy_errors ?? 0) > 0) {
+    return {
+      ok: false,
+      message: "Another update is working on this patient's rows, so this run changed none. "
+        + "Run Generate OMOP again once it has finished.",
+    };
+  }
+  // An error that is not the record's is the resolve's: the counts are then
+  // of a run that stopped, so they are not reported as what it "finished".
+  if (run.errors > recordErrors) {
+    return {
+      ok: false,
+      message: "Generate OMOP stopped on an error, so some rows may not have been updated"
+        + (recordErrors > 0 ? " and the patient record was not refreshed" : "")
+        + ". Run it again.",
+    };
+  }
+  if (recordErrors > 0) {
     return {
       ok: false,
       message: `${rowSummary(run)} The patient record could not be refreshed, so it does not show these rows yet. Run Generate OMOP again.`,
-    };
-  }
-  if (run.errors > 0) {
-    return {
-      ok: false,
-      message: "Generate OMOP stopped on an error, so some rows may not have been updated. Run it again.",
     };
   }
   return { ok: true, message: `${rowSummary(run)} The patient record was refreshed.` };
