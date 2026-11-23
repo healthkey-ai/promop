@@ -10,15 +10,17 @@ this server pulls.
 The pieces, following Garmin's "OAuth2.0 PKCE Specification":
 
 * **Consent.** :func:`authorize_url` sends the browser to Garmin with a PKCE
-  challenge and a signed ``state``. Nothing is stored for the round trip: the
-  state carries who started it, and the PKCE verifier is derived from the
-  state's nonce with a key only this deployment has (:func:`_verifier`), so
-  whoever sees the state in a URL cannot redeem the code.
+  challenge and a signed ``state``. The state carries who started it and a
+  nonce; the PKCE verifier is derived from the nonce with a key only this
+  deployment has (:func:`_verifier`). The state travels in URLs, so it proves
+  nothing by itself: the view completes a connection only for the browser
+  session that started it, which holds the same nonce.
 * **Tokens.** :func:`exchange_code` and :func:`refresh_tokens` talk to Garmin's
   token endpoint. A refresh rotates the refresh token, so both are always
-  stored together. They are stored encrypted (:func:`encrypt`) under a key
-  derived from ``SECRET_KEY``: a database dump restored on another deployment
-  holds nothing it can use.
+  stored together. They are stored encrypted (:func:`encrypt`) under a key of
+  their own, ``GARMIN_TOKEN_KEY``, which is in no database: a dump restored
+  anywhere holds nothing it can use, and rotating ``SECRET_KEY`` does not
+  strand them.
 * **Push.** :func:`read_push` turns one webhook body into samples per Garmin
   user id, plus the users who deregistered and the permission changes. A push
   carries no credential this server could check beyond the secret in its URL,
@@ -56,6 +58,14 @@ CONNECT_TIMEOUT_SECONDS = 3.0
 REQUEST_TIMEOUT_SECONDS = 6.0
 # How long the patient has on Garmin's consent page.
 STATE_MAX_AGE_SECONDS = 15 * 60
+# The webhook's path is its only credential, so it has to be unguessable:
+# anything shorter than this is treated as not set.
+MIN_WEBHOOK_SECRET_LENGTH = 32
+# A push may name any day. Garmin sends what a watch held when it synced, so a
+# day long past or still to come is a wrong clock or a mistake, and is dropped.
+MAX_PUSH_DAY_AGE = timedelta(days=366)
+# Per-day reading totals kept on a connection, for the two averaged metrics.
+READINGS_KEPT_DAYS = 14
 # Garmin's advice: treat a token as expired ten minutes early.
 EXPIRY_MARGIN_SECONDS = 600
 # A refresh token lasts about ninety days and is the only way to tell Garmin a
@@ -102,13 +112,35 @@ def _client_secret():
 
 
 def webhook_secret():
-    return (getattr(settings, 'GARMIN_WEBHOOK_SECRET', '') or '').strip()
+    """The secret path segment, or '' when unset or too short to be one."""
+    secret = (getattr(settings, 'GARMIN_WEBHOOK_SECRET', '') or '').strip()
+    return secret if len(secret) >= MIN_WEBHOOK_SECRET_LENGTH else ''
+
+
+def _token_keys():
+    """The Fernet keys for stored tokens: the one that encrypts, then any
+    earlier ones that may still decrypt. No first key, or one that is not a
+    Fernet key, is none at all: nothing could be encrypted, so it reads as not
+    set up and not as an error page. A fallback that is not a key is left out."""
+    from cryptography.fernet import Fernet
+
+    keys = [getattr(settings, 'GARMIN_TOKEN_KEY', ''), *getattr(settings, 'GARMIN_TOKEN_KEY_FALLBACKS', [])]
+    usable = []
+    for position, key in enumerate(keys):
+        key = (key or '').strip()
+        try:
+            usable.append(Fernet(key.encode()))
+        except (ValueError, TypeError):
+            if position == 0:
+                return []
+    return usable
 
 
 def configured():
-    """Whether a patient can connect: the app's key and secret are set, and so
-    is the webhook secret, without which a connection would receive nothing."""
-    return bool(client_id() and _client_secret() and webhook_secret())
+    """Whether a patient can connect: the app's key and secret are set, so is
+    the webhook secret, without which a connection would receive nothing, and
+    so is the key the tokens are stored under."""
+    return bool(client_id() and _client_secret() and webhook_secret() and _token_keys())
 
 
 def redirect_uri():
@@ -119,10 +151,9 @@ def redirect_uri():
 
 # ── Consent: state and PKCE ─────────────────────────────────────────────────
 
-def _derived_key(purpose, secret=None):
-    """A 32-byte key for one purpose, from SECRET_KEY (or a fallback of it)."""
-    material = (secret or settings.SECRET_KEY).encode()
-    return hmac.new(material, f'garmin-oauth:{purpose}'.encode(), hashlib.sha256).digest()
+def _derived_key(purpose):
+    """A 32-byte key for one purpose, from SECRET_KEY."""
+    return hmac.new(settings.SECRET_KEY.encode(), f'garmin-oauth:{purpose}'.encode(), hashlib.sha256).digest()
 
 
 def _verifier(nonce):
@@ -139,6 +170,15 @@ def _challenge(verifier):
     return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
 
 
+@dataclass(frozen=True)
+class State:
+    """What a state says: whose record, who started, and the round trip's nonce."""
+    person_id: int
+    identity_id: int
+    nonce: str
+    verifier: str
+
+
 def new_state(person_id, identity_id):
     """A signed state naming who started the connection and for which record."""
     return signing.dumps(
@@ -147,13 +187,16 @@ def new_state(person_id, identity_id):
 
 
 def read_state(state):
-    """``(person_id, identity_id, verifier)`` for a state this server issued
-    within :data:`STATE_MAX_AGE_SECONDS`, else None."""
+    """The :class:`State` of a state this server issued within
+    :data:`STATE_MAX_AGE_SECONDS`, else None."""
     if not isinstance(state, str) or not 0 < len(state) <= 1024:
         return None
     try:
         data = signing.loads(state, salt=_STATE_SALT, max_age=STATE_MAX_AGE_SECONDS)
-        return data['p'], data['i'], _verifier(data['n'])
+        nonce = data['n']
+        if not isinstance(nonce, str) or not nonce:
+            return None
+        return State(person_id=data['p'], identity_id=data['i'], nonce=nonce, verifier=_verifier(nonce))
     except (signing.BadSignature, KeyError, TypeError):
         return None
 
@@ -165,7 +208,7 @@ def authorize_url(state):
     read = read_state(state)
     if read is None:
         raise GarminOAuthError(DENIED, 400)
-    verifier = read[2]
+    verifier = read.verifier
     return f'{AUTHORIZE_URL}?' + urlencode({
         'response_type': 'code',
         'client_id': client_id(),
@@ -304,17 +347,17 @@ def deregister(access_token, *, session=None):
 # ── Tokens at rest ──────────────────────────────────────────────────────────
 
 def _fernet():
-    from cryptography.fernet import Fernet, MultiFernet
+    from cryptography.fernet import MultiFernet
 
-    secrets_ = [settings.SECRET_KEY, *getattr(settings, 'SECRET_KEY_FALLBACKS', [])]
-    return MultiFernet([
-        Fernet(base64.urlsafe_b64encode(_derived_key('token-storage', secret)))
-        for secret in secrets_ if secret
-    ])
+    keys = _token_keys()
+    if not keys:
+        raise GarminOAuthError(NOT_CONFIGURED, 503)
+    return MultiFernet(keys)
 
 
 def encrypt(text):
-    """A token as it is stored. The first key encrypts; fallbacks only decrypt."""
+    """A token as it is stored, under ``GARMIN_TOKEN_KEY``. Earlier keys
+    (``GARMIN_TOKEN_KEY_FALLBACKS``) only decrypt."""
     return _fernet().encrypt(text.encode()).decode()
 
 
@@ -327,7 +370,7 @@ def decrypt(stored):
         return None
     try:
         return _fernet().decrypt(stored.encode()).decode()
-    except (InvalidToken, ValueError):
+    except (InvalidToken, ValueError, GarminOAuthError):
         return None
 
 
@@ -368,7 +411,8 @@ def usable_access_token(connection, *, session=None):
 @dataclass
 class Push:
     """What one webhook body says, by Garmin user id."""
-    samples: dict            # user id -> [WearableSample]
+    samples: dict            # user id -> [WearableSample]: the day's value as sent
+    readings: dict           # user id -> {(metric, day): {summary: (sum, count)}}
     deregistered: set        # user ids whose registration Garmin removed
     permissions: dict        # user id -> sorted permission names
 
@@ -376,7 +420,10 @@ class Push:
 def _number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError:     # a JSON integer hundreds of digits long
+        return None
     return value if math.isfinite(value) else None
 
 
@@ -402,22 +449,36 @@ def _entry_day(entry):
     return (datetime.fromtimestamp(start, tz=dt_timezone.utc) + timedelta(seconds=offset)).date()
 
 
-def _mean(values):
-    """The mean of a ``{offset: reading}`` map's positive readings, or None."""
+def _total(values):
+    """``(sum, count)`` of a ``{offset: reading}`` map's positive readings."""
     if not isinstance(values, dict):
-        return None
+        return 0.0, 0
     readings = [r for r in (_positive(v) for v in values.values()) if r is not None]
-    return sum(readings) / len(readings) if readings else None
+    return sum(readings), len(readings)
+
+
+def _summary_key(entry):
+    """What tells one summary of a day from another: Garmin's id for it, else
+    when it starts. Garmin sends a summary again as it grows, under the same id."""
+    summary_id = entry.get('summaryId')
+    if isinstance(summary_id, str) and 0 < len(summary_id) <= 128:
+        return summary_id
+    start = _number(entry.get('startTimeInSeconds'))
+    return f't{int(start)}' if start is not None else 'x'
 
 
 def _daily(entry, keep, _average):
-    keep('steps', entry.get('steps'))
-    metres = _number(entry.get('distanceInMeters'))
-    keep('distance', None if metres is None else metres / 1000.0)
-    seconds = [_number(entry.get(f'{level}IntensityDurationInSeconds')) for level in ('moderate', 'vigorous')]
-    if any(s is not None for s in seconds):
-        keep('active_minutes', sum(s for s in seconds if s is not None) / 60.0)
-    keep('active_energy', entry.get('activeKilocalories'))
+    # A day with no steps yet is the first sync after midnight, or a watch not
+    # worn: not a day of zero movement. The Personal API reader skips the same
+    # days (includesWellnessData). A later push with steps fills the day in.
+    if _positive(entry.get('steps')) is not None:
+        keep('steps', entry.get('steps'))
+        metres = _number(entry.get('distanceInMeters'))
+        keep('distance', None if metres is None else metres / 1000.0)
+        seconds = [_number(entry.get(f'{level}IntensityDurationInSeconds')) for level in ('moderate', 'vigorous')]
+        if any(s is not None for s in seconds):
+            keep('active_minutes', sum(s for s in seconds if s is not None) / 60.0)
+        keep('active_energy', entry.get('activeKilocalories'))
     keep('basal_energy', entry.get('bmrKilocalories'))
     keep('resting_hr', _positive(entry.get('restingHeartRateInBeatsPerMinute')))
 
@@ -438,7 +499,10 @@ def _hrv(entry, keep, _average):
 
 
 def _pulse_ox(entry, _keep, average):
-    average('spo2', entry.get('timeOffsetSpo2Values'))
+    # A reading the wearer asked for on the spot is not part of the day's
+    # monitoring, and one of them would otherwise stand for a day.
+    if entry.get('onDemand') is not True:
+        average('spo2', entry.get('timeOffsetSpo2Values'))
 
 
 def _respiration(entry, _keep, average):
@@ -463,21 +527,28 @@ _READERS = {
 }
 
 
-def read_push(payload):
+def read_push(payload, today=None):
     """One webhook body as samples per user, deregistrations and permissions.
 
-    Never raises on the body's shape: Garmin retries anything but a 200, so a
-    body this cannot read is answered and dropped, not sent again for ever.
-    A user's day keeps the last value a body gives for a metric, except the
-    two that arrive as readings across the day (pulse ox and respiration),
-    which are averaged over every reading the body holds for that day.
+    Never raises on the body's shape: Garmin sends again whatever is not
+    answered 200, so a body with nothing this can read is read as nothing.
+    A user's day keeps the last value a body gives for a metric. Pulse ox and
+    respiration are different: they arrive as readings in several summaries
+    across a day, over several pushes, so they are returned as each summary's
+    ``(sum, count)`` for the caller to add to what earlier pushes held
+    (:func:`merge_readings`); one push's readings are never the day's average.
+
+    Days more than :data:`MAX_PUSH_DAY_AGE` before ``today``, or after
+    tomorrow, are dropped.
     """
-    push = Push(samples={}, deregistered=set(), permissions={})
+    push = Push(samples={}, readings={}, deregistered=set(), permissions={})
     if not isinstance(payload, dict):
         return push
+    today = today or timezone.now().date()
+    earliest, latest = today - MAX_PUSH_DAY_AGE, today + timedelta(days=1)
 
     found = defaultdict(dict)        # user id -> {(metric, day): value}
-    readings = defaultdict(list)     # (user id, metric, day) -> [mean, ...]
+    readings = defaultdict(lambda: defaultdict(dict))   # user id -> {(metric, day): {summary: (sum, count)}}
 
     def entries(kind):
         items = payload.get(kind)
@@ -489,7 +560,7 @@ def read_push(payload):
     for kind, reader in _READERS.items():
         for user_id, entry in entries(kind):
             day = _entry_day(entry)
-            if day is None:
+            if day is None or not earliest <= day <= latest:
                 continue
 
             def keep(metric_key, value, user_id=user_id, day=day):
@@ -497,16 +568,14 @@ def read_push(payload):
                 if value is not None:
                     found[user_id][(metric_key, day)] = round(value, 2)
 
-            def average(metric_key, values, user_id=user_id, day=day):
-                mean = _mean(values)
-                if mean is not None:
-                    readings[(user_id, metric_key, day)].append(mean)
+            def average(metric_key, values, user_id=user_id, day=day, entry=entry):
+                total, count = _total(values)
+                if count:
+                    readings[user_id][(metric_key, day)][_summary_key(entry)] = (total, count)
 
             reader(entry, keep, average)
 
-    for (user_id, metric_key, day), means in readings.items():
-        found[user_id][(metric_key, day)] = round(sum(means) / len(means), 2)
-
+    push.readings = {user_id: dict(days) for user_id, days in readings.items()}
     for user_id, values in found.items():
         samples = [WearableSample(metric_key=metric_key, date=day, value=value)
                    for (metric_key, day), value in values.items()]
@@ -517,3 +586,55 @@ def read_push(payload):
     for user_id, entry in entries('userPermissionsChange'):
         push.permissions[user_id] = clean_permissions(entry.get('permissions'))
     return push
+
+
+def merge_readings(stored, incoming, today=None):
+    """Add a push's readings to a connection's, and return the days' averages.
+
+    ``stored`` is ``GarminConnection.day_readings``:
+    ``{day: {metric: {summary: [sum, count]}}}``. A summary sent again replaces
+    its earlier totals (Garmin resends one as it grows); a new summary joins
+    the day. Returns ``(stored, samples)``: the updated mapping, pruned to the
+    last :data:`READINGS_KEPT_DAYS` days, and one sample per metric and day the
+    push touched, whose value is the mean of every reading held for that day.
+    """
+    stored = {day: {metric: dict(summaries) for metric, summaries in metrics.items()}
+              for day, metrics in (stored if isinstance(stored, dict) else {}).items()
+              if isinstance(metrics, dict)}
+    samples = []
+    for (metric_key, day), summaries in incoming.items():
+        held = stored.setdefault(day.isoformat(), {}).setdefault(metric_key, {})
+        for summary, (total, count) in summaries.items():
+            held[summary] = [round(total, 4), count]
+        totals = [pair for pair in held.values()
+                  if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[1]]
+        readings = sum(pair[1] for pair in totals)
+        if readings:
+            samples.append(WearableSample(
+                metric_key=metric_key, date=day,
+                value=round(sum(pair[0] for pair in totals) / readings, 2)))
+    cutoff = ((today or timezone.now().date()) - timedelta(days=READINGS_KEPT_DAYS)).isoformat()
+    stored = {day: metrics for day, metrics in stored.items() if day >= cutoff}
+    return stored, samples
+
+
+def forget(person):
+    """Tell Garmin that a person whose record is being erased has left.
+
+    Best effort, and never in the way of the erasure: the connection goes with
+    the person whatever Garmin answers, and with it the only token that could
+    have told Garmin later. Call inside the erasing transaction, before the
+    rows are deleted.
+    """
+    from omop_core.models import GarminConnection
+
+    row = GarminConnection.objects.select_for_update().filter(person=person).first()
+    if row is None:
+        return
+    try:
+        deregister(usable_access_token(row))
+        logger.info('garmin_deregistered_on_erasure person_id=%s', person.pk)
+    except GarminOAuthError as exc:
+        logger.warning('garmin_deregister_failed person_id=%s status=%s', person.pk, exc.status)
+    except Exception:
+        logger.exception('garmin_deregister_failed person_id=%s', person.pk)

@@ -101,6 +101,42 @@ describe('GarminAccountLink', () => {
     expect(screen.getByText(/Sharing health data was not allowed/)).toBeInTheDocument();
   });
 
+  it.each([[[]], [['healthExport']], [['something']]])(
+    'does not claim health data was refused when the permissions are not known (%j)', async (permissions) => {
+      mockGet.mockResolvedValue(connected({ permissions }));
+      render(<GarminAccountLink />);
+      await screen.findByRole('button', { name: 'Disconnect Garmin' });
+      expect(screen.queryByText(/Sharing health data was not allowed/)).not.toBeInTheDocument();
+    });
+
+  it('still offers Disconnect for a connected account where the Garmin app is no longer set up', async () => {
+    mockGet.mockResolvedValue(connected({ configured: false }));
+    render(<GarminAccountLink />);
+    expect(await screen.findByRole('button', { name: 'Disconnect Garmin' })).toBeInTheDocument();
+  });
+
+  it('does not leave the page for an answer that names no consent page', async () => {
+    mockGet.mockResolvedValue(status());
+    mockPost.mockResolvedValueOnce({ data: {} });
+    const leave = vi.fn();
+    render(<GarminAccountLink leave={leave} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Connect Garmin' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not start connecting');
+    expect(leave).not.toHaveBeenCalled();
+  });
+
+  it('is usable again when the page is restored by the Back button', async () => {
+    mockGet.mockResolvedValue(status());
+    mockPost.mockResolvedValue({ data: { authorize_url: 'https://connect.garmin.com/oauth2Confirm?state=s' } });
+    render(<GarminAccountLink leave={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Connect Garmin' }));
+    await screen.findByRole('button', { name: 'Opening Garmin...' });
+    const restored = new Event('pageshow');
+    Object.defineProperty(restored, 'persisted', { value: true });
+    window.dispatchEvent(restored);
+    expect(await screen.findByRole('button', { name: 'Connect Garmin' })).toHaveAttribute('aria-disabled', 'false');
+  });
+
   it('disconnects after asking, and says whether Garmin was told', async () => {
     mockGet.mockResolvedValue(connected());
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
@@ -141,6 +177,7 @@ describe('GarminAccountLink', () => {
     ['in_use', /already connected to another record/],
     ['error', /could not be connected/],
     ['something-else', /could not be connected/],
+    ['toString', /could not be connected/],
   ])('says what the callback reported (%s) and takes it out of the address', async (value, text) => {
     window.history.replaceState(null, '', `/?garmin=${value}&keep=1#top`);
     mockGet.mockResolvedValue(value === 'connected' ? connected() : status());

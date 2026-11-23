@@ -3563,9 +3563,15 @@ class GarminConnection(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='garmin_connections',
     )
-    connected_at = models.DateTimeField(auto_now_add=True)
-    # When Garmin last pushed data for this account.
+    # Set again when the patient connects again: it is this account's link.
+    connected_at = models.DateTimeField(default=timezone.now)
+    # When Garmin last pushed data for this account that was stored.
     last_push_at = models.DateTimeField(null=True, blank=True)
+    # Pulse ox and respiration arrive as readings in several summaries a day,
+    # over several pushes. The totals per summary are kept for the last days,
+    # {day: {metric: {summary: [sum, count]}}}, so the day's stored value is
+    # the mean of all of them and not of whichever push came last.
+    day_readings = models.JSONField(default=dict, blank=True)
 
     class Meta:
         db_table = 'garmin_connection'

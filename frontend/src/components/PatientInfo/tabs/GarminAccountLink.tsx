@@ -28,7 +28,8 @@ const URL_PATH = '/v1/garmin/connection/';
 function readOutcome(): Outcome | null {
   const value = new URLSearchParams(window.location.search).get('garmin');
   if (value === null) return null;
-  return value in OUTCOMES ? (value as Outcome) : 'error';
+  // Own keys only: "toString" is in every object and is no outcome.
+  return Object.prototype.hasOwnProperty.call(OUTCOMES, value) ? (value as Outcome) : 'error';
 }
 
 /** Takes `?garmin=` out of the address, so a reload does not say it again. */
@@ -75,6 +76,14 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
 
   useEffect(() => { clearOutcome(); }, []);
 
+  // Back from Garmin's page with the browser's Back button, the page can be
+  // restored as it was left: mid-"Opening Garmin...", with the button inert.
+  useEffect(() => {
+    const restored = (event: PageTransitionEvent) => { if (event.persisted) setBusy(false); };
+    window.addEventListener('pageshow', restored);
+    return () => window.removeEventListener('pageshow', restored);
+  }, []);
+
   useEffect(() => {
     let current = true;
     (async () => {
@@ -88,7 +97,9 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
     return () => { current = false; };
   }, []);
 
-  if (!connection?.configured) return null;
+  // Nothing to offer where no Garmin app is set up, unless an account is
+  // already connected: that one can still be disconnected.
+  if (!connection || (!connection.configured && !connection.connected)) return null;
 
   const connect = async () => {
     if (busy || disabled) return;
@@ -98,8 +109,10 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
     setNotice(null);
     try {
       const res = await clinicalClient().post<{ authorize_url: string }>(clinicalUrl('/v1/garmin/oauth/start/'));
+      const url = res?.data?.authorize_url;
+      if (typeof url !== 'string' || !url.startsWith('https://')) throw new Error('no consent page');
       // Garmin's own page; it sends the patient back here when they answer.
-      leave(res.data.authorize_url);
+      leave(url);
     } catch (err: unknown) {
       setError(errorText(err, 'Could not start connecting to Garmin. Please try again.'));
       setBusy(false);
@@ -129,8 +142,12 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
 
   const since = day(connection.connected_at);
   const last = day(connection.last_push_at);
-  // Garmin sends health data only when the patient left that box ticked.
-  const noHealth = connection.connected && !connection.permissions.includes('HEALTH_EXPORT');
+  // Garmin sends health data only when the patient left that box ticked. Said
+  // only of a list that names permissions the way Garmin's consent does: an
+  // empty or unrecognised one means it is not known, not that it was refused.
+  const granted = connection.permissions ?? [];
+  const noHealth = connection.connected && granted.some(name => /^[A-Z]+_(EXPORT|IMPORT)$/.test(name))
+    && !granted.includes('HEALTH_EXPORT');
   const idle = busy || disabled;
   const button = `rounded-md px-4 py-2 text-sm font-medium shadow-sm ${idle ? 'cursor-not-allowed opacity-50' : ''}`;
 

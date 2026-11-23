@@ -7,28 +7,29 @@ Five routes, all on ``/api/v1/`` only. The rules are in
 |---|---|---|
 | ``GET garmin/connection/`` | a signed-in patient | whether it is set up here and whether they are connected |
 | ``DELETE garmin/connection/`` | a signed-in patient | disconnect: Garmin is told, the connection is removed |
-| ``POST garmin/oauth/start/`` | a signed-in patient | the URL of Garmin's consent page for them |
-| ``GET garmin/oauth/callback/`` | Garmin's redirect | stores the connection, returns the patient to their record |
+| ``POST garmin/oauth/start/`` | a patient signed in to this site | the URL of Garmin's consent page for them |
+| ``GET garmin/oauth/callback/`` | the same browser, back from Garmin | stores the connection, returns the patient to their record |
 | ``POST garmin/webhooks/<secret>/`` | Garmin | pushed summaries, deregistrations, permission changes |
 
-A connection is the person's own act: the three patient routes want the person
+A connection is the person's own act: the patient routes want the person
 signed in (``is_interactive_session``), never a service credential or a token
-they delegated to an application.
+they delegated to an application. Connecting goes further and wants this
+site's own session, because the callback is a page load and a session cookie
+is the only thing a page load carries.
 """
-import hashlib
 import hmac
 import json
 import logging
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
 from django.utils import timezone
 from django.views.decorators.cache import never_cache
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
-from django.core.cache import cache
 from rest_framework import status
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -45,9 +46,8 @@ logger = logging.getLogger(__name__)
 # Where the callback sends the patient: their own record, which reads the
 # `garmin` parameter, opens the Wearables tab and says what happened.
 RETURN_PATH = '/?garmin={outcome}'
-# How often one consent may come back with a code. Each is a request to
-# Garmin's token endpoint; a real return is one, a reload a second.
-CALLBACK_TRIES_PER_STATE = 5
+# The session key holding the nonce of the consent this browser started.
+SESSION_NONCE = 'garmin_oauth_nonce'
 # Garmin batches users and a daily summary carries a day of heart-rate samples,
 # so a push runs to megabytes: far past DATA_UPLOAD_MAX_MEMORY_SIZE, which is
 # sized for forms. Refusing one would only have Garmin send it again.
@@ -56,7 +56,8 @@ MAX_PUSH_BYTES = 10 * 1024 * 1024
 
 class GarminConnectThrottle(UserRateThrottle):
     """Starting or ending a connection, per signed-in user. Each one is a
-    round trip to Garmin; a patient needs a handful, nobody needs hundreds."""
+    round trip to Garmin; a patient needs a handful, nobody needs hundreds.
+    Counted beside the project's per-user limit, which covers the reads."""
     scope = 'garmin_connect'
     rate = '30/hour'
 
@@ -92,7 +93,7 @@ def _describe(connection):
 
 @api_view(['GET', 'DELETE'])
 @permission_classes([IsAuthenticated])
-@throttle_classes([GarminConnectThrottle])
+@throttle_classes([UserRateThrottle, GarminConnectThrottle])
 def connection(request):
     """The caller's own Garmin connection: read it, or end it."""
     person, refusal = _own_person(request)
@@ -125,18 +126,28 @@ def connection(request):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-@throttle_classes([GarminConnectThrottle])
+@throttle_classes([UserRateThrottle, GarminConnectThrottle])
 def oauth_start(request):
-    """The URL of Garmin's consent page for the caller's own record."""
+    """The URL of Garmin's consent page for the caller's own record.
+
+    The consent's nonce is left in the caller's session, and the callback
+    finishes only for a browser that holds it: the state in the URL names the
+    record, but a URL can be handed to somebody else.
+    """
     person, refusal = _own_person(request)
     if refusal is not None:
         return refusal
+    if not isinstance(getattr(request, 'successful_authenticator', None), SessionAuthentication):
+        return Response({'error': 'Connect your Garmin account from this site, signed in here.'},
+                        status=status.HTTP_403_FORBIDDEN)
     if not record_permitted(person):
         return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
     try:
-        url = garmin_oauth.authorize_url(garmin_oauth.new_state(person.person_id, request.user.pk))
+        state = garmin_oauth.new_state(person.person_id, request.user.pk)
+        url = garmin_oauth.authorize_url(state)
     except garmin_oauth.GarminOAuthError as exc:
         return Response({'error': exc.message}, status=exc.status)
+    request.session[SESSION_NONCE] = garmin_oauth.read_state(state).nonce
     return Response({'authorize_url': url})
 
 
@@ -148,54 +159,68 @@ def _back(outcome):
     return response
 
 
+def _abandon(tokens, person_id):
+    """Garmin registered the account, and it is not being connected here after
+    all: tell Garmin, or it would send pushes nobody receives."""
+    try:
+        garmin_oauth.deregister(tokens.access_token)
+    except garmin_oauth.GarminOAuthError as exc:
+        logger.warning('garmin_deregister_failed person_id=%s status=%s', person_id, exc.status)
+
+
 @never_cache
 @require_GET
 def oauth_callback(request):
     """Garmin sends the patient back here with a code, or without one.
 
-    Whose connection this is comes from the signed state, not from the session:
-    the browser may arrive without one. A browser that *is* signed in as
-    somebody else is refused, so a link built from one person's state cannot
-    be used to attach a Garmin account while another person is at the keyboard.
+    It finishes only for the browser that started: signed in as the account
+    the state names, and holding that consent's nonce in its session. Without
+    that, a consent link sent to somebody else would attach *their* Garmin
+    account to the sender's record, and a state read from a log or a history
+    would attach the reader's account to its owner's. The nonce is spent on
+    the first return, so a state is good for one exchange.
     """
     read = garmin_oauth.read_state(request.GET.get('state'))
     if read is None:
         return _back('error')
-    person_id, identity_id, verifier = read
     user = getattr(request, 'user', None)
-    if user is not None and user.is_authenticated and user.pk != identity_id:
+    if user is None or not user.is_authenticated or not user.is_active or user.pk != read.identity_id:
         return _back('error')
+    held = request.session.get(SESSION_NONCE)
+    if not isinstance(held, str) or not hmac.compare_digest(held.encode(), read.nonce.encode()):
+        return _back('error')
+    del request.session[SESSION_NONCE]
     code = request.GET.get('code')
     if not code:
         # The patient declined on Garmin's page, or Garmin reported an error.
         return _back('denied')
-    # A state is good for fifteen minutes; it is not a way to send Garmin's
-    # token endpoint any number of guesses in that time.
-    tries_key = 'garmin-oauth-callback:' + hashlib.sha256(request.GET['state'].encode()).hexdigest()
-    cache.add(tries_key, 0, garmin_oauth.STATE_MAX_AGE_SECONDS)
-    try:
-        tries = cache.incr(tries_key)
-    except ValueError:      # evicted between the two calls
-        tries = 1
-    if tries > CALLBACK_TRIES_PER_STATE:
-        return _back('error')
 
+    person_id = read.person_id
     try:
-        tokens = garmin_oauth.exchange_code(code, verifier)
+        tokens = garmin_oauth.exchange_code(code, read.verifier)
+    except garmin_oauth.GarminOAuthError as exc:
+        logger.warning('garmin_connect_failed person_id=%s status=%s', person_id, exc.status)
+        return _back('error')
+    try:
         garmin_user_id = garmin_oauth.fetch_user_id(tokens.access_token)
         permissions = garmin_oauth.fetch_permissions(tokens.access_token)
     except garmin_oauth.GarminOAuthError as exc:
         logger.warning('garmin_connect_failed person_id=%s status=%s', person_id, exc.status)
+        _abandon(tokens, person_id)
         return _back('error')
 
     from patient_portal.models import PatientUser
 
     with transaction.atomic():
+        # Person first, then the connection: the order a push takes them in.
         person = Person.objects.select_for_update(no_key=True).filter(pk=person_id).first()
         # Asked again here: minutes passed on Garmin's page. The account that
         # started this must still be this person's own.
         if (person is None or not record_permitted(person)
-                or not PatientUser.objects.filter(identity_id=identity_id, person=person).exists()):
+                or not PatientUser.objects.filter(identity_id=read.identity_id, person=person).exists()):
+            _abandon(tokens, person_id)
+            # The registration just deleted may have been this person's.
+            GarminConnection.objects.filter(person_id=person_id, garmin_user_id=garmin_user_id).delete()
             return _back('error')
         # A push names only the Garmin user, so one account feeds one record.
         if GarminConnection.objects.filter(garmin_user_id=garmin_user_id).exclude(person=person).exists():
@@ -203,18 +228,29 @@ def oauth_callback(request):
             return _back('in_use')
         row = GarminConnection.objects.select_for_update().filter(person=person).first() \
             or GarminConnection(person=person)
-        if row.pk and row.garmin_user_id != garmin_user_id:
+        changed_account = bool(row.pk) and row.garmin_user_id != garmin_user_id
+        if changed_account:
             # They connected a different Garmin account: the one before is told
             # to stop, or it would keep sending pushes nobody here receives.
             try:
                 garmin_oauth.deregister(garmin_oauth.usable_access_token(row))
             except garmin_oauth.GarminOAuthError as exc:
                 logger.warning('garmin_deregister_failed person_id=%s status=%s', person_id, exc.status)
+        if changed_account or not row.pk:
+            row.last_push_at = None
+            row.day_readings = {}
         row.garmin_user_id = garmin_user_id
         row.permissions = permissions
-        row.connected_by_id = identity_id
+        row.connected_by_id = read.identity_id
+        row.connected_at = timezone.now()
         garmin_oauth.store_tokens(row, tokens)
-        row.save()
+        try:
+            with transaction.atomic():
+                row.save()
+        except IntegrityError:
+            # Another record connected the same Garmin account a moment ago.
+            logger.warning('garmin_connect_account_in_use person_id=%s', person_id)
+            return _back('in_use')
     logger.info('garmin_connected person_id=%s permissions=%s', person_id, permissions)
     return _back('connected')
 
@@ -222,11 +258,13 @@ def oauth_callback(request):
 # ── Webhook ─────────────────────────────────────────────────────────────────
 
 def _fold_history(person, label, result):
-    """One history row per patient per day of pushes, not one per push.
+    """One history row per patient per month of pushes, not one per push.
 
     Garmin pushes whenever the watch syncs. The writer records each write as
-    an upload; the first push of a day keeps its row and later ones are folded
-    into it, and a push that changed nothing leaves no row at all.
+    an upload; the first push of a month keeps its row and later ones are
+    folded into it, and a push that changed nothing leaves no row at all. A
+    folded row lists a metric and day once, with the value now stored: an
+    entry a later push replaced named a row that is gone.
     """
     rows = list(WearableUpload.objects.filter(
         person=person, device_type='garmin', filename=label).order_by('id'))
@@ -239,70 +277,114 @@ def _fold_history(person, label, result):
     if len(rows) == 1:
         return
     first = rows[0]
-    first.sample_summary = list(first.sample_summary or []) + list(newest.sample_summary or [])
-    first.samples_created += newest.samples_created
-    first.duplicates_skipped += newest.duplicates_skipped
+    fresh = list(newest.sample_summary or [])
+    replaced = {(entry.get('metric'), entry.get('date')) for entry in fresh}
+    kept = [entry for entry in (first.sample_summary or [])
+            if (entry.get('metric'), entry.get('date')) not in replaced]
+    first.sample_summary = kept + fresh
+    first.samples_created = sum(1 for entry in first.sample_summary if entry.get('row_id') is not None)
+    first.duplicates_skipped = 0
     first.save(update_fields=['sample_summary', 'samples_created', 'duplicates_skipped'])
     newest.delete()
 
 
-def _keep_tokens_alive(row):
+def _keep_tokens_alive(garmin_user_id):
     """Renew a connection's tokens when a push shows it live and they are old.
 
     Nothing reads Garmin for a push connection, so nothing else would refresh
     them, and an expired refresh token cannot tell Garmin about a disconnect.
+    In a transaction of its own, after the push's rows are committed: a refresh
+    retires the old refresh token at Garmin, so the new one must not be lost
+    to a rollback of anything else. Only the connection's row is locked while
+    Garmin is asked.
     """
-    updated = row.tokens_updated_at
-    if updated is not None and timezone.now() - updated < garmin_oauth.REFRESH_AFTER:
-        return
-    refresh = garmin_oauth.decrypt(row.refresh_token)
-    if not refresh:
-        return
-    try:
-        garmin_oauth.store_tokens(row, garmin_oauth.refresh_tokens(refresh))
-    except garmin_oauth.GarminOAuthError as exc:
-        logger.warning('garmin_token_refresh_failed person_id=%s status=%s', row.person_id, exc.status)
-        # Not tried again on every push today.
-        row.tokens_updated_at = timezone.now() - garmin_oauth.REFRESH_AFTER + timedelta(days=1)
-    row.save(update_fields=['access_token', 'refresh_token', 'access_expires_at',
-                            'refresh_expires_at', 'tokens_updated_at'])
+    with transaction.atomic():
+        row = GarminConnection.objects.select_for_update().filter(garmin_user_id=garmin_user_id).first()
+        if row is None:
+            return
+        updated = row.tokens_updated_at
+        if updated is not None and timezone.now() - updated < garmin_oauth.REFRESH_AFTER:
+            return
+        refresh = garmin_oauth.decrypt(row.refresh_token)
+        if not refresh:
+            return
+        try:
+            garmin_oauth.store_tokens(row, garmin_oauth.refresh_tokens(refresh))
+        except garmin_oauth.GarminOAuthError as exc:
+            logger.warning('garmin_token_refresh_failed person_id=%s status=%s', row.person_id, exc.status)
+            # Not tried again on every push today.
+            row.tokens_updated_at = timezone.now() - garmin_oauth.REFRESH_AFTER + timedelta(days=1)
+        row.save(update_fields=['access_token', 'refresh_token', 'access_expires_at',
+                                'refresh_expires_at', 'tokens_updated_at'])
 
 
-def _ingest(garmin_user_id, samples):
-    """Write one pushed user's samples to the patient connected as that user.
+def _ingest(garmin_user_id, samples, readings):
+    """Write one pushed user's data to the patient connected as that user.
 
-    Returns the person to re-derive, or None when nothing changed. Samples for
-    a Garmin user nobody here is connected as are dropped.
+    Returns the person to re-derive, or None when nothing changed. The patient
+    is locked first and the connection second, as the callback takes them, and
+    the patient with NO KEY UPDATE, as the writer asks: a clinical insert for
+    the person is not held up by a push.
     """
     from rest_framework.response import Response as DrfResponse
 
     from .views import PatientRecordViewSet
 
-    label = f'Garmin Connect push {timezone.now().date().isoformat()}'
+    today = timezone.now().date()
+    label = f'Garmin Connect push {today:%Y-%m}'
     with transaction.atomic():
-        row = (GarminConnection.objects.select_for_update()
-               .filter(garmin_user_id=garmin_user_id).select_related('person').first())
-        if row is None:
+        person = (Person.objects.select_for_update(no_key=True, of=('self',))
+                  .filter(garmin_connection__garmin_user_id=garmin_user_id).first())
+        if person is None:
             return None
-        person = row.person
-        # The writer's own rule: one wearable write per patient at a time.
-        Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
+        row = (GarminConnection.objects.select_for_update()
+               .filter(person=person, garmin_user_id=garmin_user_id).first())
+        if row is None or not record_permitted(person):
+            return None
+        # Pulse ox and respiration: this push's readings join the day's others.
+        row.day_readings, averaged = garmin_oauth.merge_readings(row.day_readings, readings, today)
         row.last_push_at = timezone.now()
-        row.save(update_fields=['last_push_at'])
-        _keep_tokens_alive(row)
-        if not samples or not record_permitted(person):
+        row.save(update_fields=['day_readings', 'last_push_at'])
+        samples = list(samples) + averaged
+        if not samples:
             return None
         # A day's pushed value is the day's total so far, so it replaces what
         # Garmin uploads and syncs wrote for that day (replace_daily).
         result = PatientRecordViewSet()._write_wearable_samples(
             None, person, 'garmin', samples, label, True)
         if isinstance(result, DrfResponse):
-            logger.error('garmin_push_not_stored person_id=%s status=%s',
-                         person.person_id, result.status_code)
-            return None
+            # The server cannot store wearable rows at all (its type concept is
+            # missing). Garmin keeps the push for a later try.
+            raise RuntimeError(f'wearable rows cannot be stored (status {result.status_code})')
         _fold_history(person, label, result)
     changed = bool(result.get('samples_created') or result.get('replaced'))
     return person if changed else None
+
+
+def _derive(person):
+    """Re-derive a patient's record after a push: off the request where a
+    worker exists (Garmin wants its 200 quickly), here when queueing fails,
+    because the next identical push would find nothing changed and not ask."""
+    from omop_core.services.derivation_jobs import get_dispatcher
+
+    try:
+        get_dispatcher().dispatch(person)
+        return
+    except Exception:
+        logger.exception('garmin_push_dispatch_failed person_id=%s', person.person_id)
+    try:
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
+    except Exception:
+        logger.exception('garmin_push_derivation_failed person_id=%s', person.person_id)
+
+
+def _answer(data, status_code=200):
+    response = JsonResponse(data, status=status_code)
+    # Django logs a 4xx or 5xx answer with the request's path, and this path
+    # is the webhook's secret.
+    response._has_been_logged = True
+    return response
 
 
 @csrf_exempt
@@ -312,52 +394,66 @@ def webhook(request, secret):
 
     The secret in the path is the only thing that says this is Garmin (a push
     is not signed), so anything else is a 404 that says nothing. Garmin sends
-    again whatever is not answered 200: a body this server cannot read is
-    refused once and for all, and a failure of this server's own (the database)
-    is a 503 so the same push comes back. Writing is idempotent.
+    again whatever is not answered 200. A failure of this server's own (the
+    database) is a 503, so the same push comes back, and writing is
+    idempotent. A body that is not JSON, or is too large, is refused: neither
+    is something Garmin sends, and both are logged.
     """
     expected = garmin_oauth.webhook_secret()
     if not expected or not hmac.compare_digest(secret.encode(), expected.encode()):
+        return HttpResponse(status=404)
+    # Garmin is reported to name the app it is pushing for in this header. It
+    # proves nothing by itself (anyone can send it), but a push naming another
+    # app is not ours, so one that does is turned away; one without it is read.
+    named = request.headers.get('garmin-client-id')
+    if named and not hmac.compare_digest(named.strip().encode(), garmin_oauth.client_id().encode()):
         return HttpResponse(status=404)
     # Read from the stream, with this view's own limit: request.body would
     # apply the form limit.
     raw = request.read(MAX_PUSH_BYTES + 1)
     if len(raw) > MAX_PUSH_BYTES:
-        return JsonResponse({'error': 'Body too large.'}, status=413)
+        logger.error('garmin_push_too_large limit=%d', MAX_PUSH_BYTES)
+        return _answer({'error': 'Body too large.'}, 413)
     try:
         payload = json.loads(raw)
     except (ValueError, RecursionError):
-        return JsonResponse({'error': 'Body is not JSON.'}, status=400)
+        logger.error('garmin_push_not_json bytes=%d', len(raw))
+        return _answer({'error': 'Body is not JSON.'}, 400)
 
     push = garmin_oauth.read_push(payload)
     failed = False
 
-    if push.deregistered:
-        # The patient removed this app in Garmin Connect.
-        removed, _ = GarminConnection.objects.filter(garmin_user_id__in=push.deregistered).delete()
-        logger.info('garmin_push_deregistered connections=%d', removed)
-    for garmin_user_id, permissions in push.permissions.items():
-        GarminConnection.objects.filter(garmin_user_id=garmin_user_id).update(permissions=permissions)
+    # One query says which of the body's users are connected here; the rest
+    # cost nothing more, however many a body names.
+    named = (set(push.samples) | set(push.readings) | set(push.permissions)) - push.deregistered
+    known = set(GarminConnection.objects.filter(garmin_user_id__in=named)
+                .values_list('garmin_user_id', flat=True)) if named else set()
 
-    from omop_core.services.derivation_jobs import get_dispatcher
+    for garmin_user_id in sorted(known & set(push.permissions)):
+        GarminConnection.objects.filter(garmin_user_id=garmin_user_id).update(
+            permissions=push.permissions[garmin_user_id])
 
-    for garmin_user_id, samples in push.samples.items():
-        if garmin_user_id in push.deregistered:
-            continue
+    for garmin_user_id in sorted(known & (set(push.samples) | set(push.readings))):
         try:
-            person = _ingest(garmin_user_id, samples)
+            person = _ingest(garmin_user_id, push.samples.get(garmin_user_id, []),
+                             push.readings.get(garmin_user_id, {}))
         except Exception:
             failed = True
             logger.exception('garmin_push_failed')
             continue
         if person is not None:
-            try:
-                # Off the request where a worker exists: Garmin wants its 200
-                # quickly and a derivation takes seconds.
-                get_dispatcher().dispatch(person)
-            except Exception:
-                logger.exception('garmin_push_derivation_failed person_id=%s', person.person_id)
+            _derive(person)
+        try:
+            _keep_tokens_alive(garmin_user_id)
+        except Exception:
+            logger.exception('garmin_token_refresh_failed')
+
+    if push.deregistered:
+        # The patient removed this app in Garmin Connect. Their data in the
+        # same body was not stored.
+        removed, _ = GarminConnection.objects.filter(garmin_user_id__in=push.deregistered).delete()
+        logger.info('garmin_push_deregistered connections=%d', removed)
 
     if failed:
-        return JsonResponse({'error': 'Try again.'}, status=503)
-    return JsonResponse({})
+        return _answer({'error': 'Try again.'}, 503)
+    return _answer({})

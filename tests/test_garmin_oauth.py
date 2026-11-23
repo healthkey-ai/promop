@@ -23,13 +23,20 @@ CLIENT_SECRET = 'test-client-secret-NOT-REAL'
 ACCESS = 'access-token-AAAA'
 REFRESH = 'refresh-token-RRRR=='
 USER = 'd3315b1072421d0dd7c8f6b8e1de4df8'
+HOOK_SECRET = 'test-webhook-secret-0123456789-abcdefghij'
+# Fernet keys made for these tests: 32 bytes, URL-safe base64.
+TOKEN_KEY = base64.urlsafe_b64encode(b'k' * 32).decode()
+OLD_TOKEN_KEY = base64.urlsafe_b64encode(b'o' * 32).decode()
+TODAY = date(2026, 11, 23)
 
 
 @pytest.fixture(autouse=True)
 def garmin_settings(settings):
     settings.GARMIN_CLIENT_ID = CLIENT_ID
     settings.GARMIN_CLIENT_SECRET = CLIENT_SECRET
-    settings.GARMIN_WEBHOOK_SECRET = 'hook-secret'
+    settings.GARMIN_WEBHOOK_SECRET = HOOK_SECRET
+    settings.GARMIN_TOKEN_KEY = TOKEN_KEY
+    settings.GARMIN_TOKEN_KEY_FALLBACKS = []
     settings.GARMIN_REDIRECT_URI = ''
     settings.APP_BASE_URL = 'https://promop.example.test/'
     settings.SECRET_KEY = 'unit-test-secret-key'
@@ -78,13 +85,33 @@ def token_payload(**over):
 
 # ── Configuration ───────────────────────────────────────────────────────────
 
-def test_it_is_configured_only_with_the_key_the_secret_and_the_webhook_secret(settings):
+def test_it_is_configured_only_with_all_four_values(settings):
     assert go.configured()
-    for name in ('GARMIN_CLIENT_ID', 'GARMIN_CLIENT_SECRET', 'GARMIN_WEBHOOK_SECRET'):
+    for name in ('GARMIN_CLIENT_ID', 'GARMIN_CLIENT_SECRET', 'GARMIN_WEBHOOK_SECRET', 'GARMIN_TOKEN_KEY'):
         kept = getattr(settings, name)
         setattr(settings, name, '  ')
         assert not go.configured(), name
         setattr(settings, name, kept)
+
+
+@pytest.mark.parametrize('secret', ['1database', 'x' * 31, 'short-but-random-Zq8'])
+def test_a_webhook_secret_short_enough_to_guess_is_not_one(settings, secret):
+    settings.GARMIN_WEBHOOK_SECRET = secret
+    assert go.webhook_secret() == '' and not go.configured()
+    settings.GARMIN_WEBHOOK_SECRET = f'  {"x" * 32}  '
+    assert go.webhook_secret() == 'x' * 32 and go.configured()
+
+
+@pytest.mark.parametrize('key', ['not-a-fernet-key', 'unit-test-secret-key', TOKEN_KEY[:-4]])
+def test_a_token_key_that_is_not_a_fernet_key_is_not_set_up(settings, key):
+    settings.GARMIN_TOKEN_KEY = key
+    assert not go.configured()
+    with pytest.raises(go.GarminOAuthError) as error:
+        go.encrypt('anything')
+    assert error.value.status == 503
+    # A fallback cannot stand in for it: nothing could be encrypted.
+    settings.GARMIN_TOKEN_KEY_FALLBACKS = [TOKEN_KEY]
+    assert not go.configured()
 
 
 def test_the_redirect_url_is_built_from_the_base_url_unless_one_is_given(settings):
@@ -97,15 +124,16 @@ def test_the_redirect_url_is_built_from_the_base_url_unless_one_is_given(setting
 
 def test_a_state_names_who_started_and_gives_the_same_verifier_each_time():
     state = go.new_state(41, 7)
-    person_id, identity_id, verifier = go.read_state(state)
-    assert (person_id, identity_id) == (41, 7)
-    assert go.read_state(state)[2] == verifier
+    read = go.read_state(state)
+    verifier = read.verifier
+    assert (read.person_id, read.identity_id) == (41, 7)
+    assert go.read_state(state) == read and read.nonce
     # 43 to 128 characters of the unreserved set, as the specification asks.
     assert 43 <= len(verifier) <= 128 and set(verifier) <= set(
         'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~')
     # Two starts never share a verifier, and the state does not contain it.
-    other = go.read_state(go.new_state(41, 7))[2]
-    assert other != verifier and verifier not in state
+    other = go.read_state(go.new_state(41, 7))
+    assert other.verifier != verifier and other.nonce != read.nonce and verifier not in state
 
 
 def test_a_state_this_server_did_not_issue_or_issued_too_long_ago_is_nothing(monkeypatch, settings):
@@ -123,13 +151,13 @@ def test_a_state_this_server_did_not_issue_or_issued_too_long_ago_is_nothing(mon
 
 def test_the_verifier_cannot_be_derived_without_this_deployments_key(settings):
     state = go.new_state(41, 7)
-    here = go.read_state(state)[2]
+    here = go.read_state(state).verifier
     settings.SECRET_KEY_FALLBACKS = ['unit-test-secret-key']
     settings.SECRET_KEY = 'rotated-key'
     # The old state still verifies through the fallback, but the verifier is
     # the new key's: a connection begun before a rotation has to be restarted.
     read = go.read_state(state)
-    assert read is not None and read[2] != here
+    assert read is not None and read.verifier != here
 
 
 def test_the_consent_url_carries_the_challenge_of_the_states_verifier():
@@ -137,7 +165,7 @@ def test_the_consent_url_carries_the_challenge_of_the_states_verifier():
     url = urlsplit(go.authorize_url(state))
     assert f'{url.scheme}://{url.netloc}{url.path}' == 'https://connect.garmin.com/oauth2Confirm'
     params = {key: values[0] for key, values in parse_qs(url.query).items()}
-    verifier = go.read_state(state)[2]
+    verifier = go.read_state(state).verifier
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
     assert params == {
         'response_type': 'code', 'client_id': CLIENT_ID, 'code_challenge': challenge,
@@ -284,15 +312,26 @@ def test_a_stored_token_is_not_the_token_and_reads_back(settings):
     assert go.encrypt(REFRESH) != stored          # a fresh nonce each time
     for unreadable in ('', None, 'plain-text', stored[:-4] + 'AAAA'):
         assert go.decrypt(unreadable) is None
-    # Restored on a deployment with another key, it is nothing.
-    settings.SECRET_KEY = 'another-deployment'
+    # SECRET_KEY has no part in it: rotating that strands nothing.
+    settings.SECRET_KEY = 'rotated'
+    assert go.decrypt(stored) == REFRESH
+
+
+def test_a_token_is_unreadable_without_its_key_and_readable_through_a_fallback(settings):
+    settings.GARMIN_TOKEN_KEY = OLD_TOKEN_KEY
+    stored = go.encrypt(REFRESH)
+    # Another key, as on any other deployment or after the key is replaced.
+    settings.GARMIN_TOKEN_KEY = TOKEN_KEY
     assert go.decrypt(stored) is None
-    # A rotated key still reads what the old one wrote, and writes with the new.
-    settings.SECRET_KEY_FALLBACKS = ['unit-test-secret-key']
+    # The old key listed as a fallback still reads it; new tokens use the new key.
+    settings.GARMIN_TOKEN_KEY_FALLBACKS = [OLD_TOKEN_KEY, 'not-a-key']
     assert go.decrypt(stored) == REFRESH
     rewritten = go.encrypt(REFRESH)
-    settings.SECRET_KEY_FALLBACKS = []
+    settings.GARMIN_TOKEN_KEY_FALLBACKS = []
     assert go.decrypt(rewritten) == REFRESH and go.decrypt(stored) is None
+    # No key at all: nothing reads, and nothing raises.
+    settings.GARMIN_TOKEN_KEY = ''
+    assert go.decrypt(rewritten) is None
 
 
 class Row(SimpleNamespace):
@@ -344,12 +383,37 @@ def test_tokens_that_cannot_be_read_ask_for_a_new_connection_without_calling_gar
 DAY = date(2026, 11, 20)
 
 
+def read(payload):
+    return go.read_push(payload, today=TODAY)
+
+
 def values(push, user=USER):
     return {(s.metric_key, s.date): s.value for s in push.samples.get(user, [])}
 
 
+def test_a_day_with_no_steps_yet_is_not_a_day_of_no_movement():
+    # The first sync after midnight, or a watch not worn.
+    push = read({'dailies': [{
+        'userId': USER, 'calendarDate': '2026-11-20', 'steps': 0, 'distanceInMeters': 0.0,
+        'activeKilocalories': 0, 'moderateIntensityDurationInSeconds': 0, 'vigorousIntensityDurationInSeconds': 0,
+        'bmrKilocalories': 1700, 'restingHeartRateInBeatsPerMinute': 52}]})
+    assert values(push) == {('basal_energy', DAY): 1700.0, ('resting_hr', DAY): 52.0}
+
+
+def test_a_day_that_cannot_be_is_dropped():
+    def daily(day):
+        return {'userId': USER, 'calendarDate': day, 'steps': 5000}
+    push = read({'dailies': [
+        daily('2026-11-24'),                       # tomorrow, for a wearer ahead of the server's clock
+        daily('2026-11-25'), daily('9999-12-31'),  # a watch with the wrong date
+        daily('2025-11-22'),                       # a year ago, to the day
+        daily('2025-11-21'), daily('0001-01-01'),  # longer ago than a watch holds
+    ]})
+    assert sorted(day for _metric, day in values(push)) == [date(2025, 11, 22), date(2026, 11, 24)]
+
+
 def test_a_daily_summary_becomes_the_days_six_metrics():
-    push = go.read_push({'dailies': [{
+    push = read({'dailies': [{
         'userId': USER, 'userAccessToken': 'ignored', 'summaryId': 'x', 'calendarDate': '2026-11-20',
         'steps': 8123, 'distanceInMeters': 6400.4, 'activeKilocalories': 450, 'bmrKilocalories': 1700,
         'restingHeartRateInBeatsPerMinute': 52,
@@ -361,11 +425,11 @@ def test_a_daily_summary_becomes_the_days_six_metrics():
         ('basal_energy', DAY): 1700.0, ('resting_hr', DAY): 52.0, ('active_minutes', DAY): 30.5,
     }
     assert all(isinstance(sample, WearableSample) for sample in push.samples[USER])
-    assert push.deregistered == set() and push.permissions == {}
+    assert push.deregistered == set() and push.permissions == {} and push.readings == {}
 
 
 def test_sleep_is_the_sleep_stages_and_falls_back_to_the_duration():
-    push = go.read_push({'sleeps': [
+    push = read({'sleeps': [
         {'userId': USER, 'calendarDate': '2026-11-20', 'durationInSeconds': 30000,
          'deepSleepDurationInSeconds': 5400, 'lightSleepDurationInSeconds': 14400,
          'remSleepInSeconds': 5400, 'awakeDurationInSeconds': 1800},
@@ -378,19 +442,24 @@ def test_sleep_is_the_sleep_stages_and_falls_back_to_the_duration():
 
 
 def test_hrv_and_vo2_max_are_read_from_their_own_types():
-    push = go.read_push({
+    push = read({
         'hrv': [{'userId': USER, 'calendarDate': '2026-11-20', 'lastNightAvg': 44, 'lastNight5MinHigh': 72}],
         'userMetrics': [{'userId': USER, 'calendarDate': '2026-11-20', 'vo2Max': 48.0, 'fitnessAge': 32}],
     })
     assert values(push) == {('hrv_rmssd', DAY): 44.0, ('vo2_max', DAY): 48.0}
 
 
-def test_pulse_ox_and_respiration_are_averaged_over_the_days_readings():
+def test_pulse_ox_and_respiration_come_back_as_each_summarys_readings_not_as_a_value():
     # 2026-11-20 23:00 UTC, five hours west of it: still the 20th for the wearer.
     late = 1795215600
-    push = go.read_push({
-        'pulseox': [{'userId': USER, 'calendarDate': '2026-11-20',
-                     'timeOffsetSpo2Values': {'0': 94, '60': 96, '120': 0, '180': 'x'}}],
+    push = read({
+        'pulseox': [
+            {'userId': USER, 'summaryId': 'night', 'calendarDate': '2026-11-20',
+             'timeOffsetSpo2Values': {'0': 94, '60': 96, '120': 0, '180': 'x'}},
+            # Asked for on the spot: not the day's monitoring.
+            {'userId': USER, 'summaryId': 'spot', 'calendarDate': '2026-11-20', 'onDemand': True,
+             'timeOffsetSpo2Values': {'0': 80}},
+        ],
         'allDayRespiration': [
             {'userId': USER, 'startTimeInSeconds': late, 'startTimeOffsetInSeconds': -18000,
              'timeOffsetEpochToBreaths': {'0': 14.0, '60': 16.0}},
@@ -398,13 +467,49 @@ def test_pulse_ox_and_respiration_are_averaged_over_the_days_readings():
              'timeOffsetEpochToBreaths': {'0': 12.0}},
         ],
     })
-    assert values(push) == {('spo2', DAY): 95.0, ('respiratory_rate', DAY): 13.5}
+    # One push's readings are never the day's average, so no sample yet.
+    assert values(push) == {}
+    assert push.readings[USER] == {
+        ('spo2', DAY): {'night': (190.0, 2)},
+        ('respiratory_rate', DAY): {f't{late}': (30.0, 2), f't{late - 3600}': (12.0, 1)},
+    }
+
+
+def test_merging_gives_the_mean_of_every_reading_held_for_the_day():
+    stored, samples = go.merge_readings({}, {
+        ('respiratory_rate', DAY): {'a': (30.0, 2), 'b': (12.0, 1)}}, today=TODAY)
+    # (14 + 16 + 12) / 3: each reading counts once, however the summaries split them.
+    assert samples == [WearableSample(metric_key='respiratory_rate', date=DAY, value=14.0)]
+    assert stored == {'2026-11-20': {'respiratory_rate': {'a': [30.0, 2], 'b': [12.0, 1]}}}
+    # A later push adds a summary: it joins the day, it does not become it.
+    stored, samples = go.merge_readings(stored, {('respiratory_rate', DAY): {'c': (20.0, 1)}}, today=TODAY)
+    assert samples[0].value == 15.5
+    # A summary sent again, grown, replaces its own earlier totals.
+    stored, samples = go.merge_readings(stored, {('respiratory_rate', DAY): {'a': (45.0, 3)}}, today=TODAY)
+    assert samples[0].value == round((45.0 + 12.0 + 20.0) / 5, 2)
+    # The mapping is JSON as stored: it survives a round trip through the database.
+    assert json.loads(json.dumps(stored)) == stored
+    # A push that touches another day reports that day only.
+    other = date(2026, 11, 21)
+    stored, samples = go.merge_readings(stored, {('spo2', other): {'n': (190.0, 2)}}, today=TODAY)
+    assert samples == [WearableSample(metric_key='spo2', date=other, value=95.0)]
+    assert set(stored) == {'2026-11-20', '2026-11-21'}
+
+
+def test_readings_are_kept_for_two_weeks_and_a_damaged_store_is_started_again():
+    stored, _ = go.merge_readings(
+        {'2026-11-01': {'spo2': {'old': [95.0, 1]}}, '2026-11-20': {'spo2': {'n': [95.0, 1]}}},
+        {('spo2', date(2026, 11, 22)): {'m': (96.0, 1)}}, today=TODAY)
+    assert set(stored) == {'2026-11-20', '2026-11-22'}
+    for damaged in (None, [], 'text', {'2026-11-22': 'x'}, {'2026-11-22': {'spo2': {'n': 'x', 'm': [1]}}}):
+        stored, samples = go.merge_readings(damaged, {('spo2', date(2026, 11, 22)): {'k': (96.0, 1)}}, today=TODAY)
+        assert samples[0].value == 96.0, damaged
 
 
 def test_an_entry_with_no_calendar_date_takes_the_local_day_it_started_on():
     # 2026-11-21 02:00 UTC is the evening of the 20th five hours west.
     start = 1795226400
-    push = go.read_push({'dailies': [
+    push = read({'dailies': [
         {'userId': USER, 'startTimeInSeconds': start, 'startTimeOffsetInSeconds': -18000, 'steps': 10},
         {'userId': 'utc', 'startTimeInSeconds': start, 'steps': 11},
         {'userId': 'nowhen', 'steps': 12},
@@ -416,7 +521,7 @@ def test_an_entry_with_no_calendar_date_takes_the_local_day_it_started_on():
 
 
 def test_a_later_entry_for_the_same_day_wins_and_every_user_has_their_own():
-    push = go.read_push({'dailies': [
+    push = read({'dailies': [
         {'userId': USER, 'calendarDate': '2026-11-20', 'steps': 4000},
         {'userId': 'someone-else', 'calendarDate': '2026-11-20', 'steps': 99},
         {'userId': USER, 'calendarDate': '2026-11-20', 'steps': 9000},
@@ -426,7 +531,7 @@ def test_a_later_entry_for_the_same_day_wins_and_every_user_has_their_own():
 
 
 def test_deregistrations_and_permission_changes_are_reported_by_user():
-    push = go.read_push({
+    push = read({
         'deregistrations': [{'userId': USER, 'userAccessToken': 't'}, {'userId': 5}, 'junk'],
         'userPermissionsChange': [
             {'userId': 'changed', 'permissions': ['HEALTH_EXPORT', 'ACTIVITY_EXPORT'], 'changeTimeInSeconds': 1},
@@ -444,9 +549,14 @@ def test_deregistrations_and_permission_changes_are_reported_by_user():
     {'dailies': [{'userId': USER, 'calendarDate': '2026-11-20', 'steps': True}]},    # a flag, not a count
     {'dailies': [{'userId': USER, 'calendarDate': '2026-11-20', 'steps': 'many'}]},
     {'dailies': [{'userId': USER, 'calendarDate': '2026-11-20', 'steps': float('nan')}]},
+    # An integer too long to be a number: read as none, not an error.
+    {'dailies': [{'userId': USER, 'calendarDate': '2026-11-20', 'steps': int('9' * 400)}]},
+    {'dailies': [{'userId': USER, 'startTimeInSeconds': int('9' * 400), 'steps': 5}]},
+    {'pulseox': [{'userId': USER, 'calendarDate': '2026-11-20', 'timeOffsetSpo2Values': {'0': 0}}]},
     {'stressDetails': [{'userId': USER, 'calendarDate': '2026-11-20', 'averageStressLevel': 30}]},
     {'activities': [{'userId': USER, 'steps': 500}]},
 ])
 def test_a_body_that_holds_nothing_storable_is_read_as_nothing(payload):
-    push = go.read_push(payload)
-    assert push.samples == {} and push.deregistered == set() and push.permissions == {}
+    push = read(payload)
+    assert push.samples == {} and push.readings == {}
+    assert push.deregistered == set() and push.permissions == {}

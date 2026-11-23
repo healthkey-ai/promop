@@ -611,13 +611,15 @@ watch ─► Garmin Connect ─► POST garmin/webhooks/<secret>/ ─► read_pu
 | Variable | What |
 |---|---|
 | `GARMIN_CLIENT_ID`, `GARMIN_CLIENT_SECRET` | the app's consumer key and secret from the developer portal |
-| `GARMIN_WEBHOOK_SECRET` | a long random string, e.g. `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `GARMIN_WEBHOOK_SECRET` | a random string of at least 32 characters: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `GARMIN_TOKEN_KEY` | the key patients' Garmin tokens are stored under: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 
 In the developer portal, register the redirect URL `<APP_BASE_URL>/api/v1/garmin/oauth/callback/`
 and, for each push type (Dailies, Sleeps, HRV, Pulse Ox, Respiration, User Metrics,
 Deregistrations, User Permissions), the URL
 `<APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/`, with delivery set to push. The
-Wearables tab shows "Garmin account" only when all three variables are set.
+Wearables tab shows "Garmin account" only when all four variables are set. A webhook secret shorter
+than 32 characters counts as unset: the URL is the webhook's only credential.
 
 ### What a push becomes
 
@@ -631,14 +633,25 @@ Wearables tab shows "Garmin account" only when all three variables are set.
 | `dailies` | `restingHeartRateInBeatsPerMinute` | `resting_hr` | |
 | `sleeps` | deep + light + REM seconds, else `durationInSeconds` | `sleep_duration` | hours |
 | `hrv` | `lastNightAvg` | `hrv_rmssd` | Garmin's overnight HRV is RMSSD (#438) |
-| `pulseox` | mean of `timeOffsetSpo2Values` | `spo2` | |
-| `allDayRespiration` | mean of `timeOffsetEpochToBreaths` | `respiratory_rate` | several entries a day are averaged |
+| `pulseox` | `timeOffsetSpo2Values` | `spo2` | the day's mean, see below; on-demand readings left out |
+| `allDayRespiration` | `timeOffsetEpochToBreaths` | `respiratory_rate` | the day's mean, see below |
 | `userMetrics` | `vo2Max` | `vo2_max` | |
 
-An entry's day is its `calendarDate`, else the local day its `startTimeInSeconds` falls on. Garmin
-sends a day's summary again as the day goes on; each one replaces the last through the same
-[replace rule](#a-days-total-replaces-what-garmin-uploads-wrote-for-the-day) the sync uses, and the
-day's pushes fold into one row of the upload history. Other push types are answered and ignored.
+An entry's day is its `calendarDate`, else the local day its `startTimeInSeconds` falls on; a day
+more than a year old or after tomorrow is dropped. Garmin sends a day's summary again as the day
+goes on; each one replaces the last through the same
+[replace rule](#a-days-total-replaces-what-garmin-uploads-wrote-for-the-day) the sync uses. A daily
+summary with no steps yet (the first sync after midnight) stores no steps, distance, active minutes
+or active energy: it is not a day of zero movement. Other push types are answered and ignored.
+
+Pulse ox and respiration arrive as readings in several summaries across a day, over several pushes,
+so one push is never the day's average. Each summary's sum and count are kept on the connection for
+14 days, by Garmin's `summaryId`, and the stored value is the mean of every reading held for the
+day; a summary sent again, grown, replaces its own earlier totals.
+
+A month's pushes fold into one row of the upload history, "Garmin Connect push <YYYY-MM>", which
+lists each metric and day once with the value now stored. Deleting it removes that month's pushed
+rows.
 
 These field names are Garmin's published Health API names. The full specification sits behind the
 developer portal, so check the reader against the portal's sample pushes before relying on a type.
@@ -646,8 +659,13 @@ developer portal, so check the reader against the portal's sample pushes before 
 ### Limits
 
 - A push carries no signature. The webhook answers only at its secret path and routes by Garmin
-  user id to the patient connected as that user; entries for anyone else are dropped.
-- The tokens are stored encrypted and used only to tell Garmin when a patient disconnects.
+  user id to the patient connected as that user; entries for anyone else are dropped. The secret is
+  kept out of the audit trail and Sentry, but the platform's access log records request paths:
+  treat that log as secret.
+- Connecting finishes only in the browser that started it, signed in to this site. A patient signed
+  in through a partner host cannot connect.
+- The tokens are stored encrypted under `GARMIN_TOKEN_KEY` and used only to tell Garmin when a
+  patient disconnects, or when their record is erased.
 - No history, no activities, body composition or stress. A `.fit` upload after a push for the same
   day stacks beside it, as it does after a sync (#442).
 

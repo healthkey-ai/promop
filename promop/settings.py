@@ -612,12 +612,16 @@ ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
 
 # Garmin Connect Developer Program app (#2802): a patient links their Garmin
-# account by OAuth and Garmin pushes their data to the webhook. All three must
-# be set before the Wearables tab offers "Connect Garmin".
+# account by OAuth and Garmin pushes their data to the webhook. All four must
+# be set before the Wearables tab offers "Garmin account".
 #   GARMIN_CLIENT_ID / GARMIN_CLIENT_SECRET: the app's consumer key and secret.
-#   GARMIN_WEBHOOK_SECRET: a long random string, the last path segment of the
-#     URL registered with Garmin for every push type:
+#   GARMIN_WEBHOOK_SECRET: a random string of at least 32 characters, the last
+#     path segment of the URL registered with Garmin for every push type:
 #     <APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/
+#   GARMIN_TOKEN_KEY: the Fernet key patients' Garmin tokens are stored under,
+#     a key of its own so that neither a database dump nor SECRET_KEY reads
+#     them. GARMIN_TOKEN_KEY_FALLBACKS (comma-separated) lists earlier keys,
+#     which still decrypt while tokens are re-encrypted under the new one.
 # The redirect URL registered with Garmin is
 # <APP_BASE_URL>/api/v1/garmin/oauth/callback/ unless GARMIN_REDIRECT_URI says
 # otherwise; it must match the registration exactly.
@@ -625,6 +629,8 @@ GARMIN_CLIENT_ID = os.environ.get('GARMIN_CLIENT_ID', '')
 GARMIN_CLIENT_SECRET = os.environ.get('GARMIN_CLIENT_SECRET', '')
 GARMIN_WEBHOOK_SECRET = os.environ.get('GARMIN_WEBHOOK_SECRET', '')
 GARMIN_REDIRECT_URI = os.environ.get('GARMIN_REDIRECT_URI', '')
+GARMIN_TOKEN_KEY = os.environ.get('GARMIN_TOKEN_KEY', '')
+GARMIN_TOKEN_KEY_FALLBACKS = _env_list('GARMIN_TOKEN_KEY_FALLBACKS')
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
 # loinc.org release API. LOINC is licensed, so there is no anonymous access and

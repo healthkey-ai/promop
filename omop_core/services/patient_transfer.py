@@ -36,6 +36,7 @@ from omop_core.models import (
     DrugEra,
     DrugExposure,
     FhirConnection,
+    GarminConnection,
     Location,
     Measurement,
     MeasurementOwnership,
@@ -205,7 +206,7 @@ _EVENT_REFS: dict[type[Model], tuple[str, str]] = {
 
 # System rows that would be deleted with the person, or that point at it by id.
 _SYSTEM_LINKS: tuple[tuple[type[Model], str], ...] = (
-    (PatientUser, 'person_id'), (FhirConnection, 'person_id'),
+    (PatientUser, 'person_id'), (FhirConnection, 'person_id'), (GarminConnection, 'person_id'),
     (PatientInvitation, 'person_id'), (OrgInvitation, 'person_id'),
     (SurveyInvitation, 'participant_id'), (PersonalRepresentative, 'person_id'),
     (PatientGroupMembership, 'person_id'), (BreakGlassGrant, 'person_id'),
