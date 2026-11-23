@@ -28,7 +28,12 @@ class FakeResponse:
         self.content = self.text.encode()
 
     def json(self):
-        return json.loads(self.text)
+        # As requests does: its JSONDecodeError is a RequestException as well
+        # as a ValueError, which decides which handler sees it.
+        try:
+            return json.loads(self.text)
+        except json.JSONDecodeError as exc:
+            raise requests.exceptions.JSONDecodeError(exc.msg, exc.doc, exc.pos) from None
 
 
 def summary(day, **over):
@@ -137,7 +142,8 @@ def test_days_outside_one_to_ninety_is_a_400(days):
     assert refused.value.status == 400
 
 
-@pytest.mark.parametrize('end_date', ['2026-11-25', 'yesterday', '2026-13-01', 20261120, ['2026-11-20']])
+@pytest.mark.parametrize('end_date', ['2026-11-25', 'yesterday', '2026-13-01', 20261120, ['2026-11-20'],
+                                      '0001-01-05', '2004-12-31'])
 def test_a_bad_or_future_end_date_is_a_400(end_date):
     with pytest.raises(gc.GarminSyncError) as refused:
         gc.clean_range(7, end_date, date(2026, 11, 23))
@@ -155,14 +161,14 @@ def test_the_key_buys_a_token_and_the_token_reads_the_data():
     assert post['url'] == f'{BASE}/personalapitoken-service/personal-api/personal-api-key/token'
     assert post['headers']['Authorization'] == f'ApiKey {KEY}'
     assert post['allow_redirects'] is False
-    assert 0 < post['timeout'] <= gc.REQUEST_TIMEOUT_SECONDS
+    assert post['timeout'] == (gc.CONNECT_TIMEOUT_SECONDS, gc.REQUEST_TIMEOUT_SECONDS)
 
     assert session.gets, 'no data call was made'
     for get in session.gets:
         assert get['url'].startswith(BASE + '/')
         assert get['headers']['Authorization'] == f'Bearer {TOKEN}'
         assert KEY not in json.dumps(get, default=str)
-        assert 0 < get['timeout'] <= gc.REQUEST_TIMEOUT_SECONDS
+        assert get['timeout'] == (gc.CONNECT_TIMEOUT_SECONDS, gc.REQUEST_TIMEOUT_SECONDS)
     # A session the caller passed in is the caller's to close.
     assert session.closed is False
 
@@ -189,11 +195,12 @@ def test_ninety_days_is_one_summary_call_and_28_day_chunks_for_the_rest():
     assert [g['params'] for g in summaries] == [{'startDate': '2026-08-25', 'endDate': '2026-11-22'}]
 
     sleep = [g['params'] for g in session.gets if 'sleep-service' in g['url']]
+    # Newest first: if time runs out, the oldest days are the ones missed.
     assert sleep == [
-        {'startDate': '2026-08-25', 'endDate': '2026-09-21'},
-        {'startDate': '2026-09-22', 'endDate': '2026-10-19'},
-        {'startDate': '2026-10-20', 'endDate': '2026-11-16'},
-        {'startDate': '2026-11-17', 'endDate': '2026-11-22'},
+        {'startDate': '2026-10-26', 'endDate': '2026-11-22'},
+        {'startDate': '2026-09-28', 'endDate': '2026-10-25'},
+        {'startDate': '2026-08-31', 'endDate': '2026-09-27'},
+        {'startDate': '2026-08-25', 'endDate': '2026-08-30'},
     ]
     assert len([g for g in session.gets if 'hrv-service' in g['url']]) == 4
     assert len([g for g in session.gets if 'maxmet' in g['url']]) == 4
@@ -202,9 +209,9 @@ def test_ninety_days_is_one_summary_call_and_28_day_chunks_for_the_rest():
 def test_chunks_cover_the_range_once():
     start, end = date(2026, 1, 1), date(2026, 3, 31)
     chunks = list(gc._chunks(start, end))
-    assert chunks[0][0] == start and chunks[-1][1] == end
-    assert all((b - a).days < gc.CHUNK_DAYS for a, b in chunks)
-    assert all(chunks[i][1] + timedelta(days=1) == chunks[i + 1][0] for i in range(len(chunks) - 1))
+    assert chunks[0][1] == end and chunks[-1][0] == start
+    assert all(0 <= (b - a).days < gc.CHUNK_DAYS for a, b in chunks)
+    assert all(chunks[i + 1][1] + timedelta(days=1) == chunks[i][0] for i in range(len(chunks) - 1))
     assert list(gc._chunks(start, start)) == [(start, start)]
 
 
@@ -309,7 +316,7 @@ def test_samples_come_back_in_date_then_metric_order():
 
 # -- failures -------------------------------------------------------------------
 
-@pytest.mark.parametrize('status,expected', [(401, 400), (403, 400), (429, 429), (500, 502), (404, 502)])
+@pytest.mark.parametrize('status,expected', [(401, 400), (403, 400), (429, 429), (500, 424), (404, 424)])
 def test_a_refused_key_exchange_ends_the_sync(status, expected):
     session = FakeSession(token=FakeResponse(status=status, text='{"error":"secret detail"}'))
     with pytest.raises(gc.GarminSyncError) as refused:
@@ -327,27 +334,33 @@ def test_a_token_answer_that_is_not_a_token_is_a_502(text):
 
 
 @pytest.mark.parametrize('error,expected', [
-    (requests.Timeout('slow'), 504), (requests.ConnectionError('down'), 502)])
+    (requests.Timeout('slow'), 424), (requests.ConnectionError('down'), 424)])
 def test_a_token_request_that_fails_ends_the_sync(error, expected):
     with pytest.raises(gc.GarminSyncError) as refused:
         fetch(FakeSession(token=error))
     assert refused.value.status == expected
 
 
-@pytest.mark.parametrize('answer,expected', [
-    (FakeResponse(status=401), 400), (FakeResponse(status=403), 400),
-    (FakeResponse(status=429), 429), (FakeResponse(status=500), 502),
-    (FakeResponse(text='<html>not json</html>'), 502),
-    (requests.Timeout('slow'), 504), (requests.ConnectionError('down'), 502),
+@pytest.mark.parametrize('answer,expected,message', [
+    (FakeResponse(status=401), 400, gc.KEY_REJECTED), (FakeResponse(status=403), 400, gc.KEY_REJECTED),
+    (FakeResponse(status=429), 429, gc.RATE_LIMITED), (FakeResponse(status=500), 424, gc.UNREACHABLE),
+    # A 200 that is not JSON reached Garmin: it is not "could not reach", and
+    # it is the one failure that is this deployment's to hear about (a 5xx).
+    (FakeResponse(text='<html>not json</html>'), 502, gc.UNEXPECTED),
+    (requests.Timeout('slow'), 424, gc.TOO_SLOW),
+    (requests.ConnectionError('down'), 424, gc.UNREACHABLE),
 ])
-def test_the_daily_summaries_are_required(answer, expected):
+def test_the_daily_summaries_are_required(answer, expected, message):
     with pytest.raises(gc.GarminSyncError) as refused:
         fetch(FakeSession(dailysummaries=answer))
     assert refused.value.status == expected
+    assert refused.value.message == message
 
 
 @pytest.mark.parametrize('answer', [
     FakeResponse(status=500), FakeResponse(status=404), FakeResponse(text='not json'),
+    # 403 after the summaries were read: this account lacks the data set.
+    FakeResponse(status=403),
     requests.Timeout('slow'), requests.ConnectionError('down'),
 ])
 def test_an_optional_data_set_that_fails_is_reported_and_the_rest_kept(answer):
@@ -364,8 +377,8 @@ def test_an_optional_data_set_that_fails_is_reported_and_the_rest_kept(answer):
     assert not [key for key in found if key[0] == 'sleep_duration']
 
 
-@pytest.mark.parametrize('status,expected', [(401, 400), (403, 400), (429, 429)])
-def test_a_refused_key_or_a_rate_limit_ends_the_sync_wherever_it_happens(status, expected):
+@pytest.mark.parametrize('status,expected', [(401, 400), (429, 429)])
+def test_a_token_refused_or_a_rate_limit_ends_the_sync_wherever_it_happens(status, expected):
     session = FakeSession(hrv=FakeResponse(status=status))
     with pytest.raises(gc.GarminSyncError) as refused:
         fetch(session)
@@ -374,13 +387,13 @@ def test_a_refused_key_or_a_rate_limit_ends_the_sync_wherever_it_happens(status,
 
 
 def test_the_whole_read_has_a_time_budget():
-    """Each call takes 7.3 seconds on a fake clock: the summaries and two more
-    fit in 22, and the data set that does not is reported, not waited for."""
+    """Each call takes 5 seconds on a fake clock: the summaries and two more
+    fit in 15, and the data set that does not is reported, not waited for."""
     now = [0.0]
 
     def slow(payload):
         def answer(_request):
-            now[0] += 7.3
+            now[0] += 5.0
             return FakeResponse(payload=payload)
         return answer
 
@@ -391,10 +404,10 @@ def test_the_whole_read_has_a_time_budget():
     assert failed == ['vo2_max']
     assert by_metric(samples)[('steps', '2026-11-03')] == 8000.0
     # The last call that ran was given what was left, not the full allowance.
-    assert session.gets[-1]['timeout'] == pytest.approx(7.4)
+    assert session.gets[-1]['timeout'] == pytest.approx((3.0, 5.0))
 
 
-def test_a_budget_spent_before_the_summaries_is_a_504():
+def test_a_budget_spent_before_the_summaries_ends_the_sync():
     now = [0.0]
 
     def slow_token(_request):
@@ -403,7 +416,17 @@ def test_a_budget_spent_before_the_summaries_is_a_504():
 
     with pytest.raises(gc.GarminSyncError) as refused:
         fetch(FakeSession(token=slow_token), clock=lambda: now[0])
-    assert refused.value.status == 504
+    assert refused.value.status == 424
+    assert refused.value.message == gc.TOO_SLOW
+
+
+def test_a_base_url_that_is_not_https_never_receives_a_key(monkeypatch):
+    monkeypatch.setenv('GARMIN_PERSONAL_API_BASE_URL', 'http://personal.connectapi.garmin.com')
+    session = FakeSession()
+    with pytest.raises(gc.GarminSyncError) as refused:
+        fetch(session)
+    assert refused.value.status == 503
+    assert session.posts == [] and session.gets == []
 
 
 def test_neither_the_key_nor_the_token_nor_garmins_text_is_logged(caplog):

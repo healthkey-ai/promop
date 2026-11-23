@@ -469,7 +469,8 @@ Garmin lets any Garmin Connect user create a read-only **Personal API key** for 
 server reads one summary per day.
 
 ```
-POST /api/v1/patient-records/sync-garmin/   {"api_key": "...", "days": 30, "end_date": "2026-11-22"}
+POST /api/v1/patient-records/sync-garmin/
+     {"api_key": "...", "days": 30, "end_date": "2026-11-22", "person_id": 16813}
   200 {"samples_created": 210, "duplicates_skipped": 30, "replaced": 12,
        "unmapped_samples": 0, "unmapped_metrics": [],
        "start_date": "2026-10-24", "end_date": "2026-11-22", "datasets_failed": []}
@@ -482,25 +483,41 @@ the upload history are the file upload's own. The sync is a `WearableUpload` row
 `device_type` `garmin` and a filename of `Garmin Connect sync <start> to <end>`, listed and
 deletable like a file.
 
-- **Who.** The caller rules of `upload_wearable`: a signed-in account linked to a patient record,
-  whose record is not switched off. A machine credential is refused. `GarminSyncThrottle` allows
-  20 attempts an hour per user.
+- **Who.** The person, signed in (a session or a partner token, `is_interactive_session`), with
+  an account linked to a patient record that is not switched off. A service credential is
+  refused, and so is an OAuth token the patient delegated to an application, which could
+  otherwise write to their record with a key of its own. `GarminSyncThrottle` allows 20
+  attempts an hour per user.
+- **Whose record.** The rows go to the caller's own record. The tab therefore shows the panel
+  only to a patient on their own record (`canSyncOwnDevice`, set from `patientMode`; a read-only
+  embed and a clinician on a patient's page get none), and sends the `person_id` the page is
+  showing: the server answers 403 when that is not the caller's own, so a sync started from
+  someone else's page is refused and not filed quietly under the caller.
 - **The key is used and dropped.** It is sent with one request and kept nowhere: not in the
   database, a log line, an error message or a queued task. That is why the sync runs inside the
   request and not on a worker, where the key would sit in the broker. Garmin's own
   `PersonalApiAuthenticator` is not used, because it caches the bearer token in a plaintext file
   with no way to turn that off; `_exchange_key` makes the same request and holds the token in
-  memory. Garmin's error text is never relayed: a failure is reported by status alone.
-- **Bounded, because it is in the request.** At most 90 days (`MAX_SYNC_DAYS`), 8 seconds a
-  call, 22 seconds in all, under gunicorn's 30. `end_date` defaults to yesterday, since today's
-  summary is still filling in; the tab sends the browser's own yesterday, which the server's
-  clock cannot know.
-- **What ends a sync, and what does not.** A key Garmin refuses is a 400 with fixed wording, a
-  rate limit a 429, an unreachable or slow Garmin a 502 or 504, and nothing is written. The daily
-  summaries are required. HRV, sleep and VO2 max are read after them; one that fails or runs out
-  of time is named in `datasets_failed` and the rest is kept.
+  memory. Garmin's error text is never relayed: a failure is reported by status alone. The key
+  goes only to an `https` base URL, and the token request follows no redirect. In the browser
+  the field is a text input drawn as dots, not a password field, so no password manager offers
+  to fill or save it, and it is emptied when a sync succeeds.
+- **Bounded, because it is in the request.** At most 90 days (`MAX_SYNC_DAYS`). No call is
+  started after 15 seconds (`SYNC_BUDGET_SECONDS`), half of gunicorn's 30, because the write and
+  the record's re-derivation come after; each call has 3 seconds to connect and 6 per read. It
+  is a budget checked between calls, not a hard stop. `end_date` defaults to yesterday, since
+  today's summary is still filling in; the tab sends the browser's own yesterday, which the
+  server's clock cannot know.
+- **What ends a sync, and what does not.** Nothing is written when the sync ends early. A key
+  Garmin refuses is a 400 with fixed wording and a rate limit a 429. Garmin unreachable, erring
+  or slow is a 424, not a 5xx: it is the patient's to retry, and this deployment reports its own
+  5xx responses as errors. An answer the reader cannot parse is a 502, because that one means
+  Garmin changed. The daily summaries are required. HRV, sleep and VO2 max are read after them;
+  one that fails, is refused (a 403: the account lacks it), or runs out of time is named in
+  `datasets_failed` and the rest is kept.
 - **Ranged calls go in 28-day chunks**, the shortest limit the API documents (steps and stress;
-  sleep allows 31, daily summaries a year).
+  sleep allows 31, daily summaries a year), newest first, so the days lost to the budget are the
+  oldest.
 
 | Metric key | Personal API field |
 |---|---|
@@ -520,6 +537,20 @@ A day whose summary says `includesWellnessData: false` is skipped whole: a day t
 no all-day data for is not a day of zero steps. Floors climbed and weight are in the API too, but
 have no approved `Garmin` mapping, so they wait on Gap A.
 
+### The upload history names the rows
+
+Each `sample_summary` entry written since #2794 carries `row_id` and `row_table`: the row that
+upload wrote for the sample, or a null `row_id` when it wrote none (a duplicate, an artifact, an
+unmapped metric). A sync lists only the samples it wrote a row for, because it re-reads the same
+days every time and listing what was already stored would grow the history by the whole range on
+each sync. Entries from before have neither key.
+
+- **Deleting an upload** removes the rows its entries name and no others. Syncs overlap, and a
+  value an upload only found already stored belongs to the upload that wrote it. An entry
+  without `row_id` is matched by concept, date and value, as it always was. The delete is one
+  transaction and one derivation.
+- The history row is written in the same transaction as the rows, for the file upload too.
+
 ### A day's total replaces what Garmin uploads wrote for the day
 
 The derivation sums steps, active minutes and sleep over a day's rows, because a day reaches the
@@ -527,19 +558,33 @@ file upload as several `.fit` files. The API's value is already the day's total,
 beside those rows it would double the day. The sync therefore replaces them
 (`replace_daily=True`), on evidence, since a row records no device (#442):
 
-- A stored row is **Garmin's** when it carries the wearable type concept and its
-  `(metric, date, value)` is in the `sample_summary` of one of the patient's `garmin` uploads and
-  of no other device's.
+- A stored row is **Garmin's** when a `garmin` upload's history names it (`row_id`). For
+  history from before rows were named, it is Garmin's when it carries the wearable type concept
+  and its `(metric, date, value)` is listed by a `garmin` upload and by no other device's, and
+  no other device's history names the row.
 - For each incoming value, one stored row that already says the same is kept (counted in
   `duplicates_skipped`); Garmin's other rows for that metric and day are deleted (counted in
   `replaced`); the value is inserted when no row says it.
 - Nothing else is touched: an Apple upload's row, a row another ingest path wrote, a row no
-  upload history accounts for, or a value both devices recorded.
+  upload history accounts for, a row marked entered in error, or a value both devices recorded.
 
 So a later sync also corrects an earlier one made before the watch had sent the whole day. The
-file upload is unchanged and still stacks. **Known limit:** a `.fit` file uploaded for a day
-*after* that day was synced stacks a partial on the total again, until the next sync removes it.
-Preventing that needs the device on the row (#442).
+file upload still stacks. The write holds a lock on the patient's `person` row
+(`FOR NO KEY UPDATE`) from before it reads what is stored, so two syncs at once cannot both plan
+against the old rows, and it asks again under that lock whether the record is switched off. The
+history is read unnested in SQL, for the days being written only.
+
+**Known limits.**
+
+- A `.fit` file uploaded for a day *after* that day was synced stacks a partial on the total
+  again, until the next sync removes it. Preventing that needs the device on the row (#442).
+- Deleting a sync does not bring back the rows it replaced.
+- The record is re-derived inside the request, as for a file upload. For a patient whose
+  derivation is slow the request can outlive gunicorn's 30 seconds after the rows are written;
+  the rows and their history are then in place and the next derivation catches the record up.
+- A sync holds a web worker while it reads Garmin, and nothing caps how many run at once.
+- Nothing ties a key to the patient: a sync with somebody else's key files their data, as an
+  upload of somebody else's `.fit` file does.
 
 ## Derived values (not directly exported by either device)
 

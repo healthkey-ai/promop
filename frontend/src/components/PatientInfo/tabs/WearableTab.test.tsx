@@ -383,28 +383,50 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   const keyField = () => screen.getByLabelText('Garmin Connect Personal API key') as HTMLInputElement;
   const syncButton = () => screen.getByRole('button', { name: 'Sync' });
+  // The button is aria-disabled, not disabled, so it keeps focus through a sync.
+  const canSync = () => syncButton().getAttribute('aria-disabled') !== 'true';
+  /** The tab as the patient sees it on their own record. */
+  const renderOwn = (props: Partial<React.ComponentProps<typeof WearableTab>> = {}) =>
+    renderTab({ canSyncOwnDevice: true, ...props });
 
   function typeKey(value = KEY) {
     fireEvent.change(keyField(), { target: { value } });
   }
 
-  it('asks for the key in a masked field and says it is not stored', () => {
+  it('is offered only to a patient on their own record', () => {
+    // The server files a sync under whoever is signed in. A clinician on a
+    // patient's page, or a read-only embed, must not be asked for a key.
     renderTab();
-    expect(keyField().type).toBe('password');
-    // Not "off": a browser would still offer a saved sign-in password, which
-    // would then be sent to Garmin as the key.
-    expect(keyField()).toHaveAttribute('autocomplete', 'new-password');
+    expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
+    // The file upload is unchanged.
+    expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
+  });
+
+  it('asks for the key in a masked field no browser will store, and says it is not stored', () => {
+    renderOwn();
+    // Not a password field: that would invite the browser to fill in the
+    // saved sign-in password, and to save the key as the site's password.
+    expect(keyField().type).toBe('text');
+    expect(keyField().className).toContain('[-webkit-text-security:disc]');
+    expect(keyField()).toHaveAttribute('autocomplete', 'off');
+    expect(keyField()).toHaveAttribute('data-1p-ignore');
+    expect(keyField()).toHaveAttribute('data-lpignore', 'true');
     expect(screen.getByText(/used for this sync only and is not stored/i)).toBeInTheDocument();
     expect(screen.getByText(/Settings, Account, Personal API\s+Token/i)).toBeInTheDocument();
   });
 
   it('cannot sync without a key', () => {
-    renderTab();
-    expect(syncButton()).toBeDisabled();
+    renderOwn();
+    expect(canSync()).toBe(false);
+    fireEvent.click(syncButton());
     typeKey('   ');
-    expect(syncButton()).toBeDisabled();
+    expect(canSync()).toBe(false);
+    fireEvent.click(syncButton());
+    fireEvent.keyDown(keyField(), { key: 'Enter' });
+    expect(mockPost).not.toHaveBeenCalled();
     typeKey();
-    expect(syncButton()).toBeEnabled();
+    expect(canSync()).toBe(true);
   });
 
   it('sends the key, the range and the local yesterday, then clears the key', async () => {
@@ -413,7 +435,7 @@ describe('WearableTab — Garmin Connect sync', () => {
     try {
       mockPost.mockResolvedValue({ data: SYNCED });
       const onRefresh = vi.fn();
-      renderTab({ onRefresh });
+      renderOwn({ onRefresh });
       const historyReads = () =>
         mockGet.mock.calls.filter(([url]) => String(url).includes('wearable-uploads')).length;
       await waitFor(() => expect(historyReads()).toBe(1));
@@ -443,7 +465,7 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   it('defaults to 30 days and syncs on Enter', async () => {
     mockPost.mockResolvedValue({ data: { ...SYNCED, samples_created: 1, replaced: 0, duplicates_skipped: 0 } });
-    renderTab();
+    renderOwn();
     typeKey();
     fireEvent.keyDown(keyField(), { key: 'Enter' });
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
@@ -458,7 +480,7 @@ describe('WearableTab — Garmin Connect sync', () => {
       data: { ...SYNCED, samples_created: 0, replaced: 0, duplicates_skipped: 240 },
     });
     const onRefresh = vi.fn();
-    renderTab({ onRefresh });
+    renderOwn({ onRefresh });
     typeKey();
     fireEvent.click(syncButton());
     await waitFor(() => {
@@ -469,7 +491,7 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   it('names the data Garmin did not return', async () => {
     mockPost.mockResolvedValue({ data: { ...SYNCED, datasets_failed: ['sleep', 'hrv', 'vo2_max'] } });
-    renderTab();
+    renderOwn();
     typeKey();
     fireEvent.click(syncButton());
     await waitFor(() => {
@@ -479,18 +501,18 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   it('names metrics the server has no mapping for', async () => {
     mockPost.mockResolvedValue({ data: { ...SYNCED, unmapped_metrics: ['vo2_max'] } });
-    renderTab();
+    renderOwn();
     typeKey();
     fireEvent.click(syncButton());
     await waitFor(() => {
-      expect(screen.getByText(/no approved mapping for: vo2_max/)).toBeInTheDocument();
+      expect(screen.getByText('Not stored: VO\u2082 Max. This site cannot store this metric yet.')).toBeInTheDocument();
     });
   });
 
   it("shows the server's reason when the key is refused, and keeps the key to correct", async () => {
     mockPost.mockRejectedValue({ response: { status: 400, data: { error: 'Garmin did not accept this API key.' } } });
     const onRefresh = vi.fn();
-    renderTab({ onRefresh });
+    renderOwn({ onRefresh });
     typeKey();
     fireEvent.click(syncButton());
     await waitFor(() => {
@@ -498,14 +520,16 @@ describe('WearableTab — Garmin Connect sync', () => {
     });
     expect(keyField().value).toBe(KEY);
     expect(onRefresh).not.toHaveBeenCalled();
-    expect(syncButton()).toBeEnabled();
+    expect(canSync()).toBe(true);
+    // Focus is back on the field that has to be corrected.
+    expect(keyField()).toHaveFocus();
   });
 
   it('shows the throttle message, which arrives as detail', async () => {
     mockPost.mockRejectedValue({
       response: { status: 429, data: { detail: 'Request was throttled. Expected available in 120 seconds.' } },
     });
-    renderTab();
+    renderOwn();
     typeKey();
     fireEvent.click(syncButton());
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/throttled/));
@@ -513,7 +537,7 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   it('falls back to a plain message when the request never reached the server', async () => {
     mockPost.mockRejectedValue(new Error('Network Error'));
-    renderTab();
+    renderOwn();
     typeKey();
     fireEvent.click(syncButton());
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Sync failed. Please try again.'));
@@ -522,15 +546,93 @@ describe('WearableTab — Garmin Connect sync', () => {
   it('sends one request however often Sync is pressed while it runs', async () => {
     let finish: (value: unknown) => void = () => {};
     mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
-    renderTab();
+    renderOwn();
     typeKey();
     fireEvent.click(syncButton());
     const busy = await screen.findByRole('button', { name: 'Syncing...' });
-    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute('aria-disabled', 'true');
+    // Said to a screen reader too, not only on the button.
+    expect(screen.getByText(/Syncing with Garmin Connect/)).toBeInTheDocument();
+    expect(keyField()).toHaveAttribute('readonly');
     fireEvent.click(busy);
     fireEvent.keyDown(keyField(), { key: 'Enter' });
     expect(mockPost).toHaveBeenCalledTimes(1);
     finish({ data: SYNCED });
-    await waitFor(() => expect(syncButton()).toBeDisabled()); // key cleared
+    await waitFor(() => expect(keyField().value).toBe('')); // key cleared
+    expect(canSync()).toBe(false);
+    expect(screen.queryByText(/Syncing with Garmin Connect/)).not.toBeInTheDocument();
+  });
+
+  it('says whose record the page shows, so the server can refuse another person\'s', async () => {
+    mockPost.mockResolvedValue({ data: SYNCED });
+    renderOwn({ formData: { person_id: 4321 } });
+    typeKey();
+    fireEvent.click(syncButton());
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+    expect(mockPost.mock.calls[0][1]).toMatchObject({ api_key: KEY, person_id: 4321 });
+  });
+
+  it('holds uploads and deletes while a sync runs', async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: url.includes('writable-fields') ? DESCRIPTORS : [{
+        id: 7, device_type: 'garmin', filename: 'day.fit', samples_created: 1,
+        duplicates_skipped: 0, sample_summary: [], uploaded_at: '2026-11-20T10:00:00Z',
+      }],
+    }));
+    let finish: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    renderOwn();
+    const upload = screen.getByRole('button', { name: /upload/i });
+    const remove = await screen.findByTitle('Delete upload');
+    expect(upload).toBeEnabled();
+
+    typeKey();
+    fireEvent.click(syncButton());
+    await screen.findByRole('button', { name: 'Syncing...' });
+    expect(upload).toBeDisabled();
+    expect(remove).toBeDisabled();
+    // A file dropped meanwhile is not sent.
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('activity.fit')]));
+    expect(mockPost).toHaveBeenCalledTimes(1);
+
+    finish({ data: SYNCED });
+    await waitFor(() => expect(upload).toBeEnabled());
+    expect(remove).toBeEnabled();
+  });
+
+  it('cannot sync while a file upload runs', async () => {
+    let finish: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    renderOwn();
+    typeKey();
+    expect(canSync()).toBe(true);
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('activity.fit')]));
+    await waitFor(() => expect(canSync()).toBe(false));
+    fireEvent.click(syncButton());
+    expect(mockPost).toHaveBeenCalledTimes(1); // the upload only
+    finish({ data: { samples_created: 1, duplicates_skipped: 0 } });
+    await waitFor(() => expect(canSync()).toBe(true));
+  });
+
+  it("ends at the reader's own yesterday, not the server's or UTC's", async () => {
+    // 00:30 on New Year's Day in Auckland is still 30 December in UTC: the
+    // last whole day for this reader is 31 December.
+    const zone = process.env.TZ;
+    process.env.TZ = 'Pacific/Auckland';
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2027, 0, 1, 0, 30));
+    try {
+      mockPost.mockResolvedValue({ data: SYNCED });
+      renderOwn();
+      typeKey();
+      fireEvent.click(syncButton());
+      await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
+      expect(mockPost.mock.calls[0][1]).toMatchObject({ end_date: '2026-12-31' });
+    } finally {
+      vi.useRealTimers();
+      if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+    }
   });
 });

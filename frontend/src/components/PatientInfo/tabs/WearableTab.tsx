@@ -13,6 +13,13 @@ interface Props {
   // all wearable fields are read-only (derived from OMOP, not user-editable).
   onChange?: (field: string, value: unknown) => void;
   onRefresh?: () => void;
+  /**
+   * True when the signed-in person is the patient of this record. A Garmin
+   * Connect sync is filed under whoever is signed in, so the panel is offered
+   * nowhere else: not to a clinician on a patient's page, not in a read-only
+   * embed.
+   */
+  canSyncOwnDevice?: boolean;
 }
 
 const METRIC_LABELS: Record<string, string> = {
@@ -85,13 +92,16 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh }: Props) {
+export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors } = useWritableFields(personId);
   const noData = !formData?.wearable_last_sync_at;
   const [uploading, setUploading] = useState(false);
+  // A Garmin Connect sync in flight: uploads and deletes wait for it, as it
+  // waits for them.
+  const [syncing, setSyncing] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -255,7 +265,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     dragCounter.current = 0;
     setDragOver(false);
 
-    if (uploading) return;
+    if (uploading || syncing) return;
 
     const files = Array.from(e.dataTransfer.files);
 
@@ -289,7 +299,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
     const deviceType = types.values().next().value as string;
     await uploadFiles(files, deviceType);
-  }, [uploading, uploadFiles]);
+  }, [uploading, syncing, uploadFiles]);
 
   return (
     <div
@@ -316,7 +326,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         <button
           type="button"
           onClick={handleUploadClick}
-          disabled={uploading}
+          disabled={uploading || syncing}
           className="inline-flex items-center gap-2 rounded-md bg-portal-brand px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-portal-brand/90 disabled:opacity-50"
         >
           {uploading ? (
@@ -358,13 +368,18 @@ export default function WearableTab({ formData, onRefresh }: Props) {
       />
 
       {/* Garmin Connect: the same rows as a .fit upload, read through Garmin's API */}
-      <GarminConnectSync
-        disabled={uploading}
-        onSynced={(changed) => {
-          fetchUploads();
-          if (changed && onRefresh) onRefresh();
-        }}
-      />
+      {canSyncOwnDevice && (
+        <GarminConnectSync
+          personId={personId}
+          disabled={uploading || deletingId !== null}
+          metricLabels={METRIC_LABELS}
+          onBusyChange={setSyncing}
+          onSynced={(changed) => {
+            fetchUploads();
+            if (changed && onRefresh) onRefresh();
+          }}
+        />
+      )}
 
       {/* Upload history */}
       {!uploadsLoading && uploads.length > 0 && (
@@ -397,7 +412,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); handleDelete(upload.id); }}
-                  disabled={deletingId === upload.id}
+                  disabled={deletingId === upload.id || syncing}
                   className="ml-1 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
                   title="Delete upload"
                 >
@@ -447,7 +462,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       {noData && !uploadsLoading && uploads.length === 0 && (
         <p className="mb-4 text-sm text-gray-500 italic">
-          No wearable data synced yet. Upload or drag &amp; drop wearable data files, or sync from Garmin Connect, to contribute to your record.
+          No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.
         </p>
       )}
 

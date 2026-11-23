@@ -16,7 +16,15 @@ All notable changes to PRomop are documented here.
   (`POST /api/v1/patient-records/sync-garmin/`, #2794). The key is used for that
   one request and stored nowhere. A day's total from the API replaces the rows
   earlier Garmin uploads wrote for that day, so steps and sleep are not counted
-  twice. Adds `garmin-connect-personal-api-python`.
+  twice. The panel shows only to a patient on their own record. Adds
+  `garmin-connect-personal-api-python`.
+
+- **Wearable upload history records the rows each upload wrote** — deleting an
+  upload now removes the rows that upload wrote and no others (a row another
+  upload had already stored used to go too), in one transaction with one
+  re-derivation instead of one per row; history from before is still matched
+  by value. The history row is saved with the rows, so an upload whose history
+  cannot be saved writes nothing (#2794).
 
 - **Patient invitations never accepted are deleted after a retention period**
   — `PATIENT_INVITATION_RETENTION_DAYS` (0, the default, keeps them) and

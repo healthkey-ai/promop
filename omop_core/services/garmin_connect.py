@@ -22,9 +22,16 @@ Garmin account:
   log or show a patient.
 
 The sync runs inside the request (a queued task would put the key in the
-broker), so it is bounded: at most :data:`MAX_SYNC_DAYS` days, each request
-capped at :data:`REQUEST_TIMEOUT_SECONDS`, and the whole read at
-:data:`SYNC_BUDGET_SECONDS`, under gunicorn's 30 seconds.
+broker), so it is bounded: at most :data:`MAX_SYNC_DAYS` days, and no call is
+started once :data:`SYNC_BUDGET_SECONDS` have gone. That is a budget checked
+between calls, not a hard stop: a call's timeout is per socket read, so a
+response that trickles in can run past it.
+
+Statuses are chosen for who has to act. Garmin refusing the key is a 400 and
+Garmin being unreachable or slow a 424: the patient's to retry, and not a 5xx,
+which this deployment reports as its own error. An answer this code cannot
+read stays a 502, because that one means Garmin changed and someone here
+should know.
 """
 import logging
 import math
@@ -38,13 +45,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SYNC_DAYS = 30
 MAX_SYNC_DAYS = 90
-REQUEST_TIMEOUT_SECONDS = 8.0
-SYNC_BUDGET_SECONDS = 22.0
+REQUEST_TIMEOUT_SECONDS = 6.0
+CONNECT_TIMEOUT_SECONDS = 3.0
+# Half of gunicorn's 30 seconds: the write and the record's re-derivation,
+# which is the slow part for a patient with a large record, come after.
+SYNC_BUDGET_SECONDS = 15.0
 
 # The shortest range limit the API documents is 28 days (steps and stress);
 # sleep allows 31 and the HRV and VO2 max endpoints state none. One chunk size
 # for every ranged call stays inside all of them.
 CHUNK_DAYS = 28
+
+# Garmin Connect has nothing older, and date arithmetic near date.min overflows.
+EARLIEST_END_DATE = date(2005, 1, 1)
 
 MAX_API_KEY_LENGTH = 4096
 # A key is sent as an HTTP header value: visible ASCII only, so nothing in it
@@ -56,7 +69,7 @@ KEY_REJECTED = ('Garmin did not accept this API key. Check that all of it was '
                 'Garmin Connect.')
 RATE_LIMITED = 'Garmin is limiting requests for this key. Try again later.'
 UNREACHABLE = 'Could not reach Garmin Connect. Try again later.'
-TOO_SLOW = 'Garmin Connect took too long to answer. Try a shorter range.'
+TOO_SLOW = 'Garmin Connect took too long to answer. Try again, or choose a shorter range.'
 UNEXPECTED = 'Garmin Connect returned an answer this server could not read.'
 NOT_INSTALLED = 'Garmin Connect sync is not installed on this server.'
 
@@ -65,13 +78,15 @@ class GarminSyncError(Exception):
     """A sync that cannot go on. ``status`` is the HTTP status to answer with.
 
     The message is fixed wording written here, safe to show the patient. It
-    never contains the key, the token or anything Garmin sent.
+    never contains the key, the token or anything Garmin sent. ``upstream``
+    is the status Garmin answered with, when it answered.
     """
 
-    def __init__(self, message, status):
+    def __init__(self, message, status, upstream=None):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.upstream = upstream
 
 
 def clean_api_key(raw):
@@ -113,6 +128,8 @@ def clean_range(days, end_date, today):
             raise GarminSyncError('end_date must be a date, YYYY-MM-DD.', 400)
         if end > today + timedelta(days=1):
             raise GarminSyncError('end_date cannot be in the future.', 400)
+        if end < EARLIEST_END_DATE:
+            raise GarminSyncError('end_date is too far in the past.', 400)
     return end - timedelta(days=days - 1), end
 
 
@@ -135,19 +152,19 @@ def fetch_daily_samples(api_key, start, end, *, session=None, clock=time.monoton
     deadline = clock() + SYNC_BUDGET_SECONDS
 
     def timeout():
-        """Seconds the next request may take; raises once the budget is spent."""
+        """(connect, read) seconds for the next request; raises once the budget is spent."""
         remaining = deadline - clock()
         if remaining <= 0.5:
-            raise GarminSyncError(TOO_SLOW, 504)
-        return min(REQUEST_TIMEOUT_SECONDS, remaining)
+            raise GarminSyncError(TOO_SLOW, 424)
+        return (min(CONNECT_TIMEOUT_SECONDS, remaining), min(REQUEST_TIMEOUT_SECONDS, remaining))
 
     def refuse(status_code):
-        """The error for a response status that ends the sync."""
+        """The error for a response status Garmin refused a call with."""
         if status_code in (401, 403):
-            return GarminSyncError(KEY_REJECTED, 400)
+            return GarminSyncError(KEY_REJECTED, 400, upstream=status_code)
         if status_code == 429:
-            return GarminSyncError(RATE_LIMITED, 429)
-        return GarminSyncError(UNREACHABLE, 502)
+            return GarminSyncError(RATE_LIMITED, 429, upstream=status_code)
+        return GarminSyncError(UNREACHABLE, 424, upstream=status_code)
 
     own_session = session is None
     session = session or requests.Session()
@@ -166,14 +183,15 @@ def fetch_daily_samples(api_key, start, end, *, session=None, clock=time.monoton
                                call.__name__, exc.status_code)
                 raise refuse(exc.status_code) from None
             except requests.Timeout:
-                raise GarminSyncError(TOO_SLOW, 504) from None
+                raise GarminSyncError(TOO_SLOW, 424) from None
+            except ValueError:
+                # A 200 whose body is not JSON. Before RequestException:
+                # requests' JSONDecodeError is both.
+                raise GarminSyncError(UNEXPECTED, 502) from None
             except requests.RequestException as exc:
                 logger.warning('garmin_sync_request_failed call=%s error=%s',
                                call.__name__, type(exc).__name__)
-                raise GarminSyncError(UNREACHABLE, 502) from None
-            except ValueError:
-                # A 200 whose body is not JSON.
-                raise GarminSyncError(UNEXPECTED, 502) from None
+                raise GarminSyncError(UNREACHABLE, 424) from None
 
         found = {}
 
@@ -195,7 +213,12 @@ def fetch_daily_samples(api_key, start, end, *, session=None, clock=time.monoton
                 for chunk_start, chunk_end in _chunks(start, end):
                     parse(read(call, chunk_start, chunk_end), keep)
             except GarminSyncError as exc:
-                if exc.status in (400, 429):
+                # A token Garmin no longer accepts, or a rate limit, would only
+                # repeat on the next call. Anything else costs this data set
+                # alone: Garmin erring, running out of time, or a 403, which
+                # here is this account not having the data, the key having
+                # already read the summaries.
+                if exc.upstream in (401, 429):
                     raise
                 failed.append(name)
     finally:
@@ -217,6 +240,10 @@ def _exchange_key(session, api_key, token_path, timeout, refuse):
 
     # The same base the client reads, so the token and the data calls agree.
     base_url = os.environ.get(BASE_URL_ENV_VAR, DEFAULT_BASE_URL).rstrip('/')
+    if not base_url.startswith('https://'):
+        # A deployment setting, but a wrong one would send every key in clear.
+        logger.error('garmin_sync_base_url_not_https')
+        raise GarminSyncError(NOT_INSTALLED, 503)
     try:
         response = session.post(
             f'{base_url}{token_path}',
@@ -226,10 +253,10 @@ def _exchange_key(session, api_key, token_path, timeout, refuse):
             allow_redirects=False,
         )
     except requests.Timeout:
-        raise GarminSyncError(TOO_SLOW, 504) from None
+        raise GarminSyncError(TOO_SLOW, 424) from None
     except requests.RequestException as exc:
         logger.warning('garmin_sync_token_request_failed error=%s', type(exc).__name__)
-        raise GarminSyncError(UNREACHABLE, 502) from None
+        raise GarminSyncError(UNREACHABLE, 424) from None
     if response.status_code != 200:
         logger.warning('garmin_sync_token_refused status=%s', response.status_code)
         raise refuse(response.status_code)
@@ -240,11 +267,15 @@ def _exchange_key(session, api_key, token_path, timeout, refuse):
 
 
 def _chunks(start, end):
-    """``start`` to ``end`` in consecutive ranges of at most CHUNK_DAYS days."""
-    while start <= end:
-        chunk_end = min(end, start + timedelta(days=CHUNK_DAYS - 1))
-        yield start, chunk_end
-        start = chunk_end + timedelta(days=1)
+    """``start`` to ``end`` in ranges of at most CHUNK_DAYS days, newest first.
+
+    If the time budget runs out partway, the days lost are the oldest: the
+    record's summaries read the most recent thirty.
+    """
+    while end >= start:
+        chunk_start = max(start, end - timedelta(days=CHUNK_DAYS - 1))
+        yield chunk_start, end
+        end = chunk_start - timedelta(days=1)
 
 
 def _number(value):
