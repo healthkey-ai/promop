@@ -905,6 +905,10 @@ export default function PatientDetail({
   // Immunizations are shown inside the Treatment tab, not as a separate tab.
   // The disease-specific tab only appears when a recognised disease is selected.
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
+  // The signed-in person's own record: patient mode, or the provider console
+  // on the record the account's patient link names (#2816). What acts on the
+  // caller's own record (device uploads and syncs) is offered only here.
+  const ownRecord = patientMode || isOwnRecord(user, personId);
   const diseaseType = getDiseaseType();
   // A tab for the record's category when it has a hand-authored section or a field
   // placed on its extension: a category a curator adds gets its tab without a deploy.
@@ -1205,7 +1209,7 @@ export default function PatientDetail({
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={patientMode || isOwnRecord(user, personId)} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}

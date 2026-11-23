@@ -1,7 +1,8 @@
 /**
  * What a person does only for themselves on the Wearables tab (the Garmin
- * sync and connection, #2794, #2802) is offered on their own record, in
- * patient mode or in the provider console, and on nobody else's (#2816).
+ * sync and connection, #2794, #2802, and file uploads with their history,
+ * #2819) is offered on their own record, in patient mode or in the provider
+ * console, and on nobody else's (#2816).
  */
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
@@ -27,8 +28,11 @@ vi.mock('@/components/PatientInfo/tabs/GenomicsTab', () => ({ default: () => <di
 vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({ default: () => <div>behavior fields</div> }));
 // The tab says what it was told; its own panels are tested in WearableTab.test.tsx.
 vi.mock('@/components/PatientInfo/tabs/WearableTab', () => ({
-  default: ({ canSyncOwnDevice }: { canSyncOwnDevice?: boolean }) => (
-    <div>{canSyncOwnDevice ? 'own device sync offered' : 'own device sync withheld'}</div>
+  default: ({ canSyncOwnDevice, ownRecord }: { canSyncOwnDevice?: boolean; ownRecord?: boolean }) => (
+    <div>
+      <span>{canSyncOwnDevice ? 'own device sync offered' : 'own device sync withheld'}</span>
+      <span>{ownRecord ? 'uploads offered' : 'uploads withheld'}</span>
+    </div>
   ),
 }));
 vi.mock('@/components/PatientInfo/tabs/ClinicalSummaryTab', () => ({ default: () => <div>history</div> }));
@@ -97,20 +101,24 @@ describe('PatientDetail — own-device sync on the Wearables tab (#2816)', () =>
   it('is offered to an admin on their own record in the provider console', async () => {
     await openWearables(<PatientDetailRoute user={ADMIN_AND_PATIENT} />, '/patient/101');
     expect(screen.getByText('own device sync offered')).toBeInTheDocument();
+    expect(screen.getByText('uploads offered')).toBeInTheDocument();
   });
 
   it("is withheld from that admin on somebody else's record", async () => {
     await openWearables(<PatientDetailRoute user={ADMIN_AND_PATIENT} />, '/patient/202');
     expect(screen.getByText('own device sync withheld')).toBeInTheDocument();
+    expect(screen.getByText('uploads withheld')).toBeInTheDocument();
   });
 
   it('is withheld from an admin who is no patient', async () => {
     await openWearables(<PatientDetailRoute user={ADMIN_ONLY} />, '/patient/101');
     expect(screen.getByText('own device sync withheld')).toBeInTheDocument();
+    expect(screen.getByText('uploads withheld')).toBeInTheDocument();
   });
 
   it('is offered in patient mode, as before', async () => {
     await openWearables(<PatientDetail personIdOverride="101" patientMode user={PATIENT} />, '/');
     expect(screen.getByText('own device sync offered')).toBeInTheDocument();
+    expect(screen.getByText('uploads offered')).toBeInTheDocument();
   });
 });

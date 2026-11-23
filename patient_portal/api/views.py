@@ -5058,6 +5058,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         Form fields:
           - file: the uploaded file
           - device_type: 'garmin' | 'apple'
+          - person_id: the record the page is showing; refused unless it is
+            the caller's own
         """
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
 
@@ -5098,6 +5100,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 {'error': 'No patient record linked to your account'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # The rows go to the caller's own record. A page showing somebody
+        # else's says whose it is, so an upload started there is refused and
+        # not filed quietly under the caller (#2819), as sync_garmin does.
+        shown = request.data.get('person_id')
+        if shown not in (None, '') and str(shown).strip() != str(person.person_id):
+            return Response({'error': 'Wearable uploads go to your own record only.'},
+                            status=status.HTTP_403_FORBIDDEN)
         from patient_portal.consent import RECORD_OFF, record_permitted
         if not record_permitted(person):
             return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)

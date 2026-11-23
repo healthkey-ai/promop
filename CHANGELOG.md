@@ -409,6 +409,15 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Wearables: file upload, upload history and delete only on your own
+  record** — the three act on the signed-in person's own record, but the tab
+  showed them on every record: an account that is a patient and also staff,
+  an org admin or a doctor could upload a `.fit` on somebody else's page, be
+  told it was uploaded there, and have the rows land on their own record,
+  beside their own upload history under that patient's name. The controls
+  now show only on your own record, and the server refuses an upload that
+  names another record (#2819).
+
 - **Wearables: the Garmin panels show on your own record in the provider
   console** — an account that is a patient and also staff, an org admin or a
   doctor never gets patient mode, so "Sync from Garmin Connect" and "Garmin

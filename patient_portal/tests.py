@@ -19150,6 +19150,84 @@ class WearableUploadEndpointTest(TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
+    # -- The record the page shows (#2819) ----------------------------------
+
+    _STEPS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-07-09 08:00:00 -0700"
+          endDate="2024-07-09 08:30:00 -0700" value="4321"/>
+</HealthData>
+"""
+
+    def _post_steps(self, identity, **fields):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile(
+            'export.zip', self._make_apple_zip(self._STEPS_XML).read(), content_type='application/zip')
+        return self._client_as(identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple', **fields},
+            format='multipart',
+        )
+
+    def _wearable_rows(self, person):
+        from omop_core.models import Measurement, Observation, WearableUpload
+        return (Measurement.objects.filter(person=person).count()
+                + Observation.objects.filter(person=person).count(),
+                WearableUpload.objects.filter(person=person).count())
+
+    def test_upload_naming_the_callers_own_record_is_stored(self):
+        resp = self._post_steps(self.identity, person_id=str(self.person.person_id))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertEqual(self._wearable_rows(self.person), (1, 1))
+
+    def test_upload_started_from_another_record_is_refused_and_writes_nothing(self):
+        """The page says whose record it shows; the rows would go to the caller's.
+
+        Refused, so an upload from somebody else's page is never filed quietly
+        under the caller while that page reports it."""
+        other = Person.objects.create(person_id=99002, family_name='Other', given_name='Olive')
+        PatientRecord.objects.create(person=other)
+        resp = self._post_steps(self.identity, person_id=str(other.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.data, {'error': 'Wearable uploads go to your own record only.'})
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+        self.assertEqual(self._wearable_rows(other), (0, 0))
+
+    def test_upload_from_another_record_is_refused_for_an_admin_who_is_a_patient(self):
+        """Staff reach every record, and still upload only to their own."""
+        admin = Identity.objects.create_user(email='admin-patient@test.com', password='pw', is_staff=True)
+        own = Person.objects.create(person_id=99003, family_name='Admin', given_name='Ada')
+        PatientRecord.objects.create(person=own)
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=admin, person=own)
+
+        resp = self._post_steps(admin, person_id=str(self.person.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+        self.assertEqual(self._wearable_rows(own), (0, 0))
+
+        resp = self._post_steps(admin, person_id=str(own.person_id))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._wearable_rows(own), (1, 1))
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_upload_with_a_person_id_that_is_no_id_is_refused(self):
+        for value in ('abc', '99001x', '0', '-99001'):
+            with self.subTest(person_id=value):
+                resp = self._post_steps(self.identity, person_id=value)
+                self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_upload_without_a_person_id_goes_to_the_callers_record(self):
+        """An older page, or the federated one before it sends the field."""
+        for fields in ({}, {'person_id': ''}):
+            with self.subTest(fields=fields):
+                resp = self._post_steps(self.identity, **fields)
+                self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._wearable_rows(self.person)[1], 2)
+
     def test_upload_unauthenticated(self):
         """POST without authentication returns 401/403."""
         from django.core.files.uploadedfile import SimpleUploadedFile

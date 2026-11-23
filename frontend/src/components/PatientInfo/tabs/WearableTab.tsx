@@ -21,6 +21,14 @@ interface Props {
    * embed.
    */
   canSyncOwnDevice?: boolean;
+  /**
+   * True when the page is the signed-in person's own record. A file upload,
+   * the upload history and its deletes all act on the caller's own record,
+   * wherever they are used from, so they are offered nowhere else (#2819):
+   * on somebody else's page an upload would land on the viewer's record
+   * while the page reported it on the patient's.
+   */
+  ownRecord?: boolean;
 }
 
 const METRIC_LABELS: Record<string, string> = {
@@ -93,7 +101,7 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false }: Props) {
+export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -111,7 +119,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
   // Upload history
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
-  const [uploadsLoading, setUploadsLoading] = useState(true);
+  // The history is the caller's own, so it is read only on their own record.
+  const [uploadsLoading, setUploadsLoading] = useState(ownRecord);
   const [expandedUpload, setExpandedUpload] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
@@ -131,6 +140,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   // reads to the linter as a synchronous setState, and left a real window
   // where a slow request could resolve against a gone component.
   useEffect(() => {
+    if (!ownRecord) return undefined;
     let cancelled = false;
     (async () => {
       try {
@@ -145,7 +155,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [ownRecord]);
 
   const handleDelete = useCallback(async (uploadId: number) => {
     if (!confirm('Delete this upload and its associated measurements?')) return;
@@ -176,6 +186,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         const payload = new FormData();
         payload.append('file', file);
         payload.append('device_type', deviceType);
+        // The record this page shows: the server refuses one that is not the
+        // caller's own, so an upload is never filed under somebody else's page.
+        if (personId != null) payload.append('person_id', String(personId));
 
         const res = await clinicalClient().post(clinicalUrl('/v1/patient-records/upload-wearable/'), payload, {
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -202,7 +215,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     } finally {
       setUploading(false);
     }
-  }, [onRefresh, fetchUploads]);
+  }, [onRefresh, fetchUploads, personId]);
 
   const handleUploadClick = () => {
     if (fileInputRef.current) {
@@ -241,10 +254,10 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     e.preventDefault();
     e.stopPropagation();
     dragCounter.current += 1;
-    if (e.dataTransfer.types.includes('Files')) {
+    if (ownRecord && e.dataTransfer.types.includes('Files')) {
       setDragOver(true);
     }
-  }, []);
+  }, [ownRecord]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -266,7 +279,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     dragCounter.current = 0;
     setDragOver(false);
 
-    if (uploading || syncing) return;
+    if (!ownRecord || uploading || syncing) return;
 
     const files = Array.from(e.dataTransfer.files);
 
@@ -300,7 +313,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
     const deviceType = types.values().next().value as string;
     await uploadFiles(files, deviceType);
-  }, [uploading, syncing, uploadFiles]);
+  }, [ownRecord, uploading, syncing, uploadFiles]);
 
   return (
     <div
@@ -323,7 +336,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       )}
 
       {/* Upload controls */}
-      <div className="mb-4 flex items-center gap-3">
+      {ownRecord && <div className="mb-4 flex items-center gap-3">
         <button
           type="button"
           onClick={handleUploadClick}
@@ -356,17 +369,26 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         {uploadError && (
           <span className="text-sm text-red-600">{uploadError}</span>
         )}
-      </div>
+      </div>}
 
       {/* Hidden file input — accepts both .fit and .zip; device type auto-detected */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".fit,.zip"
-        multiple
-        className="hidden"
-        onChange={handleFileChange}
-      />
+      {ownRecord && (
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".fit,.zip"
+          multiple
+          className="hidden"
+          onChange={handleFileChange}
+        />
+      )}
+
+      {/* Somebody else's record: nothing here can add to it. */}
+      {!ownRecord && (
+        <p className="mb-4 text-sm text-gray-500">
+          Wearable data is added by the patient, from their own record.
+        </p>
+      )}
 
       {/* A Garmin account linked once, where this deployment has a Garmin app:
           Garmin then sends the data by itself (#2802). */}
@@ -387,7 +409,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       )}
 
       {/* Upload history */}
-      {!uploadsLoading && uploads.length > 0 && (
+      {ownRecord && !uploadsLoading && uploads.length > 0 && (
         <Section title="Upload History">
           <div className="divide-y divide-gray-100">
             {uploads.map(upload => (
@@ -467,7 +489,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       {noData && !uploadsLoading && uploads.length === 0 && (
         <p className="mb-4 text-sm text-gray-500 italic">
-          No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.
+          {ownRecord
+            ? <>No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.</>
+            : 'No wearable data synced yet.'}
         </p>
       )}
 
