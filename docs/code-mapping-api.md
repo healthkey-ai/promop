@@ -7,6 +7,12 @@ source code into an OMOP concept. This applies equally to an importer running
 in PRomop and one running in another service. Do not embed a local code map,
 query Athena directly, or use a suggested target as a clinical destination.
 
+There are two ways to use it. Call the lookup below and write the row yourself,
+or post the row without a concept to a clinical endpoint's `upsert_if_mapped`
+action and let the server resolve and write in one request; see
+[Resolving and writing in one call](#resolving-and-writing-in-one-call). Both
+apply the same rules.
+
 Send each source-code encounter to:
 
 ```http
@@ -66,6 +72,78 @@ source value according to your normal unmapped-data policy and do not write the
   "proposed_target_concept_id": 456
 }
 ```
+
+### Resolving and writing in one call
+
+An importer that writes the row as soon as it has the answer can skip the
+lookup. Post the rows, without a concept, to the clinical endpoint's
+`upsert_if_mapped` action and the server resolves each row's source code with
+the same rules and writes the rows that are mapped:
+
+```http
+POST /api/v1/measurements/upsert_if_mapped/
+Authorization: Bearer <service credential>
+Content-Type: application/json
+```
+
+```json
+[
+  {
+    "person": 16813,
+    "source_vocabulary_id": "OpenWearables",
+    "measurement_source_value": "steps",
+    "measurement_date": "2026-11-20",
+    "measurement_type_concept": 32817,
+    "value_as_number": 4200,
+    "source_record_key": "openwearables:u1/apple/steps/2026-11-20"
+  }
+]
+```
+
+The same action exists on `observations`, `conditions`, `drug-exposures` and
+`procedures`. Each row is the bulk write's row with two differences: it names
+its code system in `source_vocabulary_id` (and may send `source_text`), and it
+sends no concept. The source code is the row's source value
+(`measurement_source_value`, `observation_source_value`, ...), and a
+measurement's or observation's `unit_source_value` selects an approved axis
+variant as `source_unit` does on the lookup. Everything else, including
+`source_record_key`, the provenance headers and `?skip_refresh=true`, works as
+on the bulk write.
+
+```json
+{
+  "created": 1, "updated": 0, "unattributed_matches": 0, "key_ambiguous": [],
+  "ids": [10605646, null],
+  "resolved": 1, "skipped": 1,
+  "unmapped": [
+    {"source_vocabulary_id": "OpenWearables", "source_code": "hrv",
+     "reason": "unmapped", "status": "proposed",
+     "mapping_id": 45, "rows": [1]}
+  ]
+}
+```
+
+`ids` is aligned with the rows you sent; a row that was not written has
+`null`. A code with no approved mapping is not an error: it is queued for
+curators exactly as a lookup queues it, and its rows are left out and listed
+under `unmapped`. Nothing is stored for them; if you keep unresolved rows at
+concept 0, post those to the bulk write as before. A row whose code is mapped
+into another clinical table comes back with `"reason": "other_table"` and the
+`omop_table` to post it to, and is never written to the table you sent it to.
+The status is 201 when at least one row was written and 200 when none was.
+
+The source value may be as long as a mapping's code (100 characters). It is
+resolved whole and stored cut to the 50-character column. If you send one
+record per request, add `?skip_refresh=true` and ask for the patient's record
+to be re-derived once afterwards
+(`POST /api/v1/patient-records/{person_id}/refresh/`).
+
+The first time a code is seen it costs what it costs the lookup: the server
+asks Suggest for a proposal before answering, which takes seconds per new
+code. Send a new source's first batches small, or seed its codes first.
+
+Use the lookup when you need the answer without writing: text terms, the
+`unit_conversion` preview, or a dry run.
 
 ### Text terms from documents
 

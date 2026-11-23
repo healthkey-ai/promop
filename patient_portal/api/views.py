@@ -9172,8 +9172,9 @@ class _OmopBulkCreateMixin:
             data['key_ambiguous'] = True
         return Response(data, status=http_status)
 
-    def _bulk_create(self, request):
-        rows = request.data
+    def _bulk_create(self, request, rows=None):
+        # ``rows`` when a caller has already prepared them (upsert_if_mapped).
+        rows = request.data if rows is None else rows
         if len(rows) > OMOP_BULK_MAX_ROWS:
             return Response(
                 {'detail': (
@@ -9685,6 +9686,127 @@ class _OmopBulkUpdateMixin:
         return ids, payloads
 
 
+class _OmopMappedWriteMixin:
+    """Resolve each row's source code and upsert the rows that are mapped (#2813).
+
+    One call instead of ``code-mappings/lookup/`` followed by a bulk POST. The
+    rules for what is written are in :mod:`patient_portal.api.mapped_writes`;
+    the write is ``_bulk_create``, unchanged.
+    """
+
+    # What the lookup asks (EtlWritePermission) and, below, what the write asks
+    # (_authorize_person_write). The viewset's own class would let a session
+    # patient in, and resolving a code queues it and records a sighting.
+    @action(detail=False, methods=['post'], url_path='upsert_if_mapped',
+            permission_classes=[EtlWritePermission])
+    def upsert_if_mapped(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        """Write the rows whose source code has an approved mapping."""
+        from . import mapped_writes
+
+        oversized: Response | None = _bulk_body_too_large(request)
+        if oversized is not None:
+            return oversized
+        provenance = self._provenance(request)
+        rows = request.data if isinstance(request.data, list) else [request.data]
+        if len(rows) > OMOP_BULK_MAX_ROWS:
+            return Response(
+                {'detail': (
+                    f'Batch too large: {len(rows)} rows exceeds the maximum of '
+                    f'{OMOP_BULK_MAX_ROWS} rows per request. Split the batch and retry.'
+                ), 'max_rows': OMOP_BULK_MAX_ROWS},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        # Their report names rows by their place in the batch that was written,
+        # which is not the request's once unmapped rows are left out.
+        if any(name in request.query_params
+               for name in ('warn_concept_duplicates', 'reject_concept_duplicates')):
+            raise serializers.ValidationError({'detail': (
+                'warn_concept_duplicates and reject_concept_duplicates are not '
+                'supported on upsert_if_mapped.')})
+
+        model_name: str = self.serializer_class.Meta.model.__name__
+        source_field, _date_field, concept_field, _extra = _UPSERT_KEYS[model_name]
+        errors = mapped_writes.row_errors(rows, source_field, concept_field)
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        if not rows:
+            # Nothing to resolve and nobody to authorize: the bulk write's own
+            # answer to an empty list.
+            data = {'created': 0, 'updated': 0, 'unattributed_matches': 0, 'ids': [],
+                    'resolved': 0, 'skipped': 0, 'unmapped': []}
+            if model_name in _KEYED_MODELS:
+                data['key_ambiguous'] = []
+            return Response(data, status=status.HTTP_200_OK)
+
+        # Before any code is resolved: resolving writes (a queue entry, a
+        # sighting), and only a caller who may write this person gets that far.
+        person = self._mapped_write_person(rows)
+        if isinstance(person, Response):
+            return person
+        _authorize_person_write(request, person)
+
+        plan = mapped_writes.plan(
+            rows, model_name=model_name, source_field=source_field,
+            concept_field=concept_field, organization=provenance.organization)
+
+        size = len(rows)
+        if plan.rows:
+            written = self._bulk_create(request, plan.rows)
+            if written.status_code != status.HTTP_201_CREATED:
+                # Per-row errors are aligned with the rows that were attempted.
+                if isinstance(written.data, list) and len(written.data) == len(plan.rows):
+                    return Response(
+                        mapped_writes.spread(written.data, plan.positions, size, dict),
+                        status=written.status_code)
+                return written
+            data = dict(written.data)
+            data['ids'] = mapped_writes.spread(data['ids'], plan.positions, size)
+            if 'key_ambiguous' in data:
+                data['key_ambiguous'] = [plan.positions[i] for i in data['key_ambiguous']]
+            http_status = status.HTTP_201_CREATED
+        else:
+            data = {'created': 0, 'updated': 0, 'unattributed_matches': 0,
+                    'ids': [None] * size}
+            if model_name in _KEYED_MODELS:
+                data['key_ambiguous'] = []
+            http_status = status.HTTP_200_OK
+        data.update(resolved=len(plan.rows), skipped=size - len(plan.rows),
+                    unmapped=plan.unmapped)
+        response = Response(data, status=http_status)
+        # Resolving records a sighting, so the answer is not one to cache.
+        response['Cache-Control'] = 'no-store'
+        return response
+
+    @staticmethod
+    def _mapped_write_person(rows: list[dict[str, Any]]) -> Person | Response:
+        """The one person every row names, or the 400 that says why there is none."""
+        named = set()
+        for row in rows:
+            value = row.get('person')
+            if isinstance(value, bool) or not isinstance(value, (int, str)) or not str(value).strip():
+                return Response(
+                    {'detail': 'person is required on every row of a bulk request.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+            named.add(str(value).strip())
+        if len(named) > 1:
+            return Response(
+                {'detail': (
+                    'A bulk request must contain rows for exactly one person; '
+                    f'found {len(named)} distinct person values. '
+                    'Split the batch by person and retry.'
+                )},
+                status=status.HTTP_400_BAD_REQUEST)
+        raw = named.pop()
+        # ASCII digits only: str.isdigit() also accepts characters int() refuses.
+        person = (Person.objects.filter(pk=int(raw)).first()
+                  if re.fullmatch(r'-?[0-9]{1,18}', raw) else None)
+        if person is None:
+            return Response({'detail': 'person does not exist.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        return person
+
+
 class _OmopBulkDeleteMixin:
     """Delete many clinical rows of one person in a single request."""
 
@@ -10003,13 +10125,13 @@ _PROVENANCE_ORG_PARAMETER = OpenApiParameter(
 )
 _PROVENANCE_ORG_SCHEMA = extend_schema_view(**{
     action_name: extend_schema(parameters=[_PROVENANCE_ORG_PARAMETER])
-    for action_name in ('create', 'update', 'partial_update', 'bulk_update')
+    for action_name in ('create', 'update', 'partial_update', 'bulk_update', 'upsert_if_mapped')
 })
 
 
 @_PROVENANCE_ORG_SCHEMA
 class V1ConditionOccurrenceViewSet(
-        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ConditionOccurrenceViewSet):
+        _OmopMappedWriteMixin, _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ConditionOccurrenceViewSet):
     """Conditions on /api/v1/, with batch actions and diagnosis context."""
 
     source_organization_header = True
@@ -10031,7 +10153,7 @@ class V1ConditionOccurrenceViewSet(
 
 @_PROVENANCE_ORG_SCHEMA
 class V1DrugExposureViewSet(
-        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, DrugExposureViewSet):
+        _OmopMappedWriteMixin, _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, DrugExposureViewSet):
     """Drug exposures on /api/v1/, with the batch actions."""
 
     source_organization_header = True
@@ -10040,7 +10162,7 @@ class V1DrugExposureViewSet(
 
 @_PROVENANCE_ORG_SCHEMA
 class V1MeasurementViewSet(
-        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, MeasurementViewSet):
+        _OmopMappedWriteMixin, _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, MeasurementViewSet):
     """Measurements on /api/v1/, with the batch actions."""
 
     serializer_class = V1MeasurementSerializer
@@ -10049,7 +10171,7 @@ class V1MeasurementViewSet(
 
 @_PROVENANCE_ORG_SCHEMA
 class V1ObservationViewSet(
-        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ObservationViewSet):
+        _OmopMappedWriteMixin, _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ObservationViewSet):
     """Observations on /api/v1/, with the batch actions."""
 
     serializer_class = V1ObservationSerializer
@@ -10058,7 +10180,7 @@ class V1ObservationViewSet(
 
 @_PROVENANCE_ORG_SCHEMA
 class V1ProcedureOccurrenceViewSet(
-        _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ProcedureOccurrenceViewSet):
+        _OmopMappedWriteMixin, _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ProcedureOccurrenceViewSet):
     """Procedures on /api/v1/, with the batch actions."""
 
     source_organization_header = True
