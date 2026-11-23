@@ -13,27 +13,30 @@ matching cares about most:
 
 The command times the two reads and counts populated fields; it does not
 compare values. The raw row follows the derivation's row selection for coded
-stage and the receptors. The principal known differences elsewhere (#2708):
+stage and the receptors, except as listed below. The list names the principal
+known differences between the raw row and the derived record; it is not
+exhaustive (#2708):
 
 - age is the birth-year difference, so it runs one high before the birthday
   and is computed for a placeholder year such as 1900;
-- disease is the newest name-matched condition, not the primary cancer, and
-  admits screening, entered-in-error and provisional rows;
+- disease is the newest condition whose concept name matches, not the primary
+  cancer, so it admits rows the derivation rejects (for example screening,
+  history-of, benign, entered-in-error and provisional rows);
 - ECOG and Karnofsky are numeric, name-matched Observations, entered-in-error
   and provisional rows included; the derivation also reads code and source
   matches and Measurements;
 - lab codes are resolved once per run, not per person; AST, ALT and clearance
-  are read as stored (the paired labs and the blood counts are converted) and
-  their display-name rows are not read;
+  are read as stored (the paired labs and the blood counts are converted); no
+  lab reads a row named only by display text or by a legacy concept name;
 - coded labs share the derivation's code precedence but not its row
   selection: provisional rows count, and a newer row without a number does
   not hide an older one;
 - a clear (``PatientRecord:cleared``) does not hide older rows: an older lab,
-  score or stage can show through, and a receptor reads the clear marker
-  itself as its answer;
-- stage has no uncoded fallback (FHIR Condition.stage, sample-patient stage),
-  and a numeric stage is truncated as stored, while the extractor first
-  restores it to its source unit or drops it;
+  score or stage can show through, and a cleared receptor comes back as the
+  populated answer ``Patientrecord:Cleared``;
+- stage has no uncoded fallback (FHIR Condition.stage, sample-patient stage);
+  a numeric Measurement stage is truncated as stored, while the extractor
+  first restores it to its source unit or drops it and moves to the next row;
 - the record scopes linked facts to the primary cancer and applies curated
   and pending values, which this query does not.
 

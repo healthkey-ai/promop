@@ -79,11 +79,12 @@ There are two, and Step 1 covers both:
 | Source | Zenodo [10.5281/zenodo.21430170](https://doi.org/10.5281/zenodo.21430170) | Synthea, on your machine |
 | Download | `synthea_bc_1000.json`, ~249 MB | none |
 | Needs the Synthea JAR | no | yes |
-| Reproduces published numbers | same 1,000 patients; the timings also need the code revision they were measured on (see the note under the example output) | ratio yes, absolute values no |
+| Reproduces published numbers | same 1,000 patients; timings approximately (see below) | ratio approximately, absolute values no |
 
 **Route A** is the one to use when checking the paper's figures: it is the exact cohort those
-numbers came from. The raw OMOP query has changed since they were measured, so a run on the
-current code checks the method, not the exact milliseconds. **Route B** needs no download and no citation, and is the better choice for
+numbers came from. The raw OMOP query has changed since they were measured (see the note on
+the Step 3 example output), so on either route a run on the current code checks the method and
+the approximate speedup, not the exact milliseconds or ratio. **Route B** needs no download and no citation, and is the better choice for
 adapting the benchmark to a different disease or cohort size. For Route B, see
 [Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for obtaining
 `synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not on the
@@ -183,7 +184,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 > cache-dependent in any case. Use `--count 1000` to match the published cohort size, which
 > is what governs the ratio. **The reproducible result on Route B is the relative speedup
 > between the `PatientRecord` and raw-OMOP paths**, not the absolute millisecond figures.
-> Route A reproduces both.
+> Route A reproduces the cohort itself; its timings are subject to the same caveats.
 
 ---
 
@@ -255,7 +256,7 @@ The raw OMOP path is one statement: `patient_age` and `gender` read the
 `person` row itself, `stage` takes four correlated subqueries (R-ISS and ISS,
 each in `measurement` then `observation`), and every other field takes one. Lab codes come from the curated field mappings, so a run may
 read approved aliases beyond the codes listed. The raw row is not the derived
-record: the command's module docstring lists where the two still differ
+record: the command's module docstring lists the principal differences
 (#2708). The PatientRecord path reads all 20 fields in a single
 `.values()` call on the indexed `patient_record` table.
 
