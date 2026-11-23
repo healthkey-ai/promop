@@ -13,7 +13,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
-from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
@@ -1254,6 +1254,16 @@ def _delete_omop_clinical_rows(person):
     handle those after this returns.
     """
     delete_omop_clinical_rows(person)
+
+
+class GarminSyncThrottle(UserRateThrottle):
+    """Garmin Connect syncs, per signed-in user. Every attempt is a call to
+    Garmin with a key the caller typed, so the bucket is small: enough for a
+    patient who mistypes a key a few times, not for trying keys in bulk. The
+    rate is set here, like the other one-endpoint throttles, so the endpoint
+    is limited even where DEFAULT_THROTTLE_RATES has no entry for it."""
+    scope = 'garmin_sync'
+    rate = '20/hour'
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -5050,11 +5060,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
           - device_type: 'garmin' | 'apple'
         """
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
-        from omop_core.services.pk import next_pk_batch as _next_pk_batch
-        from omop_core.services.mappings import (
-            WEARABLE_ARTIFACT_BOUNDS,
-            WEARABLE_TYPE_CONCEPT_ID, resolve_wearable_mappings,
-        )
 
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -5110,6 +5115,32 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                           f'{"Garmin .fit" if device_type == "garmin" else "Apple Health export.zip"} file.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        return self._store_wearable_samples(
+            request, person, device_type, samples, uploaded.name or 'unknown')
+
+    def _store_wearable_samples(self, request, person, device_type, samples, filename,
+                                replace_daily=False):
+        """Write wearable samples as OMOP rows, record the upload, and answer.
+
+        Shared by the file upload and the Garmin Connect sync, so both resolve
+        concepts, filter artifacts, route by domain and record history one way.
+
+        ``replace_daily`` is for a source whose value *is* the day's total (the
+        Garmin Connect API). The derivation sums steps, active minutes and
+        sleep over a day's rows, because a day arrives as several ``.fit``
+        files; a day total written beside those rows would double the day. So
+        the incoming value replaces the rows earlier Garmin uploads and syncs
+        wrote for that metric and day. A row is Garmin's only on evidence: its
+        value is in a Garmin upload's ``sample_summary`` and in no other
+        device's. Rows carry no device of their own (#442), so anything else,
+        an Apple row or one another ingest path wrote, is left as stored.
+        """
+        from omop_core.services.pk import next_pk_batch as _next_pk_batch
+        from omop_core.services.mappings import (
+            WEARABLE_ARTIFACT_BOUNDS,
+            WEARABLE_TYPE_CONCEPT_ID, resolve_wearable_mappings,
+        )
 
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
@@ -5196,6 +5227,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return concept.domain_id == 'Observation'
 
         existing_keys = set()
+        # (metric_key, date) -> [(pk, value)] for the rows a wearable upload
+        # wrote: the only rows replace_daily may remove.
+        wearable_rows = defaultdict(list)
+        # Only the days in this upload can hold a duplicate of one of its samples.
+        days = (min(s.date for s in samples), max(s.date for s in samples))
         # Build set of (metric_key, date, value) that already exist, reading
         # whichever table the concept's domain routes it to.
         for metric_key in set(s.metric_key for s in samples):
@@ -5206,18 +5242,45 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 existing_rows = Observation.objects.filter(
                     person=person,
                     observation_concept=concept,
-                ).values_list('observation_date', 'value_as_number')
+                    observation_date__range=days,
+                ).values_list('observation_id', 'observation_date', 'value_as_number',
+                              'observation_type_concept_id')
             else:
                 existing_rows = Measurement.objects.filter(
                     person=person,
                     measurement_concept=concept,
-                ).values_list('measurement_date', 'value_as_number')
-            for row_date, row_val in existing_rows:
+                    measurement_date__range=days,
+                ).values_list('measurement_id', 'measurement_date', 'value_as_number',
+                              'measurement_type_concept_id')
+            for row_id, row_date, row_val, row_type_id in existing_rows:
                 if row_val is not None:
                     existing_keys.add((metric_key, row_date, float(row_val)))
+                    if row_type_id == WEARABLE_TYPE_CONCEPT_ID:
+                        wearable_rows[(metric_key, row_date)].append((row_id, float(row_val)))
+
+        # What earlier Garmin uploads and syncs recorded for these days, less
+        # anything another device's upload recorded too.
+        garmin_values = set()
+        if replace_daily:
+            other_values = set()
+            first_day, last_day = days[0].isoformat(), days[1].isoformat()
+            history = WearableUpload.objects.filter(person=person).values_list(
+                'device_type', 'sample_summary')
+            for history_device, summary in history.iterator():
+                target = garmin_values if history_device == 'garmin' else other_values
+                for entry in summary if isinstance(summary, list) else ():
+                    try:
+                        day = entry['date']
+                        if first_day <= day <= last_day:
+                            target.add((entry['metric'], day, round(float(entry['value']), 2)))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            garmin_values -= other_values
 
         pending_measurements = []
         pending_observations = []
+        stale_measurement_ids = []
+        stale_observation_ids = []
         duplicates_skipped = 0
         unmapped_samples = 0
         unmapped_metrics = set()
@@ -5236,6 +5299,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Dedup check
             dedup_key = (sample.metric_key, sample.date, round(sample.value, 2))
+
+            if replace_daily:
+                # Keep one stored row that already says this, drop the rest of
+                # Garmin's rows for the day: partial .fit totals, an earlier
+                # sync's value from before the watch had synced the whole day.
+                day = sample.date.isoformat()
+                kept = False
+                for row_id, row_val in wearable_rows.get((sample.metric_key, sample.date), ()):
+                    if round(row_val, 2) == dedup_key[2] and not kept:
+                        kept = True
+                    elif (sample.metric_key, day, round(row_val, 2)) in garmin_values:
+                        (stale_observation_ids if _is_observation(concept)
+                         else stale_measurement_ids).append(row_id)
+
             if dedup_key in existing_keys:
                 duplicates_skipped += 1
                 continue
@@ -5272,7 +5349,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 pending_measurements.append(m)
 
         created_count = 0
-        with transaction.atomic():
+        replaced_count = len(stale_measurement_ids) + len(stale_observation_ids)
+        # queryset.delete() fires post_delete, which would re-derive the record
+        # once per row; the one refresh below covers the whole write.
+        with transaction.atomic(), suppress_patient_record_refresh():
+            if stale_measurement_ids:
+                Measurement.objects.filter(
+                    person=person, measurement_id__in=stale_measurement_ids).delete()
+            if stale_observation_ids:
+                Observation.objects.filter(
+                    person=person, observation_id__in=stale_observation_ids).delete()
+
             if pending_measurements:
                 m_ids = _next_pk_batch(Measurement, 'measurement_id', len(pending_measurements))
                 for m, mid in zip(pending_measurements, m_ids):
@@ -5302,7 +5389,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             WearableUpload.objects.create(
                 person=person,
                 device_type=device_type,
-                filename=uploaded.name or 'unknown',
+                filename=filename,
                 samples_created=created_count,
                 duplicates_skipped=duplicates_skipped,
                 sample_summary=sample_summary,
@@ -5318,17 +5405,82 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         logger.info(
-            'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d unmapped=%d',
+            'wearable_upload_complete device=%s person_id=%s created=%d duplicates=%d '
+            'unmapped=%d replaced=%d',
             device_type, person.person_id, created_count, duplicates_skipped, unmapped_samples,
+            replaced_count,
         )
         # unmapped_* is reported so a missing concept is distinguishable from
         # "the device exported no data for this metric" — previously identical.
-        return Response({
+        result = {
             'samples_created': created_count,
             'duplicates_skipped': duplicates_skipped,
             'unmapped_samples': unmapped_samples,
             'unmapped_metrics': sorted(unmapped_metrics),
-        })
+        }
+        if replace_daily:
+            result['replaced'] = replaced_count
+        return Response(result)
+
+    @action(detail=False, methods=['post'], url_path='sync-garmin',
+            permission_classes=[IsAuthenticated], throttle_classes=[GarminSyncThrottle])
+    def sync_garmin(self, request):
+        """POST /api/v1/patient-records/sync-garmin/
+
+        Read the signed-in patient's daily metrics from the Garmin Connect
+        Personal API with the key they send, and write them as the ``.fit``
+        upload does (#2794). The key is used for this request and kept
+        nowhere: not in the database, a log line or a queued task, which is
+        why the sync runs here and not on a worker.
+
+        JSON body:
+          - api_key: the patient's Garmin Connect Personal API key
+          - days: how many days to read, 1 to 90 (default 30)
+          - end_date: last day to read, YYYY-MM-DD (default yesterday)
+        """
+        from omop_core.services import garmin_connect
+
+        if is_machine_request(request):
+            return Response({'error': 'Garmin Connect sync is for a signed-in patient.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        from patient_portal.models import PatientUser
+        try:
+            person = PatientUser.objects.get(identity=request.user).person
+        except PatientUser.DoesNotExist:
+            return Response(
+                {'error': 'No patient record linked to your account'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from patient_portal.consent import RECORD_OFF, record_permitted
+        if not record_permitted(person):
+            return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
+
+        body = request.data if isinstance(request.data, dict) else {}
+        try:
+            api_key = garmin_connect.clean_api_key(body.get('api_key'))
+            start, end = garmin_connect.clean_range(
+                body.get('days'), body.get('end_date'), timezone.now().date())
+            samples, failed = garmin_connect.fetch_daily_samples(api_key, start, end)
+        except garmin_connect.GarminSyncError as exc:
+            logger.info('garmin_sync_refused person_id=%s status=%s', person.person_id, exc.status)
+            return Response({'error': exc.message}, status=exc.status)
+
+        response = self._store_wearable_samples(
+            request, person, 'garmin', samples,
+            f'Garmin Connect sync {start.isoformat()} to {end.isoformat()}',
+            replace_daily=True,
+        )
+        if response.status_code == 200:
+            response.data.setdefault('replaced', 0)
+            response.data.setdefault('unmapped_samples', 0)
+            response.data.setdefault('unmapped_metrics', [])
+            response.data.update({
+                'start_date': start.isoformat(),
+                'end_date': end.isoformat(),
+                'datasets_failed': failed,
+            })
+        return response
 
     @action(detail=False, methods=['get'], url_path='wearable-uploads',
             permission_classes=[IsAuthenticated])

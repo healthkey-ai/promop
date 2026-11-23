@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
+import GarminConnectSync from './GarminConnectSync';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 const ACTIVITY_TREND_OPTIONS = ['improving', 'stable', 'declining', 'insufficient_data'];
@@ -356,6 +357,15 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         onChange={handleFileChange}
       />
 
+      {/* Garmin Connect: the same rows as a .fit upload, read through Garmin's API */}
+      <GarminConnectSync
+        disabled={uploading}
+        onSynced={(changed) => {
+          fetchUploads();
+          if (changed && onRefresh) onRefresh();
+        }}
+      />
+
       {/* Upload history */}
       {!uploadsLoading && uploads.length > 0 && (
         <Section title="Upload History">
@@ -437,7 +447,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       {noData && !uploadsLoading && uploads.length === 0 && (
         <p className="mb-4 text-sm text-gray-500 italic">
-          No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.
+          No wearable data synced yet. Upload or drag &amp; drop wearable data files, or sync from Garmin Connect, to contribute to your record.
         </p>
       )}
 
