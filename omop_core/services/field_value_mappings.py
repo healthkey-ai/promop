@@ -334,6 +334,96 @@ def in_force(choice, role: str = 'value_as_concept'):
             .filter(choice=choice, role=role, status='approved').first())
 
 
+def answer_concept_ids(field_names) -> dict[str, dict[str, int]]:
+    """The concept each answer of the given fields writes as ``value_as_concept_id``.
+
+    ``{field_name: {spelling: concept_id}}``, where a spelling is the label, the
+    stored value or any alias of a choice, so a value saved under an earlier
+    label still projects. This is what the projection engine reads (#1224); it
+    asks for the approved ``value_as_concept`` decision of each choice, and the
+    rules are:
+
+    * an **approved, mapped** decision whose target is still a current standard
+      concept writes that concept. A target a vocabulary reload has since
+      retired, or made non-standard, writes none: the value still saves, with
+      no concept, rather than carry a concept that no longer means it;
+    * an **approved no-equivalent** decision writes none, even where the choice
+      has a legacy code, because a reviewer said no standard concept exists;
+    * a choice with **no decision yet**, or only an open proposal, keeps the
+      concept of its primary ``FieldChoiceCode``, as before this existed: the
+      proposal migration 0368 made from that code is not a new decision, and
+      holding projection back until each is approved would silently stop
+      writing concepts that are written today;
+    * a choice whose decision was **rejected or withdrawn** (or superseded)
+      does not fall back to that code: the curator turned it down.
+
+    A spelling that two choices of one field resolve to different concepts (the
+    same label in two contexts) writes none: a guess is worse than a plain
+    value. Retired choices are included, since stored values still carry them.
+    """
+    from omop_core.models import (
+        FieldChoice, FieldChoiceAlias, FieldChoiceCode, FieldValueConceptMapping as Mapping,
+    )
+
+    field_names = sorted(set(field_names))
+    if not field_names:
+        return {}
+    choices = list(FieldChoice.objects.filter(field_name__in=field_names)
+                   .values('pk', 'field_name', 'display', 'value'))
+    if not choices:
+        return {}
+    ids = [c['pk'] for c in choices]
+
+    decided: dict[int, int | None] = {}   # choice -> concept id, None for "no concept"
+    ctx = CheckContext()
+    rows = (Mapping.objects.filter(choice_id__in=ids, role='value_as_concept',
+                                   status__in=('approved', 'rejected', 'superseded'))
+            .select_related('choice', 'target_concept'))
+    for row in rows:
+        if row.status != 'approved':
+            decided.setdefault(row.choice_id, None)
+            continue
+        ok = row.outcome == 'mapped' and row.target_concept_id and target_state(row, ctx) == 'ok'
+        decided[row.choice_id] = row.target_concept_id if ok else None
+
+    legacy_ids = [pk for pk in ids if pk not in decided]
+    legacy: dict[int, int] = {}
+    if legacy_ids:
+        codes = list(FieldChoiceCode.objects.filter(choice_id__in=legacy_ids, is_primary=True)
+                     .values_list('choice_id', 'vocabulary_id', 'code'))
+        by_vocab: dict[str, set] = {}
+        for _, vocabulary_id, code in codes:
+            by_vocab.setdefault(vocabulary_id, set()).add(code)
+        found: dict[tuple, int] = {}
+        for vocabulary_id, code_set in by_vocab.items():
+            found.update({(vocabulary_id, code): pk for code, pk in
+                          _concept_model().objects.filter(
+                              vocabulary_id=vocabulary_id, concept_code__in=code_set,
+                          ).values_list('concept_code', 'concept_id')})
+        for choice_id, vocabulary_id, code in codes:
+            if (vocabulary_id, code) in found:
+                legacy[choice_id] = found[(vocabulary_id, code)]
+
+    aliases: dict[int, list[str]] = {}
+    for choice_id, alias in FieldChoiceAlias.objects.filter(choice_id__in=ids).values_list('choice_id', 'alias'):
+        aliases.setdefault(choice_id, []).append(alias)
+
+    # One entry per (field, spelling): the concepts its choices resolve to, with
+    # None standing for a choice that writes no concept. Only a spelling that
+    # means exactly one concept, and no "none", is projected.
+    meanings: dict[str, dict[str, set]] = {}
+    for choice in choices:
+        concept_id = decided[choice['pk']] if choice['pk'] in decided else legacy.get(choice['pk'])
+        for text in {choice['display'], choice['value'] or choice['display'],
+                     *aliases.get(choice['pk'], ())}:
+            meanings.setdefault(choice['field_name'], {}).setdefault(text, set()).add(concept_id)
+    return {
+        field: {text: next(iter(concepts)) for text, concepts in by_text.items()
+                if len(concepts) == 1 and None not in concepts}
+        for field, by_text in meanings.items()
+    }
+
+
 def coverage(field_name: str | None = None) -> dict[str, dict[str, int]]:
     """Answer coverage per field, apart from whether the field's question is mapped.
 

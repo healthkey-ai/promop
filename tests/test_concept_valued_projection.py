@@ -182,6 +182,135 @@ class TestConceptValueProjection:
 
 
 # ---------------------------------------------------------------------------
+# Approved answer mappings decide the concept (#1224)
+# ---------------------------------------------------------------------------
+
+class TestApprovedAnswerConcepts:
+    """The projection writes the approved ``value_as_concept`` decision."""
+
+    @staticmethod
+    def _choice(display='Watch and wait'):
+        return FieldChoice.objects.get(field_name='disease_activity', display=display)
+
+    @staticmethod
+    def _concept_map():
+        descriptor = build_writable_field_descriptor()
+        projection = projection_for_descriptor(descriptor['disease_activity'])
+        return projection, projection.get('value_concept_map', {})
+
+    def test_an_approved_concept_replaces_the_legacy_code(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        proposal = fvm.propose(self._choice(), vocabulary_id='SNOMED', concept_code='103338009')
+        fvm.approve(proposal)
+
+        projection, concepts = self._concept_map()
+        assert concepts['Watch and wait'] == 4014046          # not the primary code's 4190466
+        person = PersonFactory()
+        PatientRecordFactory(person=person, disease_activity='Watch and wait')
+        assert project_single_value(person, 'disease_activity', 'Watch and wait', projection)
+        obs = Observation.objects.get(person=person, observation_source_value='97509-4')
+        assert obs.value_as_concept_id == 4014046
+
+    def test_an_approved_no_equivalent_writes_no_concept_despite_a_legacy_code(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.approve(fvm.propose(self._choice(), outcome='no_equivalent',
+                                rationale='No standard concept for this phrase'))
+
+        projection, concepts = self._concept_map()
+        assert 'Watch and wait' not in concepts
+        person = PersonFactory()
+        PatientRecordFactory(person=person, disease_activity='Watch and wait')
+        assert project_single_value(person, 'disease_activity', 'Watch and wait', projection)
+        obs = Observation.objects.get(person=person, observation_source_value='97509-4')
+        assert (obs.value_as_string, obs.value_as_concept_id) == ('Watch and wait', None)
+
+    def test_an_open_proposal_changes_nothing(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.propose(self._choice(), vocabulary_id='SNOMED', concept_code='103338009')
+        assert self._concept_map()[1]['Watch and wait'] == 4190466
+
+    def test_a_rejected_decision_does_not_fall_back_to_the_legacy_code(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.reject(fvm.propose(self._choice(), vocabulary_id='SNOMED', concept_code='373818007'))
+        assert 'Watch and wait' not in self._concept_map()[1]
+
+    def test_a_withdrawn_approval_writes_no_concept(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        approved = fvm.approve(fvm.propose(self._choice(), vocabulary_id='SNOMED',
+                                           concept_code='103338009'))
+        fvm.reject(approved)
+        assert 'Watch and wait' not in self._concept_map()[1]
+
+    def test_a_target_retired_after_approval_writes_no_concept(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.models import Concept
+        from omop_core.services import field_value_mappings as fvm
+        fvm.approve(fvm.propose(self._choice(), vocabulary_id='SNOMED', concept_code='103338009'))
+        assert self._concept_map()[1]['Watch and wait'] == 4014046
+        Concept.objects.filter(pk=4014046).update(invalid_reason='D')
+        assert 'Watch and wait' not in self._concept_map()[1]
+
+    def test_an_alias_and_the_stored_value_project_too(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.models import FieldChoiceAlias
+        choice = self._choice()
+        choice.value = 'watch_and_wait'
+        choice.save()
+        FieldChoiceAlias.objects.create(choice=choice, field_name='disease_activity',
+                                        alias='Watching', alias_key='watching')
+        concepts = self._concept_map()[1]
+        assert concepts['Watch and wait'] == concepts['watch_and_wait'] == concepts['Watching'] == 4190466
+
+    def test_a_label_two_contexts_resolve_differently_writes_no_concept(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        other = FieldChoice.objects.create(field_name='disease_activity', display='Watch and wait',
+                                           context_key='pathology')
+        fvm.approve(fvm.propose(other, vocabulary_id='SNOMED', concept_code='103338009'))
+        assert 'Watch and wait' not in self._concept_map()[1]
+
+    def test_a_retired_choice_still_projects(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_choices
+        field_choices.set_retired(self._choice(), True)
+        assert self._concept_map()[1]['Watch and wait'] == 4190466
+
+    def test_the_queries_do_not_grow_with_the_choices(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from omop_core.services import field_value_mappings as fvm
+
+        def count():
+            with CaptureQueriesContext(connection) as ctx:
+                fvm.answer_concept_ids(['disease_activity'])
+            return len(ctx)
+
+        first = FieldChoice.objects.create(field_name='disease_activity', display='Extra first')
+        fvm.approve(fvm.propose(first, vocabulary_id='SNOMED', concept_code='263855007'))
+        before = count()
+        for i in range(8):
+            c = FieldChoice.objects.create(field_name='disease_activity', display=f'Extra {i}')
+            fvm.approve(fvm.propose(c, vocabulary_id='SNOMED', concept_code='263855007'))
+        assert count() == before
+
+
+# ---------------------------------------------------------------------------
 # Migration outcome tests (mapping rows are correct after migration)
 # ---------------------------------------------------------------------------
 

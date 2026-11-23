@@ -488,29 +488,13 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
         if e.get('value_kind') == 'concept' and e.get('projection')
     ]
     if concept_fields:
-        from omop_core.models import FieldChoiceCode
-        codes = list(
-            FieldChoiceCode.objects
-            .filter(choice__field_name__in=concept_fields, is_primary=True)
-            .values_list('choice__field_name', 'choice__display',
-                         'vocabulary_id', 'code')
-        )
-        if codes:
-            # Resolve (vocabulary_id, code) pairs → concept_id.  Group by
-            # vocabulary so the existing helper works.
-            by_vocab: dict[str, set[str]] = {}
-            for _, _, vid, code in codes:
-                by_vocab.setdefault(vid, set()).add(code)
-            resolved: dict[tuple[str, str], int] = {}
-            for vid, code_set in by_vocab.items():
-                for code, cid in _resolve_concept_ids(code_set, vid).items():
-                    resolved[(vid, code)] = cid
-            for fn, display, vid, code in codes:
-                pk = resolved.get((vid, code))
-                if pk is not None:
-                    proj = entries[fn].get('projection')
-                    if proj is not None:
-                        proj.setdefault('value_concept_map', {})[display] = pk
+        # The approved answer-to-concept decisions (#1224); a choice nobody has
+        # decided yet keeps the concept of its primary code, as before.
+        from omop_core.services.field_value_mappings import answer_concept_ids
+        for fn, concepts in answer_concept_ids(concept_fields).items():
+            proj = entries[fn].get('projection')
+            if proj is not None and concepts:
+                proj['value_concept_map'] = concepts
     return entries
 
 
