@@ -12,24 +12,31 @@ not be committed (how to run tests on your machine, your sandbox URLs) go in
 
 | `.env` variable | Database | Render services | Use |
 |---|---|---|---|
-| `PROD_DATABASE_URL` | **Production** | `promop`, `promop-worker` (branch `main`) | read-only checks and verification |
-| `STAGING_DATABASE_URL` | **Staging** | `promop-staging`, `promop-staging-worker` (branch `dev`) | migrations, data fixes, investigation |
+| `DATABASE_URL` | **Production** | `promop`, `promop-worker` (branch `main`) | read-only checks and verification |
+| `STAGING_DATABASE_URL` | **Staging**, the database most work is done against | `promop-staging`, `promop-staging-worker` (branch `dev`) | migrations, data fixes, investigation |
 
-`.env` deliberately sets **no `DATABASE_URL`** — the one variable Django reads. Every command
-names its database by setting `DATABASE_URL` itself:
+`DATABASE_URL` is the one variable Django reads, and in `.env` it is **production**. There is
+no `PROD_DATABASE_URL`. Every command names its database by setting `DATABASE_URL` itself:
 
 | Target | Set |
 |---|---|
 | Local tests | `DATABASE_URL="postgresql://postgres@localhost:5433/promop_test"` |
 | Local development | `DATABASE_URL="postgresql://postgres@localhost:5433/promop_dev"` |
 | Staging | `DATABASE_URL="${STAGING_DATABASE_URL:?}"` |
-| Production (read-only) | `DATABASE_URL="${PROD_DATABASE_URL:?}"` |
+| Production (read-only) | nothing: `.env`'s own `DATABASE_URL` is production |
 
-A command that forgets fails safe: without `DEBUG=True`, settings refuse to load ("DATABASE_URL
-must be set"); with it, Django falls back to a local SQLite file. **Run local tests only with
-`DATABASE_URL` pointing at local PostgreSQL** — never leave it exported at staging or production
-in a shell you test from, because pytest and `manage.py test` create their test database on
-whatever server it names. Never write to production data — production is loaded from a staging
+**A command that forgets does not fail. It runs against production.** `settings.py` calls
+`load_dotenv()`, which looks for `.env` upward from the checkout, so a command run in the checkout
+that holds `.env`, or in a worktree beneath it, takes `DATABASE_URL` from that file. A shell that
+sourced `.env` (`set -a; . ./.env`) has it exported as well. A value set on the command wins:
+`load_dotenv()` does not override a variable that is already set. Only a worktree outside the
+checkout, in a shell that never sourced `.env`, has no `DATABASE_URL`; there settings refuse to
+load without `DEBUG=True` ("DATABASE_URL must be set") and fall back to a local SQLite file with
+it.
+
+**Run local tests only with `DATABASE_URL` set on the command to local PostgreSQL.** pytest and
+`manage.py test` create their test database on whatever server it names, and with `.env` loaded
+and nothing set, that server is production. Never write to production data — production is loaded from a staging
 dump, so fix and verify on staging; schema changes reach production only through deploys
 (`start.sh` migrates). Details: [Database Selection Rule](#database-selection-rule).
 
@@ -845,8 +852,8 @@ DATABASE_URL="${STAGING_DATABASE_URL:?STAGING_DATABASE_URL is not set}" \
   python manage.py audit_sct_history
 ```
 
-The audit only reads, so it can run against production the same way with
-`DATABASE_URL="${PROD_DATABASE_URL:?}"`.
+The audit only reads, so it can run against production: `.env`'s own `DATABASE_URL`, with no
+override on the command.
 
 The command exits with code 1 if unrecognized values are found. Resolve them before proceeding — either add a mapping to `_OLD_TO_NEW_SCT` in the migration, or accept that the values will be preserved as-is.
 
@@ -970,8 +977,8 @@ suite both pass on the offending shape, so neither catches it. CI's job is
 
 To audit whether the DB and model are in sync at any time:
 
-It only reads. Point it at staging (`$STAGING_DATABASE_URL`) or production
-(`$PROD_DATABASE_URL`) explicitly. See [above](#secret-key-on-a-shared-database).
+It only reads. Point it at staging (`$STAGING_DATABASE_URL`) explicitly, or leave `.env`'s own
+`DATABASE_URL` in place for production. See [above](#secret-key-on-a-shared-database).
 
 ```bash
 DATABASE_URL="$STAGING_DATABASE_URL" \
@@ -3074,12 +3081,13 @@ whatever is on `main`. A Blueprint sync is still what applies `render.yaml` infr
 | Running tests | `postgresql://postgres@localhost:5433/promop_test` |
 | Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5433/promop_dev` |
 | Staging migrations, writes and sync checks | `$STAGING_DATABASE_URL` |
-| Production read-only checks | `$PROD_DATABASE_URL` |
+| Production read-only checks | `.env`'s own `DATABASE_URL` (set nothing) |
 
-`.env` holds `STAGING_DATABASE_URL` (Render staging) and `PROD_DATABASE_URL` (Render production)
-and **no `DATABASE_URL`**, so nothing reaches a remote database unless a command names it — see
-[Two databases in `.env`](#two-databases-in-env). Set `DATABASE_URL` on every command, and use
-`${VAR:?}` so a missing variable fails instead of expanding to empty.
+`.env` holds `STAGING_DATABASE_URL` (Render staging, the database most work is done against) and
+`DATABASE_URL` (Render production), so a command that names no database reaches **production** —
+see [Two databases in `.env`](#two-databases-in-env). Set `DATABASE_URL` on every command that is
+not a production read, and use `${VAR:?}` so a missing variable fails instead of expanding to
+empty.
 
 Production is for reading and verification only. Never write to production data from here —
 production is loaded from a staging dump, so fix and verify on staging. Production's *services*

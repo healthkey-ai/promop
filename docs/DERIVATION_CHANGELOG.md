@@ -55,7 +55,7 @@ refused write is reported, by statement verb and table, as an error for that
 person and the command exits non-zero.
 
 **Run it on staging, or on a restored copy of production -- never against
-`PROD_DATABASE_URL`.** Production is for read-only checks (see AGENTS.md), and
+production (`.env`'s `DATABASE_URL`).** Production is for read-only checks (see AGENTS.md), and
 this takes row locks and executes updates there before rolling them back.
 Operational costs:
 
