@@ -96,19 +96,21 @@ const domains = [
 ];
 /** What the tab remembers per account in this browser, as the patient list's
  * filters are: the chosen domain (#2656), the list's order, and the categories
- * the categories a curator has opened under each domain; every other category
- * starts folded (#2690). */
-type Preferences = { domain: string; order: ConceptOrder; expanded: Record<string, string[]> };
+ * a curator has opened under each domain; every other category starts folded
+ * (#2690). Wearables has an order of its own (`wearablesOrder`), so it opens by
+ * category whatever was chosen for the clinical domains (#2795). */
+type Preferences = { domain: string; order: ConceptOrder; wearablesOrder: ConceptOrder; expanded: Record<string, string[]> };
 const domainPreferenceKey = (userId?: number | string | null) => `promop-concept-to-code:${userId ?? 'session'}`;
 /** Each part is read on its own, and one of the wrong shape is ignored. */
 function loadPreferences(key: string): Preferences {
-  const preferences: Preferences = { domain: '', order: 'category', expanded: {} };
+  const preferences: Preferences = { domain: '', order: 'category', wearablesOrder: 'category', expanded: {} };
   try {
     const saved = JSON.parse(localStorage.getItem(key) || '{}');
     if (!saved || typeof saved !== 'object') return preferences;
     const isDomain = (value: unknown) => domains.some(([domain]) => domain === value);
     if (isDomain(saved.domain)) preferences.domain = saved.domain;
     if (saved.order === 'priority') preferences.order = 'priority';
+    if (saved.wearables_order === 'priority') preferences.wearablesOrder = 'priority';
     // An older `collapsed` list is not read: it said what was shut, not what is open.
     if (saved.expanded && typeof saved.expanded === 'object' && !Array.isArray(saved.expanded)) {
       for (const [domain, names] of Object.entries(saved.expanded)) {
@@ -121,11 +123,13 @@ function loadPreferences(key: string): Preferences {
   return preferences;
 }
 /** Only what differs from a fresh tab is written, beside the domain. */
-function savePreferences(key: string, { domain, order, expanded }: Preferences) {
+function savePreferences(key: string, { domain, order, wearablesOrder, expanded }: Preferences) {
   const opened = Object.fromEntries(Object.entries(expanded).filter(([, names]) => names.length));
   try {
     localStorage.setItem(key, JSON.stringify({
-      domain, ...(order === 'category' ? {} : { order }), ...(Object.keys(opened).length ? { expanded: opened } : {}),
+      domain, ...(order === 'category' ? {} : { order }),
+      ...(wearablesOrder === 'category' ? {} : { wearables_order: wearablesOrder }),
+      ...(Object.keys(opened).length ? { expanded: opened } : {}),
     }));
   } catch { /* Storage may be disabled. */ }
 }
@@ -188,12 +192,13 @@ type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
 
-/** Download and Share under the Wearables domain. They ask for the source code
+/** The files and the vote under the Wearables domain: From the source systems,
+ *  To a target, CSV or Word, then Share (#2795). They ask for the source code
  *  systems here, so no other domain pays for the request. */
 function WearableControls({ canApprove }: { canApprove: boolean }) {
   const systems = useWearableSourceSystems();
   return <>
-    <WearableMappingsDownload systems={systems} />
+    <WearableMappingsDownload systems={systems} layout="from-to" />
     {canApprove && <WearableVoteShare systems={systems} />}
   </>;
 }
@@ -220,7 +225,9 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
     setLoadedKey(preferenceKey);
     setPreferences(loadPreferences(preferenceKey));
   }
-  const { domain, order } = preferences;
+  const { domain } = preferences;
+  const wearables = domain === WEARABLES_DOMAIN;
+  const order = wearables ? preferences.wearablesOrder : preferences.order;
   // Saved when the curator changes one, never on load.
   const remember = (change: Partial<Preferences>) => {
     const next = { ...preferences, ...change };
@@ -474,10 +481,15 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
         Ranked only{data?.prioritized ? ` (${data.prioritized})` : ''}
       </label>
       <select aria-label="Concept order" className={input} disabled={writing} value={order}
-        onChange={event => { remember({ order: event.target.value === 'priority' ? 'priority' : 'category' }); setPage(1); }}>
+        onChange={event => {
+          const chosen: ConceptOrder = event.target.value === 'priority' ? 'priority' : 'category';
+          remember(wearables ? { wearablesOrder: chosen } : { order: chosen });
+          setPage(1);
+        }}>
         <option value="category">Category, then priority</option><option value="priority">Priority</option>
       </select>
-      {groups && <div role="group" aria-label="Categories" className="flex items-center gap-2">
+      {/* Wearables has a handful of categories, each opened from its own header (#2795). */}
+      {groups && !wearables && <div role="group" aria-label="Categories" className="flex items-center gap-2">
         <button type="button" className={button} disabled={tooManyToExpand || listCategories.every(name => expanded.has(name))}
           title={tooManyToExpand ? `Expand all is offered for ${EXPAND_ALL_LIMIT} categories or fewer: this list has ${listCategories.length}. Open the categories you need.` : undefined}
           onClick={() => setExpanded([...expanded, ...listCategories])}>Expand all</button>
@@ -485,8 +497,8 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
           onClick={() => setExpanded([...expanded].filter(name => !listCategories.includes(name)))}>Collapse all</button>
       </div>}
       {/* The whole Wearables tab as a file, and the public vote: the same
-          controls as the Source Code to Concept direction's Wearables tab. */}
-      {domain === WEARABLES_DOMAIN && <div role="group" aria-label="Wearable mappings" className="flex flex-wrap items-center gap-2">
+          file and dialog as the Source Code to Concept direction's Wearables tab. */}
+      {wearables && <div role="group" aria-label="Wearable mappings" className="flex flex-wrap items-center gap-2">
         <WearableControls canApprove={canApprove} />
       </div>}
     </div>
@@ -496,7 +508,7 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       its priority (1 is first; clear it to unrank). Click a Priority cell for Done once a concept's codes are mapped; Done
       concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.
       {groups && ' Categories start folded; dragging reorders the rows of the categories you have opened.'}</p>
-    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts{tooManyToExpand ? '.' : ', or Expand all.'}</p>}
+    {groups && allFolded && <p className="text-xs text-slate-500">Categories are folded: open one to see its concepts{tooManyToExpand || wearables ? '.' : ', or Expand all.'}</p>}
     {tooLongToGroup && data && <p className="text-xs text-slate-500">This list has {data.total.toLocaleString()} concepts, too
       many to group by category (the limit is {data.group_limit?.toLocaleString()}), so it is in priority order. Choose a
       domain or a disease, or search, to narrow it.</p>}

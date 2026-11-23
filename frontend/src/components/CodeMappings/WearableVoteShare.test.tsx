@@ -97,31 +97,36 @@ describe("WearableVoteShare", () => {
     expect(within(created).getByRole("button")).toHaveTextContent("Copied");
   });
 
-  it("offers every system by default and sends none; a chosen system limits the share to it", async () => {
-    mockPost.mockImplementation(() => Promise.resolve({ data: share(6, { source_vocabularies: ["Garmin"] }) }));
+  it("offers every system by default and sends none; the systems ticked limit the share to them", async () => {
+    mockPost.mockImplementation(() => Promise.resolve({ data: share(6, { source_vocabularies: ["Apple", "Garmin"] }) }));
     await openDialog(SYSTEMS);
-    const select = screen.getByLabelText("Source code system");
-    expect(select).toHaveValue("");
-    expect(within(select).getAllByRole("option").map((option) => option.textContent))
+    // The boxes sit in the dialog itself: a list dropping below a button would be cut off by it.
+    const list = () => screen.getByRole("group", { name: "Source code systems" });
+    const all = () => within(list()).getByLabelText("All source systems");
+    expect(within(list()).getAllByRole("checkbox").map((box) => box.closest("label")?.textContent))
       .toEqual(["All source systems", "HealthKit", "Garmin", "OpenWearables"]);
+    expect(all()).toBeChecked();
 
     await userEvent.type(screen.getByLabelText("Title (shown to voters)"), "All of them");
     await userEvent.click(screen.getByRole("button", { name: "Create link" }));
     await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(SHARES, { title: "All of them", note: "" }));
 
-    await userEvent.type(screen.getByLabelText("Title (shown to voters)"), "Garmin only");
-    await userEvent.selectOptions(screen.getByLabelText("Source code system"), "Garmin");
+    await userEvent.type(screen.getByLabelText("Title (shown to voters)"), "Two systems");
+    await userEvent.click(within(list()).getByLabelText("Garmin"));
+    await userEvent.click(within(list()).getByLabelText("HealthKit"));
+    expect(all()).not.toBeChecked();
     await userEvent.click(screen.getByRole("button", { name: "Create link" }));
     await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(SHARES, {
-      title: "Garmin only", note: "", source_vocabularies: ["Garmin"],
+      title: "Two systems", note: "", source_vocabularies: ["Apple", "Garmin"],
     }));
     // The choice goes back to every system for the next share.
-    await waitFor(() => expect(screen.getByLabelText("Source code system")).toHaveValue(""));
+    await waitFor(() => expect(all()).toBeChecked());
+    expect(within(list()).getByLabelText("Garmin")).not.toBeChecked();
   });
 
   it("offers no system menu when the page has none to offer", async () => {
     await openDialog();
-    expect(screen.queryByLabelText("Source code system")).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Source code systems" })).not.toBeInTheDocument();
   });
 
   it("names the systems a listed share is limited to", async () => {

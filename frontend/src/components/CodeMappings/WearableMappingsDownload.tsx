@@ -28,13 +28,14 @@ const fromTheTab: FetchWearableFile = (format, destination, sources) => api.get<
 /** The CDISC Biomedical Concepts' own vocabulary on the Wearables tab. */
 const CDISC_BC = "CDISC-BC";
 const LABEL = "Download all wearable mappings";
-const CHOICES: { format: FileFormat; label: string; name: string; title: string }[] = [
-  { format: "csv", label: "CSV", name: `${LABEL} as CSV`, title: "One line per mapping, for a spreadsheet" },
+const CHOICES: { format: FileFormat; label: string; short: string; name: string; title: string }[] = [
+  { format: "csv", label: "CSV", short: "CSV", name: `${LABEL} as CSV`, title: "One line per mapping, for a spreadsheet" },
   {
-    format: "docx", label: "Word document", name: `${LABEL} as a Word document`,
+    format: "docx", label: "Word document", short: "Word", name: `${LABEL} as a Word document`,
     title: "A table per category, for reading and sharing",
   },
 ];
+const SELECT = "rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800";
 
 /**
  * The whole Wearables tab as a file the server builds: every mapping on the
@@ -44,32 +45,39 @@ const CHOICES: { format: FileFormat; label: string; name: string; title: string 
  * The target menu picks what the codes are mapped to in the file: the OMOP
  * concept, or the CDISC Biomedical Concept linked to it.
  *
- * The source system menu limits the file to one source code system; the
- * default is all of them. It is offered when `systems` are given, and not on
+ * The source system menu limits the file to the source code systems ticked
+ * in it, any number of them; the default is all of them. It is offered when `systems` are given, and not on
  * the public vote page, where the share already decides which systems it holds.
  *
  * Reading the tab is enough to download it, so a read-only reader sees this
  * too. `fetchFile` replaces the signed-in request, for the public vote page,
  * which asks its own endpoint with the share's token.
+ *
+ * `layout="from-to"` is the Concept to Code direction's row (#2795): "From"
+ * the source systems, "To" the target, then the two files, each with a download
+ * icon and no sentence before them. Nothing else on that tab downloads, so the
+ * label that tells this apart from the section menus is not shown; it stays
+ * the group's and the buttons' accessible name.
  */
-export default function WearableMappingsDownload({ fetchFile = fromTheTab, systems = [] }: {
+export default function WearableMappingsDownload({ fetchFile = fromTheTab, systems = [], layout = "titled" }: {
   fetchFile?: FetchWearableFile;
   systems?: WearableSourceSystem[];
+  layout?: "titled" | "from-to";
 }) {
   const [busy, setBusy] = useState<FileFormat | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [destination, setDestination] = useState<Destination>("omop");
-  const [source, setSource] = useState("");
+  const [sources, setSources] = useState<string[]>([]);
   // The Biomedical Concepts are what that target maps to, so under it the CDISC
   // BC system has no codes of its own and the file would be empty.
   const offered = destination === "cdisc-bc" ? systems.filter((system) => system.id !== CDISC_BC) : systems;
-  const chosen = offered.some((system) => system.id === source) ? source : "";
+  const chosen = offered.filter((system) => sources.includes(system.id)).map((system) => system.id);
 
   const download = async (format: FileFormat) => {
     setBusy(format);
     setError(null);
     try {
-      const response = await fetchFile(format, destination, chosen ? [chosen] : []);
+      const response = await fetchFile(format, destination, chosen);
       const stem = destination === "omop" ? "wearable-mappings" : "wearable-cdisc-bc-mappings";
       saveBlob(response.data, filenameFromDisposition(
         response.headers?.["content-disposition"], `${stem}.${format}`));
@@ -80,6 +88,53 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
     }
   };
 
+  const target = (
+    <select
+      aria-label="Map codes to"
+      title="What each wearable code is mapped to in the file"
+      value={destination}
+      disabled={busy !== null}
+      onChange={(e) => setDestination(e.target.value as Destination)}
+      className={SELECT}
+    >
+      <option value="omop">OMOP concept</option>
+      <option value="cdisc-bc">CDISC Biomedical Concept</option>
+    </select>
+  );
+  const sourceSystem = <WearableSourceSystemSelect systems={offered} value={chosen} onChange={setSources} disabled={busy !== null} />;
+  const fromTo = layout === "from-to";
+  const files = CHOICES.map(({ format, label, short, name, title }) => (
+    <button
+      key={format}
+      type="button"
+      title={title}
+      // Its own name, not the bare "CSV" the section menus' choices
+      // carry; while it works the button is named by what it shows.
+      aria-label={busy === format ? undefined : name}
+      disabled={busy !== null}
+      aria-busy={busy === format}
+      onClick={() => { void download(format); }}
+      className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1 font-medium text-slate-800 hover:bg-slate-100 focus:outline-2 focus:outline-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {fromTo && <Download size={12} aria-hidden="true" />}
+      {busy === format ? "Preparing…" : fromTo ? short : label}
+    </button>
+  ));
+
+  if (fromTo) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+        <div role="group" aria-label={LABEL} className="flex flex-wrap items-center gap-2">
+          {/* No systems yet (the reference is loading, or failed): the file is every system. */}
+          {offered.length > 0 && <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">From {sourceSystem}</span>}
+          <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">To {target}</span>
+          {files}
+        </div>
+        {error && <span role="alert" className="text-red-700">{error}</span>}
+      </div>
+    );
+  }
+
   return (
     <div className="ml-auto flex flex-wrap items-center justify-end gap-2 text-xs text-slate-600">
       {error && <span role="alert" className="text-red-700">{error}</span>}
@@ -87,34 +142,9 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
         <span className="inline-flex items-center gap-1 font-medium text-slate-700">
           <Download size={12} aria-hidden="true" /> {LABEL}
         </span>
-        <select
-          aria-label="Map codes to"
-          title="What each wearable code is mapped to in the file"
-          value={destination}
-          disabled={busy !== null}
-          onChange={(e) => setDestination(e.target.value as Destination)}
-          className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-800"
-        >
-          <option value="omop">OMOP concept</option>
-          <option value="cdisc-bc">CDISC Biomedical Concept</option>
-        </select>
-        <WearableSourceSystemSelect systems={offered} value={chosen} onChange={setSource} disabled={busy !== null} />
-        {CHOICES.map(({ format, label, name, title }) => (
-          <button
-            key={format}
-            type="button"
-            title={title}
-            // Its own name, not the bare "CSV" the section menus' choices
-            // carry; while it works the button is named by what it shows.
-            aria-label={busy === format ? undefined : name}
-            disabled={busy !== null}
-            aria-busy={busy === format}
-            onClick={() => { void download(format); }}
-            className="rounded-md border border-slate-300 bg-white px-2.5 py-1 font-medium text-slate-800 hover:bg-slate-100 focus:outline-2 focus:outline-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {busy === format ? "Preparing…" : label}
-          </button>
-        ))}
+        {target}
+        {sourceSystem}
+        {files}
       </div>
     </div>
   );
