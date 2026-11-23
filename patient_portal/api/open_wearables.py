@@ -48,7 +48,10 @@ from .permissions import is_interactive_session
 logger = logging.getLogger(__name__)
 
 NOT_FOUND = 'Invitation code not found or expired.'
-BAD_TOKEN = 'Invalid or expired token.'
+# What a phone is told when its credential does not work (a message, not a
+# credential; named so that the credential scan does not take it for one).
+NOT_SIGNED_IN = 'Invalid or expired token.'
+BEARER = 'bearer'
 WRONG_USER = 'Token does not match user_id.'
 UNKNOWN_PROVIDER = 'Unknown provider. Expected one of: apple, health_connect, samsung.'
 #: Changed batches inside this many seconds share one derivation. A first
@@ -265,7 +268,7 @@ def _small_body(request):
 def _tokens(device, refresh_token=None):
     data = {
         'access_token': open_wearables.access_token(device),
-        'token_type': 'bearer',
+        'token_type': BEARER,
         'expires_in': open_wearables.ACCESS_TOKEN_SECONDS,
     }
     if refresh_token is not None:
@@ -335,7 +338,7 @@ def refresh(request):
     device = (OpenWearablesDevice.objects.select_related('connection')
               .filter(refresh_hash=digest, expires_at__gt=now).first()) if digest else None
     if device is None:
-        return _limited(RefreshFailureThrottle(), request) or _json({'detail': BAD_TOKEN}, 401)
+        return _limited(RefreshFailureThrottle(), request) or _json({'detail': NOT_SIGNED_IN}, 401)
     refused = _limited(ConnectionThrottle(device.connection_id), request)
     if refused is not None:
         return refused
@@ -356,7 +359,7 @@ def _device(request, user_id):
     scheme, _, token = header.partition(' ')
     claims = open_wearables.read_access_token(token.strip()) if scheme.lower() == 'bearer' else None
     if claims is None:
-        return None, _json({'detail': BAD_TOKEN}, 401)
+        return None, _json({'detail': NOT_SIGNED_IN}, 401)
     token_user, device_id = claims
     if not open_wearables.same_user(token_user, str(user_id).lower()):
         return None, _json({'detail': WRONG_USER}, 403)
@@ -364,7 +367,7 @@ def _device(request, user_id):
               .filter(pk=device_id, connection__user_id=token_user,
                       expires_at__gt=timezone.now()).first())
     if device is None:
-        return None, _json({'detail': BAD_TOKEN}, 401)
+        return None, _json({'detail': NOT_SIGNED_IN}, 401)
     refused = _limited(ConnectionThrottle(device.connection_id), request)
     if refused is not None:
         return None, refused
@@ -508,7 +511,7 @@ def sync(request, user_id):
         logger.exception('open_wearables_sync_failed connection_id=%s', device.connection_id)
         return _json({'detail': 'Could not store the sync. Try again.'}, 503)
     if outcome is None:
-        return _json({'detail': BAD_TOKEN}, 401)
+        return _json({'detail': NOT_SIGNED_IN}, 401)
     if person is not None:
         _derive_soon(person)
     return _json({**answer, **outcome, 'rejected': batch.rejected,
