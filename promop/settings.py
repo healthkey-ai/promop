@@ -256,6 +256,15 @@ LOGGING = {
 # AUDIT_EVENT_RETENTION_DAYS env var, or per-run via `--days N`.
 AUDIT_EVENT_RETENTION_DAYS = int(os.environ.get('AUDIT_EVENT_RETENTION_DAYS', '2190'))
 
+# Patient invitations never accepted are deleted this many days after they
+# were last sent, once expired or cancelled, undoing the email they put on the person
+# (`purge_unaccepted_invitations`, run daily; patient_portal.invitation_retention).
+# 0 keeps them. A privacy policy that promises to delete what is held about
+# people invited who never joined sets its period here.
+PATIENT_INVITATION_RETENTION_DAYS = int(os.environ.get('PATIENT_INVITATION_RETENTION_DAYS', '0'))
+if not 0 <= PATIENT_INVITATION_RETENTION_DAYS <= 3650:
+    raise ImproperlyConfigured('PATIENT_INVITATION_RETENTION_DAYS must be between 0 (keep) and 3650 days.')
+
 ROOT_URLCONF = 'promop.urls'
 
 TEMPLATES = [

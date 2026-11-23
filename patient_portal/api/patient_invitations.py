@@ -145,15 +145,33 @@ def _invitation_refusal(person, email):
     return None
 
 
-def _issue_invitation(request, person, patient_record, email):
-    """Store the email on the Person, create or refresh the invitation, send it."""
+def _issue_invitation(request, person, patient_record, email, *, address_for_invitation=False):
+    """Store the email on the Person, create or refresh the invitation, send it.
+
+    ``address_for_invitation``: the person was just created with this address
+    in order to invite them, so it is the invitation's, not the record's."""
     with transaction.atomic():
-        person_update_fields = []
+        invitation = PatientInvitation.objects.select_for_update().filter(
+            person=person, accepted_at__isnull=True, cancelled_at__isnull=True,
+        ).first()
+        # Whether an invitation put this address on the person, and what it
+        # replaced: an address the record already held is the hospital's.
+        earlier = invitation or PatientInvitation.objects.filter(
+            person=person, accepted_at__isnull=True, email__iexact=email, set_person_email=True,
+        ).order_by('-sent_at').first()
+        if (person.email or '').lower() != email.lower():
+            set_person_email, replaced_email = True, person.email
+            if earlier is not None and earlier.set_person_email:
+                replaced_email = earlier.replaced_email  # the address before any invitation
+        elif earlier is not None and earlier.set_person_email:
+            set_person_email, replaced_email = True, earlier.replaced_email
+        elif address_for_invitation:
+            set_person_email, replaced_email = True, None
+        else:
+            set_person_email, replaced_email = False, None
         if person.email != email:
             person.email = email
-            person_update_fields.append('email')
-        if person_update_fields:
-            person.save(update_fields=person_update_fields)
+            person.save(update_fields=['email'])
 
         if patient_record is None:
             patient_record = PatientRecord.objects.create(person=person)
@@ -161,20 +179,21 @@ def _issue_invitation(request, person, patient_record, email):
         refresh_patient_record(person)
 
         token = secrets.token_hex(32)  # 64 hex chars
-        expires_at = timezone.now() + timezone.timedelta(days=settings.INVITE_TTL_DAYS)
-        invitation = PatientInvitation.objects.select_for_update().filter(
-            person=person, accepted_at__isnull=True, cancelled_at__isnull=True,
-        ).first()
+        now = timezone.now()
+        expires_at = now + timezone.timedelta(days=settings.INVITE_TTL_DAYS)
         if invitation:
             invitation.email = email
             invitation.token = token
             invitation.invited_by = request.user
+            invitation.sent_at = now
             invitation.expires_at = expires_at
-            invitation.save(update_fields=['email', 'token', 'invited_by', 'expires_at'])
+            invitation.set_person_email, invitation.replaced_email = set_person_email, replaced_email
+            invitation.save(update_fields=['email', 'token', 'invited_by', 'sent_at', 'expires_at',
+                                           'set_person_email', 'replaced_email'])
         else:
             invitation = PatientInvitation.objects.create(
-                person=person, email=email, token=token,
-                invited_by=request.user, expires_at=expires_at,
+                person=person, email=email, token=token, invited_by=request.user, sent_at=now,
+                expires_at=expires_at, set_person_email=set_person_email, replaced_email=replaced_email,
             )
 
     email_warning = None
@@ -283,7 +302,7 @@ class PatientCreateView(APIView):
 
         result = {'person_id': person.person_id, 'organization': org.slug, 'invited': False}
         if invite:
-            invited = _issue_invitation(request, person, record, email)
+            invited = _issue_invitation(request, person, record, email, address_for_invitation=True)
             result['invited'] = True
             result['invitation'] = invited.data
             if invited.data.get('email_warning'):

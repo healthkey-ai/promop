@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Patient invitations never accepted are deleted after a retention period**
+  — `PATIENT_INVITATION_RETENTION_DAYS` (0, the default, keeps them) and
+  `purge_unaccepted_invitations` (run daily; `--days`, `--dry-run`): an
+  invitation last sent more than N days ago and expired or cancelled goes, and
+  what it did to a person who never made an account is undone: the address it
+  put there is removed, or the one it replaced restored; an address the record
+  already held stays, and so does the person (#2786). Invitations record when
+  they were last sent and whether they set the address (migration
+  `patient_portal` 0031); each run writes an audit event.
+
 - **The member's record export includes their permissions and contact
   choices** — the PDF gains a "Permissions and contact choices" section (the
   answers now, the documents accepted, every answer with who recorded it), and

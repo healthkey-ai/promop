@@ -245,9 +245,16 @@ class PatientInvitation(models.Model):
         null=True, blank=True, related_name='+',
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # When it was last sent: a resend reuses the row, so retention counts from here.
+    sent_at = models.DateTimeField(default=timezone.now)
     expires_at = models.DateTimeField()
     accepted_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    # Whether this invitation put its address on the person, and what it
+    # replaced there (None: nothing), so deleting an invitation never accepted
+    # undoes only that (patient_portal.invitation_retention).
+    set_person_email = models.BooleanField(default=False)
+    replaced_email = models.EmailField(null=True, blank=True)
 
     class Meta:
         db_table = 'patient_invitation'
