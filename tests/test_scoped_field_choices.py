@@ -331,7 +331,7 @@ def test_list_filters_by_the_records_disease(staff):
     assert shown('') == {'Unknown', 'ISS I', 'Lugano I', 'Old'}
     assert shown('&disease=MM') == {'Unknown', 'ISS I'}
     assert shown('&disease=FL') == {'Unknown', 'Lugano I'}
-    assert shown('&disease=CLL') == {'Unknown'}
+    assert shown('&disease=MCL') == {'Unknown'}
     assert shared.pk
 
 
@@ -409,3 +409,79 @@ def test_transfer_ignores_a_disease_this_instance_lacks():
     }]}
     apply_payload(payload)
     assert [d.disease for d in FieldChoice.objects.get(display='X').disease_scope.all()] == ['MM']
+
+
+# ── Review findings ────────────────────────────────────────────────────────
+
+def test_transfer_rename_and_reused_label_in_one_payload():
+    make('Foo')                                   # code foo
+    payload = {'choices': [
+        {'field_name': 'stage', 'display': 'Bar', 'sort_order': 1, 'codes': [], 'code': 'foo'},
+        {'field_name': 'stage', 'display': 'Foo', 'sort_order': 2, 'codes': [], 'code': 'c'},
+    ]}
+    apply_payload(payload)
+    rows = {c.code: c.display for c in FieldChoice.objects.filter(field_name='stage')}
+    assert rows == {'foo': 'Bar', 'c': 'Foo'}
+
+
+def test_transfer_swapping_two_labels_does_not_trip_the_label_rule():
+    x, y = make('X'), make('Y')
+    payload = {'choices': [
+        {'field_name': 'stage', 'display': 'Y', 'sort_order': 1, 'codes': [], 'code': x.code},
+        {'field_name': 'stage', 'display': 'X', 'sort_order': 2, 'codes': [], 'code': y.code},
+    ]}
+    apply_payload(payload)
+    assert FieldChoice.objects.get(pk=x.pk).display == 'Y'
+    assert FieldChoice.objects.get(pk=y.pk).display == 'X'
+
+
+def test_transfer_adopts_a_choice_whose_code_this_instance_numbered_differently():
+    local = make('Stage IV')
+    FieldChoice.objects.filter(pk=local.pk).update(code='stage_iv_2')
+    apply_payload({'choices': [
+        {'field_name': 'stage', 'display': 'Stage IV', 'sort_order': 1, 'codes': [], 'code': 'stage_iv'},
+    ]})
+    assert FieldChoice.objects.filter(field_name='stage').count() == 1
+    assert FieldChoice.objects.get(pk=local.pk).code == 'stage_iv'
+
+
+def test_transfer_keeps_when_a_choice_was_retired():
+    from datetime import timedelta
+    from django.utils import timezone
+    choice = make('Old')
+    field_choices.set_retired(choice, True)
+    long_ago = timezone.now() - timedelta(days=30)
+    FieldChoice.objects.filter(pk=choice.pk).update(retired_at=long_ago)
+    apply_payload(read_payload('default'))
+    assert FieldChoice.objects.get(pk=choice.pk).retired_at == long_ago
+
+
+def test_transfer_reports_a_value_its_type_cannot_hold():
+    stats = apply_payload({'choices': [{
+        'field_name': 'stage', 'display': 'Bad', 'sort_order': 1, 'codes': [],
+        'value_type': 'integer', 'value': 'abc'}]})
+    assert any('Bad' in w for w in stats.warnings)
+    assert FieldChoice.objects.get(display='Bad').value == ''
+
+
+def test_create_refuses_a_label_that_is_another_choices_earlier_label(staff):
+    choice = make('Stage IV')
+    field_choices.rename(choice, 'Stage 4')
+    r = staff.post('/api/v1/field-choices/', {'field_name': 'stage', 'display': 'stage iv'}, format='json')
+    assert r.status_code == 400 and 'display' in r.json()
+    assert field_choices.resolve('stage', 'Stage IV') == choice
+
+
+def test_unknown_disease_filter_is_a_400(staff):
+    assert staff.get('/api/v1/field-choices/?field_name=stage&disease=NOPE').status_code == 400
+    assert staff.get('/api/v1/field-choices/?field_name=stage&disease=Other').status_code == 200
+
+
+def test_a_save_that_loses_a_race_is_a_409_not_a_500(staff, monkeypatch):
+    from patient_portal.api import serializers
+
+    def lose(self, validated_data):
+        raise IntegrityError('duplicate key value violates unique constraint')
+    monkeypatch.setattr(serializers.FieldChoiceSerializer, 'create', lose)
+    r = staff.post('/api/v1/field-choices/', {'field_name': 'stage', 'display': 'New'}, format='json')
+    assert r.status_code == 409

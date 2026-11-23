@@ -2096,6 +2096,14 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
             same = same.exclude(pk=instance.pk)
         if display and 'display' in attrs and same.filter(display=display).exists():
             errors['display'] = f'{display!r} is already a choice of {field_name} in this context.'
+        elif display and 'display' in attrs and instance is None:
+            # A new choice may not take a spelling another already answers to,
+            # an earlier label included; a rename is checked by ``rename``.
+            owner = field_choices._taken_spellings(field_name, context).get(field_choices.fold(display))
+            if owner is not None:
+                errors['display'] = (
+                    f'{display!r} is already another spelling of a choice of {field_name} '
+                    'in this context.')
         if code and same.filter(code=code).exists():
             errors['code'] = f'The code {code!r} is already used for {field_name} in this context.'
         if errors:

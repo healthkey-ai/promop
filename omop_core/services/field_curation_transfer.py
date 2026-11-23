@@ -614,23 +614,64 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
     from django.utils import timezone
 
     from omop_core.models import FieldChoiceAlias, FieldChoiceDisease
-    from omop_core.services import disease_profiles
+    from omop_core.services import disease_profiles, field_choices
 
     known = disease_profiles.category_codes() - {disease_profiles.OTHER}
-    by_code = {}
-    by_display = {}
-    for c in FieldChoice.objects.all():
-        by_code[(c.field_name, c.context_key, c.code)] = c
-        by_display[(c.field_name, c.context_key, c.display)] = c
+    claimed = {(r['field_name'], r.get('context_key', ''), r['code'])
+               for r in rows if r.get('code')}
+
+    def local():
+        by_code, by_display = {}, {}
+        for c in FieldChoice.objects.all():
+            by_code[(c.field_name, c.context_key, c.code)] = c
+            by_display[(c.field_name, c.context_key, c.display)] = c
+        return by_code, by_display
+
+    def find(row):
+        """The local choice a payload row is, or None for a new one.
+
+        A choice is found by its stable code. One the code does not find is
+        found by its display only when the payload has no code (it predates
+        codes) or the local choice's own code is one the payload does not
+        name: an instance that numbered a label that slugs alike differently
+        still has the same choice, which then takes the payload's code.
+        """
+        context = row.get('context_key', '')
+        if row.get('code'):
+            hit = by_code.get((row['field_name'], context, row['code']))
+            if hit is not None:
+                return hit
+        hit = by_display.get((row['field_name'], context, row['display']))
+        if hit is None:
+            return None
+        if row.get('code') and (hit.field_name, hit.context_key, hit.code) in claimed:
+            return None
+        return hit
+
+    by_code, by_display = local()
+    # A source that renamed one choice and gave its old label to another, or
+    # swapped two labels, would collide with the label rule midway. Move every
+    # label that is about to change aside first; each is set again below.
+    moving = []
+    for row in rows:
+        hit = find(row)
+        if hit is not None and hit.display != row['display']:
+            moving.append(hit)
+    for choice in moving:
+        choice.display = f'~moving~{choice.pk}'
+        choice.save(update_fields=['display'])
+    if moving:
+        by_code, by_display = local()
+
     for row in rows:
         context = row.get('context_key', '')
-        # A choice is found by its stable code; a payload from before codes
-        # existed is found by its display, as it always was.
-        choice = (by_code.get((row['field_name'], context, row['code']))
-                  if row.get('code') else None)
-        if choice is None:
-            choice = by_display.get((row['field_name'], context, row['display']))
-        retired_at = timezone.now() if row.get('retired') else None
+        choice = find(row)
+        value_type = row.get('value_type', 'text')
+        try:
+            value = field_choices.clean_value(value_type, row.get('value', ''))
+        except field_choices.ChoiceError as exc:
+            stats.warnings.append(f'choice {row["field_name"]}/{row["display"]}: {exc}')
+            value, value_type = '', 'text'
         if choice is None:
             choice = FieldChoice.objects.create(
                 field_name=row['field_name'],
@@ -638,24 +679,31 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
                 sort_order=row['sort_order'],
                 code=row.get('code', ''),
                 context_key=context,
-                value=row.get('value', ''),
-                value_type=row.get('value_type', 'text'),
-                retired_at=retired_at,
+                value=value,
+                value_type=value_type,
+                retired_at=timezone.now() if row.get('retired') else None,
                 created_by=None,
             )
-            by_code[(choice.field_name, choice.context_key, choice.code)] = choice
-            by_display[(choice.field_name, choice.context_key, choice.display)] = choice
             stats._bump(stats.created, 'choices')
         else:
             choice.display = row['display']
             choice.sort_order = row['sort_order']
+            if row.get('code') and choice.code != row['code'] and (
+                    choice.field_name, choice.context_key, row['code']) not in by_code:
+                choice.code = row['code']
             if 'value' in row:
-                choice.value = row['value']
-                choice.value_type = row.get('value_type', 'text')
-                choice.retired_at = retired_at if row.get('retired') else None
+                choice.value = value
+                choice.value_type = value_type
+                if row.get('retired'):
+                    # Keep when it was retired, not when it was last copied.
+                    choice.retired_at = choice.retired_at or timezone.now()
+                else:
+                    choice.retired_at = None
             choice.created_by = None
             choice.save()
             stats._bump(stats.updated, 'choices')
+        by_code[(choice.field_name, choice.context_key, choice.code)] = choice
+        by_display[(choice.field_name, choice.context_key, choice.display)] = choice
         # Codes, spellings and scope are pure data hanging off the choice, so
         # the source's set replaces the local one wholesale rather than being
         # merged. A payload from before #1224 names none and leaves them be.
@@ -669,7 +717,7 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
                 FieldChoiceAlias(
                     choice=choice, field_name=choice.field_name,
                     context_key=choice.context_key, alias=a['alias'],
-                    alias_key=' '.join(a['alias'].split()).casefold(),
+                    alias_key=field_choices.fold(a['alias']),
                     source=a.get('source', 'curator'))
                 for a in row['aliases']
             ], ignore_conflicts=True)

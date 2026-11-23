@@ -77,10 +77,19 @@ rather than the models.
   `code`, `context_key`, `value`, `value_type`, `retired`, `aliases` and
   `diseases`. The write descriptor still lists an answer once however many
   contexts hold it; which meaning a record means is scope's business, and
-  enforcing it on write is #2333.
+  enforcing it on write is #2333. It also still offers the label, not `value`,
+  and keeps retired choices, because a retired value already stored must still
+  save when an edit echoes it back; honouring `value` on write and hiding
+  retired values from new entries belong with that enforcement.
 - **Transfer.** The curation payload carries the new keys. A choice is matched
   by code, so a rename on the source renames it here instead of adding a
-  second choice; a payload from before this matches by label as it did.
+  second choice; a payload from before this matches by label as it did, and so
+  does a coded row whose code this instance does not have, when the local
+  choice's own code is not one the payload names (two instances that numbered a
+  label that slugs alike differently); it then takes the payload's code.
+  Labels about to change are moved aside first, so a rename that hands its old
+  label to another choice, or a swap, does not trip the label rule. A choice
+  already retired keeps the date it was retired.
   Aliases and scope are replaced from the source, and a disease this instance
   has no category for is dropped.
 - **Not here.** No concept is attached to an answer yet, the editor shows none

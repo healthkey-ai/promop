@@ -16730,6 +16730,10 @@ def field_choice_list(request):
             qs = qs.filter(field_name=field_name)
         disease = request.query_params.get('disease')
         if disease:
+            from omop_core.services import disease_profiles
+            if disease not in disease_profiles.category_codes():
+                return Response({'disease': f'Unknown Disease Category {disease!r}.'},
+                                status=status.HTTP_400_BAD_REQUEST)
             # What a record of that Disease Category is offered: its own
             # choices and the unscoped ones, retired values left out.
             from omop_core.services import field_choices
@@ -16741,7 +16745,12 @@ def field_choice_list(request):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    try:
+        serializer.save()
+    except IntegrityError:
+        # Two curators saving the same label at once: the second loses.
+        return Response({'detail': 'Another change to this field\'s choices was saved first; reload and retry.'},
+                        status=status.HTTP_409_CONFLICT)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -16771,7 +16780,11 @@ def field_choice_detail(request, pk):
         choice, data=request.data, partial=True, context={'request': request},
     )
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    try:
+        serializer.save()
+    except IntegrityError:
+        return Response({'detail': 'Another change to this field\'s choices was saved first; reload and retry.'},
+                        status=status.HTTP_409_CONFLICT)
     return Response(serializer.data)
 
 
