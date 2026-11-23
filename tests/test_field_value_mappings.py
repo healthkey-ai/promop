@@ -229,10 +229,10 @@ def test_coverage_counts_answers_by_best_state_and_leaves_out_retired():
     assert d.pk
 
 
-# ── Migration 0367 ─────────────────────────────────────────────────────────
+# ── Migration 0368 ─────────────────────────────────────────────────────────
 
 def _carry():
-    module = importlib.import_module('omop_core.migrations.0367_propose_value_mappings_from_codes')
+    module = importlib.import_module('omop_core.migrations.0368_propose_value_mappings_from_codes')
     module.propose_from_primary_codes(apps, None)
     return module
 

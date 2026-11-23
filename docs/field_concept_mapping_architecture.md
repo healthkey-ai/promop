@@ -127,7 +127,7 @@ and never the model.
   approved, superseded, rejected, transferred, migrated) is an append-only
   `FieldValueConceptMappingRevision` that holds the concept as ids and codes,
   with no foreign key, so a vocabulary reload cannot block it.
-- **Migration `0367`** carries each choice's first primary `FieldChoiceCode`
+- **Migration `0368`** carries each choice's first primary `FieldChoiceCode`
   over as a `value_as_concept` **proposal** (never an approval), recording
   whether it resolved, was not loaded here (`unresolved`), is retired
   (`invalid`) or non-standard. The codes stay for source codings. A replay

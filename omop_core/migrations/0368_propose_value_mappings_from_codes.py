@@ -15,7 +15,7 @@ value mapping is left alone, so a replay changes nothing.
 """
 from django.db import migrations
 
-PROVENANCE = 'migration 0367'
+PROVENANCE = 'migration 0368'
 
 
 def propose_from_primary_codes(apps, schema_editor):
@@ -70,7 +70,7 @@ def remove_migrated_proposals(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0366_field_value_concept_mapping'),
+        ('omop_core', '0367_field_value_concept_mapping'),
     ]
 
     operations = [

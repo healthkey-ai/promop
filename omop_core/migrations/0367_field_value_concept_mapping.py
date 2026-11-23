@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0365_scoped_field_choices"),
+        ("omop_core", "0366_garmin_connection"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

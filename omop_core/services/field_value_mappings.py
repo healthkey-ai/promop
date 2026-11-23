@@ -367,7 +367,7 @@ def coverage(field_name: str | None = None) -> dict[str, dict[str, int]]:
 def resolve_unresolved(*, dry_run: bool = False) -> dict[str, int]:
     """Point proposals that carry only a code at the concept now loaded for it.
 
-    Migration ``0367`` runs before any vocabulary on a fresh instance, so every
+    Migration ``0368`` runs before any vocabulary on a fresh instance, so every
     proposal it carries over names its concept by vocabulary and code with no
     target. After a load this finds them again: a current standard concept
     becomes the target (and the proposal is ready to review); one that is
