@@ -9,6 +9,17 @@ const mockUseAuth = vi.hoisted(() => vi.fn());
 vi.mock('react-router-dom', async importOriginal => ({ ...await importOriginal<typeof import('react-router-dom')>(), useNavigate: () => navigate }));
 vi.mock('@/api/axios', () => ({ default: { get: vi.fn(), delete: vi.fn() } }));
 vi.mock('@/hooks/useAuth', () => ({ useAuth: () => mockUseAuth() }));
+const loadPage = vi.hoisted(() => vi.fn());
+vi.mock('@/utils/loadPage', () => ({ loadPage }));
+// The dialog's own form is tested with the dialog; here it only reports back.
+vi.mock('./AddPatientDialog', () => ({
+  default: ({ onCreated }: { onCreated: (r: { personId: number; forSelf: boolean; message: string }) => void }) => (
+    <div>
+      <button onClick={() => onCreated({ personId: 7, forSelf: true, message: 'Created' })}>created for myself</button>
+      <button onClick={() => onCreated({ personId: 8, forSelf: false, message: 'Created' })}>created for a patient</button>
+    </div>
+  ),
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -365,4 +376,25 @@ it('offers Add patient to staff and org admins only', async () => {
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Patients');
   expect(screen.queryByRole('button', { name: /Add patient/ })).not.toBeInTheDocument();
+});
+
+it('loads the page afresh after an admin adds themselves, so the account has its patient link (#2818)', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add patient' }));
+  fireEvent.click(screen.getByRole('button', { name: 'created for myself' }));
+  expect(loadPage).toHaveBeenCalledWith('/patient/7');
+  // Not a client-side route change: that keeps the account as it was loaded.
+  expect(navigate).not.toHaveBeenCalledWith('/patient/7');
+});
+
+it('stays on the list and reads it again after adding somebody else', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Add patient' }));
+  const reads = vi.mocked(api.get).mock.calls.length;
+  fireEvent.click(screen.getByRole('button', { name: 'created for a patient' }));
+  expect(loadPage).not.toHaveBeenCalled();
+  expect(navigate).not.toHaveBeenCalled();
+  await waitFor(() => expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(reads));
 });

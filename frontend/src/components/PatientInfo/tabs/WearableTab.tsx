@@ -519,8 +519,10 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       <div className="mb-5 rounded-md border border-border bg-muted/40 px-4 py-3">
         <p className="text-xs text-muted-foreground">
           Every value below is a 30-day aggregate over device readings, so none of
-          them is typed in: a clinician does not enter a median. Upload device
-          data above and these follow.
+          them is typed in: a clinician does not enter a median.{' '}
+          {ownRecord
+            ? 'Upload device data above and these follow.'
+            : 'They follow from the device data the patient adds.'}
         </p>
       </div>
 

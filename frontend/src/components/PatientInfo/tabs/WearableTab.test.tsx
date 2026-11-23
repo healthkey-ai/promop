@@ -365,9 +365,16 @@ describe("WearableTab — somebody else's record (#2819)", () => {
     expect(screen.queryByText(/contribute to your record/i)).not.toBeInTheDocument();
   });
 
-  it('still shows the wearable fields', () => {
+  it('still shows the wearable fields, and does not point at an upload that is not there', () => {
     renderTab({ ownRecord: false, formData: { person_id: 202, wearable_last_sync_at: '2024-07-01T00:00:00Z' } });
     expect(screen.getByTestId('section-Data Coverage')).toBeInTheDocument();
+    expect(screen.queryByText(/Upload device data above/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/follow from the device data the patient adds/i)).toBeInTheDocument();
+  });
+
+  it('points at the upload on the own record', () => {
+    renderTab({ formData: { person_id: 101 } });
+    expect(screen.getByText(/Upload device data above and these follow/i)).toBeInTheDocument();
   });
 
   it('is what a caller that says nothing gets', async () => {
@@ -485,7 +492,7 @@ describe('WearableTab — Garmin Connect sync', () => {
   }
 
   it('offers the Garmin account panel to a patient on their own record, where a Garmin app is set up (#2802)', async () => {
-    const first = renderTab();
+    const first = renderTab({ ownRecord: false });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     // A clinician's view of the record never asks for the patient's connection.
     expect(mockGet.mock.calls.some(([url]) => String(url).includes('/v1/garmin/connection/'))).toBe(false);
@@ -504,11 +511,18 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   it('is offered only to a patient on their own record', () => {
     // The server files a sync under whoever is signed in. A clinician on a
-    // patient's page, or a read-only embed, must not be asked for a key.
+    // patient's page must not be asked for a key, nor offered an upload (#2819).
+    const clinician = renderTab({ ownRecord: false });
+    expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /upload/i })).not.toBeInTheDocument();
+    clinician.unmount();
+
+    // The federated page is the patient's own record without this site's
+    // session: no key sync, and the file upload as before.
     renderTab();
     expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
-    // The file upload is unchanged.
     expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
   });
 

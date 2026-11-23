@@ -1135,11 +1135,15 @@ Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
   `wearable-uploads` and its delete act on the caller's own record wherever
   they are called from, so the tab offers the Upload button, the drop zone,
   the history and its deletes only with `ownRecord` (the same own-record
-  test; the federated patient page, which reads `patient-info/me/`, passes
-  it), and reads no history elsewhere. An upload sends the page's
+  test; the embedded patient page, which reads `patient-info/me/`, passes
+  it where it shows the tab at all: a host that sets `federated` gets no
+  Wearables tab), and reads no history elsewhere. An upload sends the page's
   `person_id` and the server answers 403 when it is not the caller's own; no
   `person_id` is the caller's record, as before. Unlike the sync, an upload
-  still accepts a delegated token: the federated host uploads with one.
+  still accepts a delegated token: the embedded page uploads with one.
+  Add patient "for myself" loads the new record with a full page load
+  (`utils/loadPage`), since the account is read once when the app loads and
+  would not show its new patient link otherwise (#2818).
 - **The upload history names the rows.** A `sample_summary` entry carries
   `row_id` / `row_table` for the row its upload wrote (null when it wrote
   none; a sync lists only what it wrote). Deleting an upload removes those

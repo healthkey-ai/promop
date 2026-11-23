@@ -251,6 +251,18 @@ describe('federated PatientInfo save', () => {
   });
 });
 
+describe('embedded PatientInfo wearables (#2819)', () => {
+  it("offers the upload and reads the history: the page is the patient's own record", async () => {
+    await renderAndLoad();
+    fireEvent.click(screen.getByRole('button', { name: 'Wearable' }));
+    // Offered only on one's own record; this page is `patient-info/me/`.
+    expect(await screen.findByRole('button', { name: /upload/i })).toBeInTheDocument();
+    await waitFor(() => expect(
+      (client.get as ReturnType<typeof vi.fn>).mock.calls.some(([url]) => String(url).includes('wearable-uploads')),
+    ).toBe(true));
+  });
+});
+
 describe('federated PatientInfo added fields (#721)', () => {
   it('shows a field added through Field Concept Mapping on its tab, with no Add Field', async () => {
     const original = (client.get as ReturnType<typeof vi.fn>).getMockImplementation()!;

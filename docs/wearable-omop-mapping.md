@@ -497,7 +497,8 @@ deletable like a file.
   someone else's page is refused and not filed quietly under the caller.
   The file upload follows the same rule (#2819): the Upload button, the drop zone, the upload
   history and its deletes are offered only on the person's own record (`ownRecord`; the
-  federated patient page passes it), the history is not read anywhere else, and
+  embedded patient page passes it, where the host does not set `federated`, which hides the
+  tab), the history is not read anywhere else, and
   `upload-wearable` refuses a `person_id` that is not the caller's own with a 403. On somebody
   else's record the tab shows the wearable fields and says the patient adds the data.
 - **The key is used and dropped.** It is sent with one request and kept nowhere: not in the
