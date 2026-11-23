@@ -1001,12 +1001,20 @@ PROLOG_MACHINE_LANGUAGES = [
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
 # The smallest count PROlog's survey report and admin show (RUN-24): a count
 # under it reads "fewer than N". 0 shows every count; a deployment whose privacy
-# policy promises no figure for a small group sets that size. PROlog's system
-# check prolog_surveys.E003 refuses anything but an integer of 0 or more.
-try:
-    PROLOG_STATS_MIN_COUNT = int(os.environ.get('PROLOG_STATS_MIN_COUNT', '0'))
-except ValueError:
-    raise ImproperlyConfigured('PROLOG_STATS_MIN_COUNT must be a whole number of 0 or more.') from None
+# policy promises no figure for a small group sets that size. Refused here, not
+# only by PROlog's system check (E003): gunicorn and scheduled jobs never run
+# the checks, and a negative floor would show every count.
+def _stats_min_count(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f'PROLOG_STATS_MIN_COUNT must be a whole number of 0 or more, not {raw!r}.') from None
+    if value < 0:
+        raise ImproperlyConfigured(f'PROLOG_STATS_MIN_COUNT must be 0 or more, not {value}.')
+    return value
+
+
+PROLOG_STATS_MIN_COUNT = _stats_min_count(os.environ.get('PROLOG_STATS_MIN_COUNT', '0'))
 
 # Sharing a Personal Health Record (patient_portal/api/phr/sharing.py).
 # PHR_SHARE_URL is where the app that shows a shared record lives; the link is

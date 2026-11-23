@@ -190,8 +190,8 @@ One setting, no migration:
   default, shows every count. A deployment whose privacy policy promises no
   figure for a small group sets it: `PROLOG_STATS_MIN_COUNT=20` in the
   environment, which `promop/settings.py` reads. A value that isn't a whole
-  number stops startup, and PROlog's system check `prolog_surveys.E003`
-  refuses a negative one.
+  number of 0 or more stops startup (PROlog's system check
+  `prolog_surveys.E003` refuses it too).
 
 ### What v0.7.0 added
 
