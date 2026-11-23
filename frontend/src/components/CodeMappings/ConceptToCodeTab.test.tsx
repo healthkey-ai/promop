@@ -696,10 +696,37 @@ describe('the Wearables domain and the remembered domain (#2656)', () => {
     expect(screen.getByLabelText('Concept scope')).toBeEnabled();
     fireEvent.change(domain, { target: { value: 'wearables' } });
     await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', page: 1 }));
-    // Wearables is its own scope, so the scope choice is set aside while it is chosen.
-    expect(screen.getByLabelText('Concept scope')).toBeDisabled();
     fireEvent.change(domain, { target: { value: 'measurement' } });
     expect(screen.getByLabelText('Concept scope')).toBeEnabled();
+  });
+
+  it('lists every wearable concept by default and narrows to patient field concepts when asked (#2808)', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    const scope = screen.getByLabelText('Concept scope') as HTMLSelectElement;
+    const options = () => Array.from(scope.options).map(option => option.textContent);
+    expect(scope).toHaveValue('fields');
+    expect(options()).toEqual(['Patient field concepts', 'All standard concepts']);
+
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    // Its own scope, starting on all of them: the dropdown works and says what the list holds.
+    expect(scope).toBeEnabled();
+    expect(scope).toHaveValue('all');
+    expect(options()).toEqual(['Patient field concepts', 'All wearable concepts']);
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', scope: 'all', page: 1 }));
+
+    fireEvent.change(scope, { target: { value: 'fields' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', scope: 'fields', page: 1 }));
+
+    // The other domains keep their own choice, and Wearables keeps this one.
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    expect(scope).toHaveValue('fields');
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'measurement', scope: 'fields' }));
+    fireEvent.change(scope, { target: { value: 'all' } });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    expect(scope).toHaveValue('fields');
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    expect(scope).toHaveValue('all');
   });
 
   it('restores the domain an account chose, and only for that account', async () => {

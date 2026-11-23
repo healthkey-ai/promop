@@ -235,7 +235,12 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
     savePreferences(preferenceKey, next);
   };
   const [disease, setDisease] = useState('');
-  const [scope, setScope] = useState('fields');
+  // Wearables has a scope of its own, starting on every wearable concept: few
+  // of them back a patient field, so the other domains' default would open
+  // the list nearly empty (#2808).
+  const [fieldScope, setFieldScope] = useState('fields');
+  const [wearablesScope, setWearablesScope] = useState('all');
+  const scope = wearables ? wearablesScope : fieldScope;
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -456,12 +461,11 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
     <div className="flex flex-wrap gap-3">
       <input className={`${input} min-w-64 flex-1`} aria-label="Search standard concepts" placeholder="Concept name, code, OMOP ID or patient field"
         value={search} disabled={writing} onChange={event => { setSearch(event.target.value); setPage(1); }} />
-      {/* Wearables is its own scope: the server lists every concept a wearable
-          code maps to, patient field or not, so this choice does not apply. */}
-      <select aria-label="Concept scope" className={input} disabled={writing || domain === WEARABLES_DOMAIN} value={scope}
-        title={domain === WEARABLES_DOMAIN ? 'Wearables lists every concept a wearable code is mapped to' : undefined}
-        onChange={event => { setScope(event.target.value); setPage(1); }}>
-        <option value="fields">Patient field concepts</option><option value="all">All standard concepts</option>
+      {/* Under Wearables "all" is every concept a wearable code maps to. */}
+      <select aria-label="Concept scope" className={input} disabled={writing} value={scope}
+        onChange={event => { (wearables ? setWearablesScope : setFieldScope)(event.target.value); setPage(1); }}>
+        <option value="fields">Patient field concepts</option>
+        <option value="all">{wearables ? 'All wearable concepts' : 'All standard concepts'}</option>
       </select>
       <select aria-label="Concept domain" className={input} disabled={writing} value={domain}
         onChange={event => { remember({ domain: event.target.value }); setPage(1); }}>

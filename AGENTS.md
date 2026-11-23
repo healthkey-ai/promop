@@ -2212,9 +2212,12 @@ The tab's domain list has one entry that is not an OMOP domain: **Wearables**
 standard concepts that a source code in `WEARABLE_SOURCE_VOCABULARIES` is
 mapped to by a proposed or approved mapping, so the HealthKit, Health Connect,
 OpenWearables, Garmin and HL7 PHR codes of one metric can be reviewed against
-the one concept they should share. It is its own scope: the "Patient field
-concepts" choice is set aside (few wearable concepts back a field), while a
-disease, the search and "ranked only" still narrow it. A wearable code with no
+the one concept they should share. It has a scope of its own (#2808): the
+dropdown opens on "All wearable concepts", because few wearable concepts back
+a field, and "Patient field concepts" narrows to the ones that do
+(`scope=fields`, which narrows here only when sent by name; a request that
+names no scope lists them all). A disease, the search and "ranked only" narrow
+it as under any domain. A wearable code with no
 destination has no concept to appear under, and the local, non-standard
 `HK-Wearable` concepts are not listed, as on every other domain. The domain a
 curator chooses, Wearables or any other, is saved per account in the browser
