@@ -11,6 +11,10 @@ answered by the next run reading the same column, and nothing is lost between
 the save and the worker. It is the same column a patient-scoped save already
 uses, so Generate OMOP sees rows still waiting for this job too.
 
+A save from a patient's page is the exception to "off the request": it moves
+that one patient's rows as it saves (``repoint_for_person``, #2791) and leaves
+every other patient's in the column, with no job.
+
 Celery when ``CELERY_BROKER_URL`` is set, inline after commit otherwise, the
 rule ``derivation_jobs`` and ``suggest_jobs`` follow.
 """
@@ -150,6 +154,64 @@ def run_unpoint(mapping_id, old_concept_id):
         _advisory_unlock(mapping_id)
     logger.info('Un-mapping of mapping %s from concept %s finished: %s.', mapping_id, old_concept_id, totals)
     return totals
+
+
+def repoint_for_person(mapping, concept_ids, person_id):
+    """Move one patient's stored rows onto *mapping*'s destination, now (#2791).
+
+    An approval saved from a patient's page: the curator is looking at that
+    patient, so their rows move in the request instead of waiting for Generate
+    OMOP. One person's rows for one code is a handful of rows, not the minutes
+    a common code takes across every patient, which is why that move is a job
+    and this one is not. Nobody else's row is touched: the caller keeps
+    *concept_ids* on ``deferred_repoint_concept_ids`` for the other patients.
+
+    The same sweeps a job run makes (``run_repoint``), narrowed to the person:
+    each concept in *concept_ids* to the destination, then the provisional rows
+    already at the destination made real. Must be called inside the
+    transaction that saved the mapping.
+
+    Returns ``{'queued': False, 'patient_id', 'from_concept_ids',
+    'rows_updated', 'rows_collapsed'}``. ``rows_updated`` counts rows moved and
+    provisional rows made real.
+    """
+    target = mapping.target_concept_id
+    sources = sorted(set(concept_ids) - {target})
+    totals = {'rows_updated': 0, 'rows_collapsed': 0}
+    for old_concept_id in sources:
+        outcome = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=old_concept_id, new_concept_id=target,
+            # As in run_repoint: the concept-0 sweep matches the code only.
+            match_description=old_concept_id != NO_MATCHING_CONCEPT_ID,
+            person_id=person_id,
+        )
+        for key in totals:
+            totals[key] += outcome[key]
+    promoted = promote_provisional_rows(mapping=mapping, person_id=person_id)
+    totals['rows_updated'] += promoted['rows_promoted']
+    totals['rows_collapsed'] += promoted['rows_collapsed']
+    if totals['rows_updated']:
+        _derive_after_commit(person_id)
+    return {'queued': False, 'patient_id': person_id, 'from_concept_ids': sources, **totals}
+
+
+def _derive_after_commit(person_id):
+    """Re-derive the patient's record once the save has committed.
+
+    The move marked the record stale, and nothing else would bring it up to
+    date: Generate OMOP derives only for rows it moves itself, and this
+    patient has none left. ``derivation_jobs`` decides how, as it does for
+    Generate OMOP: a worker when there is a broker, inline otherwise. After
+    the commit either way, so a derivation that fails or cannot be queued
+    costs a record that stays stale for ``backfill_patient_records``, never
+    the save.
+    """
+    def derive():
+        from omop_core.models import Person
+        from omop_core.services.derivation_jobs import get_dispatcher
+        get_dispatcher().dispatch(Person.objects.get(person_id=person_id))
+
+    _after_commit(derive)
 
 
 def _advisory_lock(mapping_id):

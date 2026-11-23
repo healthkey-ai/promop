@@ -1050,7 +1050,7 @@ def _promote_rows(model, pks, concept_col, concept_id):
     return cleared
 
 
-def promote_provisional_rows(*, mapping):
+def promote_provisional_rows(*, mapping, person_id=None):
     """Approval of a proposal at the concept its rows already sit on.
 
     ``repoint_clinical_rows`` moves rows off one concept onto another and has
@@ -1061,6 +1061,10 @@ def promote_provisional_rows(*, mapping):
     would, and the confidence is cleared last. A person whose code also arrived
     under a system with no approval to this destination keeps theirs
     provisional (:func:`_persons_coded_elsewhere`).
+
+    *person_id* limits it to one patient, for an approval saved from that
+    patient's page (#2791); the others are promoted when Generate OMOP next
+    runs for them, or by an approval from the Code Mapping page.
 
     Returns ``{'rows_promoted', 'persons_marked_stale', 'person_ids',
     'rows_collapsed'}``.
@@ -1080,6 +1084,8 @@ def promote_provisional_rows(*, mapping):
     # mapping's code ("Glucose").
     match = _source_value_match(model, source_col, mapping, include_description=False)
     qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
     qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
         mapping, normalize_omop_table(mapping.omop_table), concept_id, model, source_col))
     if mapping.organization_id:

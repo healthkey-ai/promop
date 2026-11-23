@@ -158,6 +158,44 @@ it("sends the current patient when saving a mapping", async () => {
   ));
 });
 
+describe("PatientSourceCodesTab banner after an approval (#2791)", () => {
+  const approve = async (data: Record<string, unknown>) => {
+    vi.mocked(api.patch).mockResolvedValueOnce({ data } as never);
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Pulse"));
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "approved" } });
+    fireEvent.submit(screen.getByRole("button", { name: "Update Mapping" }).closest("form")!);
+  };
+  const saved = { mapping_id: 78, source_code: "8867-4", status: "approved" };
+
+  it("says how many of this patient's rows moved and that other patients wait", async () => {
+    await approve({ ...saved, repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated: 3, rows_collapsed: 0 } });
+    expect(await screen.findByText(
+      "8867-4: approved. 3 of this patient's rows now use the approved concept. "
+      + "Other patients are updated when Generate OMOP runs for them.",
+    )).toBeInTheDocument();
+  });
+
+  it("uses the singular for one row", async () => {
+    await approve({ ...saved, repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated: 1, rows_collapsed: 0 } });
+    expect(await screen.findByText(/1 of this patient's rows now uses the approved concept\./)).toBeInTheDocument();
+  });
+
+  it("says so when none of this patient's rows needed to move", async () => {
+    await approve({ ...saved, repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated: 0, rows_collapsed: 0 } });
+    expect(await screen.findByText(
+      "8867-4: approved. No stored rows for this patient needed to move. "
+      + "Other patients are updated when Generate OMOP runs for them.",
+    )).toBeInTheDocument();
+  });
+
+  it("no longer tells the curator to run Generate OMOP for a save that moved nothing", async () => {
+    await approve({ ...saved, repoint: null });
+    expect(await screen.findByText("Mapping saved.")).toBeInTheDocument();
+    expect(screen.queryByText(/Run Generate OMOP/)).not.toBeInTheDocument();
+  });
+});
+
 describe("PatientSourceCodesTab and the mapping's destination unit", () => {
   // A patient row says nothing about the mapping's unit; the mapping's own
   // GET does. A save from here used to send "no unit" over a curated one.

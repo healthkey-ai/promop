@@ -6,6 +6,7 @@ from rest_framework.test import APIClient
 
 from omop_core.models import PatientSourceCode, SourceCodeConceptMapping
 from omop_core.services import repoint_jobs
+from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
 from tests.factories import ConceptFactory, MeasurementFactory, OrganizationFactory
 
 pytestmark = pytest.mark.django_db
@@ -247,3 +248,164 @@ def test_an_oid_alias_agrees_unless_it_holds_a_mapping_of_its_own():
     SourceCodeConceptMapping.objects.filter(pk=row.pk).update(deferred_repoint_concept_ids=[0])
 
     assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 0
+
+
+# --- a patient-page approval moves that patient's rows in the request (#2791) ---
+
+def _patient_save(client, row, person, **body):
+    return client.patch(f'/api/v1/code-mappings/{row.pk}/',
+                        {'patient_id': person.person_id, **body}, format='json')
+
+
+def test_a_patient_page_approval_moves_that_patients_rows_and_nobody_elses(client):
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+    theirs = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+
+    with patch.object(repoint_jobs, 'dispatch_repoint') as job:
+        response = _patient_save(client, row, mine.person, status='approved', destination_concept_id=new.pk)
+    assert response.status_code == 200, response.data
+    # Moved in the request, for this patient: no job.
+    job.assert_not_called()
+    assert response.data['repoint'] == {
+        'queued': False, 'patient_id': mine.person_id, 'from_concept_ids': [old.pk],
+        'rows_updated': 1, 'rows_collapsed': 0,
+    }
+    mine.refresh_from_db(); theirs.refresh_from_db(); row.refresh_from_db()
+    assert mine.measurement_concept_id == new.pk
+    assert theirs.measurement_concept_id == old.pk
+    # The concept stays queued for everyone else: the next run moves them.
+    assert row.deferred_repoint_concept_ids == [old.pk]
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
+    theirs.refresh_from_db()
+    assert theirs.measurement_concept_id == new.pk
+
+
+def test_a_first_patient_page_approval_claims_that_patients_unresolved_rows(client):
+    new = ConceptFactory()
+    row = mapping(new, status='proposed')
+    mine = MeasurementFactory(measurement_concept_id=0, measurement_source_value='GLU')
+    theirs = MeasurementFactory(measurement_concept_id=0, measurement_source_value='GLU')
+
+    response = _patient_save(client, row, mine.person, status='approved')
+    assert response.status_code == 200, response.data
+    assert (response.data['repoint']['from_concept_ids'], response.data['repoint']['rows_updated']) == ([0], 1)
+    mine.refresh_from_db(); theirs.refresh_from_db()
+    assert mine.measurement_concept_id == new.pk
+    assert theirs.measurement_concept_id == 0
+
+
+def test_a_patient_page_save_that_only_proposes_moves_nothing(client):
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old, status='proposed')
+    mine = MeasurementFactory(measurement_concept_id=0, measurement_source_value='GLU')
+
+    response = _patient_save(client, row, mine.person, status='proposed', destination_concept_id=new.pk)
+    assert response.status_code == 200, response.data
+    assert response.data['repoint'] is None
+    mine.refresh_from_db()
+    assert mine.measurement_concept_id == 0
+
+
+def test_a_hospital_mapping_approved_from_a_patient_page_moves_only_that_hospitals_rows(client):
+    from django.contrib.contenttypes.models import ContentType
+
+    from omop_core.models import Measurement, ProvenanceRecord
+    hospital, new = OrganizationFactory(), ConceptFactory()
+    row = mapping(new, status='proposed', organization=hospital,
+                  source_vocabulary_id='https://fhir.cerner.com/993df7f9/codeSet/72')
+    from_hospital = MeasurementFactory(measurement_concept_id=0, measurement_source_value='GLU')
+    unattributed = MeasurementFactory(
+        person=from_hospital.person, measurement_concept_id=0, measurement_source_value='GLU',
+        measurement_date='2024-02-01')
+    ProvenanceRecord.objects.create(
+        source='etl', organization=hospital, target_patient_id=str(from_hospital.person_id),
+        content_type=ContentType.objects.get_for_model(Measurement), object_id=from_hospital.pk)
+
+    response = _patient_save(client, row, from_hospital.person, status='approved')
+    assert response.status_code == 200, response.data
+    assert response.data['repoint']['rows_updated'] == 1
+    from_hospital.refresh_from_db(); unattributed.refresh_from_db()
+    assert from_hospital.measurement_concept_id == new.pk
+    assert unattributed.measurement_concept_id == 0
+
+
+def test_the_patients_record_is_re_derived_after_the_save_commits(client, django_capture_on_commit_callbacks):
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+    MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+
+    with use_dispatcher(FakeDispatcher()) as derivations:
+        with django_capture_on_commit_callbacks() as callbacks:
+            response = _patient_save(client, row, mine.person, status='approved', destination_concept_id=new.pk)
+            assert response.status_code == 200, response.data
+            # Not inside the save: a worker would derive from the rows as they were.
+            assert derivations.calls == []
+        for callback in callbacks:
+            callback()
+    # This patient only; the other waits for Generate OMOP, which derives theirs.
+    assert derivations.calls == [mine.person_id]
+
+
+def test_no_derivation_when_no_row_of_the_patient_moved(client, django_capture_on_commit_callbacks):
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    theirs = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+    bystander = MeasurementFactory(measurement_concept=old, measurement_source_value='OTHER')
+
+    with use_dispatcher(FakeDispatcher()) as derivations, django_capture_on_commit_callbacks(execute=True):
+        response = _patient_save(client, row, bystander.person, status='approved', destination_concept_id=new.pk)
+    assert response.status_code == 200, response.data
+    assert response.data['repoint']['rows_updated'] == 0
+    assert derivations.calls == []
+    theirs.refresh_from_db()
+    assert theirs.measurement_concept_id == old.pk
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_derivation_that_cannot_be_queued_does_not_fail_the_patient_page_save(client, settings):
+    """A real commit, so the hook runs as it does in a request: the worker's
+    dispatcher defers to commit itself, and that has already happened."""
+    settings.CELERY_BROKER_URL = 'redis://example.invalid/0'
+    settings.PROVISIONAL_DATA_ENABLED = False
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+
+    with patch('omop_core.tasks.refresh_patient_record_task.apply_async',
+               side_effect=ConnectionError('no broker')) as queued:
+        response = _patient_save(client, row, mine.person, status='approved', destination_concept_id=new.pk)
+    assert response.status_code == 200, response.data
+    queued.assert_called_once()
+    assert queued.call_args.kwargs['args'] == [mine.person_id]
+    mine.refresh_from_db()
+    assert mine.measurement_concept_id == new.pk
+
+
+def test_a_patient_the_approver_cannot_write_is_refused_and_no_row_moves(django_user_model):
+    """The scope is checked before anything is written, and a refused scope
+    never falls back to every patient (#1814)."""
+    from omop_core.models import GroupAccess
+    from tests.factories import PatientRecordFactory
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    elsewhere = PatientRecordFactory()
+    stored = MeasurementFactory(person=elsewhere.person, measurement_concept=old, measurement_source_value='GLU')
+    admin = django_user_model.objects.create_user(email='other-hospital-admin@test.com')
+    GroupAccess.objects.create(identity=admin, org=OrganizationFactory(), role='org_admin')
+    api = APIClient()
+    api.force_authenticate(admin)
+
+    response = _patient_save(api, row, elsewhere.person, status='approved', destination_concept_id=new.pk)
+    assert response.status_code == 403, response.data
+    stored.refresh_from_db(); row.refresh_from_db()
+    assert stored.measurement_concept_id == old.pk
+    assert (row.target_concept_id, row.deferred_repoint_concept_ids) == (old.pk, [])
+
+    missing = _patient_save(api, row, type('P', (), {'person_id': 987654321}), status='approved',
+                            destination_concept_id=new.pk)
+    assert missing.status_code == 400, missing.data
+    stored.refresh_from_db()
+    assert stored.measurement_concept_id == old.pk

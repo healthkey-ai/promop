@@ -13632,9 +13632,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     ``repoint_result`` is ``{'queued': True, 'from_concept_ids': [...]}`` when
     the approval left stored rows to move **and** no ``person_id`` was
     supplied; the rows move in a background job (``repoint_jobs``).  When ``person_id`` is
-    set (a patient-page save), rows are not re-pointed immediately; old
-    concept IDs are stored in ``deferred_repoint_concept_ids`` for
-    Generate OMOP to apply later.
+    set (a patient-page save), that patient's rows are re-pointed in the
+    request and the result is ``{'queued': False, 'patient_id', 'rows_updated',
+    ...}`` (``repoint_jobs.repoint_for_person``, #2791); the old concept IDs
+    stay in ``deferred_repoint_concept_ids`` for Generate OMOP to apply to
+    every other patient later.
     """
     # Another curator has claimed the destination concept (#2390): review only.
     if concept is not None:
@@ -14219,15 +14221,17 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             sources.add(previous_concept_id)
         sources.discard(concept.concept_id)
 
-        # A patient-page save skips the repoint entirely. The curator
-        # uses Generate OMOP from the patients list to apply the mapping,
-        # which calls resolve_person_source_codes per patient.  Retain old
-        # destinations so that path (and the Code-Mapping-page full repoint)
-        # can move them later.
+        # A patient-page save moves that patient's rows now (#2791) and no
+        # other patient's (#1874): one person's rows for one code is quick,
+        # every patient's is not. The old destinations stay recorded so that
+        # Generate OMOP (resolve_person_source_codes, per patient) and the
+        # Code-Mapping-page full repoint can move everyone else's later.
         if person_id is not None:
             if sources:
                 mapping.deferred_repoint_concept_ids = sorted(sources)
                 mapping.save(update_fields=['deferred_repoint_concept_ids'])
+                from omop_core.services.repoint_jobs import repoint_for_person
+                repoint = repoint_for_person(mapping, sources, person_id)
         else:
             # Moving every stored row is minutes on a common code, so the save
             # only records what must move and a job moves it after commit.

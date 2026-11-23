@@ -189,10 +189,18 @@ export interface WearableSourceSystem {
   label: string;
 }
 
-/** An approval queued the move of stored clinical rows; a job does it. */
+/**
+ * What an approval did to stored clinical rows. From a mapping tab the move of
+ * every patient's rows is queued for a job (`queued`). From a patient's page
+ * that patient's rows move in the request (`patient_id`, `rows_updated`) and
+ * every other patient waits for Generate OMOP (#2791).
+ */
 export interface RepointResult {
   queued: boolean;
   from_concept_ids: number[];
+  patient_id?: number;
+  rows_updated?: number;
+  rows_collapsed?: number;
 }
 
 /** What to tell the curator after a save that queued a re-point, if anything. */
@@ -200,6 +208,16 @@ export function repointBanner(sourceCode: string, repoint: RepointResult | null)
   return repoint?.queued
     ? `${sourceCode}: saved. Patient records with this code are being updated to the new concept in the background.`
     : null;
+}
+
+/** What to tell the curator after an approval saved from a patient's page, if it was one. */
+export function patientRepointBanner(sourceCode: string, repoint: RepointResult | null): string | null {
+  if (!repoint || repoint.queued || repoint.patient_id == null) return null;
+  const moved = repoint.rows_updated ?? 0;
+  const here = moved === 0
+    ? "No stored rows for this patient needed to move."
+    : `${moved} of this patient's rows now ${moved === 1 ? "uses" : "use"} the approved concept.`;
+  return `${sourceCode}: approved. ${here} Other patients are updated when Generate OMOP runs for them.`;
 }
 
 export interface MappingForm {

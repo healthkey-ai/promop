@@ -1693,6 +1693,47 @@ removing the row hides the code as well. `DELETE /api/v1/code-mappings/<id>/`
   the consequence, asks before sending, and sends one request however often
   it is pressed.
 
+### An approval moves stored rows: where it is saved decides whose
+
+Approving a mapping, or approving it at another destination, has to move the
+clinical rows already stored for its code. `_upsert_source_code_mapping`
+gathers the concepts to move off (concept 0 on a first approval, the previous
+destination when it changed, anything still waiting from an earlier save) and
+writes them to `deferred_repoint_concept_ids`. Where the save came from decides
+what happens next (`omop_core/services/repoint_jobs.py`):
+
+| Saved from | Rows moved | When | Response `repoint` |
+|---|---|---|---|
+| a mapping tab (no `patient_id`) | every patient's | a job after commit (`queue_repoint`; Celery when a broker is set, inline after commit otherwise) | `{queued: true, from_concept_ids}` |
+| a patient's Source Codes tab (`patient_id`) | that patient's only | in the request (`repoint_for_person`, #2791) | `{queued: false, patient_id, from_concept_ids, rows_updated, rows_collapsed}` |
+
+- **A patient-page approval never touches another patient's row** (#1874).
+  The concepts stay in `deferred_repoint_concept_ids`, so Generate OMOP for
+  another patient, or a later approval from a mapping tab, moves theirs. One
+  patient's rows for one code is a few rows, which is why this move is not a
+  job and the all-patients one is.
+- It makes the same sweeps as the job, narrowed to the patient: each concept
+  to the destination (the concept-0 sweep by code only), then that patient's
+  provisional rows already at the destination made real
+  (`promote_provisional_rows(person_id=)`). The guards are the re-point's own:
+  a hospital-scoped mapping moves only rows its hospital wrote, and a patient
+  whose code also arrived under another code system keeps unresolved rows.
+  `rows_updated` counts rows moved and provisional rows made real, so it can
+  be 0.
+- **The patient's record is re-derived after commit** when a row moved,
+  through `derivation_jobs` (a worker when a broker is set, inline otherwise).
+  It has to be asked for here: Generate OMOP derives only for rows it moves
+  itself, and this patient has none left. A derivation that fails or cannot
+  be queued leaves the record stale for `backfill_patient_records`; it never
+  fails the save.
+- A save that only proposes, rejects or un-approves moves no rows to a
+  destination, from either place. `patient_id` is validated before anything
+  is written (`_mapping_patient_scope`): an unknown patient is a 400 and one
+  the caller cannot write is a 403, never a fall back to every patient.
+- The tab's banner reports the count ("3 of this patient's rows now use the
+  approved concept", or that none needed to move) and that other patients
+  are updated when Generate OMOP runs for them.
+
 ### A code's rows follow its mapping to another table
 
 A curator who changes a mapping's Domain re-files it under another clinical
@@ -1739,9 +1780,10 @@ code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
   re-point's job -- it also normalizes units, routes axis variants and
   collapses duplicates -- so the concepts moved join
   `deferred_repoint_concept_ids`; an approval's re-point runs after the move
-  (the move dispatches it again), and a patient-scoped approval leaves it to
-  Generate OMOP as before. An organization-scoped mapping moves only rows its
-  hospital wrote.
+  (the move dispatches it again), and a patient-scoped approval re-points
+  that patient's rows in the request, after their move, leaving every other
+  patient's to Generate OMOP (#2791). An organization-scoped mapping moves
+  only rows its hospital wrote.
 - The per-patient inventory (`PatientSourceCode`) is re-filed under the new
   table, merging into a row the patient already has there.
 
