@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import App from "./App";
 
@@ -39,6 +39,21 @@ function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <App />
+    </MemoryRouter>
+  );
+}
+
+/** Where the app ended up: the route targets are stand-ins and say nothing of it. */
+function Landing() {
+  const location = useLocation();
+  return <div data-testid="landing">{`${location.pathname}${location.search}`}</div>;
+}
+
+function renderWithLanding(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <App />
+      <Landing />
     </MemoryRouter>
   );
 }
@@ -172,9 +187,34 @@ describe("return from Garmin's consent page (#2816)", () => {
       ...baseAuth,
       currentUser: { id: 9, is_staff: true, is_org_admin: true, is_patient: false, person_id: null, effective_roles: [patientLink] },
     });
-    renderAt("/?garmin=connected");
+    renderWithLanding("/?garmin=connected");
     expect(screen.getByText("PATIENT_DETAIL:9")).toBeInTheDocument();
     expect(screen.queryByText("PROVIDER_LIST")).not.toBeInTheDocument();
+    // The record of the patient link, not the account's id, with the outcome
+    // still in the address for the Wearables tab to read.
+    expect(screen.getByTestId("landing")).toHaveTextContent("/patient/44?garmin=connected");
+  });
+
+  it("keeps whatever outcome Garmin's callback sent", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 9, is_staff: true, is_patient: false, person_id: null, effective_roles: [patientLink] },
+    });
+    renderWithLanding("/?garmin=in_use");
+    expect(screen.getByTestId("landing")).toHaveTextContent("/patient/44?garmin=in_use");
+  });
+
+  it("still sends an analyst-only account to Code Mapping, which is all it can open", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: {
+        id: 7, is_patient: false, person_id: null, effective_roles: [patientLink],
+        org_accesses: [{ org_name: "Org", org_slug: "org", role: "analyst", expires_at: null }],
+      },
+    });
+    renderWithLanding("/?garmin=connected");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+    expect(screen.getByTestId("landing")).toHaveTextContent("/code-mappings");
   });
 
   it("leaves that admin on the patient list without a return from Garmin", () => {
@@ -182,8 +222,9 @@ describe("return from Garmin's consent page (#2816)", () => {
       ...baseAuth,
       currentUser: { id: 9, is_staff: true, is_org_admin: true, is_patient: false, person_id: null, effective_roles: [patientLink] },
     });
-    renderAt("/");
+    renderWithLanding("/");
     expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+    expect(screen.getByTestId("landing")).toHaveTextContent(/^\/$/);
   });
 
   it("leaves an admin with no record of their own on the patient list", () => {
