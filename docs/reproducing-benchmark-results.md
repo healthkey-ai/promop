@@ -16,7 +16,7 @@ for clinical trial eligibility screening, via two query paths:
 | Path | Mechanism |
 |------|-----------|
 | **PatientRecord** | Single indexed lookup on the `patient_record` table — the fast path used in production |
-| **Raw OMOP** | Reconstructs the same 20 fields live from `person`, `measurement`, `observation`, and `condition_occurrence` using 17 correlated subqueries |
+| **Raw OMOP** | Reconstructs the same 20 fields live from `person`, `measurement`, `observation`, and `condition_occurrence` in one statement with 21 correlated subqueries (counted at #2720) |
 
 ### 2. Full PatientRecord benchmark (`benchmark_patient_record`)
 
@@ -232,7 +232,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 | `patient_age` | `person` | `year_of_birth` (computed) |
 | `gender` | `person` | `gender_concept.concept_name` |
 | `disease` | `condition_occurrence` | concept name contains cancer/neoplasm/carcinoma/… |
-| `stage` | `measurement` / `observation` | LOINC 21908-9 |
+| `stage` | `measurement` / `observation` | R-ISS (`21908-9-riss`) before ISS (LOINC 21908-9), concept code before source value, first usable answer |
 | `ecog_performance_status` | `observation` | concept name icontains `ecog` |
 | `karnofsky_performance_score` | `observation` | concept name icontains `karnofsky` |
 | `hemoglobin_g_dl` | `measurement` | LOINC 718-7 |
@@ -246,16 +246,22 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 | `ast_u_l` | `measurement` | LOINC 1920-8 |
 | `alt_u_l` | `measurement` | LOINC 1742-6 |
 | `albumin_g_dl` | `measurement` | LOINC 1751-7 |
-| `her2_status` | `measurement` | LOINC 48676-1 |
-| `estrogen_receptor_status` | `measurement` | LOINC 16112-5 |
-| `progesterone_receptor_status` | `measurement` | LOINC 16113-3 |
+| `her2_status` | `measurement` | concept code LOINC 48676-1 |
+| `estrogen_receptor_status` | `measurement` | concept code LOINC 16112-5 |
+| `progesterone_receptor_status` | `measurement` | concept code LOINC 16113-3 |
 
-The raw OMOP path issues one correlated subquery per field against the
-appropriate table. The PatientRecord path reads all 20 fields in a single
+The raw OMOP path is one statement with a correlated subquery per field,
+except `stage`, which takes four (R-ISS and ISS, each in `measurement` then
+`observation`). Lab codes come from the curated field mappings, so a run may
+read approved aliases beyond the codes listed. The raw row is not the derived
+record: the command's module docstring lists where the two still differ
+(#2708). The PatientRecord path reads all 20 fields in a single
 `.values()` call on the indexed `patient_record` table.
 
 **Example output.** Verbatim from a run against the 1,000-patient reference cohort
-(PostgreSQL 14, Apple Silicon, warm cache, `--repeat 3`):
+(PostgreSQL 14, Apple Silicon, warm cache, `--repeat 3`). The raw OMOP query
+has changed since this run (#2720 among others), so treat its timings as a
+historical measurement and rerun for current numbers:
 
 ```
 Benchmarking 1000 patient(s), 3 repeat pass(es) per path...

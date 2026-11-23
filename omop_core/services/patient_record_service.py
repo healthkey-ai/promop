@@ -4008,6 +4008,11 @@ SAMPLE_STAGE_SOURCE_VALUE = 'sample-patient-stage'
 _STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
 
 
+#: Answers a staging row may carry that are not a stage: legacy boolean RECIST
+#: results coded as stage. The trial-eligibility benchmark skips the same set.
+STAGE_BOOLEAN_ANSWERS = frozenset({'true', 'false', 'yes', 'no', 'unknown'})
+
+
 def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive TNM staging and overall stage group from OMOP Measurement/Observation rows.
 
@@ -4017,8 +4022,6 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """
     snapshot = snapshot or _build_snapshot(person)
     data = {}
-
-    _BOOLEAN_EXCLUSIONS = {'true', 'false', 'yes', 'no', 'unknown'}
 
     def _stage_row_value(row):
         """Extract and validate a staging value from a row.
@@ -4031,7 +4034,7 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             value = row.value_as_concept.concept_name
         if not value and row.value_as_number is not None:
             value = str(int(row.value_as_number))
-        if value and value.strip().lower() not in _BOOLEAN_EXCLUSIONS:
+        if value and value.strip().lower() not in STAGE_BOOLEAN_ANSWERS:
             return value.strip()
         return None
 

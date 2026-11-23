@@ -15,7 +15,7 @@ from django.core.management.base import CommandError
 from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
 from omop_core.models import Organization, PatientRecord
 from omop_core.services.patient_record_service import (
-    _get_laboratory_data, _get_staging_data,
+    _get_biomarker_data, _get_laboratory_data, _get_staging_data,
 )
 from tests.factories import (
     ConditionOccurrenceFactory,
@@ -563,3 +563,130 @@ def test_stage_reads_the_r_iss_code_the_derivation_prefers():
 
     assert _fetch_omop_trial_row(person.person_id)['stage'] == 'Stage III'
     assert _get_staging_data(person)['stage'] == 'Stage III'
+
+
+# --- stage and receptors follow their extractors (#2720 review) --------------
+#
+# Each case seeds rows for one person and asserts the benchmark and the
+# extractor agree on the value given. A row is (table, concept code, source
+# value, date, answer columns).
+
+_ISS, _RISS, _T = '21908-9', '21908-9-riss', '21905-5'
+
+
+def _seed_rows(person, rows):
+    for table, code, source, when, values in rows:
+        values = dict(values)
+        if 'answer_concept' in values:
+            values['value_as_concept'] = ConceptFactory(
+                concept_code=f'ANS-{when}', concept_name=values.pop('answer_concept'))
+        if table == 'm':
+            MeasurementFactory(
+                person=person, measurement_concept=ConceptFactory(concept_code=code),
+                measurement_source_value=source, measurement_date=when, **values)
+        else:
+            ObservationFactory(
+                person=person, observation_concept=ConceptFactory(concept_code=code),
+                observation_source_value=source, observation_date=when, **values)
+
+
+_STAGE_CASES = {
+    # The reported regression: an older concept-coded row without an answer
+    # must not hide a newer source-coded one.
+    'empty concept row': ([
+        ('m', _ISS, _ISS, '2020-01-01', {}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'boolean concept row': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': 'true'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    # The string is chosen before the row is judged, so a padded boolean
+    # rejects the row although its answer concept is a stage.
+    'padded boolean beside a concept answer': ([
+        ('m', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': ' Yes ', 'answer_concept': 'Stage II'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'whitespace string beside a concept answer': ([
+        ('m', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': '   ', 'answer_concept': 'Stage II'}),
+    ], None),
+    'empty string falls through to the concept': ([
+        ('m', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': '', 'answer_concept': 'Stage 4 (qualifier value)'}),
+    ], 'Stage IV'),
+    'number is truncated': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_number': Decimal('2.8')}),
+    ], '2'),
+    'source value is not an answer': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_source_value': 'Stage IV'}),
+    ], None),
+    'label is normalised': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': ' stage 3a '}),
+    ], 'Stage IIIA'),
+    # Reported as finding 3: R-ISS in any table before ISS.
+    'R-ISS observation over ISS measurement': ([
+        ('m', _ISS, _ISS, '2026-01-01', {'value_as_string': 'Stage I'}),
+        ('o', _T, _RISS, '2020-01-01', {'value_as_string': 'Stage III'}),
+    ], 'Stage III'),
+    'entered-in-error observation': ([
+        ('o', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': 'Stage II', 'is_erroneous': True}),
+    ], None),
+    'provisional measurement': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': 'Stage II', 'confidence': 80}),
+    ], None),
+    'observation concept row before a newer source row': ([
+        ('o', _ISS, _ISS, '2020-01-01', {'value_as_string': 'Stage I'}),
+        ('o', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage I'),
+    'measurement before observation': ([
+        ('o', _ISS, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+        ('m', _T, _ISS, '2020-01-01', {'value_as_string': 'Stage I'}),
+    ], 'Stage I'),
+}
+
+
+@pytest.mark.parametrize('rows, expected', _STAGE_CASES.values(), ids=_STAGE_CASES)
+def test_stage_agrees_with_the_staging_extractor(rows, expected):
+    person = PersonFactory(year_of_birth=1960)
+    _seed_rows(person, rows)
+
+    assert _get_staging_data(person).get('stage') == expected
+    assert _fetch_omop_trial_row(person.person_id)['stage'] == expected
+
+
+_HER2 = '48676-1'
+
+_RECEPTOR_CASES = {
+    # Reported as finding 2: `_first_by_code` reads the concept code only.
+    'source-only row': ([
+        ('m', 'LOCAL-HER2', _HER2, '2020-01-01', {'value_as_string': 'Positive'}),
+    ], None),
+    'answer concept before string': ([
+        ('m', _HER2, _HER2, '2020-01-01',
+         {'answer_concept': 'Negative', 'value_as_string': 'Positive'}),
+    ], 'Negative'),
+    'empty string falls through to the source value': ([
+        ('m', _HER2, _HER2, '2020-01-01',
+         {'value_as_string': '', 'value_source_value': 'Equivocal (IHC 2+)'}),
+    ], 'Equivocal'),
+    # Unlike stage, the newest row wins even without an answer.
+    'empty newest row over an older positive': ([
+        ('m', _HER2, _HER2, '2020-01-01', {'value_as_string': 'Positive'}),
+        ('m', _HER2, _HER2, '2026-01-01', {}),
+    ], None),
+    'provisional row': ([
+        ('m', _HER2, _HER2, '2020-01-01', {'value_as_string': 'Positive', 'confidence': 80}),
+    ], None),
+}
+
+
+@pytest.mark.parametrize('rows, expected', _RECEPTOR_CASES.values(), ids=_RECEPTOR_CASES)
+def test_her2_agrees_with_the_biomarker_extractor(rows, expected):
+    person = PersonFactory(year_of_birth=1960)
+    _seed_rows(person, rows)
+
+    assert _get_biomarker_data(person).get('her2_status') == expected
+    assert _fetch_omop_trial_row(person.person_id)['her2_status'] == expected

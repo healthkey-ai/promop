@@ -11,6 +11,22 @@ matching cares about most:
     raw OMOP tables -> one patient eligibility row
     PatientRecord    -> the same row from a flat projection
 
+The command times the two reads and counts populated fields; it does not
+compare values. The raw row follows the derivation's row selection for stage,
+the receptors and the coded labs, and is known to differ from the derived
+record elsewhere (#2708):
+
+- age is the birth-year difference;
+- disease is the newest name-matched condition, not the primary cancer;
+- ECOG and Karnofsky are name-matched Observations, entered-in-error included;
+- lab codes are resolved once per run, numeric labs other than the unit pairs
+  are read as stored, and AST, ALT and clearance rows named only by display
+  text are not read;
+- a row hidden by a later clear still counts, and stage has no uncoded
+  fallback (FHIR Condition.stage, sample-patient stage);
+- the record scopes facts to the primary cancer and applies curated and
+  pending values, which no raw-table read sees.
+
 Usage:
     python manage.py benchmark_trial_eligibility --org-slugs synthea-mm --limit 10
     python manage.py benchmark_trial_eligibility --person-ids 123,456
@@ -24,11 +40,13 @@ from types import SimpleNamespace
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import (
+    BigIntegerField,
     BooleanField,
     Case,
     CharField,
     DecimalField,
     F,
+    Func,
     IntegerField,
     OuterRef,
     Q,
@@ -36,7 +54,7 @@ from django.db.models import (
     Value,
     When,
 )
-from django.db.models.functions import Coalesce, JSONObject, NullIf
+from django.db.models.functions import Cast, Coalesce, JSONObject, Lower, NullIf
 
 from omop_core.models import ConditionOccurrence, Measurement, Observation, PatientRecord, Person
 from omop_core.services.chemistry_units import (
@@ -60,10 +78,12 @@ from omop_core.services.hemoglobin_units import (
     normalize_unit as normalize_hemoglobin_unit,
 )
 from omop_core.services.patient_record_service import (
+    STAGE_BOOLEAN_ANSWERS,
     _LOINC_CODE_RE,
     _resolve_reported_unit,
     resolve_lab_code_fields,
 )
+from omop_core.services.stage_labels import normalise_stage_label
 
 
 TRIAL_ELIGIBILITY_FIELDS = [
@@ -147,47 +167,111 @@ def _effective_code():
     )
 
 
-def _latest_measurement_text_subquery(concept_codes, source_fallback=False):
-    """The newest text answer, matched by the effective code.
+def _non_empty(field):
+    return Q(**{f'{field}__isnull': False}) & ~Q(**{field: ''})
 
-    ``source_fallback`` keeps the staging extractor's rule for the stage field:
-    `_get_staging_data` reads a row by concept *or* source value, so the
-    benchmark must not give the concept precedence there (#2708 review).
+
+def _python_strip(expression):
+    """``str.strip()`` in SQL: ``TRIM`` alone drops spaces only."""
+    return Func(expression, Value(r'^\s+|\s+$'), Value(''), Value('g'),
+                function='REGEXP_REPLACE', output_field=CharField())
+
+
+def _stage_row_text():
+    """`_stage_row_value`'s answer for one row, in SQL.
+
+    The first non-empty of the string, the answer concept's name and the
+    number truncated to an integer, then stripped. The field is chosen before
+    the row is judged, so a whitespace-only string rejects the row even when an
+    answer concept is present, as in the extractor. ``value_source_value`` is
+    not an answer there, so it is not one here.
     """
-    qs = Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False)
-    if source_fallback:
-        # `_get_staging_data` reads every concept-coded row before any
-        # source-only row, so the ordering carries that precedence; a plain
-        # newest-across-both query would let an older concept row lose to a
-        # newer source row the record does not read (#2708 review).
-        qs = (
-            qs.annotate(
-                _concept_match=Case(
-                    When(measurement_concept__concept_code__in=concept_codes,
-                         then=Value(0)),
-                    default=Value(1),
-                ),
-            )
-            .filter(
-                Q(measurement_concept__concept_code__in=concept_codes)
-                | Q(measurement_source_value__in=concept_codes),
-            )
-            .order_by('_concept_match', '-measurement_date', '-measurement_id')
-        )
-    else:
-        qs = qs.annotate(effective_code=_effective_code()).filter(
-            effective_code__in=concept_codes)
-    qs = qs.annotate(
-        raw_text=Coalesce(
-            'value_as_string',
-            'value_source_value',
-            'value_as_concept__concept_name',
-            output_field=CharField(),
-        )
+    chosen = Case(
+        When(_non_empty('value_as_string'), then=F('value_as_string')),
+        When(_non_empty('value_as_concept__concept_name'),
+             then=F('value_as_concept__concept_name')),
+        When(value_as_number__isnull=False, then=Cast(
+            Cast(Func(F('value_as_number'), function='TRUNC'), BigIntegerField()),
+            CharField())),
+        output_field=CharField(),
     )
-    if not source_fallback:
-        qs = qs.order_by('-measurement_date', '-measurement_id')
-    qs = qs.values('raw_text')[:1]
+    return _python_strip(chosen)
+
+
+_STAGE_TABLES = {
+    Measurement: ('measurement_concept__concept_code', 'measurement_source_value',
+                  '-measurement_date', '-measurement_id'),
+    Observation: ('observation_concept__concept_code', 'observation_source_value',
+                  '-observation_date', '-observation_id'),
+}
+
+
+def _stage_subquery(model, code):
+    """The stage `_stage_value` reads from one table for one code.
+
+    The extractor walks the concept-coded rows, newest first, before the
+    source-only rows, and stops at the first row with a usable answer: one
+    that is not empty and not a boolean RECIST result (#2720 review). Its
+    snapshot holds neither entered-in-error nor provisional rows.
+
+    Not mirrored (#2708): a row hidden by a later clear in the snapshot's
+    cleared history still counts here.
+    """
+    concept, source, *ordering = _STAGE_TABLES[model]
+    qs = (
+        model.objects
+        .filter(person=OuterRef('pk'), is_erroneous=False, confidence__isnull=True)
+        .filter(Q(**{concept: code}) | Q(**{source: code}))
+        .annotate(
+            _concept_match=Case(When(**{concept: code}, then=Value(0)), default=Value(1)),
+            stage_text=_stage_row_text(),
+        )
+        .annotate(_stage_key=Lower('stage_text'))
+        .filter(stage_text__gt='')
+        .exclude(_stage_key__in=sorted(STAGE_BOOLEAN_ANSWERS))
+        .order_by('_concept_match', *ordering)
+        .values('stage_text')[:1]
+    )
+    return Subquery(qs, output_field=CharField())
+
+
+def _stage_expression():
+    """`_get_staging_data`'s coded overall stage: R-ISS before ISS, and within
+    each code Measurement before Observation.
+
+    Not mirrored (#2708): the extractor's uncoded fallbacks (a FHIR
+    Condition.stage assertion, the sample-patient stage) when no coded row
+    answers.
+    """
+    return Coalesce(*(
+        _stage_subquery(model, code)
+        for code in ('21908-9-riss', '21908-9')
+        for model in (Measurement, Observation)
+    ))
+
+
+def _receptor_answer_subquery(concept_code):
+    """The answer `_receptor_status` reads off `_first_by_code`'s row.
+
+    The row is the newest real Measurement whose *concept* code is the
+    receptor's; a source value alone does not name it. The newest row wins even
+    when it holds no answer, as in the extractor. Its answer is the concept
+    name, then the string, then the source value, each skipped when empty
+    (#2720 review).
+    """
+    qs = (
+        Measurement.objects
+        .filter(person=OuterRef('pk'), is_erroneous=False, confidence__isnull=True,
+                measurement_concept__concept_code=concept_code)
+        .order_by('-measurement_date', '-measurement_id')
+        .annotate(raw_text=Coalesce(
+            NullIf(F('value_as_concept__concept_name'), Value('')),
+            NullIf(F('value_as_string'), Value('')),
+            NullIf(F('value_source_value'), Value('')),
+            output_field=CharField(),
+        ))
+        .values('raw_text')[:1]
+    )
     return Subquery(qs, output_field=CharField())
 
 
@@ -251,9 +335,11 @@ def _latest_measurement_pair_subquery(concept_codes):
     row whose concept is 59260-0 (moles/volume) through a 718-7 source value as
     g/dL hemoglobin.
 
-    The number and text builders use the same effective code (except the stage
-    text field, which follows the staging extractor's concept-or-source rule).
-    The remaining benchmark/derivation divergence is row selection (#2708).
+    The number builders use the same effective code. The text fields follow
+    their own extractors instead: stage reads concept or source value, the
+    receptors read the concept code only. This does not make the benchmark row
+    equal the derived record; the module docstring lists what still differs
+    (#2708).
     """
     return Subquery(
         Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False)
@@ -329,28 +415,6 @@ def _canonical_blood_count(payload):
     return blood_count_to_canonical(sent, count_unit(payload['unit'], payload['ucum']))
 
 
-def _latest_observation_text_subquery(concept_codes):
-    qs = (
-        Observation.objects
-        .filter(person=OuterRef('pk'))
-        .filter(
-            Q(observation_concept__concept_code__in=concept_codes)
-            | Q(observation_source_value__in=concept_codes)
-        )
-        .annotate(
-            raw_text=Coalesce(
-                'value_as_string',
-                'value_source_value',
-                'value_as_concept__concept_name',
-                output_field=CharField(),
-            )
-        )
-        .order_by('-observation_date', '-observation_id')
-        .values('raw_text')[:1]
-    )
-    return Subquery(qs, output_field=CharField())
-
-
 def _latest_observation_number_subquery(concept_codes, output_field):
     qs = (
         Observation.objects
@@ -414,7 +478,7 @@ def _normalize_receptor_status(raw):
         return 'Negative'
     if 'equivocal' in value:
         return 'Equivocal'
-    return str(raw).strip().title()
+    return str(raw).strip().title() or None
 
 
 def _normalize_disease(raw):
@@ -445,14 +509,7 @@ def _fetch_omop_trial_row(person_id, code_fields=None):
             patient_age=Value(today.year, output_field=IntegerField()) - F('year_of_birth'),
             gender_raw=Coalesce('gender_concept__concept_name', 'gender_source_value'),
             disease=_latest_cancer_condition_subquery(),
-            stage=Coalesce(
-                # `_get_staging_data` prefers R-ISS and reads concept or source
-                # value, so this field keeps both rules while the other text
-                # fields use the effective code (#2708 review).
-                _latest_measurement_text_subquery(['21908-9-riss'], source_fallback=True),
-                _latest_measurement_text_subquery(['21908-9'], source_fallback=True),
-                _latest_observation_text_subquery(['21908-9']),
-            ),
+            stage=_stage_expression(),
             ecog_performance_status=_latest_observation_number_name_subquery(['ecog'], IntegerField()),
             karnofsky_performance_score=_latest_observation_number_name_subquery(['karnofsky'], IntegerField()),
             # Not 59260-0: it is moles/volume, the canonical field does not read
@@ -479,9 +536,9 @@ def _fetch_omop_trial_row(person_id, code_fields=None):
                 _codes_for(code_fields, 'alt_u_l'), IntegerField()),
             albumin_g_dl=_latest_measurement_pair_subquery(
                 _codes_for(code_fields, 'albumin_g_dl')),
-            her2_raw=_latest_measurement_text_subquery(['48676-1']),
-            estrogen_receptor_raw=_latest_measurement_text_subquery(['16112-5']),
-            progesterone_receptor_raw=_latest_measurement_text_subquery(['16113-3']),
+            her2_raw=_receptor_answer_subquery('48676-1'),
+            estrogen_receptor_raw=_receptor_answer_subquery('16112-5'),
+            progesterone_receptor_raw=_receptor_answer_subquery('16113-3'),
         )
         .values(
             'patient_age',
@@ -512,7 +569,7 @@ def _fetch_omop_trial_row(person_id, code_fields=None):
         'patient_age': row['patient_age'],
         'gender': _normalize_gender(row['gender_raw']),
         'disease': _normalize_disease(row['disease']),
-        'stage': row['stage'],
+        'stage': normalise_stage_label(row['stage']),
         'ecog_performance_status': row['ecog_performance_status'],
         'karnofsky_performance_score': row['karnofsky_performance_score'],
         'hemoglobin_g_dl': _canonical_pair(
