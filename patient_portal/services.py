@@ -80,6 +80,9 @@ def set_new_password(identity, raw_password, must_change=False):
     identity.locked_until = None
     identity.save(update_fields=['password', 'must_change_password', 'failed_login_count', 'locked_until'])
     record_password(identity)
+    # A credential the account handed to a phone stops with the old password.
+    from patient_portal import wearable_sync_tokens
+    wearable_sync_tokens.stop_for_identity(identity)
 
 
 def patient_person_for(identity):

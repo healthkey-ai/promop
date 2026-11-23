@@ -7,13 +7,14 @@ from drf_spectacular.utils import (
 )
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied, Throttled, ValidationError
 from rest_framework.pagination import CursorPagination, PageNumberPagination
+from rest_framework.parsers import JSONParser
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
-from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
+from rest_framework.throttling import ScopedRateThrottle, SimpleRateThrottle, UserRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
@@ -1264,6 +1265,41 @@ class GarminSyncThrottle(UserRateThrottle):
     is limited even where DEFAULT_THROTTLE_RATES has no entry for it."""
     scope = 'garmin_sync'
     rate = '20/hour'
+
+
+class AppleHealthSyncAddressThrottle(SimpleRateThrottle):
+    """Apple Health sync requests with no usable token, per client address.
+    The endpoint signs nobody in, so this is what limits a stranger. The view
+    applies it only once a token has failed: a phone with a good token is
+    limited per token and never shares this bucket, which matters where
+    ``MAPPING_VOTE_PROXY_HOPS`` is unset and every client's address is the
+    platform proxy's.
+
+    The address is the one the deployment's proxies wrote
+    (``mapping_votes.client_address``), not DRF's ``get_ident``: that keys on
+    the whole ``X-Forwarded-For`` header while ``NUM_PROXIES`` is unset, so a
+    caller who varied the header would get a fresh bucket each time."""
+    scope = 'apple_health_sync_address'
+    rate = '300/hour'
+
+    def get_cache_key(self, request, view):
+        from patient_portal.api.mapping_votes import client_address
+        return self.cache_format % {'scope': self.scope, 'ident': client_address(request)}
+
+
+class AppleHealthSyncTokenThrottle(SimpleRateThrottle):
+    """Apple Health sync requests, per sync token: a phone set to push every
+    few minutes is slowed, whatever addresses it pushes from. Checked by the
+    view once the token is known, since DRF throttles before a view runs."""
+    scope = 'apple_health_sync_token'
+    rate = '120/hour'
+
+    def __init__(self, token_id):
+        self.token_id = token_id
+        super().__init__()
+
+    def get_cache_key(self, request, view):
+        return self.cache_format % {'scope': self.scope, 'ident': self.token_id}
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -5120,23 +5156,34 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             request, person, device_type, samples, uploaded.name or 'unknown')
 
     def _store_wearable_samples(self, request, person, device_type, samples, filename,
-                                replace_daily=False):
+                                replace_daily=False, uploaded_by=None,
+                                rolling_history=False):
         """Write wearable samples as OMOP rows, record the upload, and answer.
 
-        Shared by the file upload and the Garmin Connect sync, so both resolve
-        concepts, filter artifacts, route by domain and record history one way.
+        Shared by the file upload, the Garmin Connect sync and the Apple Health
+        sync, so all three resolve concepts, filter artifacts, route by domain
+        and record history one way.
 
         ``replace_daily`` is for a source whose value *is* the day's total (the
-        Garmin Connect API). The derivation sums steps, active minutes and
-        sleep over a day's rows, because a day arrives as several ``.fit``
-        files; a day total written beside those rows would double the day. So
-        the incoming value replaces the rows earlier Garmin uploads and syncs
-        wrote for that metric and day. A row is Garmin's only on evidence: a
-        Garmin upload's ``sample_summary`` records writing it (``row_id``),
-        or, for an upload from before summaries recorded rows, lists its value
-        where no other device's upload does. Rows carry no device of their own
-        (#442), so anything else, an Apple row or one another ingest path
-        wrote, is left as stored.
+        Garmin Connect API, an Apple Health sync). The derivation sums steps,
+        active minutes and sleep over a day's rows, because a day arrives as
+        several ``.fit`` files; a day total written beside those rows would
+        double the day. So the incoming value replaces the rows earlier uploads
+        and syncs of the same ``device_type`` wrote for that metric and day. A
+        row is that device's only on evidence: one of its uploads'
+        ``sample_summary`` records writing it (``row_id``), or, for an upload
+        from before summaries recorded rows, lists its value where no other
+        device's upload does. Rows carry no device of their own (#442), so
+        anything else, another device's row or one another ingest path wrote,
+        is left as stored.
+
+        ``uploaded_by`` names the account behind a request that signs nobody
+        in (a sync token); otherwise it is ``request.user``.
+        ``rolling_history`` is for an unattended source, which re-sends the
+        same days many times a day: ``filename`` is then a label, a write that
+        changed nothing records no history and re-derives nothing, and one
+        that did is merged into the device's history row for the calendar
+        month (``_record_rolling_history``) instead of adding a row per push.
         """
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
@@ -5147,8 +5194,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # both insert the day. NO KEY UPDATE, so a clinical insert for this
         # person (which takes a key-share lock on the row) is not held up.
         # The upload's history row is written in the same transaction, because
-        # replace_daily reads it as the evidence of which rows are Garmin's: a
-        # sync whose rows survived without it could never be replaced.
+        # replace_daily reads it as the evidence of which rows are a device's:
+        # a sync whose rows survived without it could never be replaced.
         from patient_portal.consent import RECORD_OFF, record_permitted
         with transaction.atomic():
             Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
@@ -5157,19 +5204,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if not record_permitted(person):
                 return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
             result = self._write_wearable_samples(
-                request.user, person, device_type, samples, filename, replace_daily)
+                uploaded_by or request.user, person, device_type, samples, filename,
+                replace_daily, rolling_history)
         if isinstance(result, Response):
             return result
 
-        # Refresh the PatientRecord to recompute 30-day summaries
-        try:
-            refresh_patient_record(person)
-        except Exception:
-            logger.exception('wearable_refresh_failed person_id=%s', person.person_id)
+        # Refresh the PatientRecord to recompute 30-day summaries. A rolling
+        # source's push that wrote and replaced nothing left nothing to derive.
+        changed = result.pop('changed')
+        if changed or not rolling_history:
+            try:
+                refresh_patient_record(person)
+            except Exception:
+                logger.exception('wearable_refresh_failed person_id=%s', person.person_id)
         return Response(result)
 
     def _write_wearable_samples(self, uploaded_by, person, device_type, samples, filename,
-                                replace_daily):
+                                replace_daily, rolling_history=False):
         """The rows and the history row of one upload. Call inside a
         transaction holding the patient's lock (``_store_wearable_samples``).
         Returns the result to answer with, or a Response that refuses."""
@@ -5296,11 +5347,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if row_type_id == WEARABLE_TYPE_CONCEPT_ID:
                         wearable_rows[(metric_key, row_date)].append((row_id, float(row_val)))
 
-        # Which stored rows are Garmin's. A summary entry names the row its
+        # Which stored rows are this device's. A summary entry names the row its
         # upload wrote (row_id); an entry from before that was recorded has
         # only the value, which counts when no other device's upload lists it.
-        garmin_rows, other_rows = set(), set()      # (table, pk)
-        garmin_values = set()                       # (metric_key, date, value)
+        own_rows, other_rows = set(), set()         # (table, pk)
+        own_values = set()                          # (metric_key, date, value)
         if replace_daily:
             other_values = set()
             # The entries for these days only, unnested in the database: a
@@ -5321,18 +5372,25 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 for (history_device, metric_key, day, value,
                      names_row, row_id, row_table) in cursor.fetchall():
-                    garmin = history_device == 'garmin'
+                    own = history_device == device_type
                     try:
                         if names_row:
                             if row_id is not None:
-                                (garmin_rows if garmin else other_rows).add(
+                                (own_rows if own else other_rows).add(
                                     (row_table, int(row_id)))
                         else:
-                            (garmin_values if garmin else other_values).add(
+                            (own_values if own else other_values).add(
                                 (metric_key, day, round(float(value), 2)))
                     except (TypeError, ValueError):
                         continue
-            garmin_values -= other_values
+            own_values -= other_values
+
+        # The days an unattended sync of this device holds. Its value is the
+        # day's own total; a file's figure for the same day (a part of it, or
+        # an export's sum across every source) written beside it would double
+        # the day, and nothing would come back to replace it. A file therefore
+        # leaves those days as the sync stored them.
+        synced_days = set() if replace_daily else self._rolling_days(person, device_type)
 
         pending_measurements = []
         pending_observations = []
@@ -5359,19 +5417,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Dedup check
             dedup_key = (sample.metric_key, sample.date, round(sample.value, 2))
 
+            if (sample.metric_key, sample.date.isoformat()) in synced_days:
+                duplicates_skipped += 1
+                continue
+
             if replace_daily:
                 # Keep one stored row that already says this, drop the rest of
-                # Garmin's rows for the day: partial .fit totals, an earlier
-                # sync's value from before the watch had synced the whole day.
+                # this device's rows for the day: partial file totals, an
+                # earlier sync's value from before the day was complete.
                 day = sample.date.isoformat()
                 table = 'observation' if _is_observation(concept) else 'measurement'
                 kept = False
                 for row_id, row_val in wearable_rows.get((sample.metric_key, sample.date), ()):
                     if round(row_val, 2) == dedup_key[2] and not kept:
                         kept = True
-                    elif (table, row_id) in garmin_rows or (
+                    elif (table, row_id) in own_rows or (
                             (table, row_id) not in other_rows
-                            and (sample.metric_key, day, round(row_val, 2)) in garmin_values):
+                            and (sample.metric_key, day, round(row_val, 2)) in own_values):
                         (stale_observation_ids if table == 'observation'
                          else stale_measurement_ids).append(row_id)
 
@@ -5454,15 +5516,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if row is not None:
                 entry['row_table'] = table
             sample_summary.append(entry)
-        WearableUpload.objects.create(
-            person=person,
-            device_type=device_type,
-            filename=filename,
-            samples_created=created_count,
-            duplicates_skipped=duplicates_skipped,
-            sample_summary=sample_summary,
-            uploaded_by=uploaded_by,
-        )
+        changed = bool(created_count or replaced_count)
+        if rolling_history:
+            if changed:
+                self._record_rolling_history(
+                    uploaded_by, person, device_type, filename, sample_summary,
+                    {('measurement', pk) for pk in stale_measurement_ids}
+                    | {('observation', pk) for pk in stale_observation_ids})
+        else:
+            WearableUpload.objects.create(
+                person=person,
+                device_type=device_type,
+                filename=filename,
+                samples_created=created_count,
+                duplicates_skipped=duplicates_skipped,
+                sample_summary=sample_summary,
+                uploaded_by=uploaded_by,
+            )
 
         if unmapped_samples:
             logger.warning(
@@ -5483,10 +5553,86 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'duplicates_skipped': duplicates_skipped,
             'unmapped_samples': unmapped_samples,
             'unmapped_metrics': sorted(unmapped_metrics),
+            # For _store_wearable_samples, which takes it out of the answer.
+            'changed': changed,
         }
         if replace_daily:
             result['replaced'] = replaced_count
         return result
+
+    #: An unattended sync's history rows are named by this label, by device.
+    ROLLING_HISTORY_LABELS = {'apple': 'Apple Health sync'}
+
+    @classmethod
+    def _rolling_uploads(cls, person, device_type):
+        """The device's rolling history rows: the label alone or with its day
+        range, never a file somebody named alike."""
+        import re
+        label = cls.ROLLING_HISTORY_LABELS.get(device_type)
+        if label is None:
+            return WearableUpload.objects.none()
+        named = rf'^{re.escape(label)}( \d{{4}}-\d{{2}}-\d{{2}} to \d{{4}}-\d{{2}}-\d{{2}})?$'
+        return WearableUpload.objects.filter(
+            person=person, device_type=device_type, filename__regex=named)
+
+    @classmethod
+    def _rolling_days(cls, person, device_type):
+        """``(metric, ISO day)`` for every value an unattended sync of this
+        device wrote and still stores."""
+        days = set()
+        summaries = cls._rolling_uploads(person, device_type).values_list(
+            'sample_summary', flat=True)
+        for summary in summaries:
+            for entry in summary if isinstance(summary, list) else ():
+                if isinstance(entry, dict) and entry.get('row_id') is not None:
+                    days.add((entry.get('metric'), entry.get('date')))
+        return days
+
+    @classmethod
+    def _record_rolling_history(cls, uploaded_by, person, device_type, label, entries, replaced):
+        """Merge one push into the device's history row for this calendar month.
+
+        An unattended source pushes many times a day, and today's totals change
+        every time: a row per push would bury the patient's file uploads in the
+        history (the tab lists fifty) and grow what ``replace_daily`` reads on
+        every push. So a month of pushes is one row, ``<label> <first day> to
+        <last day>``, whose entries are the rows the pushes wrote and that are
+        still stored. An entry whose row this push replaced is dropped from
+        whichever month's row holds it (the first push of a month finishes the
+        last day of the one before), and a row left with no entries is removed.
+        Deleting a row from the history removes that month's pushed values.
+        Call inside the patient's lock, with the rows already written.
+        """
+        month = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        rolling = list(cls._rolling_uploads(person, device_type).order_by('-uploaded_at'))
+        current = next((upload for upload in rolling if upload.uploaded_at >= month), None)
+        for upload in rolling:
+            earlier = upload.sample_summary if isinstance(upload.sample_summary, list) else []
+            summary = [
+                entry for entry in earlier
+                if isinstance(entry, dict)
+                and (entry.get('row_table'), entry.get('row_id')) not in replaced
+            ]
+            if upload is current:
+                summary = summary + entries
+            if summary == earlier:
+                continue
+            if not summary:
+                upload.delete()
+                continue
+            days = sorted(entry['date'] for entry in summary if isinstance(entry.get('date'), str))
+            upload.filename = f'{label} {days[0]} to {days[-1]}' if days else label
+            upload.samples_created = len(summary)
+            upload.sample_summary = summary
+            upload.save(update_fields=['filename', 'samples_created', 'sample_summary'])
+        if current is None and entries:
+            days = sorted(entry['date'] for entry in entries)
+            WearableUpload.objects.create(
+                person=person, device_type=device_type,
+                filename=f'{label} {days[0]} to {days[-1]}',
+                samples_created=len(entries), duplicates_skipped=0,
+                sample_summary=entries, uploaded_by=uploaded_by,
+            )
 
     @action(detail=False, methods=['post'], url_path='sync-garmin',
             permission_classes=[IsAuthenticated], throttle_classes=[GarminSyncThrottle])
@@ -5603,6 +5749,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         # Resolve mappings for the device type that created this upload.
         metric_concepts = resolve_wearable_mappings(upload.device_type)
+        gone = Response({'error': 'Upload not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Delete associated Measurement/Observation rows using sample_summary.
         # An entry that names the row its upload wrote (row_id) removes that
@@ -5613,6 +5760,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         row_ids = {'measurement': [], 'observation': []}
         # One derivation below, not one per deleted row.
         with transaction.atomic(), suppress_patient_record_refresh():
+            # The writer's lock, then the row as it is now: an unattended sync
+            # rewrites its month's history row, so one read before the lock
+            # may list rows a push has since replaced and miss the ones it
+            # wrote, which would then be left with no history to remove them.
+            Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
+            upload = WearableUpload.objects.filter(id=upload_id, person=person).first()
+            if upload is None:
+                return gone
             for entry in upload.sample_summary or []:
                 if not isinstance(entry, dict):
                     continue
@@ -6226,6 +6381,171 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     The legacy /api/patient-info/ prefix registers PatientRecordViewSet itself,
     so anything added there widens a frozen API. New actions belong here.
     """
+
+    @action(detail=False, methods=['post'], url_path='sync-apple-health',
+            authentication_classes=[], permission_classes=[AllowAny],
+            parser_classes=[JSONParser], throttle_classes=[])
+    def sync_apple_health(self, request, format=None):
+        """POST /api/v1/patient-records/sync-apple-health/
+
+        Daily Apple Health values pushed from the patient's iPhone (#2800).
+        Apple has no cloud API for HealthKit, so an export app or a Shortcut on
+        the phone posts here, unattended, with the sync token the patient
+        created on the Wearables tab. Values are written as the ``export.zip``
+        upload writes them, and a day's value replaces what earlier Apple
+        uploads stored for that metric and day.
+
+        The token is the only credential read: no session, no cookie, no other
+        bearer token. It adds values to one record and reads nothing, so the
+        answer says what was understood, never what the record holds.
+
+        Header ``Authorization: Bearer <sync token>``. JSON body, either
+        ``{"samples": [{"type": <HealthKit identifier>, "date", "value", "unit"?}]}``
+        or Health Auto Export's ``{"data": {"metrics": [...]}}``. See
+        ``omop_core/services/apple_health_api.py``.
+        """
+        from omop_core.services import apple_health_api
+        from omop_core.services.mappings import WEARABLE_ARTIFACT_BOUNDS
+        from patient_portal import wearable_sync_tokens
+        from patient_portal.consent import RECORD_OFF, record_permitted
+
+        token = wearable_sync_tokens.resolve(
+            wearable_sync_tokens.bearer(request.META.get('HTTP_AUTHORIZATION')), 'apple')
+        if token is None:
+            # DRF would throttle before this handler runs; both throttles are
+            # applied here instead, because which one depends on the token.
+            by_address = AppleHealthSyncAddressThrottle()
+            if not by_address.allow_request(request, self):
+                raise Throttled(by_address.wait())
+            # One answer for every way a token fails.
+            return Response(
+                {'error': 'This sync token is not valid. Create a new one on the Wearables tab.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+                headers={'WWW-Authenticate': 'Bearer'},
+            )
+        throttle = AppleHealthSyncTokenThrottle(token.pk)
+        if not throttle.allow_request(request, self):
+            raise Throttled(throttle.wait())
+
+        person = token.person
+        # The request signs nobody in, so the audit row names the record here.
+        request._request.audit_detail = {'wearable_sync': 'apple', 'person_id': person.person_id}
+        if not record_permitted(person):
+            return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
+
+        if apple_health_api.too_large(request.META.get('CONTENT_LENGTH')):
+            return Response(
+                {'error': 'Request too large. Send fewer days at a time.'},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        unreadable = Response({'error': apple_health_api.UNREADABLE},
+                              status=status.HTTP_400_BAD_REQUEST)
+        # The parser decodes the body with whatever charset the client names,
+        # and Python has codecs that are not text at all (zlib would inflate a
+        # small body past every limit here before a point is counted).
+        charset = (request._request.content_params or {}).get('charset', 'utf-8')
+        if charset.lower().replace('_', '-') not in ('utf-8', 'utf8'):
+            return unreadable
+        try:
+            body = request.data
+        except RecursionError:
+            # JSON nested past the parser's stack is not a ParseError.
+            return unreadable
+        try:
+            parsed = apple_health_api.parse_payload(body, timezone.now().date())
+        except apple_health_api.AppleHealthPayloadError as exc:
+            return Response({'error': exc.message}, status=exc.status)
+
+        samples = parsed.samples
+        response = self._store_wearable_samples(
+            request, person, 'apple', samples, self.ROLLING_HISTORY_LABELS['apple'],
+            replace_daily=True, uploaded_by=token.created_by, rolling_history=True,
+        )
+        if response.status_code != 200:
+            return response
+        wearable_sync_tokens.touch(token)
+
+        # The writer drops a value outside its metric's plausible range without
+        # saying so; the bounds are fixed, so counting them tells the phone's
+        # owner why a metric never appears and nothing about the record.
+        def in_range(sample):
+            low, high = WEARABLE_ARTIFACT_BOUNDS.get(
+                sample.metric_key, (float('-inf'), float('inf')))
+            return low <= sample.value <= high
+        accepted = [sample for sample in samples if in_range(sample)]
+        days = sorted(sample.date for sample in accepted)
+        return Response({
+            'accepted': len(accepted),
+            'out_of_range': len(samples) - len(accepted),
+            'start_date': days[0].isoformat() if days else None,
+            'end_date': days[-1].isoformat() if days else None,
+            'unrecognized': parsed.unrecognized,
+            'rejected': parsed.rejected,
+            'unmapped_metrics': response.data.get('unmapped_metrics', []),
+        })
+
+    @action(detail=False, methods=['get', 'post', 'delete'], url_path='apple-health-sync-token',
+            permission_classes=[IsAuthenticated])
+    def apple_health_sync_token(self, request, format=None):
+        """GET / POST / DELETE /api/v1/patient-records/apple-health-sync-token/
+
+        The signed-in patient's Apple Health sync token (#2800): whether one
+        exists (GET), a new one in place of any old one (POST), none (DELETE).
+        The token itself is in the POST response and nowhere afterwards.
+        """
+        from patient_portal import wearable_sync_tokens
+        from patient_portal.consent import RECORD_OFF, record_permitted
+
+        # The person, signed in: not a service credential, and not an OAuth
+        # token they delegated to an application, which could otherwise leave
+        # itself a credential that outlives its own grant.
+        if not is_interactive_session(request):
+            return Response({'error': 'An Apple Health sync token is for a signed-in patient.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        person = wearable_sync_tokens.patient_person(request.user)
+        if person is None:
+            return Response(
+                {'error': 'No patient record linked to your account'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        raw = None
+        if request.method == 'POST':
+            # Turning a token off always works; making one needs the record on.
+            if not record_permitted(person):
+                return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
+            row, raw = wearable_sync_tokens.issue(person, request.user, 'apple')
+            logger.info('apple_health_sync_token_issued person_id=%s', person.person_id)
+        elif request.method == 'DELETE':
+            if wearable_sync_tokens.revoke(person, 'apple'):
+                logger.info('apple_health_sync_token_revoked person_id=%s', person.person_id)
+            row = None
+        else:
+            row = wearable_sync_tokens.current(person, 'apple')
+
+        # "active" is what the phone would find: the rule that admits a push.
+        active = row is not None and wearable_sync_tokens.usable(row)
+        data = {
+            'active': active,
+            'expired': row is not None and row.is_expired,
+            # A token that stopped for another reason (the password changed
+            # since it was made) is neither: there is one to replace or remove.
+            'stopped': row is not None and not active and not row.is_expired,
+            'hint': row.hint if row else None,
+            'created_at': row.created_at.isoformat() if row else None,
+            'expires_at': row.expires_at.isoformat() if row else None,
+            'last_used_at': row.last_used_at.isoformat() if row and row.last_used_at else None,
+            'endpoint': request.build_absolute_uri(
+                '/api/v1/patient-records/sync-apple-health/'),
+        }
+        if raw is not None:
+            data['token'] = raw
+        response = Response(
+            data, status=status.HTTP_201_CREATED if raw is not None else status.HTTP_200_OK)
+        # The POST answer carries the token: nothing between here and the
+        # patient's screen may keep a copy.
+        response['Cache-Control'] = 'no-store'
+        return response
 
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:

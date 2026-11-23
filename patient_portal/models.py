@@ -725,6 +725,50 @@ class ShareScan(models.Model):
         return f'{self.share_id} @ {self.scanned_at:%Y-%m-%d %H:%M}'
 
 
+class WearableSyncToken(models.Model):
+    """A patient's standing permission for their phone to add wearable values.
+
+    Apple has no cloud API for HealthKit, so an app or Shortcut on the
+    patient's iPhone posts daily values and has to authenticate unattended
+    (#2800). This is the credential it holds: issued to the patient once,
+    stored here only as a SHA-256 hash, and good for one thing, adding wearable
+    values to this person's record. It reads nothing. A patient has at most one
+    per device type; replacing or turning it off deletes the row, and so does
+    withdrawing the permission the record depends on. Rules:
+    ``patient_portal/wearable_sync_tokens.py``.
+    """
+    APPLE = 'apple'
+    DEVICES = [(APPLE, 'Apple Health')]
+
+    person = models.ForeignKey(
+        'omop_core.Person', on_delete=models.CASCADE, related_name='wearable_sync_tokens')
+    device_type = models.CharField(max_length=10, choices=DEVICES)
+    token_hash = models.CharField(max_length=64, unique=True)
+    # The token's last characters, so the patient can tell which one a phone holds.
+    hint = models.CharField(max_length=8)
+    # The token is its creator's permission and goes when the account does.
+    created_by = models.ForeignKey(Identity, on_delete=models.CASCADE, related_name='+')
+    # Set when the creator's password is changed or reset: the token stops,
+    # as the account's sessions do, and the tab says why.
+    stopped_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'device_type'], name='wearable_sync_token_one_per_device'),
+        ]
+
+    def __str__(self):
+        return f'{self.device_type} sync token for person {self.person_id}'
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at <= timezone.now()
+
+
 class AiExplanation(models.Model):
     """A plain-language explanation of one item in a patient's record.
 

@@ -20,12 +20,16 @@ Apple export.zip ──► parse_apple_health_export ──┐
                                                  ├──► WearableSample ──► one concept ──► Measurement
 Garmin .fit ────────► parse_garmin_fit ──────────┤   (metric_key,       (LOINC or       or Observation
                      (FIT message handlers)      │    date, value)       HK-Wearable)    (by domain_id)
-Garmin Connect API ─► fetch_daily_samples ───────┘
-                     (daily summaries)
+Garmin Connect API ─► fetch_daily_samples ───────┤
+                     (daily summaries)           │
+Apple Health push ──► parse_payload ─────────────┘
+                     (apple_health_api)
 ```
 
-The third input is not a third device: it is Garmin again, read through the Garmin Connect
-Personal API instead of from a file. See [Garmin Connect sync](#garmin-connect-sync).
+The third and fourth inputs are not new devices. One is Garmin again, read through the Garmin
+Connect Personal API instead of from a file: see [Garmin Connect sync](#garmin-connect-sync).
+The other is Apple again, pushed from the patient's iPhone instead of exported and uploaded: see
+[Apple Health sync](#apple-health-sync).
 
 `WearableSample` (`omop_core/services/wearable_parsers.py:18`) is the normalization contract —
 `(metric_key, date, value)`, nothing else. The consequence is that **a metric is stored
@@ -35,9 +39,8 @@ for resting heart rate never has to know whether the patient wears an Apple Watc
 Both parsers reduce to **one value per metric per calendar day** before returning. Cumulative
 metrics (steps, active minutes, sleep, distance, flights, active energy, basal energy) are summed
 across the day; rates and percentages (HR, SpO2, HRV, respiratory rate, walking speed, step
-length, double support, walking HR, VO2 max, body mass) are averaged. The two parsers share the
-same sum-vs-mean list, at `wearable_parsers.py:346` (Garmin) and `:507` (Apple) — a metric added
-to one must be added to the other.
+length, double support, walking HR, VO2 max, body mass) are averaged. The two parsers and
+the Apple Health sync read one list, `CUMULATIVE_METRICS` in `wearable_parsers.py`.
 
 ---
 
@@ -586,6 +589,169 @@ history is read unnested in SQL, for the days being written only.
 - Nothing ties a key to the patient: a sync with somebody else's key files their data, as an
   upload of somebody else's `.fit` file does.
 
+## Apple Health sync
+
+Apple has no cloud API for HealthKit. The data is on the iPhone, and only an app there that holds
+the HealthKit entitlement can read it. So there is nothing for the server to call, as it calls
+Garmin: the Apple "API route" is a **push**. Something on the phone reads Apple Health and posts
+daily values to promop (#2800). What that something is, is the patient's choice: an export app
+such as Health Auto Export, an iOS Shortcut, or, later, HealthKey's own `phr-mobile-bridge`.
+
+```
+POST /api/v1/patient-records/sync-apple-health/
+     Authorization: Bearer hkws_...
+     {"samples": [{"type": "HKQuantityTypeIdentifierStepCount", "date": "2026-11-22", "value": 8123},
+                  {"type": "HKQuantityTypeIdentifierDistanceWalkingRunning", "date": "2026-11-22",
+                   "value": 4.1, "unit": "mi"}]}
+  200 {"accepted": 2, "out_of_range": 0, "start_date": "2026-11-22", "end_date": "2026-11-22",
+       "unrecognized": [], "rejected": 0, "unmapped_metrics": []}
+```
+
+Code: `omop_core/services/apple_health_api.py` reads the body and returns `WearableSample`s;
+`PatientRecordV1ViewSet.sync_apple_health` is the endpoint; `_store_wearable_samples` is the
+writer it shares with the file upload and the Garmin sync, with `device_type` `apple`, so the
+concepts are the approved `Apple` code mappings and the rows are the `export.zip` upload's. Token
+rules: `patient_portal/wearable_sync_tokens.py`. Both actions are on the v1 viewset, so the
+legacy registration has neither.
+
+### The sync token
+
+The phone has to authenticate unattended, so the patient gives it a credential made for that and
+nothing else. This is the one place the wearable routes store a credential (the Garmin sync
+stores none).
+
+- **Made on the Wearables tab** ("Sync from Apple Health"), by the patient, signed in, on their
+  own record: `GET` / `POST` / `DELETE /api/v1/patient-records/apple-health-sync-token/`. `POST`
+  answers with the token once (`Cache-Control: no-store`); nothing shows it again. A service
+  credential is refused, and so is an OAuth token the patient delegated to an application
+  (`is_interactive_session`), which could otherwise leave itself a credential that outlives its
+  grant.
+- **Stored as a SHA-256 hash** (`WearableSyncToken.token_hash`), with the last four characters
+  as a hint. The token is `hkws_` and 256 random bits, so the digest needs no salt. It is never
+  logged; the audit row for a push names the record (`detail: {wearable_sync, person_id}`), not
+  the token.
+- **Write-only.** It adds wearable values to one person's record. The endpoint reads no other
+  credential (no session, no cookie) and the token opens no other endpoint. The answer says what
+  was understood (`accepted`, `out_of_range`, `unrecognized`, `rejected`, `unmapped_metrics`)
+  and never what the record holds: not how many values were new, already stored or replaced.
+  `out_of_range` counts values outside the metric's fixed artifact bounds, which are not stored.
+- **One per patient, a year long.** Making a new one deletes the old one; "Turn off" deletes it.
+- **What stops it** (`wearable_sync_tokens.usable`), each with the same 401 as a token that
+  never existed: it expires; its creator's account is deactivated, is made to change its
+  password, or is no longer the active patient of that record; or **the account's password is
+  changed or reset**. `services.set_new_password`, which every change and reset goes through,
+  stamps the account's tokens `stopped_at`, as the change ends the account's sessions: someone
+  who held the account before a reset keeps nothing. The row stays so the tab can say the token
+  has stopped and offer a new one. A re-hash that is not a password change (Django upgrading a
+  hash at sign-in, `setup_admin` on a deploy) stops nothing.
+- **It goes with the record.** Withdrawing the permission the record depends on erases the token
+  with the rest (`tests/test_member_erasure.py` pins that). While the record is off no token is
+  made, and one that exists gets a 403; turning one off still works.
+- **Limited** to 120 pushes an hour per token (`AppleHealthSyncTokenThrottle`). A request with
+  no usable token is limited to 300 an hour per client address
+  (`AppleHealthSyncAddressThrottle`); a phone with a good token is never counted there. Both
+  are applied in the handler, since which one depends on the token and DRF throttles before a
+  view runs. The address is the one the deployment's proxies wrote
+  (`mapping_votes.client_address`, `MAPPING_VOTE_PROXY_HOPS`, as for the public vote pages):
+  DRF's own would be the whole `X-Forwarded-For` header, which a caller can vary. Where the
+  setting is left at 0 the address is the platform proxy's, so strangers share one bucket and
+  real phones are unaffected. A body over 2 MB (by `Content-Length`) or 10,000 data points is a
+  413. JSON nested past the parser's stack, or a `charset` other than UTF-8, is a 400.
+- It is **system** data (`instance_data.py`): never copied between instances.
+
+### The body
+
+Two shapes are read. Both carry **whole days**: values for one metric and day in one request are
+combined as the `export.zip` parser combines a day's records, added up for a cumulative metric
+(`CUMULATIVE_METRICS`: steps, exercise minutes, sleep, distance, flights, active and basal
+energy) and averaged otherwise.
+
+- **promop's own:** `{"samples": [{"type", "date", "value", "unit"?}]}`. `type` is the HealthKit
+  identifier, the source code of the approved `Apple` mapping
+  (`HKQuantityTypeIdentifierStepCount`, ..., `HKCategoryTypeIdentifierSleepAnalysis`). `date` is
+  `YYYY-MM-DD` or a timestamp that starts with it; the day is read as the phone wrote it and is
+  not converted to the server's zone. `unit` is required for the metrics in the table below.
+- **Health Auto Export's** REST API automation JSON: `{"data": {"metrics": [{"name", "units",
+  "data": [{"date", "qty"}]}]}}`. Metric names are the app's (`step_count`,
+  `walking_running_distance`, `sleep_analysis`, ...; the table is `_HAE_NAME_TO_TYPE`). A
+  summarised night is its `totalSleep`, else `asleep`, else its stages added up; a night with
+  time in bed and no sleep recorded (a phone with no watch) stores nothing, as in the
+  `export.zip` parser. Unsummarised sleep counts the Asleep, Core, Deep and REM segments.
+
+| Metric | Stored in | Units converted |
+|---|---|---|
+| distance | km | `km`, `m`, `mi` |
+| walking speed | km/hr | `km/hr`, `m/s`, `mi/hr` |
+| step length | cm | `cm`, `m`, `in` |
+| active and basal energy | kcal | `kcal`, `kJ` |
+| body mass | kg | `kg`, `g`, `lb` |
+| sleep | h | `hr`, `min` |
+| exercise minutes | min | `min`, `hr`, `s` |
+
+For these metrics a missing or any other unit is refused (counted in `rejected`): an iPhone set
+to miles sends miles, and a mile stored as a kilometre is a wrong fact. The other metrics have
+one unit in HealthKit and the spelling a client gives is not checked. SpO2 and double-support percentage
+sent as a fraction are stored as a percentage. A metric name the reader does not know is
+returned in `unrecognized` and not stored; Health Auto Export's `heart_rate` (minimum, average
+and maximum) is one of those. A day before 2014 or more than a day ahead is rejected.
+
+### A day's value replaces what Apple uploads wrote for the day
+
+The push uses the writer's `replace_daily`, with the evidence rule of
+[the Garmin sync](#a-days-total-replaces-what-garmin-uploads-wrote-for-the-day) read for `apple`:
+a stored row is replaced when an `apple` upload's history names it (or, for older history, lists
+its value where no other device's does). So a day's steps from the phone replace the steps an
+earlier `export.zip` or an earlier push stored for that day, and a later push corrects an earlier
+one made before the day was over. A Garmin row, a row another ingest path wrote and a row no
+upload history accounts for are left as stored.
+
+An automation pushes many times a day, re-sending the same days, and today's totals change
+between pushes. So the push is a **rolling** source to the writer (`rolling_history=True`):
+
+- A push that writes and replaces nothing records no history and does not re-derive the record.
+  The tab shows when the phone last made contact (`last_used_at`) instead.
+- A push that does is merged into one `WearableUpload` row per calendar month,
+  `Apple Health sync <first day> to <last day>` (`_record_rolling_history`). Its entries are the
+  rows the month's pushes wrote and that are still stored: an entry whose row a later push
+  replaced is dropped from whichever month's row holds it, and a row left with none is removed.
+  A row per push would push the patient's file uploads off the history list (it shows fifty)
+  within days, and grow what `replace_daily` reads on every push.
+- Deleting that row from the history removes the values that month's pushes wrote. The delete
+  takes the writer's lock on the patient first, so it and a push cannot interleave. While the
+  token is on, the next push writes again the days the phone still sends.
+- **An `export.zip` uploaded afterwards leaves the pushed days alone.** The export sums a day
+  across every source, so its figure differs from the phone's own total, and no later push comes
+  back for a day the phone has stopped sending. A file therefore skips a metric and day that a
+  rolling history row names (`_rolling_days`; counted in `duplicates_skipped`) and writes the
+  rest. To take the file's value instead, delete the sync's row from the history first.
+
+**Known limits.**
+
+- **Not verified against an iPhone.** No device was available where this was built. The reader
+  follows Health Auto Export's published JSON format and is tested on bodies of that shape.
+- **A request with part of a day replaces the day with that part.** An automation must send
+  whole days (Health Auto Export: summarised by day, a period of "Today" or the last days, not
+  "since last sync").
+- The patient needs an app or Shortcut that can post Apple Health data. promop ships neither.
+- A value marked entered in error is kept and is not a value the patient has, so the next push
+  writes the day's value beside it, once. That is the writer's rule for every source.
+- A push re-derives the record inside the request when it changed something, as a file upload
+  does; nothing queues it.
+- The `export.zip` parser attributes sleep to the day each segment starts, a summarised push to
+  the day the app names. A night that crosses midnight can therefore sit on different days by
+  the two routes.
+- A token is as safe as the phone and the app holding it. Whoever has it can add wearable values
+  to that one record, and replace Apple-sourced ones, until the patient turns it off.
+
+**Not this route.** `POST /api/fhir/patient-sync/` already takes HealthKit daily rollups as FHIR
+from `phr-mobile-bridge`, signed in as the patient. That app is not shipped, and its rows do not
+feed the Wearables tab: it sends steps as LOINC `41950-7`, distance as `93849-8` in metres,
+flights as `93833-2` and active energy as `41981-2`, as Measurement rows typed as EHR data,
+while the tab's derivation reads the `WEARABLE_CONCEPT_CODE` codes above. Pointing that app at
+this endpoint is the way to give it the tab.
+
+---
+
 ## Derived values (not directly exported by either device)
 
 Two metrics are computed rather than read, and this is where the two adapters deliberately
@@ -849,7 +1015,7 @@ What a new vendor does touch:
 
 | Layer | Change |
 |---|---|
-| `wearable_parsers.py` | The new parser. Reuse the shared sum-vs-mean list (`:346`, `:507`) — don't invent a third copy. |
+| `wearable_parsers.py` | The new parser. Use `CUMULATIVE_METRICS` for sum-vs-mean; don't write a second list. |
 | `views.py:3569` | `device_type` allow-list, currently the literal `('garmin', 'apple')` |
 | `views.py:3579-3582` | Per-device file-extension validation |
 | `views.py:3605` | Parser dispatch, plus the error-message ternary at `:3613` |
@@ -888,7 +1054,9 @@ it was caught.
    logged and counted, but no row is written). Seed the genuine Athena `concept_id` if the code
    exists there; otherwise mint via `_hk()` under `HK-Wearable`.
 3. `wearable_parsers.py` — add the Apple `_APPLE_TYPE_MAP` entry and the Garmin FIT handler;
-   add the key to the sum-vs-mean list at `:346` **and** `:507` if it is cumulative.
+   add the key to `CUMULATIVE_METRICS` if it is cumulative. For an Apple metric, add its
+   Health Auto Export name to `_HAE_NAME_TO_TYPE` in `apple_health_api.py`, and its units to
+   `_UNIT_FACTORS` there if it is exported in more than one.
 4. `views.py` — add the `unit_map` entry in `_store_wearable_samples`, the writer
    `upload_wearable` and `sync_garmin` share. If Garmin's Personal API reports the metric, read
    it in `garmin_connect.py` too.

@@ -19738,6 +19738,704 @@ class GarminSyncEndpointTest(TestCase):
             self._sync([], identity=self.unlinked_identity, expect=403)
 
 
+class AppleHealthSyncEndpointTest(TestCase):
+    """Apple Health through an API (#2800).
+
+    POST /api/v1/patient-records/sync-apple-health/ takes daily values from
+    the patient's phone, authenticated by a sync token and nothing else;
+    /apple-health-sync-token/ is where the signed-in patient makes, replaces
+    and removes that token. The body reader has its own tests in
+    tests/test_apple_health_api.py.
+    """
+
+    URL = '/api/v1/patient-records/sync-apple-health/'
+    TOKEN_URL = '/api/v1/patient-records/apple-health-sync-token/'
+    STEPS = 'HKQuantityTypeIdentifierStepCount'
+    RESTING_HR = 'HKQuantityTypeIdentifierRestingHeartRate'
+    SLEEP = 'HKCategoryTypeIdentifierSleepAnalysis'
+    INVALID = {'error': 'This sync token is not valid. Create a new one on the Wearables tab.'}
+
+    @classmethod
+    def setUpTestData(cls):
+        # The same concepts, approved Apple mappings, type concept and patient
+        # as the file upload's tests.
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+        cls.day = timezone.now().date() - timedelta(days=3)
+
+    def setUp(self):
+        # The throttles count in the cache across tests.
+        from django.core.cache import cache
+        cache.clear()
+
+    # The Garmin sync's helpers for stored rows read nothing Garmin-specific.
+    _client_as = GarminSyncEndpointTest._client_as
+    _values = GarminSyncEndpointTest._values
+    _stored = GarminSyncEndpointTest._stored
+
+    def _token(self, identity=None):
+        resp = self._client_as(identity or self.identity).post(self.TOKEN_URL)
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return resp.data['token']
+
+    def _sample(self, hk_type, value, day=None, **extra):
+        return {'type': hk_type, 'date': (day or self.day).isoformat(), 'value': value, **extra}
+
+    def _push(self, samples=None, token=None, body=None, expect=200, client=None):
+        token = self._token() if token is None else token
+        resp = (client or APIClient()).post(
+            self.URL, {'samples': samples or []} if body is None else body, format='json',
+            HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(resp.status_code, expect, getattr(resp, 'data', None))
+        return resp
+
+    # -- the token ---------------------------------------------------------------
+
+    def test_no_token_until_the_patient_makes_one(self):
+        resp = self._client_as(self.identity).get(self.TOKEN_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, {
+            'active': False, 'expired': False, 'stopped': False, 'hint': None, 'created_at': None,
+            'expires_at': None, 'last_used_at': None,
+            'endpoint': 'http://testserver' + self.URL,
+        })
+        self.assertEqual(resp['Cache-Control'], 'no-store')
+
+    def test_a_token_is_shown_once_and_stored_only_as_a_hash(self):
+        import hashlib
+        from patient_portal.models import WearableSyncToken
+        client = self._client_as(self.identity)
+        with self.assertLogs('patient_portal.api.views', level='DEBUG') as logs, \
+                self.assertLogs('audit', level='DEBUG') as audit:
+            resp = client.post(self.TOKEN_URL)
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp['Cache-Control'], 'no-store')
+        token = resp.data['token']
+        self.assertRegex(token, r'^hkws_[A-Za-z0-9_-]{43}$')
+        self.assertTrue(resp.data['active'])
+        self.assertEqual(resp.data['hint'], token[-4:])
+        self.assertNotIn(token, '\n'.join(logs.output + audit.output))
+
+        row = WearableSyncToken.objects.get(person=self.person)
+        self.assertEqual(row.token_hash, hashlib.sha256(token.encode()).hexdigest())
+        self.assertEqual(row.created_by, self.identity)
+        self.assertEqual(row.device_type, 'apple')
+        self.assertAlmostEqual(
+            (row.expires_at - timezone.now()).total_seconds(), 365 * 86400, delta=60)
+        for value in row.__dict__.values():
+            self.assertNotEqual(value, token)
+
+        # Afterwards the patient can see that it exists, never the token.
+        seen = client.get(self.TOKEN_URL).data
+        self.assertNotIn('token', seen)
+        self.assertTrue(seen['active'])
+        self.assertEqual(seen['hint'], token[-4:])
+
+    def test_a_new_token_replaces_the_old_one(self):
+        from patient_portal.models import WearableSyncToken
+        old = self._token()
+        new = self._token()
+        self.assertNotEqual(old, new)
+        self.assertEqual(WearableSyncToken.objects.filter(person=self.person).count(), 1)
+        self._push([self._sample(self.STEPS, 100)], token=old, expect=401)
+        self._push([self._sample(self.STEPS, 100)], token=new)
+
+    def test_turning_the_token_off_stops_the_phone(self):
+        token = self._token()
+        client = self._client_as(self.identity)
+        resp = client.delete(self.TOKEN_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['active'])
+        self.assertEqual(self._push([self._sample(self.STEPS, 100)], token=token, expect=401).data,
+                         self.INVALID)
+        # Turning off what is already off is not an error.
+        self.assertEqual(client.delete(self.TOKEN_URL).status_code, 200)
+
+    def test_who_may_manage_a_token(self):
+        from unittest import mock
+        from patient_portal.models import WearableSyncToken
+        self.assertIn(APIClient().post(self.TOKEN_URL).status_code, [401, 403])
+        self.assertEqual(self._client_as(self.unlinked_identity).post(self.TOKEN_URL).status_code, 403)
+        # The person, signed in. A credential that can be presented without
+        # them (a service token, an OAuth grant handed to an application) may
+        # not leave itself a longer-lived one.
+        delegated = APIClient()
+        delegated.force_authenticate(user=self.identity)
+        for method in ('get', 'post', 'delete'):
+            resp = getattr(delegated, method)(self.TOKEN_URL)
+            self.assertEqual(resp.status_code, 403, method)
+        with mock.patch('patient_portal.api.views.is_interactive_session', return_value=False):
+            self.assertEqual(self._client_as(self.identity).post(self.TOKEN_URL).status_code, 403)
+        self.assertFalse(WearableSyncToken.objects.exists())
+
+    def test_a_record_that_is_off_makes_no_token_but_can_remove_one(self):
+        from unittest import mock
+        from patient_portal.consent import RECORD_OFF
+        from patient_portal.models import WearableSyncToken
+        self._token()
+        client = self._client_as(self.identity)
+        with mock.patch('patient_portal.consent.record_permitted', return_value=False):
+            resp = client.post(self.TOKEN_URL)
+            self.assertEqual(resp.status_code, 403)
+            self.assertEqual(resp.data, {'error': RECORD_OFF})
+            self.assertTrue(WearableSyncToken.objects.filter(person=self.person).exists())
+            self.assertEqual(client.delete(self.TOKEN_URL).status_code, 200)
+        self.assertFalse(WearableSyncToken.objects.filter(person=self.person).exists())
+
+    def test_the_legacy_path_has_neither_endpoint(self):
+        """New actions go on /api/v1/ only: the frozen legacy registration
+        routes these paths to nothing of ours."""
+        from django.urls import resolve
+        for name in ('sync-apple-health', 'apple-health-sync-token'):
+            self.assertEqual(
+                resolve(f'/api/v1/patient-records/{name}/').url_name, f'v1-patient-records-{name}')
+            # There the path is only a record id that names no record.
+            self.assertEqual(resolve(f'/api/patient-info/{name}/').url_name, 'patient-info-detail')
+        token = self._token()
+        resp = APIClient().post(
+            '/api/patient-info/sync-apple-health/',
+            {'samples': [self._sample(self.STEPS, 100)]}, format='json',
+            HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertIn(resp.status_code, (401, 403, 405))
+        self.assertEqual(self._values('steps'), [])
+
+    # -- what a push writes --------------------------------------------------------
+
+    def test_a_push_writes_rows_as_the_file_upload_does(self):
+        from omop_core.models import Measurement, Observation, WearableUpload
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+        from patient_portal.models import WearableSyncToken
+
+        resp = self._push([
+            self._sample(self.STEPS, 9200), self._sample(self.RESTING_HR, 52),
+            self._sample(self.SLEEP, 7.5, unit='hr'),
+            self._sample('HKQuantityTypeIdentifierDistanceWalkingRunning', 5, unit='mi'),
+        ])
+        # What was understood, and nothing about what the record holds.
+        self.assertEqual(resp.data, {
+            'accepted': 4, 'out_of_range': 0,
+            'start_date': self.day.isoformat(), 'end_date': self.day.isoformat(),
+            'unrecognized': [], 'rejected': 0, 'unmapped_metrics': [],
+        })
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+        self.assertEqual(self._values('sleep_duration'), [7.5])
+        self.assertEqual(self._values('distance'), [8.05])
+
+        steps = Observation.objects.get(
+            person=self.person, observation_concept=self.wearable_concepts['steps'])
+        self.assertEqual(steps.observation_type_concept_id, WEARABLE_TYPE_CONCEPT_ID)
+        self.assertEqual(steps.observation_source_value, '55423-8')
+        self.assertEqual(steps.unit_source_value, '/d')
+        rhr = Measurement.objects.get(
+            person=self.person, measurement_concept=self.wearable_concepts['resting_hr'])
+        self.assertEqual(rhr.measurement_type_concept_id, WEARABLE_TYPE_CONCEPT_ID)
+        self.assertEqual(rhr.unit_source_value, '/min')
+
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'apple')
+        self.assertEqual(
+            upload.filename, f'Apple Health sync {self.day.isoformat()} to {self.day.isoformat()}')
+        self.assertEqual(upload.samples_created, 4)
+        self.assertEqual(upload.uploaded_by, self.identity)
+        self.assertIsNotNone(WearableSyncToken.objects.get(person=self.person).last_used_at)
+
+    def test_a_health_auto_export_body_is_read(self):
+        day = self.day.isoformat()
+        resp = self._push(body={'data': {'metrics': [
+            {'name': 'step_count', 'units': 'count',
+             'data': [{'date': f'{day} 00:00:00 -0700', 'qty': 8123, 'source': 'Watch'}]},
+            {'name': 'sleep_analysis', 'units': 'hr',
+             'data': [{'date': f'{day} 00:00:00 -0700', 'totalSleep': 6.75, 'inBed': 8}]},
+            {'name': 'heart_rate', 'units': 'count/min',
+             'data': [{'date': f'{day} 00:00:00 -0700', 'Min': 48, 'Avg': 70, 'Max': 131}]},
+        ]}})
+        self.assertEqual(resp.data['accepted'], 2)
+        self.assertEqual(resp.data['unrecognized'], ['heart_rate'])
+        self.assertEqual(self._values('steps'), [8123.0])
+        self.assertEqual(self._values('sleep_duration'), [6.75])
+
+    def test_the_readings_of_a_day_in_one_push_are_one_value(self):
+        self._push([self._sample(self.STEPS, 4000), self._sample(self.STEPS, 5200),
+                    self._sample(self.RESTING_HR, 50), self._sample(self.RESTING_HR, 54)])
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+
+    def test_an_artifact_value_is_not_written_and_is_counted(self):
+        resp = self._push([self._sample(self.STEPS, 250000), self._sample(self.RESTING_HR, 52)])
+        self.assertEqual((resp.data['accepted'], resp.data['out_of_range']), (1, 1))
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+
+    def test_a_metric_with_no_approved_apple_mapping_is_reported_not_written(self):
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple', source_code=self.STEPS).update(status='proposed')
+        resp = self._push([self._sample(self.STEPS, 9200), self._sample(self.RESTING_HR, 52)])
+        self.assertEqual(resp.data['unmapped_metrics'], ['steps'])
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+
+    def test_names_and_values_that_cannot_be_read_are_reported(self):
+        resp = self._push([
+            self._sample('HKQuantityTypeIdentifierHeartRate', 70),
+            self._sample(self.STEPS, 'many'),
+            self._sample(self.STEPS, 100, day=timezone.now().date() + timedelta(days=30)),
+            self._sample('HKQuantityTypeIdentifierBodyMass', 11, unit='stone'),
+            self._sample(self.RESTING_HR, 52),
+        ])
+        self.assertEqual(resp.data['accepted'], 1)
+        self.assertEqual(resp.data['unrecognized'], ['HKQuantityTypeIdentifierHeartRate'])
+        self.assertEqual(resp.data['rejected'], 3)
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(self._values('body_mass'), [])
+
+    def test_an_empty_push_is_accepted_and_counts_as_contact(self):
+        from omop_core.models import WearableUpload
+        from patient_portal.models import WearableSyncToken
+        resp = self._push([])
+        self.assertEqual(resp.data['accepted'], 0)
+        self.assertIsNone(resp.data['start_date'])
+        self.assertFalse(WearableUpload.objects.filter(person=self.person).exists())
+        self.assertIsNotNone(WearableSyncToken.objects.get(person=self.person).last_used_at)
+
+    # -- a day's value replaces, it does not stack ---------------------------------
+
+    def test_a_days_value_replaces_what_an_export_upload_stored(self):
+        self._stored('apple', 'steps', [8800.0])
+        self._push([self._sample(self.STEPS, 9200)])
+        self.assertEqual(self._values('steps'), [9200.0])
+
+    def test_a_later_push_replaces_an_earlier_pushs_value(self):
+        token = self._token()
+        self._push([self._sample(self.STEPS, 2000)], token=token)
+        self._push([self._sample(self.STEPS, 9200)], token=token)
+        self.assertEqual(self._values('steps'), [9200.0])
+
+    def test_pushing_the_same_days_again_changes_records_and_derives_nothing(self):
+        from unittest import mock
+        from omop_core.models import WearableUpload
+        token = self._token()
+        samples = [self._sample(self.STEPS, 9200), self._sample(self.RESTING_HR, 52)]
+        self._push(samples, token=token)
+        before = WearableUpload.objects.get(person=self.person)
+        # An automation re-sends the same days all day: no history, and no
+        # re-derivation of the whole record for a write that wrote nothing.
+        with mock.patch('patient_portal.api.views.refresh_patient_record') as refresh:
+            self._push(samples, token=token)
+            self._push(samples, token=token)
+        refresh.assert_not_called()
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+        after = WearableUpload.objects.get(person=self.person)
+        self.assertEqual((after.pk, after.sample_summary), (before.pk, before.sample_summary))
+
+    def test_a_months_pushes_are_one_history_row_naming_the_rows_still_stored(self):
+        """Today's totals change with every push. A history row per push would
+        bury the patient's file uploads in the list within days."""
+        from omop_core.models import Observation, WearableUpload
+        token = self._token()
+        earlier = self.day - timedelta(days=1)
+        self._push([self._sample(self.STEPS, 2000)], token=token)
+        self._push([self._sample(self.STEPS, 6000), self._sample(self.RESTING_HR, 52)], token=token)
+        self._push([self._sample(self.STEPS, 9200), self._sample(self.STEPS, 7000, day=earlier)],
+                   token=token)
+
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'apple')
+        self.assertEqual(
+            upload.filename, f'Apple Health sync {earlier.isoformat()} to {self.day.isoformat()}')
+        self.assertEqual(upload.samples_created, 3)
+        self.assertEqual(
+            sorted((e['metric'], e['date'], e['value']) for e in upload.sample_summary),
+            [('resting_hr', self.day.isoformat(), 52.0), ('steps', earlier.isoformat(), 7000.0),
+             ('steps', self.day.isoformat(), 9200.0)])
+        # Every entry names a row that exists; the replaced 2000 and 6000 are gone.
+        steps_ids = set(Observation.objects.filter(person=self.person).values_list(
+            'observation_id', flat=True))
+        self.assertEqual(
+            {e['row_id'] for e in upload.sample_summary if e['row_table'] == 'observation'},
+            steps_ids)
+        self.assertEqual(self._values('steps'), [9200.0])
+
+        # Deleting it from the history removes what the month's pushes wrote.
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(self._values('steps', day=earlier), [])
+        self.assertEqual(self._values('resting_hr'), [])
+
+    def test_a_push_starts_a_new_history_row_each_month_and_never_joins_a_file(self):
+        from omop_core.models import WearableUpload
+        token = self._token()
+        self._push([self._sample(self.STEPS, 2000)], token=token)
+        last_month = WearableUpload.objects.get(person=self.person)
+        WearableUpload.objects.filter(pk=last_month.pk).update(
+            uploaded_at=timezone.now() - timedelta(days=40))
+        # A file somebody named like a sync is still a file.
+        WearableUpload.objects.create(
+            person=self.person, device_type='apple', filename='Apple Health sync export.zip',
+            samples_created=0, sample_summary=[])
+        self._push([self._sample(self.RESTING_HR, 52)], token=token)
+
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).count(), 3)
+        last_month.refresh_from_db()
+        self.assertEqual([e['metric'] for e in last_month.sample_summary], ['steps'])
+        named_file = WearableUpload.objects.get(filename='Apple Health sync export.zip')
+        self.assertEqual(named_file.sample_summary, [])
+
+    def test_an_export_uploaded_after_a_sync_leaves_the_synced_days_alone(self):
+        """An export sums a day across every source, so its figure differs
+        from the phone's own total: beside it, the day would double, and no
+        later push comes back for a day the phone has stopped sending."""
+        from unittest import mock
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from omop_core.services.wearable_parsers import WearableSample
+        other = self.day - timedelta(days=30)
+        self._push([self._sample(self.STEPS, 9200), self._sample(self.RESTING_HR, 52)])
+        export = [WearableSample('steps', self.day, 9350.0),        # synced: left alone
+                  WearableSample('steps', other, 4000.0),           # not synced: written
+                  WearableSample('vo2_max', self.day, 41.5)]        # a metric the sync never sent
+        with mock.patch('omop_core.services.wearable_parsers.parse_apple_health_export',
+                        return_value=export):
+            resp = self._client_as(self.identity).post(
+                '/api/v1/patient-records/upload-wearable/',
+                data={'file': SimpleUploadedFile('export.zip', b'zip'), 'device_type': 'apple'},
+                format='multipart')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual((resp.data['samples_created'], resp.data['duplicates_skipped']), (2, 1))
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(self._values('steps', day=other), [4000.0])
+        self.assertEqual(self._values('vo2_max'), [41.5])
+
+    def test_a_push_that_finishes_last_months_day_tidies_last_months_history(self):
+        from omop_core.models import WearableUpload
+        token = self._token()
+        earlier = self.day - timedelta(days=1)
+        self._push([self._sample(self.STEPS, 2000), self._sample(self.STEPS, 7000, day=earlier)],
+                   token=token)
+        last_month = WearableUpload.objects.get(person=self.person)
+        WearableUpload.objects.filter(pk=last_month.pk).update(
+            uploaded_at=timezone.now() - timedelta(days=40))
+
+        # The first push of the new month replaces the last day of the old one.
+        self._push([self._sample(self.STEPS, 9200)], token=token)
+        last_month.refresh_from_db()
+        self.assertEqual(
+            [(e['date'], e['value']) for e in last_month.sample_summary],
+            [(earlier.isoformat(), 7000.0)])
+        self.assertEqual(last_month.samples_created, 1)
+        self.assertEqual(
+            last_month.filename, f'Apple Health sync {earlier.isoformat()} to {earlier.isoformat()}')
+        this_month = WearableUpload.objects.exclude(pk=last_month.pk).get(person=self.person)
+        self.assertEqual([e['value'] for e in this_month.sample_summary], [9200.0])
+
+        # And a month's row whose every value was replaced is removed.
+        self._push([self._sample(self.STEPS, 7100, day=earlier)], token=token)
+        self.assertFalse(WearableUpload.objects.filter(pk=last_month.pk).exists())
+        self.assertEqual(self._values('steps', day=earlier), [7100.0])
+
+    def test_a_push_that_only_removes_rows_adds_no_empty_history(self):
+        from omop_core.models import WearableUpload
+        self._stored('apple', 'steps', [9200.0, 3000.0])      # an export's rows, with its history
+        self._push([self._sample(self.STEPS, 9200)])
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(
+            list(WearableUpload.objects.filter(person=self.person).values_list('filename', flat=True)),
+            ['earlier'])
+
+    def test_values_deleted_from_the_history_come_back_with_the_next_push(self):
+        """Deleting a month's sync row removes its values; while the token is
+        on, the phone's next push writes the days it still sends again."""
+        from omop_core.models import WearableUpload
+        token = self._token()
+        self._push([self._sample(self.STEPS, 9200)], token=token)
+        upload = WearableUpload.objects.get(person=self.person)
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._values('steps'), [])
+        self._push([self._sample(self.STEPS, 9200)], token=token)
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).count(), 1)
+
+    def test_a_garmin_row_is_never_replaced(self):
+        self._stored('garmin', 'steps', [4100.0])
+        self._push([self._sample(self.STEPS, 9200)])
+        self.assertEqual(self._values('steps'), [4100.0, 9200.0])
+
+    def test_a_value_both_devices_recorded_is_not_apples_to_replace(self):
+        self._stored('apple', 'steps', [4100.0])
+        from omop_core.models import WearableUpload
+        WearableUpload.objects.create(
+            person=self.person, device_type='garmin', filename='watch.fit', samples_created=0,
+            sample_summary=[{'metric': 'steps', 'date': self.day.isoformat(), 'value': 4100.0}])
+        self._push([self._sample(self.STEPS, 9200)])
+        self.assertEqual(self._values('steps'), [4100.0, 9200.0])
+
+    def test_rows_no_apple_upload_accounts_for_are_left_alone(self):
+        # One row no upload history records; one a history records but that is
+        # not typed as a wearable upload's row (a FHIR sync's, say).
+        other_type = self.wearable_concepts['spo2'].concept_id
+        self._stored('apple', 'steps', [3000.0], in_history=False)
+        self._stored('apple', 'resting_hr', [61.0], type_concept_id=other_type)
+        self._push([self._sample(self.STEPS, 9200), self._sample(self.RESTING_HR, 52)])
+        self.assertEqual(self._values('steps'), [3000.0, 9200.0])
+        self.assertEqual(self._values('resting_hr'), [52.0, 61.0])
+
+    def test_another_days_rows_are_left_alone(self):
+        self._stored('apple', 'steps', [8800.0])
+        other = self.day - timedelta(days=1)
+        self._push([self._sample(self.STEPS, 9200, day=other)])
+        self.assertEqual(self._values('steps'), [8800.0])
+        self.assertEqual(self._values('steps', day=other), [9200.0])
+
+    def test_a_replace_derives_the_record_once(self):
+        from unittest import mock
+        self._stored('apple', 'steps', [1000.0, 2000.0, 3000.0])
+        token = self._token()
+        with mock.patch('patient_portal.api.views.refresh_patient_record') as refresh, \
+                mock.patch('omop_core.services.patient_record_service.refresh_patient_record') as from_signal:
+            self._push([self._sample(self.STEPS, 9200)], token=token)
+        self.assertEqual(self._values('steps'), [9200.0])
+        refresh.assert_called_once()
+        from_signal.assert_not_called()
+
+    def test_a_push_is_listed_and_can_be_deleted(self):
+        self._push([self._sample(self.STEPS, 9200), self._sample(self.RESTING_HR, 52)])
+        client = self._client_as(self.identity)
+        listed = client.get('/api/v1/patient-records/wearable-uploads/').data
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]['device_type'], 'apple')
+        self.assertTrue(listed[0]['filename'].startswith('Apple Health sync '))
+        self.assertEqual(listed[0]['samples_created'], 2)
+        resp = client.delete(f"/api/v1/patient-records/wearable-uploads/{listed[0]['id']}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(self._values('resting_hr'), [])
+
+    # -- who may push ---------------------------------------------------------------
+
+    def test_every_token_failure_is_the_same_401_and_writes_nothing(self):
+        from patient_portal.models import PatientUser, WearableSyncToken
+        token = self._token()
+        body = {'samples': [self._sample(self.STEPS, 9200)]}
+
+        def refused(**headers):
+            resp = APIClient().post(self.URL, body, format='json', **headers)
+            self.assertEqual(resp.status_code, 401, headers)
+            self.assertEqual(resp.data, self.INVALID)
+            self.assertEqual(resp['WWW-Authenticate'], 'Bearer')
+
+        refused()
+        refused(HTTP_AUTHORIZATION='Bearer ')
+        refused(HTTP_AUTHORIZATION=token)
+        refused(HTTP_AUTHORIZATION=f'Token {token}')
+        refused(HTTP_AUTHORIZATION=f'Bearer {token}x')
+        refused(HTTP_AUTHORIZATION='Bearer hkws_' + 'A' * 43)
+        refused(HTTP_AUTHORIZATION=f'Bearer {token[5:]}')
+
+        row = WearableSyncToken.objects.get(person=self.person)
+        WearableSyncToken.objects.filter(pk=row.pk).update(
+            expires_at=timezone.now() - timedelta(seconds=1))
+        refused(HTTP_AUTHORIZATION=f'Bearer {token}')
+        WearableSyncToken.objects.filter(pk=row.pk).update(expires_at=row.expires_at)
+
+        # The token is its creator's permission: it stops when theirs does.
+        Identity.objects.filter(pk=self.identity.pk).update(is_active=False)
+        refused(HTTP_AUTHORIZATION=f'Bearer {token}')
+        Identity.objects.filter(pk=self.identity.pk).update(is_active=True)
+        PatientUser.objects.filter(identity=self.identity).update(is_active=False)
+        refused(HTTP_AUTHORIZATION=f'Bearer {token}')
+        PatientUser.objects.filter(identity=self.identity).update(is_active=True)
+        Identity.objects.filter(pk=self.identity.pk).update(must_change_password=True)
+        refused(HTTP_AUTHORIZATION=f'Bearer {token}')
+        Identity.objects.filter(pk=self.identity.pk).update(must_change_password=False)
+
+        self.assertEqual(self._values('steps'), [])
+        # And works again once every condition holds.
+        self._push(body=body, token=token)
+
+    def test_a_password_change_turns_the_token_off(self):
+        """Whoever held the account before the password changed keeps nothing:
+        a token made under the old password stops, as its sessions do."""
+        from patient_portal.services import set_new_password
+        token = self._token()
+        self._push([self._sample(self.STEPS, 100)], token=token)
+        identity = Identity.objects.get(pk=self.identity.pk)
+        # The one function every change and reset goes through.
+        set_new_password(identity, 'a-new-password-after-a-reset')
+
+        resp = self._push([self._sample(self.STEPS, 9200)], token=token, expect=401)
+        self.assertEqual(resp.data, self.INVALID)
+        self.assertEqual(self._values('steps'), [100.0])
+        # The tab says so, and offers a new one.
+        seen = self._client_as(identity).get(self.TOKEN_URL).data
+        self.assertEqual((seen['active'], seen['expired'], seen['stopped']), (False, False, True))
+        self._push([self._sample(self.STEPS, 9200)], token=self._token(identity))
+
+    def test_a_rewritten_password_hash_is_not_a_password_change(self):
+        """Django re-hashes a password at sign-in when its hasher's settings
+        move on, and a deploy re-sets the administrator's: neither is the
+        person changing their password, and neither may strand their phone."""
+        token = self._token()
+        identity = Identity.objects.get(pk=self.identity.pk)
+        before = identity.password
+        identity.set_password('pw')          # the same password, a new salt
+        identity.save(update_fields=['password'])
+        self.assertNotEqual(Identity.objects.get(pk=identity.pk).password, before)
+        self._push([self._sample(self.STEPS, 9200)], token=token)
+        self.assertEqual(self._values('steps'), [9200.0])
+
+    def test_an_account_whose_patient_link_is_off_gets_no_token(self):
+        from patient_portal.models import PatientUser, WearableSyncToken
+        PatientUser.objects.filter(identity=self.identity).update(is_active=False)
+        try:
+            resp = self._client_as(self.identity).post(self.TOKEN_URL)
+        finally:
+            PatientUser.objects.filter(identity=self.identity).update(is_active=True)
+        self.assertEqual(resp.status_code, 403)
+        self.assertFalse(WearableSyncToken.objects.exists())
+
+    def test_the_format_suffix_route_answers_like_the_plain_one(self):
+        """The router also serves `<action>.json`; a stranger must get the 401
+        there too, not a crash."""
+        resp = APIClient().post(
+            '/api/v1/patient-records/sync-apple-health.json',
+            {'samples': [self._sample(self.STEPS, 9200)]}, format='json')
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(resp.data, self.INVALID)
+        resp = self._client_as(self.identity).get(
+            '/api/v1/patient-records/apple-health-sync-token.json')
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data['active'])
+
+    def test_a_signed_in_session_is_not_a_token(self):
+        """The endpoint reads the sync token and no other credential."""
+        client = self._client_as(self.identity)
+        resp = client.post(self.URL, {'samples': [self._sample(self.STEPS, 9200)]}, format='json')
+        self.assertEqual(resp.status_code, 401)
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_record_that_is_switched_off_takes_nothing(self):
+        from unittest import mock
+        from patient_portal.consent import RECORD_OFF
+        token = self._token()
+        with mock.patch('patient_portal.consent.record_permitted', return_value=False):
+            resp = self._push([self._sample(self.STEPS, 9200)], token=token, expect=403)
+        self.assertEqual(resp.data, {'error': RECORD_OFF})
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_token_reaches_only_its_own_record(self):
+        from patient_portal.models import PatientUser
+        other_person = Person.objects.create(person_id=99002)
+        PatientRecord.objects.create(person=other_person)
+        other = Identity.objects.create_user(email='other-wearable@test.com', password='pw')
+        PatientUser.objects.create(identity=other, person=other_person)
+        self._push([self._sample(self.STEPS, 9200)], token=self._token(other))
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(
+            list(Observation.objects.filter(person=other_person).values_list('value_as_number', flat=True)),
+            [9200])
+
+    def test_get_is_not_allowed(self):
+        self.assertEqual(APIClient().get(self.URL).status_code, 405)
+
+    def test_bodies_that_cannot_be_read(self):
+        token = self._token()
+        for body in ([1, 2], {}, {'samples': 'steps'}, {'data': {'metrics': 'steps'}}):
+            resp = self._push(body=body, token=token, expect=400)
+            self.assertIn('error', resp.data)
+        resp = APIClient().post(self.URL, '{not json', content_type='application/json',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(resp.status_code, 400)
+        resp = APIClient().post(self.URL, 'samples=1', content_type='application/x-www-form-urlencoded',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(resp.status_code, 415)
+        # JSON nested past the parser's stack, and a "charset" that is not text
+        # (zlib would inflate a small body past every limit): refused, not a 500.
+        from omop_core.services.apple_health_api import UNREADABLE
+        nested = '{"samples": ' + '[' * 100000 + ']' * 100000 + '}'
+        resp = APIClient().post(self.URL, nested, content_type='application/json',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual((resp.status_code, resp.data), (400, {'error': UNREADABLE}))
+        for charset in ('zlib', 'rot13', 'utf-16'):
+            resp = APIClient().post(
+                self.URL, b'{"samples": []}', content_type=f'application/json; charset={charset}',
+                HTTP_AUTHORIZATION=f'Bearer {token}')
+            self.assertEqual((resp.status_code, resp.data), (400, {'error': UNREADABLE}), charset)
+        resp = APIClient().post(
+            self.URL, b'{"samples": []}', content_type='application/json; charset=UTF-8',
+            HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_a_body_over_the_ceiling_is_refused_before_it_is_read(self):
+        from unittest import mock
+        token = self._token()
+        with mock.patch('omop_core.services.apple_health_api.MAX_BODY_BYTES', 50), \
+                mock.patch('omop_core.services.apple_health_api.parse_payload') as parse:
+            self._push([self._sample(self.STEPS, 9200)], token=token, expect=413)
+        parse.assert_not_called()
+        with mock.patch('omop_core.services.apple_health_api.MAX_POINTS', 2):
+            self._push([self._sample(self.STEPS, n) for n in (1, 2, 3)], token=token, expect=413)
+        self.assertEqual(self._values('steps'), [])
+
+    def test_the_token_is_not_in_the_answer_or_the_logs(self):
+        from patient_portal.models import AuditEvent
+        token = self._token()
+        with self.assertLogs('patient_portal.api.views', level='DEBUG') as logs, \
+                self.assertLogs('audit', level='DEBUG') as audit:
+            resp = self._push([self._sample(self.STEPS, 9200)], token=token)
+        self.assertNotIn(token, json.dumps(resp.data))
+        self.assertNotIn(token, '\n'.join(logs.output + audit.output))
+        # The request signs nobody in; the audit row still names the record.
+        event = AuditEvent.objects.filter(path=self.URL).latest('id')
+        self.assertEqual(event.detail, {'wearable_sync': 'apple', 'person_id': self.person.person_id})
+
+    def test_pushes_are_limited_per_token(self):
+        from unittest import mock
+        from patient_portal.api.views import AppleHealthSyncTokenThrottle
+        token = self._token()
+        with mock.patch.object(AppleHealthSyncTokenThrottle, 'rate', '2/hour'):
+            self._push([], token=token)
+            self._push([], token=token)
+            self._push([self._sample(self.STEPS, 9200)], token=token, expect=429)
+            # Another patient's phone has its own allowance.
+            self.assertEqual(self._values('steps'), [])
+
+    def test_callers_without_a_usable_token_are_limited_per_address(self):
+        from unittest import mock
+        from patient_portal.api.views import AppleHealthSyncAddressThrottle
+        token = self._token()
+        with mock.patch.object(AppleHealthSyncAddressThrottle, 'rate', '2/hour'):
+            # A header the caller wrote is not their address: varying it buys
+            # no fresh bucket.
+            for forged in ('203.0.113.1', '203.0.113.2'):
+                resp = APIClient().post(self.URL, {}, format='json', HTTP_X_FORWARDED_FOR=forged)
+                self.assertEqual(resp.status_code, 401)
+            resp = APIClient().post(self.URL, {}, format='json', HTTP_X_FORWARDED_FOR='203.0.113.3')
+            self.assertEqual(resp.status_code, 429)
+            # A phone with a good token is never counted in that bucket: where
+            # the deployment has not said how many proxies it sits behind,
+            # every client's address is the proxy's.
+            for _ in range(3):
+                self._push([], token=token)
+
+    def test_the_address_is_the_one_the_deployments_proxies_wrote(self):
+        from unittest import mock
+        from patient_portal.api.views import AppleHealthSyncAddressThrottle
+
+        def post(forwarded):
+            return APIClient().post(self.URL, {}, format='json',
+                                    HTTP_X_FORWARDED_FOR=forwarded).status_code
+
+        with override_settings(MAPPING_VOTE_PROXY_HOPS=1), \
+                mock.patch.object(AppleHealthSyncAddressThrottle, 'rate', '1/hour'):
+            self.assertEqual(post('10.9.9.9, 198.51.100.7'), 401)
+            # The last entry is the proxy's word; what precedes it is the caller's.
+            self.assertEqual(post('10.1.1.1, 198.51.100.7'), 429)
+            self.assertEqual(post('10.9.9.9, 198.51.100.8'), 401)
+
+
 # ---------------------------------------------------------------------------
 # Bulk OMOP row write endpoint
 # (contract summarised in AGENTS.md, "Bulk OMOP Row Writes")

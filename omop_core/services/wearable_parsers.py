@@ -23,6 +23,15 @@ class WearableSample(NamedTuple):
     value: float
 
 
+# Metrics a device reports in pieces that add up to the day (several records,
+# several files). Every other metric is a level, and a day's readings are
+# averaged. One list, read by each parser and by the Apple Health API reader.
+CUMULATIVE_METRICS = frozenset({
+    'steps', 'active_minutes', 'sleep_duration',
+    'distance', 'flights_climbed', 'active_energy', 'basal_energy',
+})
+
+
 # ── Garmin FIT ──────────────────────────────────────────────────────────────
 
 def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
@@ -344,8 +353,7 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     samples: list[WearableSample] = []
     for metric_key, date_map in daily.items():
         for d, values in date_map.items():
-            if metric_key in ('steps', 'active_minutes', 'sleep_duration',
-                              'distance', 'flights_climbed', 'active_energy', 'basal_energy'):
+            if metric_key in CUMULATIVE_METRICS:
                 agg = sum(values)
             else:
                 # Average for rates/percentages
@@ -505,8 +513,7 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     samples: list[WearableSample] = []
     for metric_key, date_map in daily.items():
         for d, values in date_map.items():
-            if metric_key in ('steps', 'active_minutes', 'sleep_duration',
-                              'distance', 'flights_climbed', 'active_energy', 'basal_energy'):
+            if metric_key in CUMULATIVE_METRICS:
                 agg = sum(values)
             else:
                 agg = sum(values) / len(values)

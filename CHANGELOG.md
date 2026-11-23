@@ -8,6 +8,18 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: sync Apple Health through an API** — Apple has no cloud API for
+  Health data, so the iPhone sends it. The Wearables tab gains "Sync from Apple
+  Health": the patient makes a sync token and gives it, with the address, to an
+  app on the phone that can post Apple Health data (Health Auto Export, an iOS
+  Shortcut). Daily values are written as the `export.zip` upload writes them
+  (`POST /api/v1/patient-records/sync-apple-health/`, #2800), and a day's value
+  replaces what earlier Apple uploads stored for that day. The token is shown
+  once, stored as a hash, can add wearable values to that one record and read
+  nothing, lasts a year, stops when the account's password changes, and is
+  replaced or turned off from the tab. A month of pushes is one row in the
+  upload history.
+
 - **Wearables: sync from Garmin Connect with the patient's own Personal API
   key** — the Wearables tab gains "Sync from Garmin Connect": paste a Garmin
   Connect Personal API key, pick 7, 30 or 90 days, and the daily steps,

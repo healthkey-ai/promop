@@ -38,6 +38,9 @@ SYSTEM: frozenset[str] = frozenset({
     # Access a patient granted to their record, and who opened it. A link is
     # derived from this deployment's own key, so it would open nothing elsewhere.
     'patient_portal.RecordShare', 'patient_portal.ShareScan',
+    # A patient's phone's permission to add wearable values (#2800): a
+    # credential of this deployment, tied to one of its accounts.
+    'patient_portal.WearableSyncToken',
     # A curator's claim on a concept names this deployment's user (#2390).
     'omop_core.ConceptMappingLock',
     # Public voting on wearable mapping proposals (#2678): this deployment's

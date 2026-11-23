@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
+import AppleHealthSync from './AppleHealthSync';
 import GarminConnectSync from './GarminConnectSync';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
@@ -379,6 +380,11 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             if (changed && onRefresh) onRefresh();
           }}
         />
+      )}
+
+      {/* Apple Health: no cloud API, so the iPhone pushes with a token made here */}
+      {canSyncOwnDevice && (
+        <AppleHealthSync disabled={uploading || syncing || deletingId !== null} />
       )}
 
       {/* Upload history */}

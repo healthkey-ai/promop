@@ -234,6 +234,13 @@ so there is no token to keep or refresh; the day totals it returns are the same
 `WearableSample`s. The detail is in
 [wearable-omop-mapping.md](wearable-omop-mapping.md#garmin-connect-sync).
 
+Apple cannot have that. There is no Apple cloud API for HealthKit: the data is on the iPhone, so
+nothing a server holds can fetch it. Apple's second way in is therefore a push. The patient
+makes a sync token on the Wearables tab and gives it to an app or Shortcut on the phone, which
+posts daily values to promop; the token can add wearable values to that one record and read
+nothing. Those values are `WearableSample`s too. The detail is in
+[wearable-omop-mapping.md](wearable-omop-mapping.md#apple-health-sync).
+
 That is a genuine architectural difference, and it is worth being precise about where it lands.
 It changes how bytes arrive — token storage, refresh handling, scheduled pulls, rate limits,
 revocation — and it changes nothing at all about what an adapter emits. `WearableSample` is

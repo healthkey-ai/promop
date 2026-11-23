@@ -120,6 +120,31 @@ def test_health_data_synced_or_uploaded_by_the_member_is_refused(off):
         r = client.post('/api/v1/patient-records/sync-garmin/', {'api_key': 'gcpk_TEST-key'}, format='json')
     assert r.status_code == 403
     fetch.assert_not_called()
+    # Apple Health: no sync token is made while the record is off, and one that
+    # exists adds nothing. The token endpoint wants the person signed in with
+    # a session, which the fixture's client is not.
+    from rest_framework.test import APIClient
+
+    from patient_portal import wearable_sync_tokens
+    signed_in = APIClient()
+    signed_in.force_login(off['identity'])
+    r = signed_in.post('/api/v1/patient-records/apple-health-sync-token/')
+    assert (r.status_code, r.data) == (403, {'error': svc.RECORD_OFF})
+    _, token = wearable_sync_tokens.issue(off['person'], off['identity'], 'apple')
+    steps = {'type': 'HKQuantityTypeIdentifierStepCount', 'date': '2026-11-20', 'value': 9200}
+    r = APIClient().post('/api/v1/patient-records/sync-apple-health/', {'samples': [steps]},
+                         format='json', HTTP_AUTHORIZATION=f'Bearer {token}')
+    assert (r.status_code, r.data) == (403, {'error': svc.RECORD_OFF})
+
+
+def test_withdrawing_the_permission_takes_the_sync_token_with_the_record(member):
+    from patient_portal import wearable_sync_tokens
+    from patient_portal.models import WearableSyncToken
+
+    wearable_sync_tokens.issue(member['person'], member['identity'], 'apple')
+    assert withdraw(member['client'], 'my_record').status_code == 200
+
+    assert not WearableSyncToken.objects.filter(person=member['person']).exists()
 
 
 def test_giving_the_permission_again_opens_the_record(off):

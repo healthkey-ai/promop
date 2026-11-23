@@ -1137,6 +1137,73 @@ Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
 Tests: `tests/test_garmin_connect.py` (Garmin's real client over a fake HTTP
 session), `patient_portal.tests.GarminSyncEndpointTest`, `WearableTab.test.tsx`.
 
+## Wearables — Apple Health Sync
+
+Apple has no cloud API for HealthKit, so the Apple API route is a push from
+the patient's iPhone (#2800): `POST /api/v1/patient-records/sync-apple-health/`
+with `Authorization: Bearer <sync token>` and daily values, written as the
+`export.zip` upload writes them. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#apple-health-sync).
+Body reader: `omop_core/services/apple_health_api.py` (promop's own
+`{"samples": [...]}` keyed by HealthKit identifier, and Health Auto Export's
+JSON). Token rules: `patient_portal/wearable_sync_tokens.py`. Writer:
+`_store_wearable_samples` with `device_type` `apple`. Both actions are on
+`PatientRecordV1ViewSet`, so the legacy registration has neither.
+
+- **The sync token is the one stored wearable credential.** The patient makes
+  it on the Wearables tab (`apple-health-sync-token/`: GET, POST, DELETE;
+  signed in, own record, `is_interactive_session`), it is shown once and kept
+  as a SHA-256 hash (`WearableSyncToken`, system data). One per patient, a
+  year long; replacing or turning off deletes the row, and so does withdrawing
+  the record's permission (pinned in `tests/test_member_erasure.py`).
+- **A password change turns it off.** `services.set_new_password` calls
+  `wearable_sync_tokens.stop_for_identity`, which stamps `stopped_at`; a
+  password path that does not go through `set_new_password` must call it too.
+  Do not bind the token to the password hash instead: Django re-hashes at
+  sign-in when its hasher's settings change, and `setup_admin` re-sets the
+  administrator's on every deploy. The token also stops when its creator is
+  deactivated, must change password, or is no longer the active patient of
+  the record. `usable()` is the one rule: the push uses it and the tab's
+  "active" reports it.
+- **Write-only, and only there.** `sync_apple_health` sets
+  `authentication_classes = []` and reads the token itself: no session, cookie
+  or other bearer token is honoured, and the token opens nothing else. Its
+  answer says what was understood, never what the record holds (no created,
+  duplicate or replaced counts). Keep both properties: do not add the token to
+  `DEFAULT_AUTHENTICATION_CLASSES`, and do not return stored values.
+- **Every token failure is one 401**, whatever the reason. A record that is
+  off is a 403.
+- **The endpoint signs nobody in, so it guards itself.** Both throttles run in
+  the handler (`throttle_classes=[]`): the token throttle for a good token,
+  the address throttle only for a request without one, so real phones never
+  share a bucket keyed on a proxy's address. The address is
+  `mapping_votes.client_address` (not DRF's `get_ident`, which a forged
+  `X-Forwarded-For` defeats). The body is bounded by `Content-Length` (2 MB) and
+  `MAX_POINTS`; a non-UTF-8 `charset` and JSON nested past the parser's stack
+  are a 400. The actions take `format=None`: the router also serves
+  `<action>.json`, and a stranger reaches this one.
+- **A request carries whole days.** Values for a metric and day are combined
+  by `CUMULATIVE_METRICS` (the list both file parsers use), then
+  `replace_daily=True` replaces what `apple` uploads wrote for that day.
+- **It is a rolling source** (`rolling_history=True`): a push that changes
+  nothing writes no history and re-derives nothing; one that does is merged
+  into one `WearableUpload` row per calendar month, whose entries are the rows
+  still stored. A daily-total source that pushes unattended must use it and
+  name its label in `ROLLING_HISTORY_LABELS`. A file upload of the same device
+  skips the metric and day a rolling row names, so an `export.zip` after a
+  sync does not double the day; `delete_wearable_upload` takes the writer's
+  person lock, because a rolling row is rewritten by pushes.
+- **Nothing is guessed.** An unknown metric name is returned in
+  `unrecognized`; a missing or unconvertible unit on a multi-unit metric, a
+  bad date or value is counted in `rejected`; a value outside the artifact
+  bounds in `out_of_range`.
+- `/api/fhir/patient-sync/` (HealthKit rollups from `phr-mobile-bridge`) is a
+  different route and does not feed the Wearables tab: its codes and row type
+  are not the wearable ones.
+
+Tests: `tests/test_apple_health_api.py`,
+`patient_portal.tests.AppleHealthSyncEndpointTest`, `WearableTab.test.tsx`.
+
 ---
 
 ## Code Mapping Suggest

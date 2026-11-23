@@ -9,10 +9,12 @@ import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 
 const mockPost = vi.fn();
 const mockGet = vi.fn();
+const mockDelete = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: {
     post: (...args: unknown[]) => mockPost(...args),
     get: (...args: unknown[]) => mockGet(...args),
+    delete: (...args: unknown[]) => mockDelete(...args),
   },
 }));
 
@@ -70,15 +72,26 @@ function createDragEnterEvent(): Partial<React.DragEvent> {
 beforeEach(() => {
   mockPost.mockReset();
   mockGet.mockReset();
+  mockDelete.mockReset();
   __resetWritableFieldsCache();
   // Upload history is empty; the writable-field descriptor is served separately
   // because the tab now asks what may be written before rendering a box.
   mockGet.mockImplementation((url: string) =>
-    Promise.resolve({
-      data: url.includes('writable-fields') ? DESCRIPTORS : [],
-    }),
+    Promise.resolve({ data: defaultAnswer(url) }),
   );
 });
+
+/** No Apple Health sync token yet: what the server answers a patient who never made one. */
+const NO_SYNC_TOKEN = {
+  active: false, expired: false, stopped: false, hint: null, created_at: null, expires_at: null,
+  last_used_at: null, endpoint: 'https://promop.example/api/v1/patient-records/sync-apple-health/',
+};
+
+function defaultAnswer(url: string): unknown {
+  if (url.includes('writable-fields')) return DESCRIPTORS;
+  if (url.includes('apple-health-sync-token')) return NO_SYNC_TOKEN;
+  return [];
+}
 
 /** Every wearable field is a 30-day aggregate over device readings. */
 const aggregate = (metric: string) => ({
@@ -634,5 +647,303 @@ describe('WearableTab — Garmin Connect sync', () => {
       vi.useRealTimers();
       if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
     }
+  });
+});
+
+
+/**
+ * Sync from Apple Health (#2800). Apple has no cloud API, so the iPhone sends
+ * the data with a sync token the patient makes here. The token is shown once.
+ */
+describe('WearableTab — Apple Health sync', () => {
+  const TOKEN_URL = '/v1/patient-records/apple-health-sync-token/';
+  const ENDPOINT = NO_SYNC_TOKEN.endpoint;
+  const TOKEN = 'hkws_TEST-token_0123456789abcdefghijklmnopqrstuvw';
+  const NONE = NO_SYNC_TOKEN;
+  const ACTIVE = {
+    ...NONE, active: true, hint: 'tuvw', created_at: '2026-11-23T09:00:00Z',
+    expires_at: '2027-11-23T09:00:00Z',
+  };
+
+  /** Serve `status` for the token read; everything else as the suite's default. */
+  function serveToken(status: unknown) {
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes('apple-health-sync-token')) {
+        return status instanceof Error ? Promise.reject(status) : Promise.resolve({ data: status });
+      }
+      return Promise.resolve({ data: defaultAnswer(url) });
+    });
+  }
+  const tokenReads = () =>
+    mockGet.mock.calls.filter(([url]) => String(url).includes('apple-health-sync-token')).length;
+
+  const heading = () => screen.queryByRole('heading', { name: 'Sync from Apple Health' });
+  // The panel is a patient's, on their own record.
+  const renderOwnTab = () => renderTab({ canSyncOwnDevice: true });
+
+  it('is not offered on a record that is not the reader\'s own', async () => {
+    serveToken(NONE);
+    renderTab();
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(heading()).not.toBeInTheDocument();
+    expect(mockGet).not.toHaveBeenCalledWith(TOKEN_URL);
+  });
+
+  it('reads the token status on mount and offers to create one', async () => {
+    serveToken(NONE);
+    renderOwnTab();
+    expect(await screen.findByRole('button', { name: 'Create sync token' })).toBeEnabled();
+    expect(mockGet).toHaveBeenCalledWith(TOKEN_URL);
+    expect(screen.getByText(/Apple keeps Health data on your iPhone/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Turn off' })).not.toBeInTheDocument();
+  });
+
+  it('stays hidden when the server says the record is not the reader\'s', async () => {
+    serveToken(Object.assign(new Error('forbidden'), { response: { status: 403 } }));
+    renderOwnTab();
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(TOKEN_URL));
+    expect(heading()).not.toBeInTheDocument();
+    // The rest of the tab is unaffected.
+    expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+  });
+
+  it('says so and offers to try again when the status cannot be read', async () => {
+    // A rate limit or an outage must not hide a token the patient may want off.
+    serveToken(Object.assign(new Error('unavailable'), { response: { status: 503 } }));
+    renderOwnTab();
+    expect(await screen.findByText('The sync token could not be loaded.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create sync token' })).not.toBeInTheDocument();
+
+    serveToken(ACTIVE);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Turn off' })).toBeInTheDocument();
+    expect(screen.queryByText('The sync token could not be loaded.')).not.toBeInTheDocument();
+  });
+
+  it('treats an answer that is not a token status as unread, not as no token', async () => {
+    // A proxy's page with a 200, or a body missing what the panel renders from.
+    for (const body of [[], '<html></html>', { endpoint: ENDPOINT }, { ...NONE, endpoint: '' }]) {
+      serveToken(body);
+      const { unmount } = renderOwnTab();
+      expect(await screen.findByText('The sync token could not be loaded.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Create sync token' })).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('shows a new token and its address once, then only that one exists', async () => {
+    serveToken(NONE);
+    mockPost.mockResolvedValue({ data: { ...ACTIVE, token: TOKEN } });
+    renderOwnTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create sync token' }));
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(TOKEN_URL));
+    expect((await screen.findByLabelText('Sync token') as HTMLInputElement).value).toBe(TOKEN);
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe(ENDPOINT);
+    expect(screen.getByText('Copy the token now. It is not shown again.')).toBeInTheDocument();
+    expect(screen.getByText(/can add wearable data to your record and cannot read it/)).toBeInTheDocument();
+    // While the token is on screen there is nothing else to press but Done.
+    expect(screen.queryByRole('button', { name: 'Replace token' })).not.toBeInTheDocument();
+
+    // Focus went to the token when it appeared: the button that was pressed is gone.
+    expect(screen.getByRole('group', { name: 'Your new sync token' })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.queryByLabelText('Sync token')).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue(TOKEN)).not.toBeInTheDocument();
+    expect(screen.getByText(/A sync token ending in/)).toHaveTextContent('tuvw');
+    expect(screen.getByText(/Nothing has been received from your iPhone yet/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Replace token' })).toBeInTheDocument();
+    // And back to the panel when it was put away.
+    expect(heading()?.parentElement).toHaveFocus();
+  });
+
+  it('reads the status again once the patient is done, for the phone\'s first contact', async () => {
+    serveToken(NONE);
+    mockPost.mockResolvedValue({ data: { ...ACTIVE, token: TOKEN } });
+    renderOwnTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create sync token' }));
+    await screen.findByLabelText('Sync token');
+    expect(tokenReads()).toBe(1);
+
+    serveToken({ ...ACTIVE, last_used_at: '2026-11-23T10:05:00Z' });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText(/Last received from your iPhone/)).toBeInTheDocument();
+    expect(tokenReads()).toBe(2);
+  });
+
+  it('does not let a slow status read undo a later turn-off', async () => {
+    serveToken(NONE);
+    mockPost.mockResolvedValue({ data: { ...ACTIVE, token: TOKEN } });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      renderOwnTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Create sync token' }));
+      await screen.findByLabelText('Sync token');
+
+      // Done starts a read that answers only after the token is turned off.
+      let answerRead: (value: unknown) => void = () => {};
+      mockGet.mockImplementation((url: string) => (
+        url.includes('apple-health-sync-token')
+          ? new Promise(resolve => { answerRead = resolve; })
+          : Promise.resolve({ data: defaultAnswer(url) })
+      ));
+      fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+      mockDelete.mockResolvedValue({ data: NONE });
+      fireEvent.click(screen.getByRole('button', { name: 'Turn off' }));
+      expect(await screen.findByRole('button', { name: 'Create sync token' })).toBeInTheDocument();
+
+      answerRead({ data: ACTIVE });
+      await waitFor(() => expect(tokenReads()).toBe(2));
+      expect(screen.queryByText(/A sync token ending in/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Create sync token' })).toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('says so when the clipboard refuses, and selects the token to copy by hand', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    serveToken(NONE);
+    mockPost.mockResolvedValue({ data: { ...ACTIVE, token: TOKEN } });
+    renderOwnTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create sync token' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy sync token' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Could not copy/);
+    expect(screen.getByRole('button', { name: 'Copy sync token' })).toHaveTextContent('Copy');
+    const field = screen.getByLabelText('Sync token') as HTMLInputElement;
+    expect([field.selectionStart, field.selectionEnd]).toEqual([0, TOKEN.length]);
+  });
+
+  it('waits while a file upload is running', async () => {
+    serveToken(ACTIVE);
+    mockPost.mockReturnValue(new Promise(() => {}));     // an upload that never finishes
+    const { container } = renderOwnTab();
+    expect(await screen.findByRole('button', { name: 'Replace token' })).toBeEnabled();
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [createFile('day.fit')] } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Replace token' })).toBeDisabled());
+    expect(screen.getByRole('button', { name: 'Turn off' })).toBeDisabled();
+  });
+
+  it('keeps the token on when turning it off fails', async () => {
+    serveToken(ACTIVE);
+    mockDelete.mockRejectedValue({ response: { data: { detail: 'Request was throttled.' } } });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      renderOwnTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Turn off' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Request was throttled.');
+      expect(screen.getByText(/A sync token ending in/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Turn off' })).toBeEnabled();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('copies the token to the clipboard', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    serveToken(NONE);
+    mockPost.mockResolvedValue({ data: { ...ACTIVE, token: TOKEN } });
+    renderOwnTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create sync token' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy sync token' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(TOKEN));
+    expect(await screen.findByRole('button', { name: 'Copy sync token' })).toHaveTextContent('Copied');
+    // Said aloud too: the button keeps its name.
+    expect(screen.getByText('Sync token copied')).toHaveAttribute('role', 'status');
+    fireEvent.click(screen.getByRole('button', { name: 'Copy address' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(ENDPOINT));
+  });
+
+  it('says when the iPhone last sent data', async () => {
+    serveToken({ ...ACTIVE, last_used_at: '2026-11-23T07:15:00Z' });
+    renderOwnTab();
+    expect(await screen.findByText(/Last received from your iPhone/)).toBeInTheDocument();
+    expect(screen.queryByText(/Nothing has been received/)).not.toBeInTheDocument();
+    // The token itself is never part of a status read.
+    expect(screen.queryByLabelText('Sync token')).not.toBeInTheDocument();
+  });
+
+  it('asks before replacing a token the phone is using', async () => {
+    serveToken(ACTIVE);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      renderOwnTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Replace token' }));
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(mockPost).not.toHaveBeenCalled();
+
+      confirmSpy.mockReturnValue(true);
+      mockPost.mockResolvedValue({ data: { ...ACTIVE, hint: 'wxyz', token: TOKEN } });
+      fireEvent.click(screen.getByRole('button', { name: 'Replace token' }));
+      expect((await screen.findByLabelText('Sync token') as HTMLInputElement).value).toBe(TOKEN);
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('turns the token off after asking', async () => {
+    serveToken(ACTIVE);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    try {
+      renderOwnTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Turn off' }));
+      expect(mockDelete).not.toHaveBeenCalled();
+
+      confirmSpy.mockReturnValue(true);
+      mockDelete.mockResolvedValue({ data: NONE });
+      fireEvent.click(screen.getByRole('button', { name: 'Turn off' }));
+      await waitFor(() => expect(mockDelete).toHaveBeenCalledWith(TOKEN_URL));
+      expect(await screen.findByRole('button', { name: 'Create sync token' })).toBeInTheDocument();
+      expect(screen.queryByText(/A sync token ending in/)).not.toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('offers a new token when the old one has expired', async () => {
+    serveToken({ ...ACTIVE, active: false, expired: true, expires_at: '2026-11-01T09:00:00Z' });
+    renderOwnTab();
+    expect(await screen.findByText(/Your sync token expired/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create sync token' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Turn off' })).toBeInTheDocument();
+  });
+
+  it('says when a token stopped because the password changed', async () => {
+    serveToken({ ...ACTIVE, active: false, stopped: true });
+    renderOwnTab();
+    expect(await screen.findByText(/has stopped\s+working\. A token stops when your password is changed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create sync token' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Turn off' })).toBeInTheDocument();
+    expect(screen.queryByText(/A sync token ending in/)).not.toBeInTheDocument();
+  });
+
+  it('says so when a new token comes back unreadable', async () => {
+    // The old token may already be gone on the server: silence would strand the phone.
+    serveToken(ACTIVE);
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    try {
+      mockPost.mockResolvedValue({ data: {} });
+      renderOwnTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Replace token' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent(/could not be shown/);
+      expect(screen.queryByLabelText('Sync token')).not.toBeInTheDocument();
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it('shows the server\'s reason when a token cannot be made', async () => {
+    serveToken(NONE);
+    mockPost.mockRejectedValue({ response: { data: { error: 'Your record is switched off.' } } });
+    renderOwnTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Create sync token' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your record is switched off.');
+    expect(screen.queryByLabelText('Sync token')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Create sync token' })).toBeEnabled();
   });
 });
