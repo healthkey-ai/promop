@@ -16738,17 +16738,33 @@ def field_choice_list(request):
     from .serializers import FieldChoiceSerializer
 
     if request.method == 'GET':
-        qs = FieldChoice.objects.prefetch_related('codes').all()
+        qs = FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope').all()
         field_name = request.query_params.get('field_name')
         if field_name:
             qs = qs.filter(field_name=field_name)
+        disease = request.query_params.get('disease')
+        if disease:
+            from omop_core.services import disease_profiles
+            if disease not in disease_profiles.category_codes():
+                return Response({'disease': f'Unknown Disease Category {disease!r}.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            # What a record of that Disease Category is offered: its own
+            # choices and the unscoped ones, retired values left out.
+            from omop_core.services import field_choices
+            qs = qs.filter(retired_at__isnull=True)
+            qs = [c for c in qs if field_choices._in_scope(c, disease)]
         return Response(FieldChoiceSerializer(qs, many=True).data)
 
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    try:
+        serializer.save()
+    except IntegrityError:
+        # Two curators saving the same label at once: the second loses.
+        return Response({'detail': 'Another change to this field\'s choices was saved first; reload and retry.'},
+                        status=status.HTTP_409_CONFLICT)
     return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
@@ -16760,7 +16776,7 @@ def field_choice_detail(request, pk):
     from omop_core.models import FieldChoice
     from .serializers import FieldChoiceSerializer
     try:
-        choice = FieldChoice.objects.prefetch_related('codes').get(pk=pk)
+        choice = FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope').get(pk=pk)
     except FieldChoice.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -16778,7 +16794,11 @@ def field_choice_detail(request, pk):
         choice, data=request.data, partial=True, context={'request': request},
     )
     serializer.is_valid(raise_exception=True)
-    serializer.save()
+    try:
+        serializer.save()
+    except IntegrityError:
+        return Response({'detail': 'Another change to this field\'s choices was saved first; reload and retry.'},
+                        status=status.HTTP_409_CONFLICT)
     return Response(serializer.data)
 
 

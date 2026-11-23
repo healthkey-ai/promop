@@ -2012,7 +2012,20 @@ class FieldChoiceCodeSerializer(serializers.ModelSerializer):
 
 
 class FieldChoiceSerializer(serializers.ModelSerializer):
+    """A choice with its stable identity, spellings and scope (#1224).
+
+    The legacy shape (``id``, ``field_name``, ``display``, ``sort_order``,
+    ``codes``) is unchanged; the rest is additive. ``code`` is made from the
+    label when a choice is created and cannot be changed afterwards: a label
+    edit goes through ``field_choices.rename`` so the old label survives as an
+    alias. ``aliases`` and ``diseases`` replace the stored set when sent.
+    """
     codes = FieldChoiceCodeSerializer(many=True, required=False)
+    aliases = serializers.ListField(
+        child=serializers.CharField(max_length=200), required=False, write_only=True)
+    diseases = serializers.ListField(
+        child=serializers.CharField(max_length=30), required=False, write_only=True)
+    retired = serializers.BooleanField(required=False, write_only=True)
     created_by = serializers.CharField(
         source='created_by.username', read_only=True, default=None,
     )
@@ -2021,9 +2034,22 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         model = FieldChoice
         fields = [
             'id', 'field_name', 'display', 'sort_order',
+            'code', 'context_key', 'value', 'value_type', 'retired',
+            'aliases', 'diseases',
             'codes', 'created_by', 'created_at',
         ]
         read_only_fields = ['id', 'created_by', 'created_at']
+        extra_kwargs = {'code': {'required': False}}
+        # The model's unique constraints are checked by ``validate`` with
+        # wording a curator can act on, rather than DRF's generic message.
+        validators: list = []
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data['retired'] = instance.retired_at is not None
+        data['aliases'] = sorted(a.alias for a in instance.aliases.all())
+        data['diseases'] = sorted(d.disease for d in instance.disease_scope.all())
+        return data
 
     def validate_field_name(self, value):
         from omop_core.models import PatientRecord
@@ -2037,8 +2063,75 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def validate(self, attrs):
+        from omop_core.models import FieldChoice as Choice
+        from omop_core.services import field_choices
+
+        instance = self.instance
+        if instance is not None:
+            if 'field_name' in attrs and attrs['field_name'] != instance.field_name:
+                raise serializers.ValidationError(
+                    {'field_name': 'A choice cannot move to another field.'})
+            if 'code' in attrs and attrs['code'] != instance.code:
+                raise serializers.ValidationError(
+                    {'code': 'A choice keeps its code; change the label instead.'})
+            if 'context_key' in attrs and attrs['context_key'] != instance.context_key:
+                raise serializers.ValidationError(
+                    {'context_key': 'A choice cannot move to another context.'})
+        field_name = attrs.get('field_name', getattr(instance, 'field_name', None))
+        context = attrs.get('context_key', getattr(instance, 'context_key', ''))
+        display = ' '.join(str(attrs.get('display', getattr(instance, 'display', ''))).split())
+        value_type = attrs.get('value_type', getattr(instance, 'value_type', 'text'))
+        errors = {}
+        try:
+            attrs['value'] = field_choices.clean_value(
+                value_type, attrs.get('value', getattr(instance, 'value', '')))
+        except field_choices.ChoiceError as exc:
+            errors['value'] = str(exc)
+        code = attrs.get('code')
+        if code is not None and code != '' and field_choices.slug(code) != code:
+            errors['code'] = 'Use lower case letters, digits and underscores.'
+        same = Choice.objects.filter(field_name=field_name, context_key=context)
+        if instance is not None:
+            same = same.exclude(pk=instance.pk)
+        if display and 'display' in attrs and same.filter(display=display).exists():
+            errors['display'] = f'{display!r} is already a choice of {field_name} in this context.'
+        elif display and 'display' in attrs and instance is None:
+            # A new choice may not take a spelling another already answers to,
+            # an earlier label included; a rename is checked by ``rename``.
+            owner = field_choices._taken_spellings(field_name, context).get(field_choices.fold(display))
+            if owner is not None:
+                errors['display'] = (
+                    f'{display!r} is already another spelling of a choice of {field_name} '
+                    'in this context.')
+        if code and same.filter(code=code).exists():
+            errors['code'] = f'The code {code!r} is already used for {field_name} in this context.'
+        if errors:
+            raise serializers.ValidationError(errors)
+        if 'display' in attrs:
+            attrs['display'] = display
+        return attrs
+
+    def _apply_related(self, choice, aliases, diseases, retired):
+        from omop_core.services import field_choices
+        try:
+            if diseases is not None:
+                field_choices.set_diseases(choice, diseases)
+            if aliases is not None:
+                field_choices.set_aliases(choice, aliases)
+        except field_choices.ChoiceError as exc:
+            raise serializers.ValidationError(str(exc)) from None
+        if retired is not None:
+            field_choices.set_retired(choice, retired)
+        # The view prefetched aliases and scope before they were rewritten.
+        getattr(choice, '_prefetched_objects_cache', {}).clear()
+
+    @transaction.atomic
     def create(self, validated_data):
         codes_data = validated_data.pop('codes', [])
+        aliases = validated_data.pop('aliases', None)
+        diseases = validated_data.pop('diseases', None)
+        retired = validated_data.pop('retired', None)
         request = self.context.get('request')
         choice = FieldChoice.objects.create(
             **validated_data,
@@ -2046,10 +2139,24 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         )
         for code_data in codes_data:
             FieldChoiceCode.objects.create(choice=choice, **code_data)
+        self._apply_related(choice, aliases, diseases, retired)
         return choice
 
+    @transaction.atomic
     def update(self, instance, validated_data):
+        from omop_core.services import field_choices
+
         codes_data = validated_data.pop('codes', None)
+        aliases = validated_data.pop('aliases', None)
+        diseases = validated_data.pop('diseases', None)
+        retired = validated_data.pop('retired', None)
+        display = validated_data.pop('display', None)
+        validated_data.pop('code', None)
+        try:
+            if display is not None:
+                field_choices.rename(instance, display)
+        except field_choices.ChoiceError as exc:
+            raise serializers.ValidationError({'display': str(exc)}) from None
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
@@ -2057,6 +2164,7 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
             instance.codes.all().delete()
             for code_data in codes_data:
                 FieldChoiceCode.objects.create(choice=instance, **code_data)
+        self._apply_related(instance, aliases, diseases, retired)
         return instance
 
 

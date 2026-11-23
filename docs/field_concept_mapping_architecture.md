@@ -29,14 +29,72 @@ second manually maintained UI-to-concept table.
 | Model | Current responsibility |
 |---|---|
 | `FieldConceptMapping` | Field-level recipe: concept, destination, source key, value kind, units, type, review state and provenance |
-| `FieldChoice` | Allowed display values keyed by `(field_name, display)`, with ordering and creator metadata |
+| `FieldChoice` | An allowed value with a stable identity `(field_name, context_key, code)`, an editable label, a typed canonical `value`, ordering, a retired mark and creator metadata (#1224) |
+| `FieldChoiceAlias` | Another spelling of a choice: an earlier label or a source's wording; one spelling names one choice within a field and context |
+| `FieldChoiceDisease` | The Disease Categories that offer a choice; no rows means every disease |
 | `FieldChoiceCode` | Vocabulary/code aliases for a choice, with a primary flag; this does not independently approve an answer mapping |
 | `CustomPatientField` / `FieldFormula` | Dynamic field definitions and computed values using the existing mapping/formula services |
 | Therapy reference models | Regimen, component, class and disease/round relationships, resolved by their dedicated authoring paths |
 
-The models are in [omop_core/models.py](../omop_core/models.py). The current choice
-schema does not provide stable scoped answer identity or a reviewed
-`FieldValueConceptMapping` model. The plan owns that extension.
+The models are in [omop_core/models.py](../omop_core/models.py). A choice has
+stable, scoped identity (below); the reviewed `FieldValueConceptMapping` model
+that binds an answer to a standard concept is not built yet, and the plan
+owns that extension.
+
+### Scoped choices: `FieldChoice` identity (#1224)
+
+A choice used to be known by its label, which a curator can edit, and offered
+to every patient. Its identity is now `(field_name, context_key, code)`;
+`omop_core/services/field_choices.py` holds the rules and writers use it
+rather than the models.
+
+- **`code`** is made once from the label (`stage_iv`, then `stage_iv_2` for a
+  label that slugs alike) and never changes: the API refuses a different code
+  on PATCH, and a label edit goes through `rename`. Migration `0365` gave every
+  existing row its code, in sort order, before the unique constraint was
+  added, so it does not depend on row order and a replay changes nothing.
+- **`context_key`** separates answers of one field that mean different things
+  (stage `I` in the ISS system and in Ann Arbor); blank when there is one
+  meaning. The label is unique within a field and context, not within the
+  field, so both can exist.
+- **`value` / `value_type`** are the canonical storage value and how it is read
+  (`text`, `integer`, `decimal`, `boolean`); blank `value` means the label,
+  which is what every seeded row stored. A value the type cannot hold is a 400.
+- **Aliases.** A rename keeps the old label as an alias (`source='label'`), so
+  stored data that still reads it resolves; `set_aliases` replaces the curator's
+  own spellings and keeps those. A spelling another choice of the field and
+  context answers to, as its label, code or alias, is refused by name, and the
+  database holds the alias rule (`uq_field_choice_alias`).
+- **Scope.** `FieldChoiceDisease` rows name the Disease Categories that offer a
+  choice, validated against the categories (`Other` refused, its profile is the
+  base record). `offered(field, disease)` returns the unscoped choices plus the
+  disease's own, retired ones left out; `GET /api/v1/field-choices/?disease=MM`
+  is the same read. `resolve(field, text, disease)` finds the one choice a
+  spelling names for that disease and raises `AmbiguousChoice` rather than
+  guess when two are in scope. Scope hides nothing already stored.
+- **Retired** (`retired_at`) stops a choice being offered; it still resolves.
+- **Shapes.** The API and the field descriptors keep their old keys and gain
+  `code`, `context_key`, `value`, `value_type`, `retired`, `aliases` and
+  `diseases`. The write descriptor still lists an answer once however many
+  contexts hold it; which meaning a record means is scope's business, and
+  enforcing it on write is #2333. It also still offers the label, not `value`,
+  and keeps retired choices, because a retired value already stored must still
+  save when an edit echoes it back; honouring `value` on write and hiding
+  retired values from new entries belong with that enforcement.
+- **Transfer.** The curation payload carries the new keys. A choice is matched
+  by code, so a rename on the source renames it here instead of adding a
+  second choice; a payload from before this matches by label as it did, and so
+  does a coded row whose code this instance does not have, when the local
+  choice's own code is not one the payload names (two instances that numbered a
+  label that slugs alike differently); it then takes the payload's code.
+  Labels about to change are moved aside first, so a rename that hands its old
+  label to another choice, or a swap, does not trip the label rule. A choice
+  already retired keeps the date it was retired.
+  Aliases and scope are replaced from the source, and a disease this instance
+  has no category for is dropped.
+- **Not here.** No concept is attached to an answer yet, the editor shows none
+  of this (#1225), and the disease tab's `stage` options are still the
+  hand-written ones (#2332).
 
 `FieldConceptMapping.provenance` distinguishes System Generated and Curator
 recipes. Approval state is separate from origin: approving a recipe does not

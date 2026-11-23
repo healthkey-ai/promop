@@ -22,6 +22,12 @@ interface FieldChoiceInfo {
   id: number;
   display: string;
   sort_order: number;
+  /** Stable identity and scope (#1224); the dialog only reads display and codes. */
+  code?: string;
+  context_key?: string;
+  retired?: boolean;
+  aliases?: string[];
+  diseases?: string[];
   codes: { code: string; vocabulary_id: string; display: string; is_primary: boolean }[];
 }
 
