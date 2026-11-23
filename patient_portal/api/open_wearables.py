@@ -21,6 +21,7 @@ the upload history are the ``export.zip`` upload's.
 import json
 import logging
 import uuid
+from datetime import datetime
 
 from django.conf import settings
 from django.db import transaction
@@ -50,6 +51,12 @@ NOT_FOUND = 'Invitation code not found or expired.'
 BAD_TOKEN = 'Invalid or expired token.'
 WRONG_USER = 'Token does not match user_id.'
 UNKNOWN_PROVIDER = 'Unknown provider. Expected one of: apple, health_connect, samsung.'
+#: Changed batches inside this many seconds share one derivation. A first
+#: export is thousands of batches, and each derivation rebuilds the record.
+DERIVE_QUIET_SECONDS = 60
+#: The derivation runs this long after the first of them: past the window, so
+#: a batch that found one already due has committed by then.
+DERIVE_AFTER_SECONDS = 75
 #: A small body: a code or a refresh token.
 MAX_CREDENTIAL_BYTES = 4096
 
@@ -66,36 +73,46 @@ class OpenWearablesPatientThrottle(UserRateThrottle):
         return request.method == 'GET' or super().allow_request(request, view)
 
 
-class _AddressThrottle(SimpleRateThrottle):
-    """A public route, per client address as the deployment's proxies report
-    it (``mapping_votes.client_address``): a code is eight characters, and
-    this is what stands between a stranger and guessing one."""
+class _FailureThrottle(SimpleRateThrottle):
+    """Requests that carried no working credential, per client address as
+    the deployment's proxies report it (``mapping_votes.client_address``).
+
+    Only failures are counted, after the credential has been looked up. A
+    working code or token is never refused here: where the address is a
+    shared one (``MAPPING_VOTE_PROXY_HOPS`` left at 0 behind a proxy puts
+    every client in one bucket), a stranger posting junk would otherwise
+    stop every patient connecting a phone and every phone refreshing. What
+    it bounds is the cost of junk, not guessing: 32^8 codes that live fifteen
+    minutes are not found by trying.
+    """
 
     def get_cache_key(self, request, view):
         return self.cache_format % {'scope': self.scope, 'ident': client_address(request)}
 
 
-class RedeemThrottle(_AddressThrottle):
+class RedeemFailureThrottle(_FailureThrottle):
     scope = 'open_wearables_redeem'
-    rate = '30/hour'
+    rate = '60/hour'
 
 
-class RefreshThrottle(_AddressThrottle):
+class RefreshFailureThrottle(_FailureThrottle):
     scope = 'open_wearables_refresh'
-    rate = '600/hour'
+    rate = '120/hour'
 
 
-class DeviceThrottle(SimpleRateThrottle):
-    """One signed-in phone, whatever addresses it syncs from."""
-    scope = 'open_wearables_device'
+class ConnectionThrottle(SimpleRateThrottle):
+    """One patient's phones together, whatever addresses they sync from. Per
+    connection, not per phone: a patient can sign in several, and each would
+    otherwise bring a budget of its own."""
+    scope = 'open_wearables_connection'
     rate = '1200/hour'
 
-    def __init__(self, device_id):
-        self.device_id = device_id
+    def __init__(self, connection_id):
+        self.connection_id = connection_id
         super().__init__()
 
     def get_cache_key(self, request, view):
-        return self.cache_format % {'scope': self.scope, 'ident': self.device_id}
+        return self.cache_format % {'scope': self.scope, 'ident': self.connection_id}
 
 
 def _json(data, status_code=200):
@@ -144,13 +161,20 @@ def _host():
 
 def _describe(connection):
     now = timezone.now()
-    devices = connection.devices.filter(expires_at__gt=now).count() if connection else 0
+    live = list(connection.devices.filter(expires_at__gt=now).values_list('created_at', flat=True)
+                ) if connection else []
+    pending = bool(connection and connection.code_hash
+                   and connection.code_expires_at and connection.code_expires_at > now)
     return {
         'enabled': open_wearables.enabled(),
-        'connected': devices > 0,
-        'devices': devices,
-        'code_pending': bool(connection and connection.code_hash
-                             and connection.code_expires_at and connection.code_expires_at > now),
+        'connected': bool(live),
+        'devices': len(live),
+        'code_pending': pending,
+        # Which code is pending, without the code: a panel showing one that a
+        # newer one replaced can tell. And when a phone last joined: the count
+        # alone does not move when the newest phone displaces the oldest.
+        'code_expires_at': connection.code_expires_at.isoformat() if pending else None,
+        'last_connected_at': max(live).isoformat() if live else None,
         'last_sync_at': (connection.last_sync_at.isoformat()
                          if connection and connection.last_sync_at else None),
         'providers': sorted((connection.synced_until or {}).keys()) if connection else [],
@@ -174,7 +198,11 @@ def connection(request):
         return refused
     if request.method == 'GET':
         return Response(_describe(OpenWearablesConnection.objects.filter(person=person).first()))
-    OpenWearablesConnection.objects.filter(person=person).delete()
+    with transaction.atomic():
+        # Under the patient's lock, which a sync holds while it writes: a
+        # delete that slipped between a sync's rows would fail on them.
+        Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
+        OpenWearablesConnection.objects.filter(person=person).delete()
     return Response(_describe(None))
 
 
@@ -206,11 +234,18 @@ def invitation_code(request):
             person=person, defaults={'user_id': uuid.uuid4(), 'created_by': request.user})
         row.code_hash = digest
         row.code_expires_at = expires_at
-        if zone:
+        # The zone decides which day a record is counted under, so it is set
+        # before any is: changed later (a code made while travelling), a
+        # record sent again would land on the day beside its own and be
+        # counted twice.
+        if zone and not row.days.exists():
             row.time_zone = zone
         row.save(update_fields=['code_hash', 'code_expires_at', 'time_zone'])
-    return Response({**_describe(row), 'code': code, 'code_expires_at': expires_at.isoformat()},
-                    status=status.HTTP_201_CREATED)
+    return Response({
+        **_describe(row), 'code': code,
+        # Seconds from now, for a browser whose clock is not this server's.
+        'code_expires_in': int(open_wearables.CODE_LIFETIME.total_seconds()),
+    }, status=status.HTTP_201_CREATED)
 
 
 # ── The phone: credentials ──────────────────────────────────────────────────
@@ -248,19 +283,26 @@ def redeem(request):
     """
     if not open_wearables.enabled():
         return _off()
-    refused = _limited(RedeemThrottle(), request)
-    if refused is not None:
-        return refused
     body = _small_body(request)
     digest = open_wearables.code_digest(body.get('code')) if body else None
-    if digest is None:
-        return _json({'detail': NOT_FOUND}, 404)
     now = timezone.now()
+    person_id = (OpenWearablesConnection.objects
+                 .filter(code_hash=digest, code_expires_at__gt=now)
+                 .values_list('person_id', flat=True).first()) if digest else None
+
+    def refused():
+        return _limited(RedeemFailureThrottle(), request) or _json({'detail': NOT_FOUND}, 404)
+
+    if person_id is None:
+        return refused()
     with transaction.atomic():
+        # The patient first and the connection second, as a sync takes them,
+        # and the code read again under the lock: two phones with one code.
+        person = Person.objects.select_for_update(no_key=True).filter(pk=person_id).first()
         row = (OpenWearablesConnection.objects.select_for_update()
-               .filter(code_hash=digest, code_expires_at__gt=now).select_related('person').first())
-        if row is None or not record_permitted(row.person):
-            return _json({'detail': NOT_FOUND}, 404)
+               .filter(person_id=person_id, code_hash=digest, code_expires_at__gt=now).first())
+        if person is None or row is None or not record_permitted(person):
+            return refused()
         # Single use: a second phone needs a second code.
         row.code_hash = ''
         row.code_expires_at = None
@@ -287,16 +329,16 @@ def refresh(request):
     """
     if not open_wearables.enabled():
         return _off()
-    refused = _limited(RefreshThrottle(), request)
-    if refused is not None:
-        return refused
     body = _small_body(request)
     digest = open_wearables.refresh_digest(body.get('refresh_token')) if body else None
     now = timezone.now()
     device = (OpenWearablesDevice.objects.select_related('connection')
               .filter(refresh_hash=digest, expires_at__gt=now).first()) if digest else None
     if device is None:
-        return _json({'detail': BAD_TOKEN}, 401)
+        return _limited(RefreshFailureThrottle(), request) or _json({'detail': BAD_TOKEN}, 401)
+    refused = _limited(ConnectionThrottle(device.connection_id), request)
+    if refused is not None:
+        return refused
     device.last_used_at = now
     device.expires_at = now + open_wearables.REFRESH_TOKEN_LIFETIME
     device.save(update_fields=['last_used_at', 'expires_at'])
@@ -323,7 +365,7 @@ def _device(request, user_id):
                       expires_at__gt=timezone.now()).first())
     if device is None:
         return None, _json({'detail': BAD_TOKEN}, 401)
-    refused = _limited(DeviceThrottle(device.pk), request)
+    refused = _limited(ConnectionThrottle(device.connection_id), request)
     if refused is not None:
         return None, refused
     return device, None
@@ -346,7 +388,7 @@ def _ingest(device, provider, device_type, batch):
 
     now = timezone.now()
     label = f'{open_wearables.HISTORY_LABELS[device_type]} {now:%Y-%m}'
-    outcome = {'stored': 0, 'repeated': 0, 'late': 0, 'unmapped': 0}
+    outcome = {'stored': 0, 'repeated': 0, 'late': 0, 'unmapped': 0, 'days_written': 0}
     # A metric with no approved mapping is not counted at all: a day counted
     # now and never written would not be written when its mapping is approved
     # either, since only a day that grows is written.
@@ -363,30 +405,66 @@ def _ingest(device, provider, device_type, batch):
             return None, None       # disconnected while this request was read
         if not record_permitted(person):
             return None, outcome    # the record is off: nothing is kept
-        open_wearables.close_idle_days(row, now)
         applied = open_wearables.apply_readings(row, device_type, readings, now)
+        # After, never before: a day this batch added to is not idle.
+        open_wearables.close_idle_days(row, now)
         outcome.update(stored=applied.counted, repeated=applied.repeated, late=applied.late)
         row.last_sync_at = now
         if batch.newest is not None:
-            newest = batch.newest.isoformat()
             synced = dict(row.synced_until or {})
-            if newest > synced.get(provider, ''):
-                synced[provider] = newest
+            try:
+                held = datetime.fromisoformat(synced[provider])
+            except (KeyError, TypeError, ValueError):
+                held = None
+            if held is None or batch.newest > held:
+                synced[provider] = batch.newest.isoformat()
             row.synced_until = synced
         row.save(update_fields=['last_sync_at', 'synced_until'])
         if not applied.samples:
             return None, outcome
         # A day's value here is the day's total so far, so it replaces what
         # this device's uploads and syncs wrote for that day (replace_daily).
+        # keep_larger: a running total never takes a day below what a file
+        # or an earlier sync already stored for it.
         result = PatientRecordViewSet()._write_wearable_samples(
-            row.created_by, person, device_type, applied.samples, label, True)
+            row.created_by, person, device_type, applied.samples, label, True, keep_larger=True)
         if isinstance(result, DrfResponse):
             # The server cannot store wearable rows at all (its type concept
             # is missing). Everything above is rolled back; the phone retries.
             raise RuntimeError(f'wearable rows cannot be stored (status {result.status_code})')
         _fold_history(person, label, result, device_type)
+    # Day values written, as opposed to records counted: a day whose value
+    # falls outside the plausible range for its metric is counted and not
+    # written, like any other wearable value.
+    outcome['days_written'] = result.get('samples_created') or 0
     changed = bool(result.get('samples_created') or result.get('replaced'))
     return (person if changed else None), outcome
+
+
+def _derive_soon(person):
+    """Re-derive the patient's record once for a burst of batches.
+
+    With a worker, the first changed batch queues one derivation a little
+    past ``DERIVE_QUIET_SECONDS`` and the batches inside that window ride on
+    it. Without one there is nothing to defer to, so it runs in the request,
+    as the Garmin push does.
+    """
+    from django.core.cache import cache
+
+    from omop_core.services.derivation_jobs import CeleryDispatcher, get_dispatcher
+
+    if not isinstance(get_dispatcher(), CeleryDispatcher):
+        _derive(person, 'open_wearables_sync')
+        return
+    try:
+        if not cache.add(f'open-wearables-derive:{person.person_id}', 1, DERIVE_QUIET_SECONDS):
+            return
+        from omop_core.tasks import refresh_patient_record_task
+        refresh_patient_record_task.apply_async(
+            args=[person.person_id], countdown=DERIVE_AFTER_SECONDS)
+    except Exception:
+        logger.exception('open_wearables_sync_dispatch_failed person_id=%s', person.person_id)
+        _derive(person, 'open_wearables_sync')
 
 
 @csrf_exempt
@@ -394,10 +472,12 @@ def _ingest(device, provider, device_type, batch):
 def sync(request, user_id):
     """One batch from the SDK: records, sleep stages, workouts.
 
-    Answers 202 in the SDK's own shape. A body the reader cannot use at all is
-    a 400 or 413; a record it cannot use is counted in the answer and the rest
-    of the batch is kept. A failure of this server's own is a 503, which the
-    SDK retries: counting a record twice is harmless.
+    Answers 202 in the SDK's own shape. A record the reader cannot use is
+    counted in the answer and the rest of the batch is kept. **The SDK sends
+    any batch that is not answered 2xx again, unchanged, for ever**, so
+    refusals are kept to what no SDK produces: a body that is not the SDK's
+    JSON at all (400) or is past the size ceiling (413). A failure of this
+    server's own is a 503: counting a record twice is harmless.
     """
     if not open_wearables.enabled():
         return _off()
@@ -417,8 +497,6 @@ def sync(request, user_id):
     if provider is None:
         return _json({'detail': UNKNOWN_PROVIDER}, 400)
     answer = {'status_code': 202, 'response': 'Sync received', 'user_id': str(user_id)}
-    if provider in open_wearables.IGNORED_PROVIDERS:
-        return _json({**answer, 'ignored': True}, 202)
     device_type = open_wearables.PROVIDER_DEVICE[provider]
     try:
         batch = open_wearables.read_sync(body, device_type, time_zone=device.connection.time_zone)
@@ -432,7 +510,7 @@ def sync(request, user_id):
     if outcome is None:
         return _json({'detail': BAD_TOKEN}, 401)
     if person is not None:
-        _derive(person, 'open_wearables_sync')
+        _derive_soon(person)
     return _json({**answer, **outcome, 'rejected': batch.rejected,
                   'unrecognized': batch.unrecognized}, 202)
 

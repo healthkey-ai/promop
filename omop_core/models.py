@@ -3651,11 +3651,14 @@ class OpenWearablesDay(models.Model):
     The SDK sends raw records, a day's worth in many batches and sometimes the
     same record twice (a retry, a re-export after a reinstall). Only the day's
     value is stored as patient data, so this keeps the running total and count
-    and the short keys of the records already counted (``seen``), which is
-    what makes a repeat harmless. No record's time or value is kept.
+    and, while the day is open, the short key and value of each record counted
+    (``seen``): a repeat is then harmless, and a record a Health Connect
+    writer updated in place moves the total by the difference. No record's
+    time is kept.
 
-    A day nothing has arrived for in a while is closed: its keys are dropped
-    and later records for it are ignored, so the keys do not accumulate.
+    A day nothing more is expected for is closed (``close_idle_days``): its
+    keys are dropped and later records for it are ignored, so the keys do not
+    accumulate. Deleting the sync's history row closes its days too.
     """
     connection = models.ForeignKey(
         OpenWearablesConnection, on_delete=models.CASCADE, related_name='days',
@@ -3665,7 +3668,7 @@ class OpenWearablesDay(models.Model):
     day = models.DateField()
     total = models.FloatField(default=0)
     count = models.PositiveIntegerField(default=0)
-    seen = models.JSONField(default=list, blank=True)
+    seen = models.JSONField(default=dict, blank=True)
     closed = models.BooleanField(default=False)
     updated_at = models.DateTimeField(default=timezone.now)
 

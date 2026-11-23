@@ -712,6 +712,9 @@ and syncs straight into the patient's record (#2810).
    `signIn(userId: user_id, accessToken: access_token, refreshToken: refresh_token, apiKey: nil)`.
    From there the SDK requests HealthKit or Health Connect permission, syncs,
    and refreshes its access token on its own.
+4. Ask the SDK only for the types PRomop stores (the table below). Heart-rate
+   samples in particular are large and are not read; a page of them over
+   32 MB is refused, and the SDK sends a refused page again for ever.
 
 There is no API key and no app secret: the patient's code is the only
 credential an app is ever given, and its tokens can do one thing, add wearable
@@ -728,7 +731,9 @@ values to that patient's record.
 | `DELETE /api/v1/users/{user_id}/connections/{provider}` | 204; this phone is signed out |
 
 `provider` is `apple`, `health_connect` (or its older name `google`) or
-`samsung`.
+`samsung`. The Android SDK reads one store and picks Samsung Health on a
+Galaxy phone unless the app chooses Health Connect; both are read the same
+way here.
 
 ### What a sync becomes
 
@@ -739,17 +744,22 @@ Health Connect sample), `data.sleep` (one per sleep stage) and
 | In the body | Becomes |
 |---|---|
 | a record whose `type` is a HealthKit identifier in `_APPLE_TYPE_MAP`, or one of the Health Connect names below | one reading for that metric on the record's local day |
-| `STEP_COUNT`, `RESTING_HEART_RATE`, `HEART_RATE_VARIABILITY` (RMSSD), `OXYGEN_SATURATION`, `RESPIRATORY_RATE`, `VO2_MAX`, `DISTANCE`, `FLOORS_CLIMBED`, `ACTIVE_CALORIES_BURNED`, `WEIGHT` | steps, resting heart rate, HRV RMSSD, SpO2, respiratory rate, VO2 max, distance, flights climbed, active energy, body mass |
-| `ACTIVITY_INTENSITY_MODERATE`, `ACTIVITY_INTENSITY_VIGOROUS` | active minutes: the length of the record |
+| `STEP_COUNT`, `RESTING_HEART_RATE`, `HEART_RATE_VARIABILITY` (RMSSD), `OXYGEN_SATURATION`, `RESPIRATORY_RATE`, `VO2_MAX`, `FLOORS_CLIMBED`, `ACTIVE_CALORIES_BURNED`, `WEIGHT` | steps, resting heart rate, HRV RMSSD, SpO2, respiratory rate, VO2 max, flights climbed, active energy, body mass |
+| `DISTANCE` (Android) | not stored: it is walking, running and cycling together |
 | a sleep stage `sleeping`, `light`, `deep` or `rem` | hours of sleep on the day the stage started; `in_bed` and `awake` are not sleep |
 | any other record type, and every workout | not stored; record types are listed back in `unrecognized` |
 
 Readings are added up per device, metric and day, each record once, and the
-day's value is what the `export.zip` parser would compute from the same
-records: the sum for steps, active minutes, sleep, distance, flights and the
-two energies, the mean for everything else. That value is written through the
-wearable writer, so the row, its unit and its place in the upload history are
-those of the [row shape](#row-shape-written-today) below.
+day's value follows the `export.zip` parser's rule: the sum for steps, active
+minutes, sleep, distance, flights and the two energies, the mean for
+everything else. A record sent again changes nothing; a Health Connect record
+sent again at a new value moves the day by the difference. That value is
+written through the wearable writer, so the row, its unit and its place in the
+upload history are those of the [row shape](#row-shape-written-today) below.
+
+The iPhone SDK does not send Apple Exercise Time or Walking Heart Rate
+Average, so active minutes and walking heart rate come only from an
+`export.zip`.
 
 Units are converted for the metrics that arrive in more than one: distance
 (`m`, `km`, `mi` to km), walking speed (`m/s` to km/hr), step length (`m` to
@@ -759,22 +769,32 @@ multiplied by 100. Anything else is rejected and counted.
 
 ### Beside the file uploads
 
-- A synced day replaces what earlier Apple uploads stored for that metric and
-  day.
-- An `export.zip` uploaded later skips a metric and day a sync already holds.
+- For an averaged metric the sync's value for a day stands, and an
+  `export.zip` uploaded later skips that metric and day.
+- For a summed metric the larger figure for the day stands, whichever arrived
+  first: a phone's running total is partial until it has sent the whole day.
 - Another device's value for the same day is left alone.
+- Deleting a sync's row from the upload history removes those days for good;
+  the phone's later records for them are ignored until it is disconnected and
+  connected again.
 
 ### Limits
 
-- Health Connect is written only once the `HealthConnect` mappings are
-  approved; records sent before that are not kept.
+- Android records are written only once the `HealthConnect` mappings are
+  approved; records sent before that are not kept. HRV needs a mapping a
+  curator adds (none is seeded).
+- A day's steps are every source's samples added up, as in the export parser,
+  so an iPhone and a Watch together can be counted twice (#2823).
+- Distance, walking speed and step length are converted to the stored unit
+  here and not by the export parser, so the two can differ for the same
+  records.
 - The general heart rate series is not read, so resting heart rate comes only
   from the watch's own resting value.
 - A sleep stage is filed under the day it started on, as in the export
   parser, so a night that begins before midnight is split.
 - The day a record belongs to is taken from the patient's browser time zone
-  when HealthKit gives no offset; a patient who travels keeps the zone they
-  connected in.
+  when the record gives no offset; the zone is the one they first connected
+  in and does not follow them when they travel.
 - Not verified against a live phone.
 
 ## Derived values (not directly exported by either device)

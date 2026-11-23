@@ -122,30 +122,61 @@ def test_health_connect_records_are_read_by_the_android_sdks_names():
     batch = read([
         record('STEP_COUNT', 900),
         record('HEART_RATE_VARIABILITY', 38, unit='ms'),
-        record('WEIGHT', 70500, unit='g'),
-        record('DISTANCE', 2500, unit='m'),
+        record('WEIGHT', 70.5, unit='kg'),
+        record('ACTIVE_CALORIES_BURNED', 410, unit='kcal'),
         record(STEPS, 5),                       # an iPhone's name means nothing here
+        # Walking, running and cycling together: not the walking-and-running metric.
+        record('DISTANCE', 2500, unit='m'),
     ], device=ow.ANDROID)
     assert values(batch) == [
         ('steps', '2026-11-20', 900.0),
         # Health Connect's HRV is RMSSD, never SDNN (#438).
         ('hrv_rmssd', '2026-11-20', 38.0),
         ('body_mass', '2026-11-20', 70.5),
-        ('distance', '2026-11-20', 2.5),
+        ('active_energy', '2026-11-20', 410.0),
     ]
-    assert batch.unrecognized == [STEPS]
+    assert batch.unrecognized == ['DISTANCE', STEPS]
 
 
-def test_android_activity_intensity_is_the_length_of_the_record():
-    batch = read([
-        record('ACTIVITY_INTENSITY_MODERATE', 999, start='2026-11-20T18:00:00Z', end='2026-11-20T18:25:00Z',
-               unit=None),
-        record('ACTIVITY_INTENSITY_VIGOROUS', 0, start='2026-11-20T19:00:00Z', end='2026-11-20T19:10:00Z'),
-        record('ACTIVITY_INTENSITY_VIGOROUS', 0, start='2026-11-20T19:00:00Z', end='2026-11-20T19:00:00Z',
-               id='no-length'),
-    ], device=ow.ANDROID)
-    assert values(batch) == [('active_minutes', '2026-11-20', 25.0), ('active_minutes', '2026-11-20', 10.0)]
-    assert batch.rejected == 1
+@pytest.mark.parametrize('start, end', [
+    ('0001-01-01T00:00:00Z', '0001-01-01T00:00:00Z'),      # HealthKit's distant past
+    ('9999-12-31T23:59:59Z', '9999-12-31T23:59:59Z'),
+    ('4001-01-01T00:00:00Z', '4001-01-01T00:00:00Z'),      # ... and distant future
+])
+def test_a_date_no_calendar_can_hold_rejects_its_record_and_not_the_batch(start, end):
+    for zone in ('', 'America/New_York', 'Asia/Tokyo'):
+        batch = read([record(start=start, end=end), record(STEPS, 7, id='fine')],
+                     sleep=[stage('deep', start, end, sid='s')], zone=zone)
+        assert [r.value for r in batch.readings] == [7.0], zone
+        assert batch.rejected == 2, zone
+
+
+def test_an_end_date_in_the_distant_future_does_not_become_how_far_the_sync_has_got():
+    batch = read([record(STEPS, 5, start='2026-11-20T18:00:00Z', end='4001-01-01T00:00:00Z')])
+    assert [r.value for r in batch.readings] == [5.0]
+    assert batch.newest is None
+    both = read([record(STEPS, 5, start='2026-11-20T18:00:00Z', end='4001-01-01T00:00:00Z', id='far'),
+                 record(STEPS, 6, start='2026-11-21T09:00:00Z', id='near')])
+    assert both.newest == datetime(2026, 11, 21, 9, 0, tzinfo=dt_timezone.utc)
+
+
+def test_an_id_that_is_not_valid_unicode_is_still_an_id():
+    batch = read([record(STEPS, 5, id='\ud83d'), record(STEPS, 6, id='\ud83d')])
+    assert len(batch.readings) == 2 and batch.readings[0].key == batch.readings[1].key
+    assert batch.rejected == 0
+
+
+def test_something_unforeseen_in_one_record_costs_that_record_only(monkeypatch):
+    real = ow._Reader._key
+
+    def explode(self, record, *args):
+        if record.get('id') == 'boom':
+            raise RuntimeError('unforeseen')
+        return real(self, record, *args)
+
+    monkeypatch.setattr(ow._Reader, '_key', explode)
+    batch = read([record(STEPS, 1, id='a'), record(STEPS, 2, id='boom'), record(STEPS, 3, id='c')])
+    assert [r.value for r in batch.readings] == [1.0, 3.0] and batch.rejected == 1
 
 
 @pytest.mark.parametrize('kind, value, unit, stored', [
@@ -216,6 +247,9 @@ def test_the_day_is_where_the_person_was():
     assert values(read([record(start=late, zoneOffset='+09:00')], zone='America/Denver')) == [
         ('steps', '2026-11-21', 100.0)]
     assert values(read([record(start=late, zoneOffset='-0700')])) == [('steps', '2026-11-20', 100.0)]
+    # Android writes UTC as "Z": an offset, not the absence of one.
+    assert values(read([record(start=late, zoneOffset='Z')], zone='America/Denver')) == [
+        ('steps', '2026-11-21', 100.0)]
     # An offset that is not one is no offset.
     assert values(read([record(start=late, zoneOffset='+25:00')], zone='America/Denver')) == [
         ('steps', '2026-11-20', 100.0)]
@@ -268,11 +302,16 @@ def test_a_sleep_stage_with_no_believable_length_is_rejected(start, end):
     assert batch.readings == [] and batch.rejected == 1
 
 
-def test_workouts_are_not_read_but_count_towards_the_limit(monkeypatch):
-    assert read([record()], workouts=[{'type': 'RUNNING'}] * 3).readings != []
-    monkeypatch.setattr(ow, 'MAX_ITEMS', 3)
+def test_only_what_is_read_counts_towards_the_limit(monkeypatch):
+    """The SDK sends a refused batch again unchanged, so nothing it skips may refuse one."""
+    monkeypatch.setattr(ow, 'MAX_ITEMS', 2)
+    skipped = [record('HKQuantityTypeIdentifierHeartRate', 70 + i, unit='bpm', id=f'hr{i}') for i in range(50)]
+    batch = read([record(STEPS, 1, id='a'), *skipped, record(STEPS, 2, id='b')],
+                 sleep=[stage('awake', '2026-11-20T08:00:00Z', '2026-11-20T08:20:00Z')] * 20,
+                 workouts=[{'type': 'RUNNING'}] * 20)
+    assert [r.value for r in batch.readings] == [1.0, 2.0]
     with pytest.raises(ow.SyncError) as error:
-        read([record()], workouts=[{'type': 'RUNNING'}] * 3)
+        read([record(STEPS, i, id=f's{i}') for i in range(3)])
     assert error.value.status == 413
 
 
@@ -294,10 +333,14 @@ def test_an_empty_sync_reads_as_nothing():
     assert batch.readings == [] and batch.newest is None
 
 
-def test_providers_map_to_a_device_or_are_ignored():
-    assert ow.PROVIDER_DEVICE == {'apple': 'apple', 'health_connect': 'android', 'google': 'android'}
+def test_every_provider_the_sdk_names_is_read():
+    # The Android SDK reads one store, and on a Galaxy phone that is Samsung
+    # Health unless the app chose otherwise: discarding it would look connected
+    # and store nothing.
+    assert ow.PROVIDER_DEVICE == {'apple': 'apple', 'health_connect': 'android', 'google': 'android',
+                                  'samsung': 'android'}
     assert ow.PROVIDER_SLUGS['google'] == 'health_connect'
-    assert ow.IGNORED_PROVIDERS == {'samsung'} and 'samsung' not in ow.PROVIDER_DEVICE
+    assert set(ow.PROVIDER_SLUGS) == set(ow.PROVIDER_DEVICE)
     assert all(len(device) <= 10 for device in ow.PROVIDER_DEVICE.values())    # WearableUpload.device_type
 
 
@@ -332,7 +375,21 @@ def test_a_reading_is_counted_once_across_batches_and_within_one(connection):
     assert applied.samples == [WearableSample('steps', date(2026, 11, 20), 3500.0)]
     assert (applied.counted, applied.repeated) == (1, 2)
     row = OpenWearablesDay.objects.get()
-    assert (row.total, row.count, row.seen) == (3500.0, 2, ['a', 'b'])
+    assert (row.total, row.count, row.seen) == (3500.0, 2, {'a': 3000.0, 'b': 500.0})
+
+
+def test_a_record_updated_in_place_moves_the_day_by_the_difference(connection):
+    """Health Connect lets a writer update a record: the same id, a new value."""
+    ow.apply_readings(connection, ow.ANDROID, [reading(key='bucket', value=1200), reading(key='other', value=300)])
+    applied = ow.apply_readings(connection, ow.ANDROID, [reading(key='bucket', value=4100)])
+    assert applied.samples == [WearableSample('steps', date(2026, 11, 20), 4400.0)]
+    assert (applied.counted, applied.repeated) == (1, 0)
+    row = OpenWearablesDay.objects.get()
+    assert (row.total, row.count) == (4400.0, 2)
+    # And for an averaged metric the count does not grow.
+    ow.apply_readings(connection, ow.ANDROID, [reading('resting_hr', key='r', value=60)])
+    mean = ow.apply_readings(connection, ow.ANDROID, [reading('resting_hr', key='r', value=64)])
+    assert mean.samples == [WearableSample('resting_hr', date(2026, 11, 20), 64.0)]
 
 
 def test_a_batch_of_nothing_new_changes_nothing(connection):
@@ -366,12 +423,27 @@ def test_a_day_nothing_arrives_for_is_closed_and_then_ignores_records(connection
     ow.apply_readings(connection, ow.APPLE, [reading(day=date(2026, 11, 22), key='z', value=10)], now)
     assert ow.close_idle_days(connection, now) == 1
     old = OpenWearablesDay.objects.get(day=date(2026, 11, 20))
-    assert (old.closed, old.seen, old.total) == (True, [], 3000.0)
+    assert (old.closed, old.seen, old.total) == (True, {}, 3000.0)
     assert not OpenWearablesDay.objects.get(day=date(2026, 11, 22)).closed
     # A re-export after the keys are gone cannot be told from new data, so it is not counted.
     applied = ow.apply_readings(connection, ow.APPLE, [reading(key='a', value=3000), reading(key='n', value=5)], now)
     assert applied.samples == [] and applied.late == 2
     assert OpenWearablesDay.objects.get(day=date(2026, 11, 20)).total == 3000.0
+
+
+def test_a_day_well_in_the_past_is_closed_a_day_after_its_records_stop(connection):
+    """A backfill sends an old day together, so its keys are not kept for weeks."""
+    now = timezone.now()
+    today = now.date()
+    for day, age in ((today - timedelta(days=30), timedelta(hours=30)),      # old and quiet: closed
+                     (today - timedelta(days=30, hours=24), timedelta(hours=2)),   # old, still arriving
+                     (today - timedelta(days=2), timedelta(hours=30))):      # recent: may still grow
+        ow.apply_readings(connection, ow.APPLE, [reading(day=day, key=f'k{day}', value=1)], now - age)
+    assert ow.close_idle_days(connection, now) == 1
+    assert list(OpenWearablesDay.objects.filter(closed=True).values_list('day', flat=True)) == [
+        today - timedelta(days=30)]
+    # With no connection named, every connection's: the command for phones that never sync again.
+    assert ow.close_idle_days(now=now + timedelta(days=60)) == 2
 
 
 def test_the_query_count_does_not_grow_with_the_readings(connection, django_assert_max_num_queries):

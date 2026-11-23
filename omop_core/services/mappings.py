@@ -383,7 +383,8 @@ def resolve_wearable_mappings(device_type):
             for row in SourceCodeConceptMapping.objects.filter(
                 source_vocabulary_id='HealthConnect', status='approved', organization__isnull=True,
                 metric_key__in=WEARABLE_CONCEPT_CODE, target_concept__isnull=False,
-            ).select_related('target_concept').order_by('-id')
+            # Two approved rows for one metric: the later one is the answer.
+            ).select_related('target_concept').order_by('id')
         }
 
     source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'

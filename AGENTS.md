@@ -1293,9 +1293,9 @@ in `omop_core/services/open_wearables.py`, routes in
 
 | Route | Who | What |
 |---|---|---|
-| `GET open-wearables/connection/` | a signed-in patient | `{enabled, connected, devices, code_pending, last_sync_at, providers, host}`; never a token, the SDK user id or a code |
+| `GET open-wearables/connection/` | a signed-in patient | `{enabled, connected, devices, code_pending, code_expires_at, last_connected_at, last_sync_at, providers, host}`; never a token, the SDK user id or a code |
 | `DELETE open-wearables/connection/` | a signed-in patient | signs every phone out and forgets the day totals; stored values stay |
-| `POST open-wearables/invitation-code/` | a signed-in patient | `{time_zone}` -> an 8-character code, shown once, good for 15 minutes |
+| `POST open-wearables/invitation-code/` | a signed-in patient | `{time_zone}` -> the status plus `code` (8 characters, shown once) and `code_expires_in` (900 seconds) |
 | `POST invitation-code/redeem` | the app | `{code}` -> `{access_token, token_type, refresh_token, expires_in, user_id}` |
 | `POST token/refresh` | the SDK | `{refresh_token}` -> `{access_token, token_type, expires_in}` |
 | `POST sdk/users/<user_id>/sync` | the SDK | a batch of records, sleep stages and workouts; 202 |
@@ -1315,9 +1315,7 @@ redirect that would add one.
   the Wearables tab (their own record, this site's session:
   `is_interactive_session`); the app exchanges it once. A new code replaces
   the one before it. Every code that does not work (unknown, used, expired,
-  malformed, a record switched off) gets one 404. Redeeming is limited per
-  client address (30 an hour, `mapping_votes.client_address`, so set
-  `MAPPING_VOTE_PROXY_HOPS`).
+  malformed, a record switched off) gets one 404.
 - **What a token is.** The access token is signed (`django.core.signing`, one
   hour) and names one phone row; the refresh token is random, kept as a
   SHA-256 digest (`OpenWearablesDevice`), good for 180 days from its last use
@@ -1326,63 +1324,120 @@ redirect that would add one.
   `user_id` and nowhere else, so what a phone sends can only reach the record
   of the patient who made its code. `user_id` is a random UUID, never the
   person id. Five phones at most; the sixth signs the oldest out.
+- **Limits.** A patient's phones share one budget (1,200 requests an hour
+  per connection, `ConnectionThrottle`). On the two public routes only
+  requests that carried **no working credential** are counted, per client
+  address, after the credential has been looked up (60 an hour for codes,
+  120 for refresh tokens): a working code or token is never refused there.
+  Counting every request would let a stranger posting junk stop every
+  patient connecting where the address is a shared one, which it is while
+  `MAPPING_VOTE_PROXY_HOPS` is 0 behind a proxy. It bounds junk, not
+  guessing: 32^8 codes that live fifteen minutes are not found by trying.
+- **The SDK sends a batch that is not answered 2xx again, unchanged, for
+  ever.** So a sync is refused only for what no SDK produces: a body that is
+  not its JSON (400) or is over 32 MB (413). One record that cannot be read,
+  whatever is wrong with it (a date in the year 1, a unit nobody knows), is
+  counted in `rejected` and the rest of the batch is kept. The cap of 50,000
+  is on readings kept, never on what is skipped: Android sends a heart-rate
+  record as one item per sample, and those are not read.
 - **Raw records in, day values out.** The SDK sends every HealthKit sample.
-  Each is counted once into `OpenWearablesDay` (running total, count and the
-  short keys of the records counted, per device, metric and day) and the
-  day's value is the `export.zip` parser's: a sum for `CUMULATIVE_METRICS`,
-  a mean otherwise. No record's time or value is stored. A record sent again
-  (a retry, a re-export after a reinstall) is recognised by its key and
-  changes nothing. A day nothing has arrived for in 45 days is closed: its
-  keys are dropped and later records for it are ignored.
-- **Which day.** The record's own `zoneOffset` when HealthKit kept one (it
-  rarely does), else the IANA zone the patient's browser reported when the
-  code was made (`time_zone`), else UTC. A sleep stage belongs to the day it
-  started on, as in the export parser, so a night that starts before
-  midnight is split across two days there and here alike.
+  Each is counted once into `OpenWearablesDay` (running total and count per
+  device, metric and day, and while the day is open the short key and value
+  of each record counted) and the day's value is the `export.zip` parser's:
+  a sum for `CUMULATIVE_METRICS`, a mean otherwise. A record sent again (a
+  retry, a re-export after a reinstall) is recognised by its key and changes
+  nothing; one sent again **at another value** (Health Connect lets a writer
+  update a record in place) moves the day by the difference. No record's
+  time is stored, and its key and value only until the day is closed.
+- **Closed days.** A day's keys are dropped, and later records for it
+  ignored (`late`), once nothing more is expected: 45 days after its last
+  record, or one day after for a day already a week in the past, since a
+  backfill sends an old day together (`close_idle_days`, run after each
+  batch is counted, never before). `manage.py close_open_wearables_days`
+  does it for phones that never sync again; nothing schedules it.
+  **Deleting the sync's history row closes its days too**
+  (`_close_synced_days`): left open, the next record would write the whole
+  deleted day back. Disconnecting the phone and connecting it again starts
+  afresh.
+- **Which day.** The record's own `zoneOffset` when it has one (HealthKit
+  rarely does; Android writes UTC as `Z`), else the IANA zone the patient's
+  browser reported when the **first** code was made (`time_zone`), else UTC.
+  The zone is not changed once a day has been counted: a record sent again
+  under another zone would land on the day beside its own and count twice.
+  A sleep stage belongs to the day it started on, as in the export parser,
+  so a night that starts before midnight is split across two days there and
+  here alike.
 - **Written by the wearable writer**, `_write_wearable_samples(...,
-  replace_daily=True)`, as device `apple` or `android`: the upload's rows,
-  units and history. `replace_daily` now means "this device's rows" for any
-  device (it was Garmin's): a synced day replaces what earlier Apple uploads
-  and syncs stored for that metric and day. In the other order, an
-  `export.zip` uploaded after a sync holds the day **skips that metric and
-  day** (`_synced_days`): the file's figure beside the sync's would double
-  the day and nothing would come back to replace it. Another device's rows
-  (a Garmin value for the same day) are never touched, so a patient who
-  wears a Garmin and carries an iPhone has both, as before.
+  replace_daily=True, keep_larger=True)`, as device `apple` or `android`:
+  the upload's rows, units and history. `replace_daily` now means "this
+  device's rows" for any device (it was Garmin's). Between a phone's sync
+  and an `export.zip` for the same metric and day:
+  - an averaged metric: the sync's value stands, and a file uploaded later
+    skips that day (`_synced_days`);
+  - a summed metric: **the larger figure stands**, whichever arrived first.
+    A running total is partial until the phone has sent the whole day, and
+    a phone that stops part way through would otherwise leave a truncated
+    day that no upload could correct.
+  A synced day whose row is no longer stored (deleted, or flagged entered
+  in error) blocks nothing. Another device's rows (a Garmin value for the
+  same day) are never touched, so a patient who wears a Garmin and carries
+  an iPhone has both, as before.
 - **History.** One "Open Wearables sync (iPhone) <YYYY-MM>" (or "(Android)")
   upload row per patient per month, folded as the Garmin push's is
   (`_fold_history`); deleting it removes that month's synced rows.
-- **HealthKit works as installed; Health Connect waits for approval.**
-  HealthKit records carry the identifiers the approved `Apple` mappings are
-  keyed by. Health Connect records resolve through approved `HealthConnect`
-  mappings by their `metric_key`, and those rows are seeded `proposed`: until
-  a curator approves them an Android phone's records are answered
-  `unmapped`, **not counted and not kept**, so approve them before
-  connecting Android phones. Samsung Health (`provider: samsung`) is accepted
-  and not stored: its data also reaches Health Connect.
-- **What is read.** The metrics of `WEARABLE_CONCEPT_CODE`. Not read: the
-  general heart rate series (so resting heart rate is never estimated from
-  it, as the export parser does when the watch reports none), workouts,
-  blood pressure, glucose and the rest; their types come back in
-  `unrecognized`. A unit this module does not know for a metric that has
-  several (distance, energy, weight, speed) is rejected, never guessed.
-- **Answers.** 202 with `stored`, `repeated`, `late`, `unmapped`,
-  `rejected` and `unrecognized`. 401 for a token that is missing, expired or
-  no longer names a phone (the SDK refreshes and tries once more), 403 for a
-  good token on another user's path, 400 or 413 for a body that cannot be
-  read at all (10 MB, 50,000 items), 503 for a failure of this server's own,
-  which the SDK retries. A record that is switched off stores nothing and
-  still answers 202.
+- **Derivation.** With a worker, a burst of batches is one derivation: the
+  first changed batch queues it 75 seconds out and batches in the next 60
+  ride on it (`_derive_soon`; a first export is thousands of batches).
+  Without a worker it runs in the request, as the Garmin push's does.
+- **HealthKit works as installed; Android waits for approval.** HealthKit
+  records carry the identifiers the approved `Apple` mappings are keyed by.
+  Android records (`health_connect`, its older name `google`, and
+  `samsung`: the Android SDK reads one store, and on a Galaxy phone that is
+  Samsung Health unless the app chose Health Connect) resolve through
+  approved `HealthConnect` mappings by their `metric_key`, and those rows
+  are seeded `proposed`: until a curator approves them an Android phone's
+  records are answered `unmapped`, **not counted and not kept**, so approve
+  them before connecting Android phones. No Health Connect code is seeded
+  for HRV (RMSSD): a curator adds one with metric key `hrv_rmssd` to have
+  it stored.
+- **What is read.** From an iPhone, the HealthKit types of `_APPLE_TYPE_MAP`
+  that the SDK sends; it does not send Apple Exercise Time or Walking Heart
+  Rate Average, so active minutes and walking heart rate come only from an
+  `export.zip`. From Android, `_ANDROID_TYPE_MAP`: steps, resting heart
+  rate, HRV, SpO2, respiratory rate, VO2 max, flights, active energy and
+  weight. Not `DISTANCE`, which is walking, running and cycling together.
+  Sleep stages from both. Not read: the general heart rate series (so
+  resting heart rate is never estimated from it, as the export parser does
+  when the watch reports none), workouts, blood pressure, glucose and the
+  rest; their types come back in `unrecognized`. A unit this module does not
+  know for a metric that has several is rejected, never guessed. Units are
+  converted here (m to km, m/s to km/hr, m to cm), which the export parser
+  does not do, so for distance, walking speed and step length the two paths
+  can store different numbers for the same records; the sync's are in the
+  stored unit.
+- **Answers.** 202 with `stored` (records counted), `days_written`,
+  `repeated`, `late`, `unmapped`, `rejected` and `unrecognized`. A day whose
+  value falls outside `WEARABLE_ARTIFACT_BOUNDS` is counted and not written.
+  401 for a token that is missing, expired or no longer names a phone (the
+  SDK refreshes and tries once more), 403 for a good token on another
+  user's path, 503 for a failure of this server's own. A record that is
+  switched off stores nothing and still answers 202.
 - **Erasure.** Erasing a record or closing an account deletes the connection
   (`erasure._forget_open_wearables`), so a phone left signed in cannot refill
-  it. `copy_patient --replace` refuses a person who has one. All three models
-  are system data.
+  it. Disconnecting and erasing take the patient's lock first, as a sync
+  does. `copy_patient --replace` refuses a person who has one. All three
+  models are system data.
+- **Summed across sources (#2823).** A day's steps are every source's
+  samples added up, as in the export parser, so a person with an iPhone and
+  a Watch can be counted twice. Fixing it means changing both paths
+  together.
 - **Not verified against a live phone.** The shapes are read from the SDK's
   and the server's source, not from a captured request. Check a first real
   sync's `rejected` and `unrecognized` before relying on it.
 - **Not built**: Open Wearables' cloud providers (it pulls Garmin, Oura and
   others server to server; Garmin is direct here), its outbound webhooks,
-  per-type export ranges in `sync/status`, raw sample storage.
+  per-type export ranges in `sync/status` (neither SDK calls it today), raw
+  sample storage. A patient's open days are not capped in number.
 
 Tests: `tests/test_open_wearables.py`,
 `patient_portal.tests.OpenWearablesEndpointTest`, `OpenWearablesLink.test.tsx`.

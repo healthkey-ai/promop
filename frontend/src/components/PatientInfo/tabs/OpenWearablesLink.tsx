@@ -6,6 +6,10 @@ interface Connection {
   connected: boolean;
   devices: number;
   code_pending: boolean;
+  /** Which code is pending, without being the code. */
+  code_expires_at: string | null;
+  /** When the newest phone joined. */
+  last_connected_at: string | null;
   last_sync_at: string | null;
   providers: string[];
   host: string;
@@ -14,14 +18,31 @@ interface Connection {
 /** A code the server has just made. Held here only: a reload forgets it. */
 interface Invitation {
   code: string;
-  /** When it stops working, in epoch ms; null when the server's time could not be read. */
-  expires: number | null;
-  /** Phones connected when it was made, to tell a new one arriving. */
-  devices: number;
+  /**
+   * When to stop waiting for it, on this browser's clock: the moment the
+   * answer arrived plus the code's lifetime. Never the server's instant, which
+   * a browser clock that is wrong would read as long past or far ahead.
+   */
+  deadline: number;
+  /** The server's name for this code, to tell a newer one that replaced it. */
+  codeExpiresAt: string | null;
+  /** When the newest phone had joined as the code was made, to tell one joining since. */
+  lastConnectedAt: string | null;
 }
+
+/** What a look at the server says about the code on screen. */
+type Verdict = 'waiting' | 'connected' | 'unusable' | 'expired' | 'off';
 
 const CONNECTION_PATH = '/v1/open-wearables/connection/';
 const CODE_PATH = '/v1/open-wearables/invitation-code/';
+/** A code's lifetime where the server does not say. */
+const CODE_SECONDS = 15 * 60;
+
+const NOTICES: Record<Exclude<Verdict, 'waiting' | 'off'>, string> = {
+  connected: 'Your phone is connected. Its data arrives here after the app next syncs.',
+  unusable: 'That code can no longer be used. If your phone did not connect, get a new code.',
+  expired: 'That code has expired. Get a new one to connect a phone.',
+};
 
 /** What the app's sources are called on the phone. */
 const PROVIDER_LABELS: Record<string, string> = {
@@ -33,12 +54,16 @@ const PROVIDER_LABELS: Record<string, string> = {
 function readStatus(data: unknown): Connection | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   const raw = data as Record<string, unknown>;
+  // An error body is an object too; a status always says whether it is offered.
+  if (typeof raw.enabled !== 'boolean') return null;
   const devices = typeof raw.devices === 'number' && raw.devices > 0 ? Math.floor(raw.devices) : 0;
   return {
     enabled: raw.enabled === true,
     connected: raw.connected === true || devices > 0,
     devices,
     code_pending: raw.code_pending === true,
+    code_expires_at: typeof raw.code_expires_at === 'string' ? raw.code_expires_at : null,
+    last_connected_at: typeof raw.last_connected_at === 'string' ? raw.last_connected_at : null,
     last_sync_at: typeof raw.last_sync_at === 'string' ? raw.last_sync_at : null,
     providers: Array.isArray(raw.providers)
       ? raw.providers.filter((name): name is string => typeof name === 'string') : [],
@@ -77,9 +102,57 @@ function sources(providers: string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
-function errorText(err: unknown, fallback: string): string {
-  const data = (err as { response?: { data?: { error?: string; detail?: string } } })?.response?.data;
-  const text = data?.error || data?.detail;
+/** The status in an answer, or null for a refusal or anything that is not one. */
+function readResponse(res: { status?: number; data?: unknown } | undefined): Connection | null {
+  if (typeof res?.status === 'number' && (res.status < 200 || res.status >= 300)) return null;
+  return readStatus(res?.data);
+}
+
+/** Where the connection stands now, or null when that cannot be read. */
+async function fetchStatus(): Promise<Connection | null> {
+  try {
+    return readResponse(await clinicalClient().get(clinicalUrl(CONNECTION_PATH)));
+  } catch {
+    return null;
+  }
+}
+
+/** Whether two instants the server sent differ; false when either is missing. */
+function differs(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return false;
+  const [first, second] = [timestamp(a), timestamp(b)];
+  return first !== null && second !== null ? first !== second : a !== b;
+}
+
+/** Whether a phone has joined since `before`, by when the newest one did. */
+function joinedSince(now: string | null, before: string | null): boolean {
+  if (now === null) return false;
+  if (before === null) return true;
+  const [first, second] = [timestamp(now), timestamp(before)];
+  return first !== null && second !== null ? first > second : now !== before;
+}
+
+/**
+ * What `status` says about the code on screen. `last` is the one look taken
+ * once the code's time is up: whatever it does not settle, the time has.
+ */
+function judge(invitation: Invitation, status: Connection | null, last: boolean): Verdict {
+  if (!status) return last ? 'expired' : 'waiting';
+  // Switched off meanwhile: the code cannot be used, and the panel says so.
+  if (!status.enabled) return 'off';
+  // Not the count of phones: a new one that displaces the oldest leaves it as it was.
+  if (joinedSince(status.last_connected_at, invitation.lastConnectedAt)) return 'connected';
+  // A newer code, made on another page or by a request whose answer was lost.
+  if (status.code_pending && differs(status.code_expires_at, invitation.codeExpiresAt)) return 'unusable';
+  if (last) return 'expired';
+  return status.code_pending ? 'waiting' : 'unusable';
+}
+
+/** The server's wording, except for a limit: that arrives as seconds to wait. */
+function errorText(err: unknown, fallback: string, limited: string): string {
+  const response = (err as { response?: { status?: number; data?: { error?: string; detail?: string } } })?.response;
+  if (response?.status === 429) return limited;
+  const text = response?.data?.error || response?.data?.detail;
   return typeof text === 'string' && text ? text : fallback;
 }
 
@@ -94,7 +167,8 @@ function errorText(err: unknown, fallback: string): string {
  * it can be disconnected, and no code is offered.
  *
  * The code is shown once and kept in this component only. While it is shown
- * the panel asks the server now and then whether a phone has used it.
+ * the panel asks the server now and then whether a phone has used it, and
+ * once more when the code's time is up.
  *
  * Disconnecting signs every phone out. Values already stored stay; they are
  * removed from the upload history like any other upload.
@@ -115,48 +189,35 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }:
   useEffect(() => {
     let current = true;
     (async () => {
-      try {
-        const res = await clinicalClient().get(clinicalUrl(CONNECTION_PATH));
-        const next = readStatus(res?.data);
-        if (current && next) setConnection(next);
-      } catch {
-        // Not offered when its state cannot be read; the other ways in still work.
-      }
+      // Not offered when its state cannot be read; the other ways in still work.
+      const next = await fetchStatus();
+      if (current && next) setConnection(next);
     })();
     return () => { current = false; };
   }, []);
 
   // While a code is on screen, watch for the phone that uses it: the patient
-  // is looking at their phone, and nothing else would tell this page.
+  // is looking at their phone, and nothing else would tell this page. A change
+  // of code, or none, ends the watch, and an answer still on its way is dropped.
   useEffect(() => {
     if (!invitation) return undefined;
     let current = true;
+    let asking = false;
     const timer = window.setInterval(() => {
-      if (invitation.expires !== null && Date.now() >= invitation.expires) {
-        setInvitation(null);
-        setNotice('That code has expired. Get a new one to connect a phone.');
-        return;
-      }
+      // One look at a time: a slow answer is not asked for again over itself.
+      if (asking) return;
+      const last = Date.now() >= invitation.deadline;
+      if (last) window.clearInterval(timer);
+      asking = true;
       (async () => {
-        try {
-          const res = await clinicalClient().get(clinicalUrl(CONNECTION_PATH));
-          const next = readStatus(res?.data);
-          if (!current || !next) return;
-          setConnection(next);
-          // Switched off meanwhile: the code cannot be used, and the panel says so.
-          if (!next.enabled) {
-            setInvitation(null);
-            return;
-          }
-          // Still waiting to be used.
-          if (next.code_pending) return;
-          setInvitation(null);
-          setNotice(next.devices > invitation.devices
-            ? 'Your phone is connected. Its data arrives here after the app next syncs.'
-            : 'That code can no longer be used. If your phone did not connect, get a new code.');
-        } catch {
-          // Asked again on the next turn.
-        }
+        const next = await fetchStatus();
+        asking = false;
+        if (!current) return;
+        if (next) setConnection(next);
+        const verdict = judge(invitation, next, last);
+        if (verdict === 'waiting') return;
+        setInvitation(null);
+        if (verdict !== 'off') setNotice(NOTICES[verdict]);
       })();
     }, pollMs);
     return () => {
@@ -179,17 +240,23 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }:
     setNotice(null);
     try {
       const res = await clinicalClient().post(clinicalUrl(CODE_PATH), { time_zone: browserTimeZone() });
-      const next = readStatus(res?.data);
-      const code = (res?.data as { code?: unknown } | undefined)?.code;
+      const received = Date.now();
+      const next = readResponse(res);
+      const { code, code_expires_in: seconds } = (res?.data ?? {}) as { code?: unknown; code_expires_in?: unknown };
       if (!next || typeof code !== 'string' || !code) throw new Error('no code');
+      const lifetime = typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0 ? seconds : CODE_SECONDS;
       setConnection(next);
       setInvitation({
         code,
-        expires: timestamp((res.data as { code_expires_at?: string }).code_expires_at),
-        devices: next.devices,
+        deadline: received + lifetime * 1000,
+        codeExpiresAt: next.code_expires_at,
+        lastConnectedAt: next.last_connected_at,
       });
+      // Whatever a look at the code before this one concluded is about that code.
+      setNotice(null);
     } catch (err: unknown) {
-      setError(errorText(err, 'Could not get a connection code. Please try again.'));
+      setError(errorText(err, 'Could not get a connection code. Please try again.',
+        'Too many codes requested. Try again in a few minutes.'));
     } finally {
       setBusy(null);
     }
@@ -205,15 +272,17 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }:
     setNotice(null);
     try {
       const res = await clinicalClient().delete(clinicalUrl(CONNECTION_PATH));
-      setConnection(readStatus(res?.data) ?? {
-        ...connection, connected: false, devices: 0, code_pending: false, last_sync_at: null, providers: [],
+      setConnection(readResponse(res) ?? {
+        ...connection, connected: false, devices: 0, code_pending: false, code_expires_at: null,
+        last_connected_at: null, last_sync_at: null, providers: [],
       });
       // A code made before this no longer works either.
       setInvitation(null);
       setNotice(`${phones === 1 ? 'Your phone is' : 'Your phones are'} disconnected. Values already stored `
         + 'stay in your record; you can remove them from the upload history.');
     } catch (err: unknown) {
-      setError(errorText(err, 'Could not disconnect. Please try again.'));
+      setError(errorText(err, 'Could not disconnect. Please try again.',
+        'Too many requests. Try again in a few minutes.'));
     } finally {
       setBusy(null);
     }
@@ -250,16 +319,16 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }:
         {invitation && connection.enabled && (
           <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 px-4 py-3">
             <p className="text-xs font-medium text-gray-500">Connection code</p>
-            <p className="mt-1 select-all font-mono text-3xl font-semibold tracking-widest text-portal-text-primary">
-              {invitation.code}
+            <p className="mt-1 font-mono text-3xl font-semibold tracking-widest text-portal-text-primary">
+              <span aria-hidden="true" className="select-all">{invitation.code}</span>
+              {/* Read out a character at a time, not as one word. */}
+              <span className="sr-only select-none">{invitation.code.split('').join(' ')}</span>
             </p>
             <p className="mt-3 text-xs font-medium text-gray-500">Server address</p>
             <p className="mt-1 select-all break-all font-mono text-sm text-portal-text-primary">{host}</p>
             <p className="mt-3 text-xs text-gray-500">
               In the app, enter the server address and then the code.{' '}
-              {invitation.expires !== null
-                ? `This code works once and expires at ${clock(invitation.expires)}.`
-                : 'This code works once and expires in 15 minutes.'}
+              This code works once and expires at {clock(invitation.deadline)}.
             </p>
           </div>
         )}

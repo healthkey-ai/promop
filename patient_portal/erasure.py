@@ -128,6 +128,9 @@ def _forget_open_wearables(person: Person) -> None:
     into a record that was just erased (#2810)."""
     from omop_core.models import OpenWearablesConnection
 
+    # Under the patient's lock, which a sync holds while it writes, so the
+    # erasure waits for a batch in flight instead of failing on its rows.
+    Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
     OpenWearablesConnection.objects.filter(person=person).delete()
 
 

@@ -14,11 +14,12 @@ All notable changes to PRomop are documented here.
   rest), so an app built on that SDK is pointed at a PRomop deployment and
   syncs straight into the patient's record (#2810). The patient makes a
   one-time code under "Phone health app" on the Wearables tab and types it
-  into the app. The SDK's raw records become the same daily values the
-  `export.zip` upload stores, each record counted once; a synced day replaces
-  what an earlier Apple upload stored, and a later upload skips days the sync
-  holds. HealthKit works as installed; Health Connect is written once its
-  mappings are approved. `OPEN_WEARABLES_SYNC_ENABLED=false` switches it off.
+  into the app. The SDK's raw records become one value per metric per day by
+  the `export.zip` parser's rule, each record counted once. Between a sync
+  and an upload for the same day, the larger figure stands for a summed
+  metric and the sync's for an averaged one. HealthKit works as installed;
+  Android (Health Connect or Samsung Health) is written once its mappings are
+  approved. `OPEN_WEARABLES_SYNC_ENABLED=false` switches it off.
 
 - **Wearables: connect a Garmin account by OAuth** — where a deployment has a
   Garmin Connect Developer Program app (`GARMIN_CLIENT_ID`,
