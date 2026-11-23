@@ -2055,17 +2055,24 @@ has its `concept_class_id`. It is a string, `''` for none.
   flight at once, folding discards the rows, and a write (`revision`) asks
   again for the headers and the open categories only. Collapse all folds all;
   Expand all opens every category, one request each, so it is offered only for
-  12 categories or fewer. Remembered open categories are fetched after the
+  12 categories or fewer; under the Wearables domain neither button is shown
+  (#2795), its few categories each opening from their own header. Remembered open categories are fetched after the
   headers on load, and no others. Drag-to-reorder works among the open
   categories; a drop on a row of another open category still sets the global
   position. A list too long to group says so and how to narrow it.
-  Under the Wearables domain the controls row also carries the
-  "Download all wearable mappings" CSV/Word buttons (everyone who reads the tab)
-  and Share (`canApprove` only), the same components as the Source Code to
-  Concept direction's Wearables tab.
+  Under the Wearables domain the controls row ends "From [source systems] To
+  [OMOP concept or CDISC Biomedical Concept]", CSV and Word buttons with a
+  download icon (everyone who reads the tab), then Share (`canApprove` only),
+  #2795: the same file and dialog as the Source Code to Concept direction's
+  Wearables tab (`WearableMappingsDownload layout="from-to"`), without the
+  "Download all wearable mappings" sentence, which stays the group's and the
+  buttons' accessible name.
 - **Remembered.** The per-account object that holds the domain
-  (`promop-concept-to-code:<user id>`) is `{"domain", "order"?, "expanded"?}`:
-  `order` only when it is `priority`, and `expanded`, the categories the
+  (`promop-concept-to-code:<user id>`) is
+  `{"domain", "order"?, "wearables_order"?, "expanded"?}`: `order` only when
+  it is `priority`; `wearables_order` likewise, the Wearables domain's own
+  order, so Wearables opens by category whatever the clinical domains use
+  (#2795); and `expanded`, the categories the
   curator has opened per domain (`{"wearables": ["Sleep", ""]}`, `""` being
   Uncategorized). A category not listed is folded, so a new account, domain or
   category starts folded. A part of the wrong shape is ignored on its own, and
@@ -2377,10 +2384,12 @@ loaded.
   document says "Source code systems: ..." under its title. The CDISC BC
   system is refused with the CDISC Biomedical Concept target (`SourceTargetError`,
   a 400): the target maps *to* those concepts, so the file would be empty; the
-  select hides that option under that target. The Download menu
-  shows a "Source code system" select beside "Map codes to" (default "All
-  source systems") on both Wearables controls; the public vote page has none,
-  since its share already decides (below).
+  list hides that option under that target. The Download control
+  shows a "Source code systems" list beside "Map codes to" on both Wearables
+  controls (`WearableSourceSystemSelect.tsx`): a button that opens tick-boxes,
+  any number of which can be ticked (#2795), none being every system, the
+  default; the ids are sent in `SOURCE_LABELS` order. The public vote page
+  has none, since its share already decides (below).
 - **Order.** Category in `WEARABLE_METRIC_CATEGORIES` order, blank last; then
   metric key, blank last; then source (HealthKit, Health Connect, Garmin,
   OpenWearables, HL7 PHR, then any other vocabulary by id); then source code.
@@ -2480,8 +2489,10 @@ that reason, the read of the page included. A token is checked against
   "Limited to: ...". A stored system that has since left the tab is dropped
   from the public download; a share left with none answers 400 rather than
   becoming every system. `votable_mappings`, `votable_rows` and `clean_votes`
-  take the share as a required argument, so none can default to every system. The Share dialog's "Source code system" select
-  defaults to all systems and a listed share says "HealthKit, Garmin only".
+  take the share as a required argument, so none can default to every system. The Share dialog's "Source code systems" tick-boxes
+  (any number, #2795; none ticked is all systems, the default) sit in the
+  dialog itself, since a list dropping below a button is cut off by a dialog
+  that scrolls, and a listed share says "HealthKit, Garmin only".
   The share's own votes CSV is unaffected. Editing a share's systems is not
   offered: make another link.
 - **What is put to the vote.** Read live, never snapshotted: rows of the
