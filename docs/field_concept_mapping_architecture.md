@@ -160,10 +160,35 @@ and never the model.
 - **Deleting an answer** removes its mappings and revisions with it, so an
   answer with an approved mapping can be deleted only by org admins and staff;
   retire it to stop offering it.
-- **Not here.** No write or read path uses the approved concept yet: the
-  projection still takes `value_as_concept_id` from the primary
-  `FieldChoiceCode`. The two-person rule is not applied (as for field
-  mappings), no scoped question recipe beyond a recipe's own question
+- **The projection reads the decision.** A concept-valued field's write recipe
+  carries `value_concept_map`, `{spelling: concept_id}`, built by
+  `field_value_mappings.answer_concept_ids` in a fixed number of queries
+  whatever the number of choices. A spelling is the label, the stored `value`
+  or any alias, so a value saved under an earlier label still projects, and a
+  retired choice still projects. Per choice, in the `value_as_concept` role:
+  - **approved, mapped** writes the target, provided it is still a current
+    standard concept; a target a reload has since retired or made non-standard
+    writes none (the value saves as text);
+  - **approved, no equivalent** writes none, even where the choice has a legacy
+    code;
+  - **no decision, or only an open proposal** keeps the concept of its primary
+    `FieldChoiceCode`, as before. The proposal migration 0368 made from that
+    code is not a decision; holding projection until each is approved would stop
+    writing concepts that are written today;
+  - **a decision once made and gone** (an approval withdrawn or superseded), or
+    a **rejection of the primary code's own concept**, does not fall back to that
+    code: a reviewer answered for it. Rejecting some other proposal for the
+    choice leaves the code in place.
+
+  A spelling that two choices of one field (the same label in two contexts)
+  resolve to different concepts, or one to a concept and one to an explicit "no
+  concept" decision, writes none; a choice with no code and no decision says
+  nothing, as before. Where a live choice and a retired one share a spelling, the
+  live one decides.
+- **Not here.** `main_concept` and `context_recipe` decisions are recorded and
+  reviewed but nothing projects them yet; no read path (deriving a record from
+  `value_as_concept_id`) uses them. The two-person rule is not applied (as for
+  field mappings), no scoped question recipe beyond a recipe's own question
   concept, and no UI (#1225).
 
 `FieldConceptMapping.provenance` distinguishes System Generated and Curator
