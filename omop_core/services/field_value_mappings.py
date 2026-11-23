@@ -75,15 +75,42 @@ def release_of(vocabulary_id: str) -> str:
             .values_list('vocabulary_version', flat=True).first() or '')
 
 
-def target_problem(concept, role: str, field_name: str = '', *, question: bool = False) -> Optional[str]:
+class CheckContext:
+    """What ``target_problem`` reads besides the concept, loaded once and lazily.
+
+    Checking every approved mapping of a list one by one would otherwise ask
+    for the withdrawn vocabularies and the field's table once per mapping.
+    """
+
+    def __init__(self):
+        self._deprecated = None
+        self._tables = None
+
+    @property
+    def deprecated(self) -> set:
+        if self._deprecated is None:
+            from omop_core.models import Vocabulary
+            self._deprecated = set(Vocabulary.objects.filter(is_deprecated=True)
+                                   .values_list('vocabulary_id', flat=True))
+        return self._deprecated
+
+    @property
+    def tables(self) -> dict:
+        if self._tables is None:
+            from omop_core.models import FieldConceptMapping
+            self._tables = dict(FieldConceptMapping.objects.values_list('field_name', 'omop_table'))
+        return self._tables
+
+
+def target_problem(concept, role: str, field_name: str = '', *, question: bool = False,
+                   ctx: 'CheckContext | None' = None) -> Optional[str]:
     """Why ``concept`` cannot be a mapping target, or ``None`` when it can.
 
     Used when a mapping is proposed or approved, and again by ``target_state``
     for one already approved, since a vocabulary reload can retire a concept
     after the fact.
     """
-    from omop_core.models import FieldConceptMapping, Vocabulary
-
+    ctx = ctx or CheckContext()
     what = 'question concept' if question else 'target concept'
     if concept is None:
         return f'The {what} is not loaded in this instance.'
@@ -92,29 +119,28 @@ def target_problem(concept, role: str, field_name: str = '', *, question: bool =
         return f'{label} is retired ({concept.invalid_reason}); choose its current replacement.'
     if concept.standard_concept != 'S':
         return f'{label} is not a standard concept; map to the standard concept it maps to.'
-    if Vocabulary.objects.filter(pk=concept.vocabulary_id, is_deprecated=True).exists():
+    if concept.vocabulary_id in ctx.deprecated:
         return f'The {concept.vocabulary_id} vocabulary is withdrawn.'
     domain = concept.domain_id
     if domain in NON_ANSWER_DOMAINS:
         return f'{label} is in the {domain} domain, which is not a clinical answer.'
     if role == 'main_concept' and not question and field_name:
-        table = (FieldConceptMapping.objects.filter(field_name=field_name)
-                 .values_list('omop_table', flat=True).first())
-        wanted = TABLE_DOMAIN.get(table or '')
+        wanted = TABLE_DOMAIN.get(ctx.tables.get(field_name) or '')
+        table = ctx.tables.get(field_name)
         if wanted and domain != wanted:
             return (f'{label} is in the {domain} domain, but {field_name} is stored in '
                     f'{table}, which holds {wanted} concepts.')
     return None
 
 
-def target_state(mapping) -> str:
+def target_state(mapping, ctx: 'CheckContext | None' = None) -> str:
     """``ok``, or what is wrong now with the target of an approved mapping."""
     if mapping.outcome != 'mapped':
         return 'ok'
     if mapping.target_concept_id is None:
         return 'unresolved' if mapping.source_resolution != 'resolved' else 'missing'
     problem = target_problem(mapping.target_concept, mapping.role,
-                             mapping.choice.field_name)
+                             mapping.choice.field_name, ctx=ctx)
     if problem is None:
         return 'ok'
     if mapping.target_concept.invalid_reason:
@@ -250,9 +276,13 @@ def approve(mapping, *, user=None, rationale: str = ''):
         raise ConflictError(f'Only a proposal can be approved; this one is {mapping.status}.')
     if mapping.outcome == 'mapped':
         if mapping.target_concept_id is None:
+            why = {
+                'invalid': 'is retired',
+                'non_standard': 'is not a standard concept',
+            }.get(mapping.source_resolution, 'has no concept in this instance')
             raise ValueMappingError(
-                f'{mapping.vocabulary_id}:{mapping.concept_code} has no concept in this instance; '
-                'propose a loaded concept before approving.')
+                f'{mapping.vocabulary_id}:{mapping.concept_code} {why}; '
+                'propose a current standard concept before approving.')
         problem = target_problem(mapping.target_concept, mapping.role, choice.field_name)
         if problem:
             raise ValueMappingError(problem)
@@ -332,3 +362,47 @@ def coverage(field_name: str | None = None) -> dict[str, dict[str, int]]:
         entry['choices'] += 1
         entry[states.get(pk, 'unmapped')] += 1
     return result
+
+
+def resolve_unresolved(*, dry_run: bool = False) -> dict[str, int]:
+    """Point proposals that carry only a code at the concept now loaded for it.
+
+    Migration ``0367`` runs before any vocabulary on a fresh instance, so every
+    proposal it carries over names its concept by vocabulary and code with no
+    target. After a load this finds them again: a current standard concept
+    becomes the target (and the proposal is ready to review); one that is
+    retired or not standard is recorded as such; one still not loaded stays as
+    it is. Approved rows are never touched, and a replay changes nothing.
+    ``load_athena_vocabularies`` calls it after every load, and
+    ``manage.py resolve_field_value_mappings`` does it by hand.
+    """
+    from omop_core.models import FieldValueConceptMapping as Mapping
+
+    ctx = CheckContext()
+    counts = {'resolved': 0, 'invalid': 0, 'non_standard': 0, 'still_unresolved': 0}
+    rows = (Mapping.objects.filter(status='proposed', outcome='mapped', target_concept__isnull=True)
+            .exclude(concept_code='').select_related('choice'))
+    for mapping in rows:
+        concept = lookup_concept(vocabulary_id=mapping.vocabulary_id, concept_code=mapping.concept_code)
+        if concept is None:
+            counts['still_unresolved'] += 1
+            continue
+        if concept.invalid_reason:
+            outcome = 'invalid'
+        elif concept.standard_concept != 'S':
+            outcome = 'non_standard'
+        elif target_problem(concept, mapping.role, mapping.choice.field_name, ctx=ctx):
+            outcome = 'invalid'
+        else:
+            outcome = 'resolved'
+        counts[outcome] += 1
+        if dry_run or (outcome == mapping.source_resolution and outcome != 'resolved'):
+            continue
+        with transaction.atomic():
+            mapping.source_resolution = outcome
+            if outcome == 'resolved':
+                mapping.target_concept = concept
+                mapping.vocabulary_release = release_of(concept.vocabulary_id)
+            mapping.save()
+            _record(mapping, 'resolved', None, 'resolver')
+    return counts

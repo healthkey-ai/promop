@@ -729,6 +729,7 @@ class Command(EmbeddingLoadCommand):
             self._load_loinc_axes()
             self._publish_release(counts)
             self._resolve_field_concept_mappings()
+            self._resolve_field_value_mappings()
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -794,6 +795,28 @@ class Command(EmbeddingLoadCommand):
         self._log(f'  {result.summary()}')
         if result.rollout_note():
             self._log(f'  {result.rollout_note()}')
+
+    def _resolve_field_value_mappings(self):
+        """Point carried-over answer-mapping proposals at the concepts just loaded (#1224).
+
+        Best effort, in a savepoint, like ``_resolve_field_concept_mappings``:
+        the load is complete, so a failure is logged with the manual fallback
+        (``manage.py resolve_field_value_mappings``) and never fails it.
+        """
+        from omop_core.services.field_value_mappings import resolve_unresolved
+
+        try:
+            with transaction.atomic():
+                counts = resolve_unresolved()
+        except Exception:
+            logger.exception('answer mappings: resolution failed after the load; '
+                             'run manage.py resolve_field_value_mappings')
+            self._log('  WARNING: answer mappings were not resolved; '
+                      'run manage.py resolve_field_value_mappings.')
+            return
+        if counts['resolved'] or counts['invalid'] or counts['non_standard']:
+            self._log(f"  Answer mappings: {counts['resolved']} resolved, "
+                      f"{counts['invalid']} retired, {counts['non_standard']} not standard.")
 
     def _load_loinc_axes(self):
         """Load LOINC axes from a LOINC release archive when available.

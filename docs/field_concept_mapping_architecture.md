@@ -131,7 +131,13 @@ and never the model.
   over as a `value_as_concept` **proposal** (never an approval), recording
   whether it resolved, was not loaded here (`unresolved`), is retired
   (`invalid`) or non-standard. The codes stay for source codings. A replay
-  changes nothing. Existing choices without a concept remain usable.
+  changes nothing. Existing choices without a concept remain usable. On a fresh
+  instance the migration runs before any vocabulary, so every proposal starts
+  unresolved; `load_athena_vocabularies` re-resolves them after every load
+  (best effort, like the field mappings) and `manage.py
+  resolve_field_value_mappings` does it by hand: a current standard concept
+  becomes the target, a retired or non-standard one is recorded as such, one
+  not loaded stays. Approved rows are never touched.
 - **API**, on `/api/v1/` only: `GET`/`POST field-choices/<id>/value-mappings/`
   (read: anyone who reads the mapping pages; propose: mapping curators),
   `POST .../<mapping>/approve|reject/` (org admins and staff, as for field
@@ -144,10 +150,16 @@ and never the model.
   field's question is mapped.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
-  loaded, or that is not a valid target here, cannot be approved here, so the
-  approval arrives as an unresolved proposal with a warning. A decision the
+  loaded, or that is not a valid target here, cannot be approved here: the
+  decision already in force here is left as it is, and the source's answer
+  arrives as an unresolved proposal with a warning (unless the source also has
+  an open proposal for the role, which then takes the place). A decision the
   source no longer has in force is superseded (approved) or rejected
-  (proposed), not deleted. Reviewers and the revision log are not copied.
+  (proposed), not deleted; a malformed row is skipped with a warning. Reviewers,
+  review dates and the revision log are not copied.
+- **Deleting an answer** removes its mappings and revisions with it, so an
+  answer with an approved mapping can be deleted only by org admins and staff;
+  retire it to stop offering it.
 - **Not here.** No write or read path uses the approved concept yet: the
   projection still takes `value_as_concept_id` from the primary
   `FieldChoiceCode`. The two-person rule is not applied (as for field

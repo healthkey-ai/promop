@@ -2022,7 +2022,7 @@ def _concept_brief(concept):
     }
 
 
-def value_mapping_data(mapping) -> dict:
+def value_mapping_data(mapping, ctx=None) -> dict:
     """One answer-to-concept decision for a curator (#1224). Read-only."""
     from omop_core.services import field_value_mappings
 
@@ -2036,7 +2036,7 @@ def value_mapping_data(mapping) -> dict:
         'vocabulary_id': mapping.vocabulary_id, 'concept_code': mapping.concept_code,
         'question': _concept_brief(mapping.question_concept),
         'source_resolution': mapping.source_resolution,
-        'target_state': field_value_mappings.target_state(mapping) if mapping.status == 'approved' else None,
+        'target_state': field_value_mappings.target_state(mapping, ctx) if mapping.status == 'approved' else None,
         'rationale': mapping.rationale, 'vocabulary_release': mapping.vocabulary_release,
         'provenance': mapping.provenance,
         'proposed_by': person(mapping.proposed_by), 'reviewer': person(mapping.reviewer),
@@ -2087,8 +2087,10 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
             # The decision in force and what is waiting to replace it; history
             # is its own endpoint. Only for a reader of the mapping pages: a
             # patient's dropdown has no use for who reviewed what.
+            from omop_core.services import field_value_mappings
+            ctx = self.context.setdefault('_value_mapping_check', field_value_mappings.CheckContext())
             data['value_mappings'] = [
-                value_mapping_data(m) for m in instance.value_mappings.all()
+                value_mapping_data(m, ctx) for m in instance.value_mappings.all()
                 if m.status in ('approved', 'proposed')
             ]
         return data

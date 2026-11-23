@@ -17053,6 +17053,13 @@ def field_choice_detail(request, pk):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
+        if (choice.value_mappings.filter(status='approved').exists()
+                and not _can_approve_mappings(request.user)):
+            # Deleting takes the approved decision and its revisions with it.
+            return Response(
+                {'detail': 'This answer has an approved concept mapping. Only org admins and staff can '
+                           'delete it; retire it to stop offering it.'},
+                status=status.HTTP_403_FORBIDDEN)
         choice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -17139,11 +17146,14 @@ def field_choice_value_mappings(request, choice_pk):
                                 'reviewer', 'choice'))
         if request.query_params.get('history') not in ('1', 'true'):
             rows = rows.filter(status__in=('approved', 'proposed'))
-        return Response([value_mapping_data(m) for m in rows])
+        ctx = fvm.CheckContext()
+        return Response([value_mapping_data(m, ctx) for m in rows])
 
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
     data = request.data
+    if not isinstance(data, dict) and not hasattr(data, 'get'):
+        return Response({'detail': 'Send a JSON object.'}, status=status.HTTP_400_BAD_REQUEST)
     try:
         mapping = fvm.propose(
             choice, role=data.get('role') or 'value_as_concept',

@@ -443,3 +443,161 @@ def test_transfer_reads_a_payload_from_before_value_mappings():
         row.pop('value_mappings', None)
     apply_payload(payload)
     assert choice.value_mappings.filter(status='approved').count() == 1
+
+
+# ── Review findings ────────────────────────────────────────────────────────
+
+def test_list_query_count_stays_flat_for_approved_mappings_too(staff):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    concept('500')
+
+    def count():
+        with CaptureQueriesContext(connection) as ctx:
+            assert staff.get('/api/v1/field-choices/?field_name=stage').status_code == 200
+        return len(ctx)
+
+    first = FieldChoice.objects.create(field_name='stage', display='First')
+    fvm.approve(fvm.propose(first, vocabulary_id='SNOMED', concept_code='500'))
+    small = count()
+    for n in range(8):
+        extra = FieldChoice.objects.create(field_name='stage', display=f'More {n}')
+        fvm.approve(fvm.propose(extra, vocabulary_id='SNOMED', concept_code='500'))
+    assert count() == small
+    body = staff.get('/api/v1/field-choices/?field_name=stage').json()
+    assert all(c['value_mappings'][0]['target_state'] == 'ok' for c in body)
+
+
+def test_deleting_an_answer_with_an_approved_mapping_is_for_approvers(staff, choice):
+    from omop_core.models import GroupAccess, Organization
+    concept('510')
+    fvm.approve(fvm.propose(choice, vocabulary_id='SNOMED', concept_code='510'))
+    org = Organization.objects.create(name='Org', slug='org-del')
+    analyst = Identity.objects.create_user(email='analyst-del@example.com')
+    GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
+    client = APIClient()
+    client.force_authenticate(analyst)
+    assert client.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 403
+    assert Mapping.objects.filter(choice=choice).exists()
+    assert staff.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 204
+
+
+def test_an_answer_with_only_a_proposal_can_be_deleted_by_a_curator(choice):
+    from omop_core.models import GroupAccess, Organization
+    concept('511')
+    fvm.propose(choice, vocabulary_id='SNOMED', concept_code='511')
+    org = Organization.objects.create(name='Org', slug='org-del2')
+    analyst = Identity.objects.create_user(email='analyst-del2@example.com')
+    GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
+    client = APIClient()
+    client.force_authenticate(analyst)
+    assert client.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 204
+
+
+def test_a_non_object_body_is_a_400_not_a_500(staff, choice):
+    r = staff.post(url(choice), [1, 2], format='json')
+    assert r.status_code == 400
+
+
+def test_transfer_keeps_the_sources_open_proposal_when_its_approval_cannot_apply():
+    choice = FieldChoice.objects.create(field_name='stage', display='III')
+    concept('400')
+    concept('401')
+    fvm.approve(fvm.propose(choice, vocabulary_id='SNOMED', concept_code='400'))
+    fvm.propose(choice, vocabulary_id='SNOMED', concept_code='401')
+    payload = read_payload('default')
+    FieldChoice.objects.all().delete()
+    Mapping.objects.all().delete()
+    type(concept('400')).objects.filter(concept_code='400').delete()
+    apply_payload(payload)
+    back = FieldChoice.objects.get(display='III').value_mappings.get()
+    assert (back.status, back.concept_code) == ('proposed', '401')
+
+
+def test_transfer_leaves_a_valid_local_approval_when_the_incoming_one_cannot_apply():
+    choice = FieldChoice.objects.create(field_name='stage', display='III')
+    local = concept('600')
+    fvm.approve(fvm.propose(choice, vocabulary_id='SNOMED', concept_code='600'))
+    payload = {'choices': [{
+        'field_name': 'stage', 'display': 'III', 'sort_order': 0, 'codes': [], 'code': choice.code,
+        'value_mappings': [{'role': 'value_as_concept', 'outcome': 'mapped', 'status': 'approved',
+                            'vocabulary_id': 'SNOMED', 'concept_code': 'not-loaded-here'}],
+    }]}
+    stats = apply_payload(payload)
+    states = {(m.status, m.concept_code) for m in choice.value_mappings.all()}
+    assert states == {('approved', '600'), ('proposed', 'not-loaded-here')}
+    assert any('not loaded' in w for w in stats.warnings)
+    assert fvm.in_force(choice).target_concept_id == local.pk
+
+
+def test_transfer_skips_malformed_rows_with_a_warning_instead_of_failing():
+    choice = FieldChoice.objects.create(field_name='stage', display='III')
+    concept('700')
+    stats = apply_payload({'choices': [{
+        'field_name': 'stage', 'display': 'III', 'sort_order': 0, 'codes': [], 'code': choice.code,
+        'value_mappings': [
+            {'role': 'x' * 40, 'outcome': 'mapped', 'status': 'approved'},
+            {'role': 'value_as_concept', 'status': 'approved'},
+            {'role': 'value_as_concept', 'outcome': 'no_equivalent', 'status': 'proposed',
+             'concept_code': '700', 'vocabulary_id': 'SNOMED'},
+            {'role': 'value_as_concept', 'outcome': 'mapped', 'status': 'proposed',
+             'vocabulary_id': 'SNOMED', 'concept_code': '700', 'question_concept_code': 'q'},
+        ],
+    }]})
+    assert len([w for w in stats.warnings if 'skipped' in w]) == 4
+    assert not choice.value_mappings.exists()
+
+
+def test_a_transferred_row_has_no_reviewer_and_no_review_date():
+    choice, approved = _decided()
+    payload = read_payload('default')
+    FieldChoice.objects.all().delete()
+    apply_payload(payload)
+    row = FieldChoice.objects.get(display='III').value_mappings.get(status='approved')
+    assert (row.reviewer, row.reviewed_at) == (None, None)
+    apply_payload(payload)                         # in place: still none
+    row.refresh_from_db()
+    assert (row.reviewer, row.reviewed_at) == (None, None)
+
+
+# ── Resolving carried-over proposals after a vocabulary load ───────────────
+
+def test_proposals_carried_over_before_the_vocabulary_load_resolve_afterwards():
+    ok = FieldChoice.objects.create(field_name='f', display='Ok')
+    old = FieldChoice.objects.create(field_name='f', display='Old')
+    absent = FieldChoice.objects.create(field_name='f', display='Absent')
+    for ch, code in ((ok, '800'), (old, '801'), (absent, '802')):
+        FieldChoiceCode.objects.create(choice=ch, vocabulary_id='SNOMED', code=code, is_primary=True)
+    _carry()                                       # no concepts loaded yet
+    assert set(Mapping.objects.values_list('source_resolution', flat=True)) == {'unresolved'}
+    c = concept('800')
+    concept('801', invalid_reason='D')
+    assert fvm.resolve_unresolved(dry_run=True) == {
+        'resolved': 1, 'invalid': 1, 'non_standard': 0, 'still_unresolved': 1}
+    assert Mapping.objects.filter(target_concept__isnull=False).count() == 0
+    assert fvm.resolve_unresolved() == {
+        'resolved': 1, 'invalid': 1, 'non_standard': 0, 'still_unresolved': 1}
+    got = {m.choice.display: m for m in Mapping.objects.select_related('choice')}
+    assert (got['Ok'].source_resolution, got['Ok'].target_concept_id) == ('resolved', c.pk)
+    assert got['Ok'].vocabulary_release == '2026-09'
+    assert got['Old'].source_resolution == 'invalid' and got['Absent'].source_resolution == 'unresolved'
+    assert [r.action for r in got['Ok'].revisions.all()] == ['migrated', 'resolved']
+    revisions = Revision.objects.count()
+    fvm.resolve_unresolved()                       # a replay changes nothing
+    assert Revision.objects.count() == revisions
+    fvm.approve(got['Ok'])                         # and the resolved one can now be approved
+    with pytest.raises(fvm.ValueMappingError, match='is retired'):
+        fvm.approve(got['Old'])
+
+
+def test_the_resolver_command_runs_and_never_touches_an_approved_mapping(choice):
+    from django.core.management import call_command
+    from io import StringIO
+    concept('810')
+    approved = fvm.approve(fvm.propose(choice, vocabulary_id='SNOMED', concept_code='810'))
+    out = StringIO()
+    call_command('resolve_field_value_mappings', '--dry-run', stdout=out)
+    assert 'Would resolve 0' in out.getvalue()
+    call_command('resolve_field_value_mappings', stdout=out)
+    approved.refresh_from_db()
+    assert approved.status == 'approved' and approved.revision == 2
