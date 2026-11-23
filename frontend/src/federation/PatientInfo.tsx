@@ -532,7 +532,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           )}
           {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-          {wearableIdx >= 0 && activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+          {/* This page is the signed-in patient's own record (`patient-info/me/`). */}
+          {wearableIdx >= 0 && activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} ownRecord />}
           {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
           {activeTab === historyIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
           {/* Fields added through Field Concept Mapping, last on their tab

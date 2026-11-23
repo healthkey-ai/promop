@@ -8,6 +8,7 @@ import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 import AddPatientDialog from './AddPatientDialog';
+import { loadPage } from '@/utils/loadPage';
 
 import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
@@ -768,7 +769,10 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           onCreated={({ personId, forSelf, message }) => {
             setAddDialogOpen(false);
             setAddNotice(message);
-            if (forSelf) navigate(`/patient/${personId}`);
+            // Their own record: the account just gained its patient link, and
+            // what is offered only on one's own record (device uploads and
+            // syncs) depends on it, so the page is loaded afresh (#2818).
+            if (forSelf) loadPage(`/patient/${personId}`);
             else void fetchPatients();
           }}
         />

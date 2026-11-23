@@ -495,6 +495,12 @@ deletable like a file.
   clinician on a patient's page get none), and sends the `person_id` the page is
   showing: the server answers 403 when that is not the caller's own, so a sync started from
   someone else's page is refused and not filed quietly under the caller.
+  The file upload follows the same rule (#2819): the Upload button, the drop zone, the upload
+  history and its deletes are offered only on the person's own record (`ownRecord`; the
+  embedded patient page passes it, where the host does not set `federated`, which hides the
+  tab), the history is not read anywhere else, and
+  `upload-wearable` refuses a `person_id` that is not the caller's own with a 403. On somebody
+  else's record the tab shows the wearable fields and says the patient adds the data.
 - **The key is used and dropped.** It is sent with one request and kept nowhere: not in the
   database, a log line, an error message or a queued task. That is why the sync runs inside the
   request and not on a worker, where the key would sit in the broker. Garmin's own

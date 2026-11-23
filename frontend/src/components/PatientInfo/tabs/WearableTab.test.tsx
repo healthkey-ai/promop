@@ -35,6 +35,8 @@ function renderTab(props: Partial<React.ComponentProps<typeof WearableTab>> = {}
     formData: {},
     onChange: vi.fn(),
     onRefresh: vi.fn(),
+    // The person's own record, where uploads are offered (#2819).
+    ownRecord: true,
     ...props,
   };
   return render(<WearableTab {...defaultProps} />);
@@ -317,6 +319,102 @@ describe('WearableTab — drag and drop', () => {
  * it is about saying *why*, from the server, and pointing at the upload control
  * that is the actual way to change these numbers.
  */
+describe("WearableTab — somebody else's record (#2819)", () => {
+  const HISTORY = [{
+    id: 1, device_type: 'garmin', filename: 'MINE.FIT', samples_created: 3, duplicates_skipped: 0,
+    sample_summary: [{ metric: 'steps', date: '2026-08-07', value: 11589 }],
+    uploaded_at: '2026-08-07T13:50:00Z',
+  }];
+  const withHistory = () => mockGet.mockImplementation((url: string) =>
+    Promise.resolve({ data: url.includes('writable-fields') ? DESCRIPTORS : HISTORY }));
+
+  it('offers no upload, and says who adds wearable data', async () => {
+    renderTab({ ownRecord: false, formData: { person_id: 202 } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /upload/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/or drag & drop files here/i)).not.toBeInTheDocument();
+    expect(document.querySelector('input[type="file"]')).toBeNull();
+    expect(screen.getByText(/added by the patient, from their own record/i)).toBeInTheDocument();
+  });
+
+  it("does not read or show the viewer's own upload history, or a delete", async () => {
+    withHistory();
+    renderTab({ ownRecord: false, formData: { person_id: 202 } });
+    // The descriptor read is the tab's only request.
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(mockGet).not.toHaveBeenCalledWith('/v1/patient-records/wearable-uploads/');
+    expect(screen.queryByText('MINE.FIT')).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Delete upload')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('section-Upload History')).not.toBeInTheDocument();
+  });
+
+  it('ignores a dropped file: nothing is sent and no drop zone opens', async () => {
+    renderTab({ ownRecord: false, formData: { person_id: 202 } });
+    const container = screen.getByText(/added by the patient/i).closest('div[class*="relative"]')!;
+    fireEvent.dragEnter(container, createDragEnterEvent());
+    expect(screen.queryByText(/drop .fit or .zip files to upload/i)).not.toBeInTheDocument();
+    fireEvent.drop(container, createDropEvent([createFile('activity.fit')]));
+    await Promise.resolve();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('says only that nothing is synced when the record has no wearable data', async () => {
+    renderTab({ ownRecord: false, formData: { person_id: 202 } });
+    expect(await screen.findByText('No wearable data synced yet.')).toBeInTheDocument();
+    expect(screen.queryByText(/contribute to your record/i)).not.toBeInTheDocument();
+  });
+
+  it('still shows the wearable fields, and does not point at an upload that is not there', () => {
+    renderTab({ ownRecord: false, formData: { person_id: 202, wearable_last_sync_at: '2024-07-01T00:00:00Z' } });
+    expect(screen.getByTestId('section-Data Coverage')).toBeInTheDocument();
+    expect(screen.queryByText(/Upload device data above/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/follow from the device data the patient adds/i)).toBeInTheDocument();
+  });
+
+  it('points at the upload on the own record', () => {
+    renderTab({ formData: { person_id: 101 } });
+    expect(screen.getByText(/Upload device data above and these follow/i)).toBeInTheDocument();
+  });
+
+  it('is what a caller that says nothing gets', async () => {
+    render(<WearableTab formData={{ person_id: 202 }} onChange={vi.fn()} />);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /upload/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('WearableTab — an upload names the record it was started from (#2819)', () => {
+  it("sends the page's person_id with the file", async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 2, duplicates_skipped: 0 } });
+    renderTab({ formData: { person_id: 101 } });
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('activity.fit')]));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    const [url, payload] = mockPost.mock.calls[0] as [string, FormData];
+    expect(url).toBe('/v1/patient-records/upload-wearable/');
+    expect(payload.get('person_id')).toBe('101');
+    expect(payload.get('device_type')).toBe('garmin');
+  });
+
+  it('sends none when the record has no person yet', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 1, duplicates_skipped: 0 } });
+    renderTab({ formData: {} });
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('activity.fit')]));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect((mockPost.mock.calls[0][1] as FormData).has('person_id')).toBe(false);
+  });
+
+  it("shows the server's refusal", async () => {
+    mockPost.mockRejectedValue({ response: { data: { error: 'Wearable uploads go to your own record only.' } } });
+    renderTab({ formData: { person_id: 101 } });
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('activity.fit')]));
+    expect(await screen.findByText('Wearable uploads go to your own record only.')).toBeInTheDocument();
+  });
+});
+
 describe('WearableTab — descriptor-driven', () => {
   it('offers no editable control', async () => {
     renderTab({ formData: { median_daily_steps_30d: 8000, vo2_max_avg_30d: 42 } });
@@ -394,7 +492,7 @@ describe('WearableTab — Garmin Connect sync', () => {
   }
 
   it('offers the Garmin account panel to a patient on their own record, where a Garmin app is set up (#2802)', async () => {
-    const first = renderTab();
+    const first = renderTab({ ownRecord: false });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     // A clinician's view of the record never asks for the patient's connection.
     expect(mockGet.mock.calls.some(([url]) => String(url).includes('/v1/garmin/connection/'))).toBe(false);
@@ -413,11 +511,18 @@ describe('WearableTab — Garmin Connect sync', () => {
 
   it('is offered only to a patient on their own record', () => {
     // The server files a sync under whoever is signed in. A clinician on a
-    // patient's page, or a read-only embed, must not be asked for a key.
+    // patient's page must not be asked for a key, nor offered an upload (#2819).
+    const clinician = renderTab({ ownRecord: false });
+    expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /upload/i })).not.toBeInTheDocument();
+    clinician.unmount();
+
+    // The federated page is the patient's own record without this site's
+    // session: no key sync, and the file upload as before.
     renderTab();
     expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
-    // The file upload is unchanged.
     expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
   });
 
