@@ -20,6 +20,13 @@ All notable changes to PRomop are documented here.
   metric and the sync's for an averaged one. HealthKit works as installed;
   Android (Health Connect or Samsung Health) is written once its mappings are
   approved. `OPEN_WEARABLES_SYNC_ENABLED=false` switches it off.
+- **OMOP writes: resolve the code and upsert in one call** —
+  `POST /api/v1/{measurements,observations,conditions,drug-exposures,procedures}/upsert_if_mapped/`
+  takes the bulk write's rows without a concept, resolves each row's source
+  code as `code-mappings/lookup/` does, and writes the rows that have an
+  approved mapping (#2813). A code with none is queued for curators and its
+  rows are left out, or stored at concept 0 with `?unmapped=store`; the
+  response lists them. One round trip where a producer made two.
 
 - **Wearables: connect a Garmin account by OAuth** — where a deployment has a
   Garmin Connect Developer Program app (`GARMIN_CLIENT_ID`,

@@ -3597,6 +3597,84 @@ Three things to know before touching this code:
 
 ---
 
+## Resolve and Upsert in One Call (`upsert_if_mapped`)
+
+A producer with a coded record otherwise asks `code-mappings/lookup/` for the
+concept and then posts the row: two round trips for a record that arrives on
+its own (a webhook), and every producer repeats the rules for what counts as
+resolved. The five clinical endpoints do both, on `/api/v1/` only (#2813):
+
+```
+POST /api/v1/measurements/upsert_if_mapped/
+  [{"person": 16813, "source_vocabulary_id": "OpenWearables",
+    "measurement_source_value": "steps", "measurement_date": "2026-11-20",
+    "measurement_type_concept": 32817, "value_as_number": 4200}, ...]
+  201 {"created": 1, "updated": 0, "unattributed_matches": 0, "key_ambiguous": [],
+       "ids": [10605646, null], "resolved": 1, "skipped": 1,
+       "unmapped": [{"source_vocabulary_id": "OpenWearables", "source_code": "hrv",
+                     "reason": "unmapped", "status": "proposed", "stored": false,
+                     "mapping_id": 45, "rows": [1]}]}
+```
+
+Rules: `patient_portal/api/mapped_writes.py`. The action:
+`_OmopMappedWriteMixin` in `views.py`. The write is `_bulk_create`, so
+everything in [Bulk OMOP Row Writes](#bulk-omop-row-writes) holds for the rows
+that are written: the upsert identity, `source_record_key`, the provenance
+headers, `?skip_refresh=true`, `?upsert=false`, one person, one transaction,
+1,000 rows.
+
+- **A row carries no concept.** The source code is the row's source value
+  (`measurement_source_value` and its siblings), the column a mapping finds
+  its rows by. `source_vocabulary_id` is required on every row;
+  `source_text` is optional evidence for a new queue entry. Neither is
+  stored. A row that sends the concept is a 400: the server sets it. A list
+  or one object is accepted; the response is always the batch's.
+- **Resolved by the lookup's resolver** (`resolve_source_code_variant`,
+  source system `code-mapping-api`), once per distinct code in the batch: an
+  approved mapping, a direct vocabulary hit, an approved axis variant for the
+  row's `unit_source_value`, and, for a code nobody has mapped, the queue
+  entry and sighting a lookup would have made. A proposed target is never
+  written. The organization for Epic and Cerner local codes is the request's
+  (`X-Provenance-Organization-ID`, or the credential's own); without one such
+  a code is a 400, before anything is resolved.
+- **An unmapped row is not an error.** `?unmapped=skip` (the default) leaves
+  it out; `?unmapped=store` writes it at concept 0, the state an approval's
+  re-point looks for (400 when concept 0 is not loaded). Either way the call
+  succeeds and `unmapped` lists each code once with the request indices of
+  its rows, its `reason`, the queue row's `status` and `mapping_id`, and
+  whether the rows were `stored`. Any other value of `unmapped` is a 400.
+- **Reasons.** `unmapped`: no approved mapping.
+  `destination_domain_or_validity_mismatch`: an approved identity mapping
+  whose concept cannot be used in this table, as the lookup reports it.
+  `other_table`: the code resolves, but its mapping files it under another
+  clinical table and its concept's domain is not this table's; it is never
+  written here, with either policy, and `omop_table` names where to send it.
+- **The response is the bulk write's**, with `ids` aligned to the request
+  rows and `null` for a row that was not written, plus `resolved` (rows
+  written at a mapped concept), `skipped` (rows not written) and `unmapped`.
+  201 when rows were written, 200 when none were. Per-row validation errors
+  and `key_ambiguous` are on the request's positions, not the written
+  batch's. `Cache-Control: no-store`: resolving records a sighting.
+- **Who.** `EtlWritePermission`, what the lookup asks, and then
+  `_authorize_person_write` on the batch's person, what the write asks,
+  checked before any code is resolved. A signed-in patient gets 403. The
+  viewset's own permission class is not used: it lets session patients POST.
+- **Resolving is not rolled back.** The queue entries and sightings are made
+  before the rows are validated and written, in their own transactions, as
+  with a lookup followed by a write that then fails.
+- **Cost.** One resolver call per distinct code, and one variant read per
+  distinct unit of a code that has variants; flat in the number of rows.
+  `tests/test_upsert_if_mapped.py` holds it to that.
+- **Not here.** Text terms (no code system) stay on the lookup endpoint, as
+  does the `unit_conversion` preview: a written measurement is converted to
+  an approved mapping's curated unit as on any bulk write.
+  `warn_concept_duplicates` and `reject_concept_duplicates` are refused,
+  since their report indexes the written batch.
+
+Tests: `tests/test_upsert_if_mapped.py`.
+
+---
+
 ## Bulk OMOP Row Deletes
 
 The five clinical endpoints delete in batches, on `/api/v1/` only:
