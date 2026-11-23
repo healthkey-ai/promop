@@ -14854,6 +14854,9 @@ def code_mapping_detail(request, mapping_id):
             include_source_evidence=not machine,
         )
         payload['destination_options'] = options
+        # What Delete would do, so the dialog can say so before it is pressed.
+        from omop_core.services.mapping_removal import delete_effect
+        payload['delete_effect'] = None if machine else delete_effect(mapping)
         return Response(payload)
 
     if not _can_administer_code_mapping(request.user, mapping):
@@ -14879,7 +14882,18 @@ def code_mapping_detail(request, mapping_id):
                 {'detail': 'Cannot delete an unmapped source code.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Mapped row: repoint clinical rows back to concept 0, then delete.
+        from omop_core.services import mapping_removal
+        from omop_core.services.repoint_jobs import queue_unpoint
+        if mapping_removal.delete_effect(mapping) == mapping_removal.UNMAP:
+            # A code patient data carries stays in the queue, for the reason
+            # above: only its destination goes. Its stored rows move back to
+            # concept 0 off the request (#2744).
+            repoint = queue_unpoint(mapping, mapping_removal.clear_destination(mapping, request.user))
+            payload = _serialize_code_mapping_row(None, mapping)
+            payload.update(removed=False, repoint=repoint)
+            return Response(payload)
+        # A mapping for a code no patient data carries: repoint whatever rows
+        # there are back to concept 0, then delete.
         repoint_clinical_rows(
             mapping=mapping,
             old_concept_id=mapping.target_concept_id,

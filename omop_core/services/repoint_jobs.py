@@ -94,6 +94,64 @@ def dispatch_repoint(mapping_id):
     run_repoint(mapping_id)
 
 
+def queue_unpoint(mapping, old_concept_id):
+    """Move the rows stored at a destination the mapping no longer has back to
+    "no matching concept", after commit (#2744).
+
+    Must be called inside the transaction that cleared the destination. The
+    destination is also on ``pending_repoint_concept_ids`` by then, so a lost
+    task costs nothing lasting: the next approval moves those rows itself.
+    """
+    mapping_id = mapping.pk
+    _after_commit(lambda: dispatch_unpoint(mapping_id, old_concept_id))
+    return {'queued': True, 'from_concept_ids': [old_concept_id], 'to_concept_id': NO_MATCHING_CONCEPT_ID}
+
+
+def dispatch_unpoint(mapping_id, old_concept_id):
+    if getattr(settings, 'CELERY_BROKER_URL', ''):
+        try:
+            from omop_core.tasks import unpoint_mapping_rows_task
+            unpoint_mapping_rows_task.delay(mapping_id, old_concept_id)
+            return
+        except Exception:  # noqa: BLE001 - a queue outage must not strand the rows
+            logger.warning('Could not queue the un-mapping of mapping %s; running inline.', mapping_id)
+    run_unpoint(mapping_id, old_concept_id)
+
+
+def run_unpoint(mapping_id, old_concept_id):
+    """Move a mapping's rows off *old_concept_id* to "no matching concept".
+
+    Returns the sweep counts, with ``busy`` true when a re-point of the same
+    mapping holds it: the caller tries again, since that run may have started
+    before the destination was cleared and will not move these rows.
+    """
+    totals = {'rows_updated': 0, 'persons_marked_stale': 0, 'rows_collapsed': 0, 'busy': False}
+    if not _advisory_lock(mapping_id):
+        return {**totals, 'busy': True}
+    try:
+        mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
+        # Pointed at the same destination again since: its rows are where
+        # they belong. A mapping deleted since has no rows left to describe.
+        if mapping is None or mapping.target_concept_id == old_concept_id:
+            return totals
+        outcome = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=old_concept_id, new_concept_id=NO_MATCHING_CONCEPT_ID)
+        totals['persons_marked_stale'] = len(outcome.pop('person_ids', set()))
+        for key in ('rows_updated', 'rows_collapsed'):
+            totals[key] = outcome[key]
+        with transaction.atomic():
+            current = SourceCodeConceptMapping.objects.select_for_update().filter(pk=mapping_id).first()
+            # Nothing is left at the old destination for an approval to move.
+            if current is not None and old_concept_id in (current.pending_repoint_concept_ids or []):
+                current.pending_repoint_concept_ids = [
+                    c for c in current.pending_repoint_concept_ids if c != old_concept_id]
+                current.save(update_fields=['pending_repoint_concept_ids'])
+    finally:
+        _advisory_unlock(mapping_id)
+    logger.info('Un-mapping of mapping %s from concept %s finished: %s.', mapping_id, old_concept_id, totals)
+    return totals
+
+
 def _advisory_lock(mapping_id):
     """One run per mapping. Session-level so it spans the per-sweep transactions."""
     if connection.vendor != 'postgresql':
