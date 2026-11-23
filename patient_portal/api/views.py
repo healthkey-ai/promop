@@ -5136,16 +5136,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         concepts, filter artifacts, route by domain and record history one way.
 
         ``replace_daily`` is for a source whose value *is* the day's total (the
-        Garmin Connect API). The derivation sums steps, active minutes and
-        sleep over a day's rows, because a day arrives as several ``.fit``
-        files; a day total written beside those rows would double the day. So
-        the incoming value replaces the rows earlier Garmin uploads and syncs
-        wrote for that metric and day. A row is Garmin's only on evidence: a
-        Garmin upload's ``sample_summary`` records writing it (``row_id``),
-        or, for an upload from before summaries recorded rows, lists its value
-        where no other device's upload does. Rows carry no device of their own
-        (#442), so anything else, an Apple row or one another ingest path
-        wrote, is left as stored.
+        Garmin Connect API, a phone's Open Wearables sync). The derivation sums
+        steps, active minutes and sleep over a day's rows, because a day
+        arrives as several ``.fit`` files; a day total written beside those
+        rows would double the day. So the incoming value replaces the rows
+        earlier uploads and syncs of the same ``device_type`` wrote for that
+        metric and day. A row is that device's only on evidence: one of its
+        uploads' ``sample_summary`` records writing it (``row_id``), or, for
+        an upload from before summaries recorded rows, lists its value where
+        no other device's upload does. Rows carry no device of their own
+        (#442), so anything else, another device's row or one another ingest
+        path wrote, is left as stored.
+
+        The other order is a file arriving after a phone's sync holds the day
+        (``_synced_days``): the file's figure for that metric and day is
+        skipped, since nothing would come back to replace it.
         """
         if not samples:
             return Response({'samples_created': 0, 'duplicates_skipped': 0})
@@ -5305,11 +5310,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     if row_type_id == WEARABLE_TYPE_CONCEPT_ID:
                         wearable_rows[(metric_key, row_date)].append((row_id, float(row_val)))
 
-        # Which stored rows are Garmin's. A summary entry names the row its
-        # upload wrote (row_id); an entry from before that was recorded has
+        # Which stored rows are this device's. A summary entry names the row
+        # its upload wrote (row_id); an entry from before that was recorded has
         # only the value, which counts when no other device's upload lists it.
-        garmin_rows, other_rows = set(), set()      # (table, pk)
-        garmin_values = set()                       # (metric_key, date, value)
+        own_rows, other_rows = set(), set()         # (table, pk)
+        own_values = set()                          # (metric_key, date, value)
         if replace_daily:
             other_values = set()
             # The entries for these days only, unnested in the database: a
@@ -5330,18 +5335,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 for (history_device, metric_key, day, value,
                      names_row, row_id, row_table) in cursor.fetchall():
-                    garmin = history_device == 'garmin'
+                    own = history_device == device_type
                     try:
                         if names_row:
                             if row_id is not None:
-                                (garmin_rows if garmin else other_rows).add(
+                                (own_rows if own else other_rows).add(
                                     (row_table, int(row_id)))
                         else:
-                            (garmin_values if garmin else other_values).add(
+                            (own_values if own else other_values).add(
                                 (metric_key, day, round(float(value), 2)))
                     except (TypeError, ValueError):
                         continue
-            garmin_values -= other_values
+            own_values -= other_values
+
+        # The days a phone's unattended sync of this device holds. Its value is
+        # the day's own total; a file's figure for the same day written beside
+        # it would double the day, and nothing would come back to replace it.
+        synced_days = set() if replace_daily else self._synced_days(person, device_type, days)
 
         pending_measurements = []
         pending_observations = []
@@ -5368,19 +5378,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Dedup check
             dedup_key = (sample.metric_key, sample.date, round(sample.value, 2))
 
+            if (sample.metric_key, sample.date.isoformat()) in synced_days:
+                duplicates_skipped += 1
+                continue
+
             if replace_daily:
                 # Keep one stored row that already says this, drop the rest of
-                # Garmin's rows for the day: partial .fit totals, an earlier
-                # sync's value from before the watch had synced the whole day.
+                # this device's rows for the day: partial file totals, an
+                # earlier sync's value from before the day was complete.
                 day = sample.date.isoformat()
                 table = 'observation' if _is_observation(concept) else 'measurement'
                 kept = False
                 for row_id, row_val in wearable_rows.get((sample.metric_key, sample.date), ()):
                     if round(row_val, 2) == dedup_key[2] and not kept:
                         kept = True
-                    elif (table, row_id) in garmin_rows or (
+                    elif (table, row_id) in own_rows or (
                             (table, row_id) not in other_rows
-                            and (sample.metric_key, day, round(row_val, 2)) in garmin_values):
+                            and (sample.metric_key, day, round(row_val, 2)) in own_values):
                         (stale_observation_ids if table == 'observation'
                          else stale_measurement_ids).append(row_id)
 
@@ -5496,6 +5510,41 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if replace_daily:
             result['replaced'] = replaced_count
         return result
+
+    @staticmethod
+    def _synced_days(person, device_type, days):
+        """``(metric, ISO day)`` within ``days`` that a phone's Open Wearables
+        sync of this device wrote and still stores (#2810).
+
+        Read from the sync's own history rows, which are named by a fixed
+        label and a month and never by a file somebody uploaded. A device with
+        no such sync (Garmin) has none.
+        """
+        from django.db import connection
+        from omop_core.services.open_wearables import HISTORY_LABELS
+
+        label = HISTORY_LABELS.get(device_type)
+        if label is None:
+            return set()
+        held = set()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT e->>'metric', e->>'date'
+                FROM wearable_upload u
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE WHEN jsonb_typeof(u.sample_summary) = 'array'
+                         THEN u.sample_summary ELSE '[]'::jsonb END) AS e
+                WHERE u.person_id = %s AND u.device_type = %s
+                  AND u.filename ~ %s
+                  AND e->>'date' BETWEEN %s AND %s
+                  AND e->>'row_id' IS NOT NULL
+                """,
+                [person.pk, device_type, '^' + re.escape(label) + r' \d{4}-\d{2}$',
+                 days[0].isoformat(), days[1].isoformat()],
+            )
+            held.update(cursor.fetchall())
+        return held
 
     @action(detail=False, methods=['post'], url_path='sync-garmin',
             permission_classes=[IsAuthenticated], throttle_classes=[GarminSyncThrottle])

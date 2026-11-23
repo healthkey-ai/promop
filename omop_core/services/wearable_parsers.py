@@ -16,6 +16,14 @@ from defusedxml import ElementTree as ET
 logger = logging.getLogger(__name__)
 
 
+# Metrics whose day value is the sum of the day's records; every other metric's
+# is their mean. One rule for both file parsers and the phone sync (#2810).
+CUMULATIVE_METRICS = frozenset({
+    'steps', 'active_minutes', 'sleep_duration', 'distance', 'flights_climbed',
+    'active_energy', 'basal_energy',
+})
+
+
 class WearableSample(NamedTuple):
     """A single daily metric extracted from a wearable data file."""
     metric_key: str   # one of WEARABLE_CONCEPT_CODE keys
@@ -344,8 +352,7 @@ def parse_garmin_fit(file_bytes: bytes) -> list[WearableSample]:
     samples: list[WearableSample] = []
     for metric_key, date_map in daily.items():
         for d, values in date_map.items():
-            if metric_key in ('steps', 'active_minutes', 'sleep_duration',
-                              'distance', 'flights_climbed', 'active_energy', 'basal_energy'):
+            if metric_key in CUMULATIVE_METRICS:
                 agg = sum(values)
             else:
                 # Average for rates/percentages
@@ -505,8 +512,7 @@ def parse_apple_health_export(zip_bytes: bytes) -> list[WearableSample]:
     samples: list[WearableSample] = []
     for metric_key, date_map in daily.items():
         for d, values in date_map.items():
-            if metric_key in ('steps', 'active_minutes', 'sleep_duration',
-                              'distance', 'flights_climbed', 'active_energy', 'basal_energy'):
+            if metric_key in CUMULATIVE_METRICS:
                 agg = sum(values)
             else:
                 agg = sum(values) / len(values)

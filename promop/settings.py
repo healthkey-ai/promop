@@ -631,6 +631,12 @@ GARMIN_WEBHOOK_SECRET = os.environ.get('GARMIN_WEBHOOK_SECRET', '')
 GARMIN_REDIRECT_URI = os.environ.get('GARMIN_REDIRECT_URI', '')
 GARMIN_TOKEN_KEY = os.environ.get('GARMIN_TOKEN_KEY', '')
 GARMIN_TOKEN_KEY_FALLBACKS = _env_list('GARMIN_TOKEN_KEY_FALLBACKS')
+
+# Open Wearables SDK routes (#2810): a phone app built on the Open Wearables
+# SDK syncs HealthKit and Health Connect straight to this deployment. Needs no
+# credentials; set to false to answer 404 on the routes and hide the panel.
+OPEN_WEARABLES_SYNC_ENABLED = os.environ.get(
+    'OPEN_WEARABLES_SYNC_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes')
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
 # loinc.org release API. LOINC is licensed, so there is no anonymous access and
