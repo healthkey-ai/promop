@@ -21,9 +21,10 @@ rule ``derivation_jobs`` and ``suggest_jobs`` follow.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import OperationalError, connection, transaction
 
 from omop_core.mapping.code_resolution import (
     NO_MATCHING_CONCEPT_ID, promote_provisional_rows, repoint_clinical_rows,
@@ -156,6 +157,14 @@ def run_unpoint(mapping_id, old_concept_id):
     return totals
 
 
+# How long a patient-page move waits for a row another transaction holds. An
+# all-patients sweep keeps the record and rows of every patient it moves locked
+# until it commits, which is minutes on a common code; the save must not wait
+# for that, or the web server's timeout takes the approval with it.
+PERSON_MOVE_LOCK_TIMEOUT_MS = 3000
+_LOCK_NOT_AVAILABLE = '55P03'
+
+
 def repoint_for_person(mapping, concept_ids, person_id):
     """Move one patient's stored rows onto *mapping*'s destination, now (#2791).
 
@@ -171,12 +180,36 @@ def repoint_for_person(mapping, concept_ids, person_id):
     already at the destination made real. Must be called inside the
     transaction that saved the mapping.
 
+    When another transaction holds this patient's rows for longer than
+    ``PERSON_MOVE_LOCK_TIMEOUT_MS``, nothing is moved and the result carries
+    ``'held': True``: the mapping is still saved, and the rows are left on
+    ``deferred_repoint_concept_ids`` for that job or for Generate OMOP.
+
     Returns ``{'queued': False, 'patient_id', 'from_concept_ids',
-    'rows_updated', 'rows_collapsed'}``. ``rows_updated`` counts rows moved and
-    provisional rows made real.
+    'rows_updated', 'rows_collapsed', 'held'}``. ``rows_updated`` counts rows
+    moved and provisional rows made real.
     """
     target = mapping.target_concept_id
     sources = sorted(set(concept_ids) - {target})
+    result = {'queued': False, 'patient_id': person_id, 'from_concept_ids': sources,
+              'rows_updated': 0, 'rows_collapsed': 0, 'held': False}
+    try:
+        # A savepoint, so a move that gives up leaves the mapping's own save intact.
+        with transaction.atomic(), _lock_timeout(PERSON_MOVE_LOCK_TIMEOUT_MS):
+            totals = _sweep_person(mapping, sources, target, person_id)
+    except OperationalError as exc:
+        if getattr(exc.__cause__, 'sqlstate', None) != _LOCK_NOT_AVAILABLE:
+            raise
+        logger.info('Mapping %s: a patient-page move found the rows locked and left them queued.', mapping.pk)
+        return {**result, 'held': True}
+    # A collapse deletes a row without moving one, and the record derived from it
+    # is just as stale.
+    if totals['rows_updated'] or totals['rows_collapsed']:
+        _derive_after_commit(person_id)
+    return {**result, **totals}
+
+
+def _sweep_person(mapping, sources, target, person_id):
     totals = {'rows_updated': 0, 'rows_collapsed': 0}
     for old_concept_id in sources:
         outcome = repoint_clinical_rows(
@@ -190,22 +223,42 @@ def repoint_for_person(mapping, concept_ids, person_id):
     promoted = promote_provisional_rows(mapping=mapping, person_id=person_id)
     totals['rows_updated'] += promoted['rows_promoted']
     totals['rows_collapsed'] += promoted['rows_collapsed']
-    if totals['rows_updated']:
-        _derive_after_commit(person_id)
-    return {'queued': False, 'patient_id': person_id, 'from_concept_ids': sources, **totals}
+    return totals
+
+
+@contextmanager
+def _lock_timeout(milliseconds):
+    """``lock_timeout`` for the statements inside, then whatever it was before.
+
+    Local to the transaction. A block that raises is rolled back to its
+    savepoint by the caller, which puts the setting back by itself.
+    """
+    if connection.vendor != 'postgresql':
+        yield
+        return
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT current_setting('lock_timeout')")
+        previous = cursor.fetchone()[0]
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", [str(milliseconds)])
+    yield
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
 
 
 def _derive_after_commit(person_id):
-    """Re-derive the patient's record once the save has committed.
+    """Re-derive the patient's record on a worker once the save has committed.
 
     The move marked the record stale, and nothing else would bring it up to
     date: Generate OMOP derives only for rows it moves itself, and this
-    patient has none left. ``derivation_jobs`` decides how, as it does for
-    Generate OMOP: a worker when there is a broker, inline otherwise. After
-    the commit either way, so a derivation that fails or cannot be queued
-    costs a record that stays stale for ``backfill_patient_records``, never
-    the save.
+    patient has none left. Only where there is a worker. Deriving is 12-32s on
+    a bulk-loaded patient, and inline it would run in the save request, past
+    the web server's timeout, after the save had committed; with no broker the
+    record stays stale for ``backfill_patient_records``, as after any other
+    re-point. A queue outage costs the same, never the save.
     """
+    if not getattr(settings, 'CELERY_BROKER_URL', ''):
+        return
+
     def derive():
         from omop_core.models import Person
         from omop_core.services.derivation_jobs import get_dispatcher

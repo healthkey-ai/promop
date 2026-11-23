@@ -23703,13 +23703,6 @@ class RunsRepointJobsMixin:
         def relocate_now(pk, from_table, to_table):
             self.last_relocation = relocation_jobs.run_relocation(pk, from_table, to_table)
 
-        # A patient-page approval re-derives that patient's record after
-        # commit (#2791); the tests check that it asked, not the derivation.
-        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
-        override = use_dispatcher(FakeDispatcher())
-        self.derivations = override.__enter__()
-        self.addCleanup(override.__exit__, None, None, None)
-
         for target, value in (
             ('omop_core.services.repoint_jobs._after_commit', lambda func: func()),
             ('omop_core.services.repoint_jobs.dispatch_repoint', run_now),
@@ -24060,13 +24053,12 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         # Not queued: this patient's row moved in the request, and the response
-        # says how many. Their record, and only theirs, is re-derived.
+        # says how many.
         self.assertEqual(resp.data['repoint'], {
             'queued': False, 'patient_id': self.person.person_id,
             'from_concept_ids': [0, self.minted.concept_id],
-            'rows_updated': 1, 'rows_collapsed': 0,
+            'rows_updated': 1, 'rows_collapsed': 0, 'held': False,
         })
-        self.assertEqual(self.derivations.calls, [self.person.person_id])
         self.mapping.refresh_from_db()
         # Still recorded, for the patients this save did not touch.
         self.assertIn(self.minted.concept_id, self.mapping.deferred_repoint_concept_ids)

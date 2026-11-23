@@ -1705,34 +1705,54 @@ what happens next (`omop_core/services/repoint_jobs.py`):
 | Saved from | Rows moved | When | Response `repoint` |
 |---|---|---|---|
 | a mapping tab (no `patient_id`) | every patient's | a job after commit (`queue_repoint`; Celery when a broker is set, inline after commit otherwise) | `{queued: true, from_concept_ids}` |
-| a patient's Source Codes tab (`patient_id`) | that patient's only | in the request (`repoint_for_person`, #2791) | `{queued: false, patient_id, from_concept_ids, rows_updated, rows_collapsed}` |
+| a patient's Source Codes tab (`patient_id`) | that patient's only | in the request (`repoint_for_person`, #2791) | `{queued: false, patient_id, from_concept_ids, rows_updated, rows_collapsed, held}` |
 
-- **A patient-page approval never touches another patient's row** (#1874).
-  The concepts stay in `deferred_repoint_concept_ids`, so Generate OMOP for
-  another patient, or a later approval from a mapping tab, moves theirs. One
-  patient's rows for one code is a few rows, which is why this move is not a
-  job and the all-patients one is.
+- **A patient-page approval moves no other patient's row in the request**
+  (#1874). The concepts stay in `deferred_repoint_concept_ids`, so Generate
+  OMOP for another patient, or a later approval from a mapping tab, moves
+  theirs. With provisional data on and a worker, approving a qualifying
+  proposal also queues the code's provisional sweep, which resolves the other
+  holders shortly after. One patient's rows for one code is a few rows, which
+  is why this move is not a job and the all-patients one is; every query it
+  makes names the patient, the other-code-system guard's read of the
+  inventory included (`_persons_coded_elsewhere(person_id=)`).
 - It makes the same sweeps as the job, narrowed to the patient: each concept
   to the destination (the concept-0 sweep by code only), then that patient's
   provisional rows already at the destination made real
   (`promote_provisional_rows(person_id=)`). The guards are the re-point's own:
   a hospital-scoped mapping moves only rows its hospital wrote, and a patient
   whose code also arrived under another code system keeps unresolved rows.
-  `rows_updated` counts rows moved and provisional rows made real, so it can
-  be 0.
-- **The patient's record is re-derived after commit** when a row moved,
-  through `derivation_jobs` (a worker when a broker is set, inline otherwise).
-  It has to be asked for here: Generate OMOP derives only for rows it moves
-  itself, and this patient has none left. A derivation that fails or cannot
-  be queued leaves the record stale for `backfill_patient_records`; it never
-  fails the save.
+  `rows_updated` counts rows moved and provisional rows made real. It is 0
+  when the patient has no row for the code (a code only in their inventory
+  gets its row from Generate OMOP) and when a guard held their rows back, so
+  the banner then says none were moved and still points at Generate OMOP.
+- **It applies to any patient-page save of an approved mapping**, not only
+  the save that approves it: the branch reads the status the row ends with.
+  A mapping approved from one patient's page keeps concept 0 in
+  `deferred_repoint_concept_ids`, so a later save from another patient's
+  page, even of a note alone, moves that patient's waiting rows. That is what
+  Generate OMOP would do for them; nothing drains the list but a job run.
+- **It does not wait for a lock.** An all-patients sweep keeps the record and
+  rows of every patient it moves locked until it commits, minutes on a common
+  code. The move runs in a savepoint with a `lock_timeout`
+  (`PERSON_MOVE_LOCK_TIMEOUT_MS`, 3s); when that expires nothing is moved,
+  the mapping is saved all the same, the result says `held: true`, and the
+  rows stay queued for that job or for Generate OMOP.
+- **The patient's record is re-derived on a worker after commit** when a row
+  moved or a duplicate was collapsed. It has to be asked for here: Generate
+  OMOP derives only for rows it moves itself, and this patient has none left.
+  With no `CELERY_BROKER_URL` nothing is derived: 12-32s on a bulk-loaded
+  patient would run in the save request, past the web server's timeout and
+  after the commit, so the record stays stale for `backfill_patient_records`,
+  as after any other re-point. A queue outage costs the same and never the
+  save.
 - A save that only proposes, rejects or un-approves moves no rows to a
   destination, from either place. `patient_id` is validated before anything
   is written (`_mapping_patient_scope`): an unknown patient is a 400 and one
   the caller cannot write is a 403, never a fall back to every patient.
-- The tab's banner reports the count ("3 of this patient's rows now use the
-  approved concept", or that none needed to move) and that other patients
-  are updated when Generate OMOP runs for them.
+- The tab's banner reports the count ("3 of this patient's rows were moved to
+  the approved concept"), or that none were moved or that another update
+  holds them, each with what Generate OMOP still has to do.
 
 ### A code's rows follow its mapping to another table
 

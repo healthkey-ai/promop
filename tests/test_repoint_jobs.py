@@ -270,7 +270,7 @@ def test_a_patient_page_approval_moves_that_patients_rows_and_nobody_elses(clien
     job.assert_not_called()
     assert response.data['repoint'] == {
         'queued': False, 'patient_id': mine.person_id, 'from_concept_ids': [old.pk],
-        'rows_updated': 1, 'rows_collapsed': 0,
+        'rows_updated': 1, 'rows_collapsed': 0, 'held': False,
     }
     mine.refresh_from_db(); theirs.refresh_from_db(); row.refresh_from_db()
     assert mine.measurement_concept_id == new.pk
@@ -294,6 +294,56 @@ def test_a_first_patient_page_approval_claims_that_patients_unresolved_rows(clie
     mine.refresh_from_db(); theirs.refresh_from_db()
     assert mine.measurement_concept_id == new.pk
     assert theirs.measurement_concept_id == 0
+
+
+def test_only_the_patients_own_code_systems_can_hold_their_rows_back(client):
+    """The other-code-system guard asks about this patient alone: somebody
+    else's inventory neither blocks the move nor is read for it."""
+    new = ConceptFactory()
+    row = mapping(new, status='proposed', source_code='6', source_vocabulary_id='urn:oid:hospital-a',
+                  source_code_description='')
+    mine = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    theirs = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    _code_seen(mine, 'urn:oid:hospital-a')
+    _code_seen(theirs, 'urn:oid:hospital-b')
+
+    response = _patient_save(client, row, mine.person, status='approved')
+    assert response.status_code == 200, response.data
+    assert response.data['repoint']['rows_updated'] == 1
+    mine.refresh_from_db()
+    assert mine.measurement_concept_id == new.pk
+
+    # A patient who holds the code under a system with no such approval keeps
+    # unresolved rows, as in the job, and the response says none moved.
+    response = _patient_save(client, row, theirs.person, status='approved')
+    assert response.status_code == 200, response.data
+    assert response.data['repoint']['rows_updated'] == 0
+    theirs.refresh_from_db()
+    assert theirs.measurement_concept_id == 0
+
+
+def test_a_patient_page_approval_costs_the_same_however_many_patients_hold_the_code(client):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    def approve(holders):
+        new = ConceptFactory()
+        row = mapping(new, status='proposed', source_code=f'N{holders}', source_code_description='')
+        rows = [MeasurementFactory(measurement_concept_id=0, measurement_source_value=f'N{holders}')
+                for _ in range(holders)]
+        for stored in rows:
+            _code_seen(stored, 'Local', code=f'N{holders}')
+        with CaptureQueriesContext(connection) as queries:
+            response = _patient_save(client, row, rows[0].person, status='approved')
+        assert response.status_code == 200, response.data
+        assert response.data['repoint']['rows_updated'] == 1
+        # The guard's own reads of the inventory (it compares the stored,
+        # truncated code) name the patient; the response's reads are not its.
+        guard = [q['sql'] for q in queries if 'UPPER(SUBSTRING("patient_source_code"."source_value"' in q['sql']]
+        assert guard and all('"patient_source_code"."person_id" = ' in sql for sql in guard), guard
+        return len(queries)
+
+    assert approve(1) == approve(6)
 
 
 def test_a_patient_page_save_that_only_proposes_moves_nothing(client):
@@ -331,7 +381,15 @@ def test_a_hospital_mapping_approved_from_a_patient_page_moves_only_that_hospita
     assert unattributed.measurement_concept_id == 0
 
 
-def test_the_patients_record_is_re_derived_after_the_save_commits(client, django_capture_on_commit_callbacks):
+@pytest.fixture
+def worker(settings):
+    """A deployment with a broker, and nothing else that would use it."""
+    settings.CELERY_BROKER_URL = 'redis://example.invalid/0'
+    settings.PROVISIONAL_DATA_ENABLED = False
+
+
+def test_with_a_worker_the_patients_record_is_re_derived_after_the_save_commits(
+        client, worker, django_capture_on_commit_callbacks):
     old, new = ConceptFactory(), ConceptFactory()
     row = mapping(old)
     mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
@@ -349,7 +407,26 @@ def test_the_patients_record_is_re_derived_after_the_save_commits(client, django
     assert derivations.calls == [mine.person_id]
 
 
-def test_no_derivation_when_no_row_of_the_patient_moved(client, django_capture_on_commit_callbacks):
+def test_without_a_worker_nothing_is_derived_in_the_request(client, django_capture_on_commit_callbacks):
+    """12-32s on a bulk-loaded patient: the record is marked stale and left."""
+    from omop_core.models import PatientRecord
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+    # The signal chain derived a record when the measurement landed.
+    record, _ = PatientRecord.objects.get_or_create(person=mine.person)
+    PatientRecord.objects.filter(pk=record.pk).update(derivation_version=7)
+
+    with use_dispatcher(FakeDispatcher()) as derivations, django_capture_on_commit_callbacks(execute=True):
+        response = _patient_save(client, row, mine.person, status='approved', destination_concept_id=new.pk)
+    assert response.status_code == 200, response.data
+    assert response.data['repoint']['rows_updated'] == 1
+    assert derivations.calls == []
+    record.refresh_from_db()
+    assert record.derivation_version == 0
+
+
+def test_no_derivation_when_no_row_of_the_patient_moved(client, worker, django_capture_on_commit_callbacks):
     old, new = ConceptFactory(), ConceptFactory()
     row = mapping(old)
     theirs = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
@@ -365,11 +442,9 @@ def test_no_derivation_when_no_row_of_the_patient_moved(client, django_capture_o
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_derivation_that_cannot_be_queued_does_not_fail_the_patient_page_save(client, settings):
+def test_a_derivation_that_cannot_be_queued_does_not_fail_the_patient_page_save(client, worker):
     """A real commit, so the hook runs as it does in a request: the worker's
     dispatcher defers to commit itself, and that has already happened."""
-    settings.CELERY_BROKER_URL = 'redis://example.invalid/0'
-    settings.PROVISIONAL_DATA_ENABLED = False
     old, new = ConceptFactory(), ConceptFactory()
     row = mapping(old)
     mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
@@ -382,6 +457,70 @@ def test_a_derivation_that_cannot_be_queued_does_not_fail_the_patient_page_save(
     assert queued.call_args.kwargs['args'] == [mine.person_id]
     mine.refresh_from_db()
     assert mine.measurement_concept_id == new.pk
+
+
+@pytest.mark.django_db(transaction=True)
+def test_rows_another_transaction_holds_are_left_queued_and_the_approval_is_saved(client, monkeypatch):
+    """An all-patients sweep keeps a patient's rows locked until it commits. The
+    save does not wait for it: the mapping is approved, the rows stay queued."""
+    import threading
+
+    from django.db import connections, transaction
+
+    from omop_core.models import Measurement
+    monkeypatch.setattr(repoint_jobs, 'PERSON_MOVE_LOCK_TIMEOUT_MS', 200)
+    old, new = ConceptFactory(), ConceptFactory()
+    row = mapping(old)
+    mine = MeasurementFactory(measurement_concept=old, measurement_source_value='GLU')
+    locked, release = threading.Event(), threading.Event()
+
+    def hold_the_row():
+        try:
+            with transaction.atomic():
+                Measurement.objects.select_for_update().get(pk=mine.pk)
+                locked.set()
+                release.wait(20)
+        finally:
+            connections.close_all()
+
+    holder = threading.Thread(target=hold_the_row)
+    holder.start()
+    try:
+        assert locked.wait(10)
+        response = _patient_save(client, row, mine.person, status='approved', destination_concept_id=new.pk)
+    finally:
+        release.set()
+        holder.join()
+
+    assert response.status_code == 200, response.data
+    assert response.data['repoint'] == {
+        'queued': False, 'patient_id': mine.person_id, 'from_concept_ids': [old.pk],
+        'rows_updated': 0, 'rows_collapsed': 0, 'held': True,
+    }
+    row.refresh_from_db(); mine.refresh_from_db()
+    assert (row.status, row.target_concept_id, row.deferred_repoint_concept_ids) == ('approved', new.pk, [old.pk])
+    assert mine.measurement_concept_id == old.pk
+    # Still queued, so the next run moves them.
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
+
+
+def test_any_patient_page_save_of_an_approved_mapping_applies_it_to_that_patient(client):
+    """The mapping was approved from another patient's page, so concept 0 is
+    still waiting for everyone else. A save that changes only the note, from
+    this patient's page, moves this patient's rows: the mapping is approved
+    and their rows were not on it, which is what Generate OMOP would do."""
+    new = ConceptFactory()
+    row = mapping(new, deferred_repoint_concept_ids=[0])
+    mine = MeasurementFactory(measurement_concept_id=0, measurement_source_value='GLU')
+    theirs = MeasurementFactory(measurement_concept_id=0, measurement_source_value='GLU')
+
+    response = _patient_save(client, row, mine.person, notes='checked against the report')
+    assert response.status_code == 200, response.data
+    assert response.data['repoint']['rows_updated'] == 1
+    mine.refresh_from_db(); theirs.refresh_from_db(); row.refresh_from_db()
+    assert mine.measurement_concept_id == new.pk
+    assert theirs.measurement_concept_id == 0
+    assert row.deferred_repoint_concept_ids == [0]
 
 
 def test_a_patient_the_approver_cannot_write_is_refused_and_no_row_moves(django_user_model):

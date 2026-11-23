@@ -814,7 +814,7 @@ def _source_value_match(model, source_col, mapping, include_description=True):
     return match
 
 
-def _persons_coded_elsewhere(mapping, table, new_concept_id, model, source_col):
+def _persons_coded_elsewhere(mapping, table, new_concept_id, model, source_col, person_id=None):
     """Persons whose rows for this code may come from another code system.
 
     A clinical row keeps the code but not its code system, so the concept-0
@@ -828,10 +828,17 @@ def _persons_coded_elsewhere(mapping, table, new_concept_id, model, source_col):
     column's width); an inventory code that only shares that prefix blocks.
     A hospital-scoped approval never agrees: the inventory cannot say which
     hospital a person's code came from.
+
+    *person_id* asks about one person only, and reads only that person's
+    inventory: a move made inside a save request (#2791) must not cost a scan
+    of every patient's.
     """
     width = model._meta.get_field(source_col).max_length or 50
     code = mapping.source_code
-    rows = PatientSourceCode.objects.filter(omop_table=table).annotate(
+    rows = PatientSourceCode.objects.filter(omop_table=table)
+    if person_id is not None:
+        rows = rows.filter(person_id=person_id)
+    rows = rows.annotate(
         stored_code=Upper(Substr('source_value', 1, width)),
     ).filter(stored_code=code[:width].upper())
     vocabularies = set(rows.values_list('source_vocabulary_id', flat=True).distinct())
@@ -921,12 +928,12 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     table_has_provisional = has_provisional_rows(model)
     if old_concept_id == NO_MATCHING_CONCEPT_ID:
         qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
-            mapping, table, new_concept_id, model, source_col))
+            mapping, table, new_concept_id, model, source_col, person_id=person_id))
     elif table_has_provisional:
         # A provisional row is a guess about one code system; it becomes real
         # only for a person whose code did not also arrive under another.
         qs = qs.exclude(Q(confidence__isnull=False) & Q(person_id__in=_persons_coded_elsewhere(
-            mapping, table, new_concept_id, model, source_col)))
+            mapping, table, new_concept_id, model, source_col, person_id=person_id)))
     if mapping.organization_id:
         # A shared Epic flowsheet code can mean different things at two
         # hospitals.  Only rows whose write provenance names this mapping's
@@ -1087,7 +1094,8 @@ def promote_provisional_rows(*, mapping, person_id=None):
     if person_id is not None:
         qs = qs.filter(person_id=person_id)
     qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
-        mapping, normalize_omop_table(mapping.omop_table), concept_id, model, source_col))
+        mapping, normalize_omop_table(mapping.omop_table), concept_id, model, source_col,
+        person_id=person_id))
     if mapping.organization_id:
         qs = exclusively_attributed(qs, mapping.organization_id)
     person_ids = set(qs.values_list('person_id', flat=True).distinct())

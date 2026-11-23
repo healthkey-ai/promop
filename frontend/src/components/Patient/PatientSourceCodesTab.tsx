@@ -245,11 +245,14 @@ export default function PatientSourceCodesTab({ personId }: Props) {
   const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
     handleDialogClose();
     // An approval from this page moves this patient's rows as it saves; the
-    // response says how many (#2791).
+    // response says how many (#2791). An approved save that reports no move
+    // had nothing waiting, and a code with no row yet still needs Generate OMOP.
     setBanner(
       repointBanner(saved.source_code, repoint)
       ?? patientRepointBanner(saved.source_code, repoint)
-      ?? "Mapping saved.",
+      ?? (saved.status === "approved"
+        ? "Mapping approved. Run Generate OMOP to apply to clinical rows."
+        : "Mapping saved."),
     );
     void fetchSourceCodes();
   };

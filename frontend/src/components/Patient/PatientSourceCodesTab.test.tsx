@@ -158,41 +158,57 @@ it("sends the current patient when saving a mapping", async () => {
   ));
 });
 
-describe("PatientSourceCodesTab banner after an approval (#2791)", () => {
-  const approve = async (data: Record<string, unknown>) => {
+describe("PatientSourceCodesTab banner after a save (#2791)", () => {
+  const save = async (data: Record<string, unknown>, status = "approved") => {
     vi.mocked(api.patch).mockResolvedValueOnce({ data } as never);
     render(<PatientSourceCodesTab personId="48095" />);
     fireEvent.click(await screen.findByText("Pulse"));
-    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "approved" } });
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: status } });
     fireEvent.submit(screen.getByRole("button", { name: "Update Mapping" }).closest("form")!);
   };
   const saved = { mapping_id: 78, source_code: "8867-4", status: "approved" };
+  const moved = (rows_updated: number, extra: Record<string, unknown> = {}) => ({
+    ...saved,
+    repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated, rows_collapsed: 0, held: false, ...extra },
+  });
 
   it("says how many of this patient's rows moved and that other patients wait", async () => {
-    await approve({ ...saved, repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated: 3, rows_collapsed: 0 } });
+    await save(moved(3));
     expect(await screen.findByText(
-      "8867-4: approved. 3 of this patient's rows now use the approved concept. "
+      "8867-4: approved. 3 of this patient's rows were moved to the approved concept. "
       + "Other patients are updated when Generate OMOP runs for them.",
     )).toBeInTheDocument();
   });
 
   it("uses the singular for one row", async () => {
-    await approve({ ...saved, repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated: 1, rows_collapsed: 0 } });
-    expect(await screen.findByText(/1 of this patient's rows now uses the approved concept\./)).toBeInTheDocument();
+    await save(moved(1));
+    expect(await screen.findByText(/1 of this patient's rows was moved to the approved concept\./)).toBeInTheDocument();
   });
 
-  it("says so when none of this patient's rows needed to move", async () => {
-    await approve({ ...saved, repoint: { queued: false, patient_id: 48095, from_concept_ids: [0], rows_updated: 0, rows_collapsed: 0 } });
+  it("still points at Generate OMOP when none of this patient's rows moved", async () => {
+    await save(moved(0));
     expect(await screen.findByText(
-      "8867-4: approved. No stored rows for this patient needed to move. "
-      + "Other patients are updated when Generate OMOP runs for them.",
+      "8867-4: approved. None of this patient's stored rows were moved. "
+      + "Run Generate OMOP to create or resolve rows for this code.",
     )).toBeInTheDocument();
   });
 
-  it("no longer tells the curator to run Generate OMOP for a save that moved nothing", async () => {
-    await approve({ ...saved, repoint: null });
+  it("says another update holds the rows when the move gave way to it", async () => {
+    await save(moved(0, { held: true }));
+    expect(await screen.findByText(
+      "8867-4: approved. Another update holds this patient's rows, so none were moved. "
+      + "Run Generate OMOP for this patient once it has finished.",
+    )).toBeInTheDocument();
+  });
+
+  it("keeps the Generate OMOP hint for an approved save that reports no move", async () => {
+    await save({ ...saved, repoint: null });
+    expect(await screen.findByText("Mapping approved. Run Generate OMOP to apply to clinical rows.")).toBeInTheDocument();
+  });
+
+  it("says only that a proposal was saved", async () => {
+    await save({ ...saved, status: "proposed", repoint: null }, "proposed");
     expect(await screen.findByText("Mapping saved.")).toBeInTheDocument();
-    expect(screen.queryByText(/Run Generate OMOP/)).not.toBeInTheDocument();
   });
 });
 
