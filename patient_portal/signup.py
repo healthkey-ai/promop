@@ -61,6 +61,7 @@ def signup_policy(language: str = svc.DEFAULT_LANGUAGE) -> dict:
         'purposes': [
             {
                 'key': p.key, 'kind': p.kind, 'answers': p.allowed_decisions(), 'stage': p.stage,
+                'requires': p.requires or None,
                 'gated_by_country': p.gated_by_country,
                 'enabled_countries': [str(c).upper() for c in p.enabled_countries] if p.gated_by_country else [],
                 'text': _text(t),
