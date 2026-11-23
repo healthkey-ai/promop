@@ -52,6 +52,7 @@ def test_copy_reference_data_covers_every_copied_reference_table():
     curation = {
         'omop_core.CustomPatientField', 'omop_core.FieldChoice', 'omop_core.FieldChoiceAlias',
         'omop_core.FieldChoiceCode', 'omop_core.FieldChoiceDisease',
+        'omop_core.FieldValueConceptMapping',
         'omop_core.FieldConceptMapping', 'omop_core.FieldDiseaseMembership',
         'omop_core.FieldFormula', 'omop_core.FieldSynonym',
         'omop_core.SourceCodeConceptMapping',

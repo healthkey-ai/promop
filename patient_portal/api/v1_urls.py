@@ -74,6 +74,8 @@ from .views import (
     custom_patient_field_list,
     field_synonyms, field_synonym_detail, field_synonyms_batch,
     field_choice_list, field_choice_detail, field_choice_codes,
+    field_choice_value_mappings, field_choice_value_mapping_decide,
+    field_choice_value_mapping_revisions, field_choice_answer_coverage,
     field_formula_list, field_formula_detail, field_formula_test,
 )
 from .org_views import (
@@ -279,7 +281,14 @@ urlpatterns = [
     path('field-synonyms/batch/', field_synonyms_batch, name='v1-field-synonyms-batch'),
     path('field-choices/', field_choice_list, name='v1-field-choice-list'),
     path('field-choices/<int:pk>/', field_choice_detail, name='v1-field-choice-detail'),
+    path('field-choices/answer-coverage/', field_choice_answer_coverage, name='v1-field-choice-answer-coverage'),
     path('field-choices/<int:choice_pk>/codes/', field_choice_codes, name='v1-field-choice-codes'),
+    path('field-choices/<int:choice_pk>/value-mappings/', field_choice_value_mappings,
+         name='v1-field-choice-value-mappings'),
+    path('field-choices/<int:choice_pk>/value-mappings/<int:mapping_pk>/revisions/',
+         field_choice_value_mapping_revisions, name='v1-field-choice-value-mapping-revisions'),
+    path('field-choices/<int:choice_pk>/value-mappings/<int:mapping_pk>/<str:action>/',
+         field_choice_value_mapping_decide, name='v1-field-choice-value-mapping-decide'),
     path('field-formulas/', field_formula_list, name='v1-field-formula-list'),
     path('field-formulas/test/', field_formula_test, name='v1-field-formula-test'),
     path('field-formulas/<int:pk>/', field_formula_detail, name='v1-field-formula-detail'),

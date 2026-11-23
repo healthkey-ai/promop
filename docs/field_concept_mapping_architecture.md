@@ -32,14 +32,14 @@ second manually maintained UI-to-concept table.
 | `FieldChoice` | An allowed value with a stable identity `(field_name, context_key, code)`, an editable label, a typed canonical `value`, ordering, a retired mark and creator metadata (#1224) |
 | `FieldChoiceAlias` | Another spelling of a choice: an earlier label or a source's wording; one spelling names one choice within a field and context |
 | `FieldChoiceDisease` | The Disease Categories that offer a choice; no rows means every disease |
+| `FieldValueConceptMapping` / `FieldValueConceptMappingRevision` | The standard concept an answer means in a role, or the reviewed statement that it has none; one decision per row, with a transition log (#1224) |
 | `FieldChoiceCode` | Vocabulary/code aliases for a choice, with a primary flag; this does not independently approve an answer mapping |
 | `CustomPatientField` / `FieldFormula` | Dynamic field definitions and computed values using the existing mapping/formula services |
 | Therapy reference models | Regimen, component, class and disease/round relationships, resolved by their dedicated authoring paths |
 
 The models are in [omop_core/models.py](../omop_core/models.py). A choice has
-stable, scoped identity (below); the reviewed `FieldValueConceptMapping` model
-that binds an answer to a standard concept is not built yet, and the plan
-owns that extension.
+stable, scoped identity and a reviewed binding to a standard concept (both
+below). Nothing that writes patient data reads the binding yet.
 
 ### Scoped choices: `FieldChoice` identity (#1224)
 
@@ -92,9 +92,67 @@ rather than the models.
   already retired keeps the date it was retired.
   Aliases and scope are replaced from the source, and a disease this instance
   has no category for is dropped.
-- **Not here.** No concept is attached to an answer yet, the editor shows none
-  of this (#1225), and the disease tab's `stage` options are still the
-  hand-written ones (#2332).
+- **Not here.** The editor shows none of this (#1225), and the disease tab's
+  `stage` options are still the hand-written ones (#2332).
+
+### Answer-to-concept mappings: `FieldValueConceptMapping` (#1224)
+
+`omop_core/services/field_value_mappings.py` holds the rules; writers use it
+and never the model.
+
+- **One row is one decision** about one choice in one **role**:
+  `value_as_concept` (the answer is the value of the field's question),
+  `main_concept` (the answer is itself the fact) or `context_recipe` (the
+  answer only means something with its own `question_concept`). The
+  `outcome` is `mapped` (a `target_concept`) or `no_equivalent`, a reviewed
+  statement with a reason and no target; the value stays saveable either way.
+- **Review.** `proposed` / `approved` / `rejected`, plus `superseded` for an
+  approval a later one replaced. The database holds *one approved and one open
+  proposal per choice and role* and that an approved `mapped` row has a target
+  (and that only a recipe has a question), so a change is proposed beside the
+  decision in force and replaces it only when approved; the replaced row stays,
+  superseded. Withdrawing an approval is a rejection. Decisions on one choice
+  take turns (the choice row is locked), and a lost race is a 409.
+- **A target is checked on the server**, by id or by exact vocabulary and
+  code, never trusted from the client: it must be a loaded, current
+  (`invalid_reason` blank), standard concept of a vocabulary that is not
+  withdrawn, outside the domains that describe the record rather than a
+  finding (Unit, Type Concept, Metadata, ...), and for `main_concept` in the
+  domain of the table the field's mapping stores to. It is checked again at
+  approval, since a vocabulary reload can retire it between the two.
+  `target_state` on an approved row reports `ok`, `retired`, `non_standard`
+  or `invalid` as the vocabulary stands now.
+- **Release and revisions.** The vocabulary version the target was checked
+  against is stored with the decision; every transition (proposed, edited,
+  approved, superseded, rejected, transferred, migrated) is an append-only
+  `FieldValueConceptMappingRevision` that holds the concept as ids and codes,
+  with no foreign key, so a vocabulary reload cannot block it.
+- **Migration `0367`** carries each choice's first primary `FieldChoiceCode`
+  over as a `value_as_concept` **proposal** (never an approval), recording
+  whether it resolved, was not loaded here (`unresolved`), is retired
+  (`invalid`) or non-standard. The codes stay for source codings. A replay
+  changes nothing. Existing choices without a concept remain usable.
+- **API**, on `/api/v1/` only: `GET`/`POST field-choices/<id>/value-mappings/`
+  (read: anyone who reads the mapping pages; propose: mapping curators),
+  `POST .../<mapping>/approve|reject/` (org admins and staff, as for field
+  mappings), `GET .../<mapping>/revisions/`, and `GET
+  field-choices/answer-coverage/` (`?field_name=`). A choice's own payload
+  carries its current `value_mappings` for readers of the mapping pages only; a
+  patient's dropdown never sees who reviewed what. Field descriptors gain
+  `answer_coverage` (`choices`, `mapped`, `no_equivalent`, `proposed`,
+  `unmapped`, over the choices still offered), kept apart from whether the
+  field's question is mapped.
+- **Transfer** carries the decision in force and the open proposal as
+  vocabulary and code, re-resolved here. A concept this instance has not
+  loaded, or that is not a valid target here, cannot be approved here, so the
+  approval arrives as an unresolved proposal with a warning. A decision the
+  source no longer has in force is superseded (approved) or rejected
+  (proposed), not deleted. Reviewers and the revision log are not copied.
+- **Not here.** No write or read path uses the approved concept yet: the
+  projection still takes `value_as_concept_id` from the primary
+  `FieldChoiceCode`. The two-person rule is not applied (as for field
+  mappings), no scoped question recipe beyond a recipe's own question
+  concept, and no UI (#1225).
 
 `FieldConceptMapping.provenance` distinguishes System Generated and Curator
 recipes. Approval state is separate from origin: approving a recipe does not

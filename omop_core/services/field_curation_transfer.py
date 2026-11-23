@@ -254,6 +254,21 @@ def read_payload(
                     ({'alias': a.alias, 'source': a.source} for a in fc.aliases.all()),
                     key=lambda a: a['alias'].casefold()),
                 'diseases': sorted(d.disease for d in fc.disease_scope.all()),
+                # What the answer means and who decided it: only the decision in
+                # force and the open proposal. Concepts travel as vocabulary and
+                # code; the reviewer, ids and revision log stay on their instance.
+                'value_mappings': [
+                    {
+                        'role': m.role, 'outcome': m.outcome, 'status': m.status,
+                        'vocabulary_id': m.vocabulary_id, 'concept_code': m.concept_code,
+                        'question_vocabulary_id': m.question_vocabulary_id,
+                        'question_concept_code': m.question_concept_code,
+                        'rationale': m.rationale, 'vocabulary_release': m.vocabulary_release,
+                        'provenance': m.provenance,
+                    }
+                    for m in sorted(fc.value_mappings.all(), key=lambda m: (m.role, m.status))
+                    if m.status in ('approved', 'proposed')
+                ],
                 'codes': [
                     {
                         'code': code.code,
@@ -267,7 +282,7 @@ def read_payload(
                 ],
             }
             for fc in FieldChoice.objects.using(using)
-            .prefetch_related('codes', 'aliases', 'disease_scope')
+            .prefetch_related('codes', 'aliases', 'disease_scope', 'value_mappings')
             .order_by('field_name', 'context_key', 'sort_order', 'display')
         ]
 
@@ -728,6 +743,85 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
                 FieldChoiceDisease(choice=choice, disease=d)
                 for d in sorted(set(row['diseases'])) if d in known
             ])
+        if 'value_mappings' in row:
+            _apply_value_mappings(choice, row['value_mappings'], stats)
+
+
+def _apply_value_mappings(choice, rows: list[dict], stats: TransferStats) -> None:
+    """Make the choice's current answer mappings the source's.
+
+    A concept is found again by vocabulary and code, never by the source's id.
+    One this instance has not loaded, or that is no longer a valid target here,
+    cannot be approved here: it is kept as an unresolved proposal and reported.
+    A decision the source no longer has in force is superseded (approved) or
+    rejected (proposed) rather than deleted, so its revisions stay. Reviewers
+    are not copied; the same account id is another person on another instance.
+    """
+    from omop_core.models import FieldValueConceptMapping as Mapping
+    from omop_core.services import field_value_mappings as fvm
+
+    label = 'transfer'
+    wanted: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        if row.get('status') in ('approved', 'proposed'):
+            wanted[(row['role'], row['status'])] = row
+    # An approval that cannot be kept becomes a proposal, which an open
+    # proposal for the same role already holds the place of.
+    plan = []
+    for (role, status), row in sorted(wanted.items()):
+        target = question = None
+        resolution = ''
+        if row['outcome'] == 'mapped':
+            target = fvm.lookup_concept(vocabulary_id=row['vocabulary_id'], concept_code=row['concept_code'])
+            problem = fvm.target_problem(target, role, choice.field_name)
+            if problem:
+                resolution = 'unresolved' if target is None else 'invalid'
+                stats.warnings.append(f'value mapping {choice.field_name}/{choice.display}: {problem}')
+                target = None
+            if role == 'context_recipe':
+                question = fvm.lookup_concept(vocabulary_id=row.get('question_vocabulary_id', ''),
+                                              concept_code=row.get('question_concept_code', ''))
+                if fvm.target_problem(question, role, choice.field_name, question=True):
+                    question = None
+                    resolution = resolution or 'unresolved'
+        if status == 'approved' and row['outcome'] == 'mapped' and (
+                target is None or (role == 'context_recipe' and question is None)):
+            status = 'proposed'
+        plan.append((role, status, row, target, question, resolution))
+    seen = set()
+    for role, status, row, target, question, resolution in plan:
+        if (role, status) in seen:
+            continue
+        seen.add((role, status))
+        fields = dict(
+            outcome=row['outcome'], target_concept=target,
+            vocabulary_id=row.get('vocabulary_id', ''), concept_code=row.get('concept_code', ''),
+            question_concept=question,
+            question_vocabulary_id=row.get('question_vocabulary_id', ''),
+            question_concept_code=row.get('question_concept_code', ''),
+            source_resolution=resolution, rationale=row.get('rationale', ''),
+            vocabulary_release=(fvm.release_of(target.vocabulary_id) if target else ''),
+            provenance=row.get('provenance', '') or label, reviewer=None, proposed_by=None,
+        )
+        existing = Mapping.objects.filter(choice=choice, role=role, status=status).first()
+        if existing is None:
+            if status == 'approved':
+                for old in Mapping.objects.filter(choice=choice, role=role, status='approved'):
+                    old.status = 'superseded'
+                    old.save(update_fields=['status', 'updated_at'])
+                    fvm._record(old, 'superseded', None, label)
+            existing = Mapping.objects.create(choice=choice, role=role, status=status, **fields)
+        else:
+            for name, value in fields.items():
+                setattr(existing, name, value)
+            existing.save()
+        fvm._record(existing, 'transferred', None, label)
+    kept = {(role, status) for role, status, *_ in plan}
+    for old in Mapping.objects.filter(choice=choice, status__in=('approved', 'proposed')):
+        if (old.role, old.status) not in kept:
+            old.status = 'superseded' if old.status == 'approved' else 'rejected'
+            old.save(update_fields=['status', 'updated_at'])
+            fvm._record(old, 'transferred', None, label)
 
 
 def _apply_formulas(rows: list[dict], stats: TransferStats) -> None:

@@ -606,6 +606,8 @@ def get_all_field_descriptors() -> list[dict]:
 
     # 3b. Load field choices (curator-managed value sets).
     choices_by_field: dict[str, list[dict]] = {}
+    from omop_core.services import field_value_mappings
+    answer_coverage = field_value_mappings.coverage()
     for fc in FieldChoice.objects.prefetch_related('codes', 'disease_scope').all():
         choices_by_field.setdefault(fc.field_name, []).append({
             'id': fc.id,
@@ -712,6 +714,9 @@ def get_all_field_descriptors() -> list[dict]:
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
             'choices': choices_by_field.get(name, []),
+            # How many of the answers are mapped, apart from the question's own
+            # mapping (#1224); null when the field has no choices.
+            'answer_coverage': answer_coverage.get(name),
             'formula': formula_dict,
             'explanation': _get_explanation(name, category),
             # Generic derivation health surface. Other extractors can add a
@@ -764,6 +769,7 @@ def get_all_field_descriptors() -> list[dict]:
             'mappable': True,
             'locked_table': None,
             'choices': choices_by_field.get(custom.field_name, []),
+            'answer_coverage': answer_coverage.get(custom.field_name),
             'formula': formula_dict,
             'explanation': 'Administrator-defined PatientRecord field.',
             'derivation_error': derivation_error,
@@ -790,7 +796,7 @@ def get_all_field_descriptors() -> list[dict]:
             } if mapping else None,
             'suggestion': None, 'suggest_query': _suggest_query(name),
             'unit_options': STANDARD_UNIT_CHOICES,
-            'mappable': True, 'locked_table': None, 'choices': [], 'formula': None,
+            'mappable': True, 'locked_table': None, 'choices': [], 'answer_coverage': None, 'formula': None,
             'explanation': 'Linked attribute of each Genomics finding; not a patient-level scalar.',
             'derivation_error': None,
         })
