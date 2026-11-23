@@ -79,10 +79,11 @@ There are two, and Step 1 covers both:
 | Source | Zenodo [10.5281/zenodo.21430170](https://doi.org/10.5281/zenodo.21430170) | Synthea, on your machine |
 | Download | `synthea_bc_1000.json`, ~249 MB | none |
 | Needs the Synthea JAR | no | yes |
-| Reproduces published numbers | yes — same 1,000 patients | ratio yes, absolute values no |
+| Reproduces published numbers | same 1,000 patients; the timings also need the code revision they were measured on (see the note under the example output) | ratio yes, absolute values no |
 
 **Route A** is the one to use when checking the paper's figures: it is the exact cohort those
-numbers came from. **Route B** needs no download and no citation, and is the better choice for
+numbers came from. The raw OMOP query has changed since they were measured, so a run on the
+current code checks the method, not the exact milliseconds. **Route B** needs no download and no citation, and is the better choice for
 adapting the benchmark to a different disease or cohort size. For Route B, see
 [Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for obtaining
 `synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not on the

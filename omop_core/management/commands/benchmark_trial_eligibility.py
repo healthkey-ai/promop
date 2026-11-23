@@ -12,24 +12,30 @@ matching cares about most:
     PatientRecord    -> the same row from a flat projection
 
 The command times the two reads and counts populated fields; it does not
-compare values. The raw row follows the derivation's row selection for stage
-and the receptors, and is known to differ from the derived record elsewhere
-(#2708):
+compare values. The raw row follows the derivation's row selection for coded
+stage and the receptors. The principal known differences elsewhere (#2708):
 
-- age is the birth-year difference;
-- disease is the newest name-matched condition, not the primary cancer;
-- ECOG and Karnofsky are name-matched Observations, entered-in-error included;
-- lab codes are resolved once per run, numeric labs other than the unit pairs
-  are read as stored, and AST, ALT and clearance rows named only by display
-  text are not read;
+- age is the birth-year difference, so it runs one high before the birthday
+  and is computed for a placeholder year such as 1900;
+- disease is the newest name-matched condition, not the primary cancer, and
+  admits screening, entered-in-error and provisional rows;
+- ECOG and Karnofsky are numeric, name-matched Observations, entered-in-error
+  and provisional rows included; the derivation also reads code and source
+  matches and Measurements;
+- lab codes are resolved once per run, not per person; AST, ALT and clearance
+  are read as stored (the paired labs and the blood counts are converted) and
+  their display-name rows are not read;
 - coded labs share the derivation's code precedence but not its row
   selection: provisional rows count, and a newer row without a number does
   not hide an older one;
-- a row hidden by a later clear still counts, stage has no uncoded fallback
-  (FHIR Condition.stage, sample-patient stage), and a numeric stage is read as
-  stored, not restored to its source unit first;
-- the record scopes facts to the primary cancer and applies curated and
-  pending values, which no raw-table read sees.
+- a clear (``PatientRecord:cleared``) does not hide older rows: an older lab,
+  score or stage can show through, and a receptor reads the clear marker
+  itself as its answer;
+- stage has no uncoded fallback (FHIR Condition.stage, sample-patient stage),
+  and a numeric stage is truncated as stored, while the extractor first
+  restores it to its source unit or drops it;
+- the record scopes linked facts to the primary cancer and applies curated
+  and pending values, which this query does not.
 
 Usage:
     python manage.py benchmark_trial_eligibility --org-slugs synthea-mm --limit 10

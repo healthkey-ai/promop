@@ -489,7 +489,8 @@ def test_a_number_field_reads_its_own_concept_not_another_code_source():
 
 def test_the_stage_field_keeps_the_staging_extractors_source_fallback():
     """`_get_staging_data` reads concept or source value, so the benchmark must
-    agree for stage while the other text fields use the effective code."""
+    agree for stage; the receptors read the concept code only, as
+    `_first_by_code` does."""
     person = PersonFactory(year_of_birth=1960)
     MeasurementFactory(
         person=person,
