@@ -5234,6 +5234,146 @@ class FieldChoiceDisease(models.Model):
         return f"{self.choice_id}: {self.disease}"
 
 
+class FieldValueConceptMapping(models.Model):
+    """The standard concept an allowed answer means, and who decided it (#1224).
+
+    One row is one decision about one ``FieldChoice`` in one ``role``:
+
+    * ``value_as_concept``: the answer is the value of the field's question
+      (``value_as_concept_id`` on a measurement or observation);
+    * ``main_concept``: the answer is itself the fact (a condition, procedure
+      or drug occurrence's concept);
+    * ``context_recipe``: the answer only has meaning with a question of its
+      own, ``question_concept``, which is validated with the answer.
+
+    ``outcome`` is ``mapped`` (a ``target_concept``) or ``no_equivalent``, a
+    reviewed statement that the answer has no standard concept, which has no
+    target and still lets the value be saved. ``status`` follows the field
+    mapper's review states, plus ``superseded`` for an approved decision a
+    later approval replaced. At most one row per choice and role is approved,
+    and at most one is an open proposal, so a change is proposed beside the
+    decision in force and takes its place only when approved; the database
+    holds both rules. An approved ``mapped`` row has a target.
+
+    ``vocabulary_id`` / ``concept_code`` are the target as text, so a transfer
+    re-resolves it by code and never by this instance's concept id.
+    ``vocabulary_release`` is the vocabulary version the target was checked
+    against. Every transition is a ``FieldValueConceptMappingRevision``.
+    Writers go through ``omop_core.services.field_value_mappings``.
+    """
+    ROLE_CHOICES = [
+        ('value_as_concept', 'Answer is the value'),
+        ('main_concept', 'Answer is the fact'),
+        ('context_recipe', 'Answer with its own question'),
+    ]
+    OUTCOME_CHOICES = [('mapped', 'Mapped'), ('no_equivalent', 'No standard equivalent')]
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'), ('approved', 'Approved'),
+        ('rejected', 'Rejected'), ('superseded', 'Superseded'),
+    ]
+
+    choice = models.ForeignKey(FieldChoice, related_name='value_mappings', on_delete=models.CASCADE)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='value_as_concept')
+    outcome = models.CharField(max_length=15, choices=OUTCOME_CHOICES, default='mapped')
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='proposed')
+    target_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+    )
+    vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    concept_code = models.CharField(max_length=50, blank=True, default='')
+    question_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+        help_text='context_recipe only: the question this answer belongs to.',
+    )
+    question_vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    question_concept_code = models.CharField(max_length=50, blank=True, default='')
+    source_resolution = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text=('How a proposal that came from a coded association resolved: "resolved", '
+                   '"unresolved" (concept not loaded), "invalid" or "non_standard". Blank for a curator\'s.'),
+    )
+    rationale = models.TextField(blank=True, default='')
+    vocabulary_release = models.CharField(max_length=255, blank=True, default='')
+    provenance = models.CharField(max_length=100, blank=True, default='')
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    revision = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_value_concept_mapping'
+        ordering = ['choice_id', 'role', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['choice', 'role'], condition=Q(status='approved'),
+                name='uq_fvcm_one_approved',
+            ),
+            models.UniqueConstraint(
+                fields=['choice', 'role'], condition=Q(status='proposed'),
+                name='uq_fvcm_one_proposed',
+            ),
+            models.CheckConstraint(
+                condition=Q(outcome='mapped') | (Q(target_concept__isnull=True) & Q(concept_code='')),
+                name='ck_fvcm_no_equivalent_has_no_target',
+            ),
+            models.CheckConstraint(
+                condition=~Q(status='approved', outcome='mapped', target_concept__isnull=True),
+                name='ck_fvcm_approved_has_target',
+            ),
+            models.CheckConstraint(
+                condition=Q(role='context_recipe') | Q(question_concept__isnull=True),
+                name='ck_fvcm_question_only_for_recipe',
+            ),
+        ]
+        indexes = [models.Index(fields=['status'], name='ix_fvcm_status')]
+
+    def __str__(self):
+        target = f'{self.vocabulary_id}:{self.concept_code}' if self.outcome == 'mapped' else 'no equivalent'
+        return f'{self.choice_id} {self.role} → {target} ({self.status})'
+
+
+class FieldValueConceptMappingRevision(models.Model):
+    """One transition of a ``FieldValueConceptMapping``, kept for audit.
+
+    A snapshot, so it holds the concept as ids and codes with no foreign key:
+    a vocabulary reload must not cascade into or block the record. Append only;
+    it belongs to the instance it happened on and is not copied.
+    """
+    mapping = models.ForeignKey(FieldValueConceptMapping, related_name='revisions', on_delete=models.CASCADE)
+    revision = models.PositiveIntegerField()
+    action = models.CharField(max_length=20)
+    status = models.CharField(max_length=12)
+    outcome = models.CharField(max_length=15)
+    role = models.CharField(max_length=20)
+    concept_id = models.BigIntegerField(null=True, blank=True)
+    vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    concept_code = models.CharField(max_length=50, blank=True, default='')
+    question_concept_id = models.BigIntegerField(null=True, blank=True)
+    rationale = models.TextField(blank=True, default='')
+    vocabulary_release = models.CharField(max_length=255, blank=True, default='')
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    changed_by_label = models.CharField(max_length=100, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_value_concept_mapping_revision'
+        ordering = ['mapping_id', 'revision', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['mapping', 'revision'], name='uq_fvcm_revision'),
+        ]
+
+    def __str__(self):
+        return f'{self.mapping_id} r{self.revision} {self.action}'
+
+
 class FieldChoiceCode(models.Model):
     """A coded representation (SNOMED, ICD, etc.) for a field choice."""
     choice = models.ForeignKey(FieldChoice, related_name='codes', on_delete=models.CASCADE)

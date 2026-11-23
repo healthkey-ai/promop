@@ -2011,6 +2011,40 @@ class FieldChoiceCodeSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
 
+def _concept_brief(concept):
+    if concept is None:
+        return None
+    return {
+        'concept_id': concept.pk, 'vocabulary_id': concept.vocabulary_id,
+        'concept_code': concept.concept_code, 'concept_name': concept.concept_name,
+        'domain_id': concept.domain_id, 'standard_concept': concept.standard_concept,
+        'invalid_reason': concept.invalid_reason,
+    }
+
+
+def value_mapping_data(mapping, ctx=None) -> dict:
+    """One answer-to-concept decision for a curator (#1224). Read-only."""
+    from omop_core.services import field_value_mappings
+
+    def person(user):
+        return getattr(user, 'username', None) or getattr(user, 'email', None) if user else None
+
+    return {
+        'id': mapping.pk, 'choice_id': mapping.choice_id, 'role': mapping.role,
+        'outcome': mapping.outcome, 'status': mapping.status,
+        'target': _concept_brief(mapping.target_concept),
+        'vocabulary_id': mapping.vocabulary_id, 'concept_code': mapping.concept_code,
+        'question': _concept_brief(mapping.question_concept),
+        'source_resolution': mapping.source_resolution,
+        'target_state': field_value_mappings.target_state(mapping, ctx) if mapping.status == 'approved' else None,
+        'rationale': mapping.rationale, 'vocabulary_release': mapping.vocabulary_release,
+        'provenance': mapping.provenance,
+        'proposed_by': person(mapping.proposed_by), 'reviewer': person(mapping.reviewer),
+        'reviewed_at': mapping.reviewed_at, 'revision': mapping.revision,
+        'created_at': mapping.created_at, 'updated_at': mapping.updated_at,
+    }
+
+
 class FieldChoiceSerializer(serializers.ModelSerializer):
     """A choice with its stable identity, spellings and scope (#1224).
 
@@ -2049,6 +2083,16 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         data['retired'] = instance.retired_at is not None
         data['aliases'] = sorted(a.alias for a in instance.aliases.all())
         data['diseases'] = sorted(d.disease for d in instance.disease_scope.all())
+        if self.context.get('include_value_mappings'):
+            # The decision in force and what is waiting to replace it; history
+            # is its own endpoint. Only for a reader of the mapping pages: a
+            # patient's dropdown has no use for who reviewed what.
+            from omop_core.services import field_value_mappings
+            ctx = self.context.setdefault('_value_mapping_check', field_value_mappings.CheckContext())
+            data['value_mappings'] = [
+                value_mapping_data(m, ctx) for m in instance.value_mappings.all()
+                if m.status in ('approved', 'proposed')
+            ]
         return data
 
     def validate_field_name(self, value):

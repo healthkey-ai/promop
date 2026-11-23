@@ -16998,6 +16998,11 @@ def field_choice_list(request):
 
     if request.method == 'GET':
         qs = FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope').all()
+        include_mappings = _can_view_mappings(request.user)
+        if include_mappings:
+            qs = qs.prefetch_related(
+                'value_mappings__target_concept__domain', 'value_mappings__question_concept',
+                'value_mappings__proposed_by', 'value_mappings__reviewer', 'value_mappings__choice')
         field_name = request.query_params.get('field_name')
         if field_name:
             qs = qs.filter(field_name=field_name)
@@ -17012,7 +17017,8 @@ def field_choice_list(request):
             from omop_core.services import field_choices
             qs = qs.filter(retired_at__isnull=True)
             qs = [c for c in qs if field_choices._in_scope(c, disease)]
-        return Response(FieldChoiceSerializer(qs, many=True).data)
+        return Response(FieldChoiceSerializer(
+            qs, many=True, context={'include_value_mappings': include_mappings}).data)
 
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
@@ -17039,18 +17045,27 @@ def field_choice_detail(request, pk):
     except FieldChoice.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
 
+    mapping_context = {'include_value_mappings': _can_view_mappings(request.user)}
     if request.method == 'GET':
-        return Response(FieldChoiceSerializer(choice).data)
+        return Response(FieldChoiceSerializer(choice, context=mapping_context).data)
 
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
+        if (choice.value_mappings.filter(status='approved').exists()
+                and not _can_approve_mappings(request.user)):
+            # Deleting takes the approved decision and its revisions with it.
+            return Response(
+                {'detail': 'This answer has an approved concept mapping. Only org admins and staff can '
+                           'delete it; retire it to stop offering it.'},
+                status=status.HTTP_403_FORBIDDEN)
         choice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     serializer = FieldChoiceSerializer(
-        choice, data=request.data, partial=True, context={'request': request},
+        choice, data=request.data, partial=True,
+        context={'request': request, **mapping_context},
     )
     serializer.is_valid(raise_exception=True)
     try:
@@ -17097,6 +17112,128 @@ def field_choice_codes(request, choice_pk):
     # Preserve the existing explicit remove-all-codes operation.
     choice.codes.all().delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# Answer-to-concept mappings of a field choice (#1224)
+# =============================================================================
+
+def _value_mapping_response(exc):
+    from omop_core.services.field_value_mappings import ConflictError
+    code = status.HTTP_409_CONFLICT if isinstance(exc, ConflictError) else status.HTTP_400_BAD_REQUEST
+    return Response({'detail': str(exc)}, status=code)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def field_choice_value_mappings(request, choice_pk):
+    """GET: the decision in force and open proposals (``?history=1``: every row).
+    POST: propose what the answer means, or that it has no standard equivalent."""
+    from omop_core.models import FieldChoice, FieldValueConceptMapping
+    from omop_core.services import field_value_mappings as fvm
+    from .serializers import value_mapping_data
+
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        choice = FieldChoice.objects.get(pk=choice_pk)
+    except FieldChoice.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        rows = (FieldValueConceptMapping.objects.filter(choice=choice)
+                .select_related('target_concept__domain', 'question_concept', 'proposed_by',
+                                'reviewer', 'choice'))
+        if request.query_params.get('history') not in ('1', 'true'):
+            rows = rows.filter(status__in=('approved', 'proposed'))
+        ctx = fvm.CheckContext()
+        return Response([value_mapping_data(m, ctx) for m in rows])
+
+    if not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
+    data = request.data
+    if not isinstance(data, dict) and not hasattr(data, 'get'):
+        return Response({'detail': 'Send a JSON object.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        mapping = fvm.propose(
+            choice, role=data.get('role') or 'value_as_concept',
+            outcome=data.get('outcome') or 'mapped',
+            concept_id=data.get('concept_id'),
+            vocabulary_id=str(data.get('vocabulary_id') or ''),
+            concept_code=str(data.get('concept_code') or ''),
+            question_concept_id=data.get('question_concept_id'),
+            question_vocabulary_id=str(data.get('question_vocabulary_id') or ''),
+            question_concept_code=str(data.get('question_concept_code') or ''),
+            rationale=str(data.get('rationale') or ''), user=request.user)
+    except fvm.ValueMappingError as exc:
+        return _value_mapping_response(exc)
+    except IntegrityError:
+        return Response({'detail': 'Another change to this answer was saved first; reload and retry.'},
+                        status=status.HTTP_409_CONFLICT)
+    mapping = FieldValueConceptMapping.objects.select_related(
+        'target_concept__domain', 'question_concept', 'proposed_by', 'reviewer', 'choice').get(pk=mapping.pk)
+    return Response(value_mapping_data(mapping), status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def field_choice_value_mapping_decide(request, choice_pk, mapping_pk, action):
+    """POST approve or reject one mapping. Approval is for org admins and staff."""
+    from omop_core.models import FieldValueConceptMapping
+    from omop_core.services import field_value_mappings as fvm
+    from .serializers import value_mapping_data
+
+    if action not in ('approve', 'reject'):
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if not _can_approve_mappings(request.user):
+        return Response({'detail': 'Only org admins and staff can approve or reject answer mappings.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    try:
+        mapping = FieldValueConceptMapping.objects.get(pk=mapping_pk, choice_id=choice_pk)
+    except FieldValueConceptMapping.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    decide = fvm.approve if action == 'approve' else fvm.reject
+    try:
+        mapping = decide(mapping, user=request.user, rationale=str(request.data.get('rationale') or ''))
+    except fvm.ValueMappingError as exc:
+        return _value_mapping_response(exc)
+    except IntegrityError:
+        return Response({'detail': 'Another change to this answer was saved first; reload and retry.'},
+                        status=status.HTTP_409_CONFLICT)
+    mapping = FieldValueConceptMapping.objects.select_related(
+        'target_concept__domain', 'question_concept', 'proposed_by', 'reviewer', 'choice').get(pk=mapping.pk)
+    return Response(value_mapping_data(mapping))
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def field_choice_value_mapping_revisions(request, choice_pk, mapping_pk):
+    """GET the transitions of one mapping, oldest first."""
+    from omop_core.models import FieldValueConceptMapping
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        mapping = FieldValueConceptMapping.objects.get(pk=mapping_pk, choice_id=choice_pk)
+    except FieldValueConceptMapping.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    return Response([
+        {'revision': r.revision, 'action': r.action, 'status': r.status, 'outcome': r.outcome,
+         'role': r.role, 'concept_id': r.concept_id, 'vocabulary_id': r.vocabulary_id,
+         'concept_code': r.concept_code, 'question_concept_id': r.question_concept_id,
+         'rationale': r.rationale, 'vocabulary_release': r.vocabulary_release,
+         'changed_by': r.changed_by_label, 'created_at': r.created_at}
+        for r in mapping.revisions.all()
+    ])
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def field_choice_answer_coverage(request):
+    """GET how many of each field's answers are mapped, apart from its question."""
+    from omop_core.services import field_value_mappings as fvm
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
+    return Response(fvm.coverage(request.query_params.get('field_name') or None))
 
 
 # =============================================================================

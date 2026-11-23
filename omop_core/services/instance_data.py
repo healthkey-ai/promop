@@ -22,6 +22,8 @@ SYSTEM: frozenset[str] = frozenset({
     'oauth2_provider.IDToken', 'oauth2_provider.RefreshToken',
     # Family auth refresh tokens (phr#43): this deployment's sessions.
     'family_auth.RefreshToken',
+    # The audit trail of answer mappings; it belongs to the instance it happened on.
+    'omop_core.FieldValueConceptMappingRevision',
     'patient_portal.AuditEvent', 'patient_portal.BreakGlassGrant',
     'patient_portal.Identity', 'patient_portal.Identity_groups',
     'patient_portal.Identity_user_permissions', 'patient_portal.PasswordHistory',
@@ -133,6 +135,7 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
     'omop_core.DiseaseCategoryMapping',
     'omop_core.FieldChoice', 'omop_core.FieldChoiceAlias',
     'omop_core.FieldChoiceCode', 'omop_core.FieldChoiceDisease',
+    'omop_core.FieldValueConceptMapping',
     'omop_core.FieldConceptMapping', 'omop_core.FieldDiseaseMembership',
     'omop_core.FieldFormula', 'omop_core.FieldSynonym',
     'omop_core.MappingDestinationCandidate',

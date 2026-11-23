@@ -4885,8 +4885,10 @@ class HealthKeyConceptSurvivesReloadTest(TestCase):
         # the loader never issues one anyway — it sets _direct=False precisely
         # because concept is referenced by patient data. The PROTECT is doing
         # its job; it is this simulation that is blunter than production.
-        from omop_core.models import FieldConceptMapping
+        from omop_core.models import FieldConceptMapping, FieldValueConceptMapping
         FieldConceptMapping.objects.all().delete()
+        # Likewise the answer mappings migration 0368 carries over (#1224).
+        FieldValueConceptMapping.objects.all().delete()
         Concept.objects.all().delete()
         self.assertFalse(Concept.objects.filter(concept_id=2_000_000_001).exists())
 
