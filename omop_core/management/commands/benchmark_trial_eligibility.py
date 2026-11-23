@@ -12,9 +12,9 @@ matching cares about most:
     PatientRecord    -> the same row from a flat projection
 
 The command times the two reads and counts populated fields; it does not
-compare values. The raw row follows the derivation's row selection for stage,
-the receptors and the coded labs, and is known to differ from the derived
-record elsewhere (#2708):
+compare values. The raw row follows the derivation's row selection for stage
+and the receptors, and is known to differ from the derived record elsewhere
+(#2708):
 
 - age is the birth-year difference;
 - disease is the newest name-matched condition, not the primary cancer;
@@ -22,8 +22,12 @@ record elsewhere (#2708):
 - lab codes are resolved once per run, numeric labs other than the unit pairs
   are read as stored, and AST, ALT and clearance rows named only by display
   text are not read;
-- a row hidden by a later clear still counts, and stage has no uncoded
-  fallback (FHIR Condition.stage, sample-patient stage);
+- coded labs share the derivation's code precedence but not its row
+  selection: provisional rows count, and a newer row without a number does
+  not hide an older one;
+- a row hidden by a later clear still counts, stage has no uncoded fallback
+  (FHIR Condition.stage, sample-patient stage), and a numeric stage is read as
+  stored, not restored to its source unit first;
 - the record scopes facts to the primary cancer and applies curated and
   pending values, which no raw-table read sees.
 
@@ -171,9 +175,17 @@ def _non_empty(field):
     return Q(**{f'{field}__isnull': False}) & ~Q(**{field: ''})
 
 
+#: The characters ``str.strip()`` removes, spelled out: what PostgreSQL's
+#: ``\s`` matches depends on the database's ctype, and under en_US.utf8 it
+#: leaves NBSP, NEL and U+001C-U+001F (#2720 review). None of these is special
+#: inside a bracket expression. Every ``str.isspace`` character is below U+3001.
+PYTHON_WHITESPACE = ''.join(c for c in map(chr, range(0x3001)) if c.isspace())
+_STRIP_PATTERN = f'^[{PYTHON_WHITESPACE}]+|[{PYTHON_WHITESPACE}]+$'
+
+
 def _python_strip(expression):
-    """``str.strip()`` in SQL: ``TRIM`` alone drops spaces only."""
-    return Func(expression, Value(r'^\s+|\s+$'), Value(''), Value('g'),
+    """``str.strip()`` in SQL, independent of the database locale."""
+    return Func(expression, Value(_STRIP_PATTERN), Value(''), Value('g'),
                 function='REGEXP_REPLACE', output_field=CharField())
 
 

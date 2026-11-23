@@ -12,7 +12,9 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
+from omop_core.management.commands.benchmark_trial_eligibility import (
+    PYTHON_WHITESPACE, _fetch_omop_trial_row,
+)
 from omop_core.models import Organization, PatientRecord
 from omop_core.services.patient_record_service import (
     _get_biomarker_data, _get_laboratory_data, _get_staging_data,
@@ -622,6 +624,15 @@ _STAGE_CASES = {
     'source value is not an answer': ([
         ('m', _ISS, _ISS, '2020-01-01', {'value_source_value': 'Stage IV'}),
     ], None),
+    # Stripped as `str.strip()` strips, whatever the database locale.
+    'NBSP-only string': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': '\xa0'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'boolean padded with NEL': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': 'true\x85'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
     'label is normalised': ([
         ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': ' stage 3a '}),
     ], 'Stage IIIA'),
@@ -690,3 +701,12 @@ def test_her2_agrees_with_the_biomarker_extractor(rows, expected):
 
     assert _get_biomarker_data(person).get('her2_status') == expected
     assert _fetch_omop_trial_row(person.person_id)['her2_status'] == expected
+
+
+def test_the_strip_class_is_every_character_python_strips():
+    """The SQL strip spells out `str.isspace`; a character above the range it
+    scans would be stripped by the extractor and kept by the benchmark."""
+    import sys
+
+    assert PYTHON_WHITESPACE == ''.join(
+        c for c in map(chr, range(sys.maxunicode + 1)) if c.isspace())

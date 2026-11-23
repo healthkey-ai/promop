@@ -250,9 +250,9 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 | `estrogen_receptor_status` | `measurement` | concept code LOINC 16112-5 |
 | `progesterone_receptor_status` | `measurement` | concept code LOINC 16113-3 |
 
-The raw OMOP path is one statement with a correlated subquery per field,
-except `stage`, which takes four (R-ISS and ISS, each in `measurement` then
-`observation`). Lab codes come from the curated field mappings, so a run may
+The raw OMOP path is one statement: `patient_age` and `gender` read the
+`person` row itself, `stage` takes four correlated subqueries (R-ISS and ISS,
+each in `measurement` then `observation`), and every other field takes one. Lab codes come from the curated field mappings, so a run may
 read approved aliases beyond the codes listed. The raw row is not the derived
 record: the command's module docstring lists where the two still differ
 (#2708). The PatientRecord path reads all 20 fields in a single

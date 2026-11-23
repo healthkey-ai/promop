@@ -303,8 +303,8 @@ All notable changes to PRomop are documented here.
   in the same transaction before the groups are written, so the transfer no
   longer depends on row or group order. Only a row that holds a key is
   released, so stamping unkeyed rows writes each row once.
-- **The eligibility benchmark reads stage, the receptors and the coded labs
-  the way their extractors do (#2708)** — the number subqueries matched
+- **The eligibility benchmark reads stage and the receptors the way their
+  extractors do, and the coded labs by their effective code (#2708)** — the number subqueries matched
   `concept_code OR source_value`, so a row whose LOINC concept names a
   different analyte was read through its source value (a creatinine concept
   with an AST source value reported AST); they now use the effective-code
@@ -317,8 +317,9 @@ All notable changes to PRomop are documented here.
   `_first_by_code`: concept code only, the newest real row, its answer concept
   before its string before its source value. The benchmark times the two reads
   and does not compare values; the fields it still reads differently (age,
-  disease, performance scores, display-name labs, cleared history, the stage's
-  uncoded fallbacks, record-level overrides) are listed in the command's
+  disease, performance scores, lab row selection and display-name labs,
+  cleared history, the stage's uncoded fallbacks and source units,
+  record-level overrides) are listed in the command's
   docstring and stay in #2708.
 - **A row-level write cannot take another row's `source_record_key`, and the
   key field no longer trims (#2484)** — `PATCH /api/v1/measurements/<pk>/` and

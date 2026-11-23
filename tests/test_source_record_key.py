@@ -633,16 +633,21 @@ def test_a_bulk_update_may_rotate_keys_inside_one_column_set_group(api, client):
     assert _keys(api.person) == {a: 'k/b', b: 'k/c', c: 'k/a'}
 
 
-def test_a_bulk_update_may_move_a_key_to_an_unkeyed_row(api, client):
+@pytest.mark.parametrize('destination_first', [True, False])
+def test_a_bulk_update_may_move_a_key_to_an_unkeyed_row(api, client, destination_first):
     """The destination holds no key, so only the old holder is released; the
     transfer still lands in either group order (#2720 review)."""
     holder, = api.post([api.row(key='k/a')]).json()['ids']
     unkeyed, = api.post([api.row(key=None)], query='&upsert=false').json()['ids']
-
-    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true', [
+    rows = [
         {'measurement_id': unkeyed, 'source_record_key': 'k/a', 'value_as_number': '37.9'},
         {'measurement_id': holder, 'source_record_key': None},
-    ], format='json')
+    ]
+    if not destination_first:
+        rows.reverse()
+
+    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true',
+                        rows, format='json')
 
     assert resp.status_code == 200, resp.content
     assert _keys(api.person) == {holder: None, unkeyed: 'k/a'}
