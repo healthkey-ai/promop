@@ -1092,6 +1092,53 @@ follow the copied rows. A missing concept becomes 0 where required, else null.
 
 ---
 
+## Wearables — Garmin Connect Sync
+
+`POST /api/v1/patient-records/sync-garmin/` (`{api_key, days?, end_date?,
+person_id?}`, #2794) reads a patient's daily metrics from the Garmin Connect
+Personal API with the patient's own key and writes them as the `.fit` upload
+does. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#garmin-connect-sync).
+Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
+`upload_wearable`: `PatientRecordViewSet._store_wearable_samples`.
+
+- **The key is never kept.** Not in the database, a log line, an error message
+  or a Celery task argument. The sync therefore runs inside the request (90
+  days at most, no call started after 15s), and the token exchange is our own
+  `_exchange_key`: the client's `PersonalApiAuthenticator` writes the bearer
+  token to a plaintext cache file. Storing a key, or syncing on a schedule, is
+  a separate decision; do not add either as a side effect.
+- **Garmin's error text is not relayed** to the patient or the log; failures
+  are fixed wording by status (`GarminSyncError`): 400 a refused key, 429 a
+  rate limit, 424 Garmin unreachable or slow (not a 5xx, which is reported as
+  this deployment's error), 502 an answer the reader cannot parse.
+- **The person, signed in, on their own record.** The action's
+  `IsAuthenticated` replaces the viewset's scope checks, so `sync_garmin`
+  itself requires `is_interactive_session`: a service credential or a
+  delegated OAuth token is a 403. The rows go to the caller's own record, so
+  the tab renders the panel only with `canSyncOwnDevice` (patient mode) and
+  sends the page's `person_id`, which the server refuses unless it is the
+  caller's.
+- **The upload history names the rows.** A `sample_summary` entry carries
+  `row_id` / `row_table` for the row its upload wrote (null when it wrote
+  none; a sync lists only what it wrote). Deleting an upload removes those
+  rows and no others, since syncs overlap. Entries from before #2794 have no
+  `row_id` and are matched by value. The history row is written in the rows'
+  transaction, under a `FOR NO KEY UPDATE` lock on the patient's `person` row.
+- **A day's total replaces, a file stacks.** The derivation sums steps, active
+  minutes and sleep over a day's rows. The sync (`replace_daily=True`) deletes
+  the rows a `garmin` upload's history names for that metric and day (for
+  older history: wearable type concept, a value a `garmin` upload lists and
+  no other device's does) and writes the total. A new daily-total source must
+  use it; the file upload must not.
+- Only metrics with an approved `Garmin` code mapping are read. Floors and
+  weight wait on #444.
+
+Tests: `tests/test_garmin_connect.py` (Garmin's real client over a fake HTTP
+session), `patient_portal.tests.GarminSyncEndpointTest`, `WearableTab.test.tsx`.
+
+---
+
 ## Code Mapping Suggest
 
 Suggest proposes a destination concept for queue rows that have none. Two rules

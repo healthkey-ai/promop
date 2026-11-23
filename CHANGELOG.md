@@ -8,6 +8,24 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: sync from Garmin Connect with the patient's own Personal API
+  key** — the Wearables tab gains "Sync from Garmin Connect": paste a Garmin
+  Connect Personal API key, pick 7, 30 or 90 days, and the daily steps,
+  distance, active minutes, calories, resting heart rate, respiration, SpO2,
+  overnight HRV, sleep and VO2 max are written as the `.fit` upload writes them
+  (`POST /api/v1/patient-records/sync-garmin/`, #2794). The key is used for that
+  one request and stored nowhere. A day's total from the API replaces the rows
+  earlier Garmin uploads wrote for that day, so steps and sleep are not counted
+  twice. The panel shows only to a patient on their own record. Adds
+  `garmin-connect-personal-api-python`.
+
+- **Wearable upload history records the rows each upload wrote** — deleting an
+  upload now removes the rows that upload wrote and no others (a row another
+  upload had already stored used to go too), in one transaction with one
+  re-derivation instead of one per row; history from before is still matched
+  by value. The history row is saved with the rows, so an upload whose history
+  cannot be saved writes nothing (#2794).
+
 - **Patient invitations never accepted are deleted after a retention period**
   — `PATIENT_INVITATION_RETENTION_DAYS` (0, the default, keeps them) and
   `purge_unaccepted_invitations` (run daily; `--days`, `--dry-run`): an

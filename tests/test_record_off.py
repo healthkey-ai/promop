@@ -1,5 +1,7 @@
 """While the permission a record depends on is withdrawn, nothing written on
 the member's behalf is kept (patient_portal.consent.record_permitted)."""
+from unittest import mock
+
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
 
@@ -114,6 +116,10 @@ def test_health_data_synced_or_uploaded_by_the_member_is_refused(off):
     upload = SimpleUploadedFile('export.zip', b'PK\x05\x06' + b'\x00' * 18, content_type='application/zip')
     r = client.post('/api/v1/patient-records/upload-wearable/', {'file': upload, 'device_type': 'apple'})
     assert r.status_code == 403
+    with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples') as fetch:
+        r = client.post('/api/v1/patient-records/sync-garmin/', {'api_key': 'gcpk_TEST-key'}, format='json')
+    assert r.status_code == 403
+    fetch.assert_not_called()
 
 
 def test_giving_the_permission_again_opens_the_record(off):

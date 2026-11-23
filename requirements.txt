@@ -37,6 +37,9 @@ sentry-sdk[django]==2.69.1
 redis==5.2.1
 
 python-fitparse>=2.0.0
+# Garmin's own client for the Garmin Connect Personal API: the Wearables tab's
+# "Sync from Garmin Connect" (omop_core/services/garmin_connect.py, #2794).
+garmin-connect-personal-api-python==1.1.0
 
 # Vector similarity search for code-mapping suggest
 pgvector>=0.3.6
