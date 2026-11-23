@@ -1123,9 +1123,14 @@ Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
   `IsAuthenticated` replaces the viewset's scope checks, so `sync_garmin`
   itself requires `is_interactive_session`: a service credential or a
   delegated OAuth token is a 403. The rows go to the caller's own record, so
-  the tab renders the panel only with `canSyncOwnDevice` (patient mode) and
-  sends the page's `person_id`, which the server refuses unless it is the
-  caller's.
+  the tab renders the panel only with `canSyncOwnDevice` and sends the
+  page's `person_id`, which the server refuses unless it is the caller's.
+  `canSyncOwnDevice` is the page showing the signed-in person's own record:
+  patient mode, or a provider-console page whose person is the one the
+  account's patient link names (`roles.isOwnRecord`, #2816), since an account
+  that is also staff or a professional never gets patient mode. The Garmin
+  account panel below follows the same rule, and the home route takes such an
+  account from `/?garmin=<outcome>` on to its own record.
 - **The upload history names the rows.** A `sample_summary` entry carries
   `row_id` / `row_table` for the row its upload wrote (null when it wrote
   none; a sync lists only what it wrote). Deleting an upload removes those

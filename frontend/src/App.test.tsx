@@ -164,6 +164,41 @@ describe("App role-gated routing", () => {
   });
 });
 
+describe("return from Garmin's consent page (#2816)", () => {
+  const patientLink = { role: "patient", scope: "patient", source: "patient_link", person_id: 44, expires_at: null };
+
+  it("takes an admin who is also a patient on to their own record", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 9, is_staff: true, is_org_admin: true, is_patient: false, person_id: null, effective_roles: [patientLink] },
+    });
+    renderAt("/?garmin=connected");
+    expect(screen.getByText("PATIENT_DETAIL:9")).toBeInTheDocument();
+    expect(screen.queryByText("PROVIDER_LIST")).not.toBeInTheDocument();
+  });
+
+  it("leaves that admin on the patient list without a return from Garmin", () => {
+    mockUseAuth.mockReturnValue({
+      ...baseAuth,
+      currentUser: { id: 9, is_staff: true, is_org_admin: true, is_patient: false, person_id: null, effective_roles: [patientLink] },
+    });
+    renderAt("/");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+
+  it("leaves an admin with no record of their own on the patient list", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 2, is_org_admin: true } });
+    renderAt("/?garmin=connected");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+
+  it("keeps a patient on their home, which is their record", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 1, is_patient: true, person_id: 5 } });
+    renderAt("/?garmin=connected");
+    expect(screen.getByText("PATIENT_HOME")).toBeInTheDocument();
+  });
+});
+
 describe("Org-scoped routes", () => {
   it("renders OrgLogin at /org/:slug/login without auth", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: null });

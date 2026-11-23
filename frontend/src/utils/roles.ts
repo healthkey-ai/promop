@@ -70,3 +70,28 @@ export function canWriteMappings(user: User | null | undefined): boolean {
 export function isAnalystOnly(user: User | null | undefined): boolean {
   return canWriteMappings(user) && !canReadPatients(user) && !user?.is_patient;
 }
+
+/** The record this account holds as a patient, whatever else it is. A
+ *  patient-only account has it as `person_id`. One that is also staff or a
+ *  professional is routed to the provider console and has no `person_id`
+ *  (`patient_person_for`), but its patient link is still listed among its
+ *  roles: an org admin who added themselves as a patient (#2773). */
+export function ownPersonId(user: User | null | undefined): number | null {
+  if (user?.person_id != null) return user.person_id;
+  const link = user?.effective_roles?.find(
+    (r) => r.role === 'patient' && r.source === 'patient_link' && r.person_id != null,
+  );
+  return link?.person_id ?? null;
+}
+
+/** The page shows the signed-in person's own record, in patient mode or in
+ *  the provider console. What a person does only for themselves (syncing
+ *  their own device, #2794, #2802) is offered there and nowhere else; the
+ *  server decides by the same patient link. */
+export function isOwnRecord(
+  user: User | null | undefined,
+  personId: string | number | null | undefined,
+): boolean {
+  const own = ownPersonId(user);
+  return own != null && personId != null && personId !== '' && String(own) === String(personId);
+}

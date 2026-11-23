@@ -35,6 +35,7 @@ import { addedFieldTabs, fieldDiseases, recordDiseaseCategory } from "@/utils/fi
 import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
+import { isOwnRecord } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -1204,7 +1205,7 @@ export default function PatientDetail({
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={patientMode} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={patientMode || isOwnRecord(user, personId)} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
