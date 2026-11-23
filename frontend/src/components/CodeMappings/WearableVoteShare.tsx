@@ -3,7 +3,7 @@ import { Share2 } from "lucide-react";
 import api from "@/api/axios";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
 import type { WearableSourceSystem } from "./codeMappingTypes";
-import WearableSourceSystemSelect from "./WearableSourceSystemSelect";
+import { WearableSourceSystemBoxes } from "./WearableSourceSystemSelect";
 
 interface VoteShare {
   id: number;
@@ -242,12 +242,12 @@ function VoteShareDialog({ onClose, systems }: { onClose: () => void; systems: W
               className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
           </div>
           {systems.length > 0 && (
-            <div>
-              <p className="text-xs font-medium text-slate-700">Source code systems on the page</p>
-              <div className="mt-1">
-                <WearableSourceSystemSelect inline systems={systems} value={sources} onChange={setSources} disabled={busy} />
+            <fieldset>
+              <legend className="text-xs font-medium text-slate-700">Source code systems on the page</legend>
+              <div className="mt-1 flex flex-wrap gap-x-1">
+                <WearableSourceSystemBoxes systems={systems} value={sources} onChange={setSources} disabled={busy} />
               </div>
-            </div>
+            </fieldset>
           )}
           <div className="flex flex-wrap items-end gap-3">
             <div>

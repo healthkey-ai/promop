@@ -2056,7 +2056,8 @@ has its `concept_class_id`. It is a string, `''` for none.
   again for the headers and the open categories only. Collapse all folds all;
   Expand all opens every category, one request each, so it is offered only for
   12 categories or fewer; under the Wearables domain neither button is shown
-  (#2795), its few categories each opening from their own header. Remembered open categories are fetched after the
+  (#2795): its row holds From, To and the files, and each category opens and
+  folds from its own header. Remembered open categories are fetched after the
   headers on load, and no others. Drag-to-reorder works among the open
   categories; a drop on a row of another open category still sets the global
   position. A list too long to group says so and how to narrow it.
@@ -2351,10 +2352,10 @@ algorithmic estimate from another, under different vendor codes.
 
 `GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx` returns
 every mapping on the Wearables tab as one file, built on the server
-(`omop_core/services/wearable_mapping_export.py`). On the Wearables tab, and on the Concept
-to Code direction under the Wearables domain (#2699), the page offers it as
+(`omop_core/services/wearable_mapping_export.py`). On the Wearables tab the page offers it as
 "Download all wearable mappings": CSV or Word document
-(`WearableMappingsDownload.tsx`). The section Download menus are a different
+(`WearableMappingsDownload.tsx`); on the Concept to Code direction under the
+Wearables domain the same file sits in the From/To row (#2699, #2795). The section Download menus are a different
 thing and are unchanged: they write, in the browser, the rows a section has
 loaded.
 
@@ -2388,7 +2389,10 @@ loaded.
   shows a "Source code systems" list beside "Map codes to" on both Wearables
   controls (`WearableSourceSystemSelect.tsx`): a button that opens tick-boxes,
   any number of which can be ticked (#2795), none being every system, the
-  default; the ids are sent in `SOURCE_LABELS` order. The public vote page
+  default; the ids are sent in `SOURCE_LABELS` order. Every box ticked is
+  reported as none (#2799), so "all" never becomes a list that leaves out a
+  system added later, and a CDISC BC tick is dropped when the target hides it.
+  The list closes on Escape, on a click elsewhere and when focus moves on. The public vote page
   has none, since its share already decides (below).
 - **Order.** Category in `WEARABLE_METRIC_CATEGORIES` order, blank last; then
   metric key, blank last; then source (HealthKit, Health Connect, Garmin,
@@ -2488,9 +2492,12 @@ that reason, the read of the page included. A token is checked against
   of a limited link (`source_systems`, labels; empty for every system) as
   "Limited to: ...". A stored system that has since left the tab is dropped
   from the public download; a share left with none answers 400 rather than
-  becoming every system. `votable_mappings`, `votable_rows` and `clean_votes`
+  becoming every system. Under the CDISC Biomedical Concept target the public
+  download leaves the CDISC BC system out of a share that holds it beside
+  others (#2799), as the signed-in control does; a share of CDISC BC alone is
+  still refused. `votable_mappings`, `votable_rows` and `clean_votes`
   take the share as a required argument, so none can default to every system. The Share dialog's "Source code systems" tick-boxes
-  (any number, #2795; none ticked is all systems, the default) sit in the
+  (any number, #2795; none ticked, or every one, is all systems, the default) sit in the
   dialog itself, since a list dropping below a button is cut off by a dialog
   that scrolls, and a listed share says "HealthKit, Garmin only".
   The share's own votes CSV is unaffected. Editing a share's systems is not

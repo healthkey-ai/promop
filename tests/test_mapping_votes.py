@@ -2069,6 +2069,26 @@ def test_the_public_export_of_a_limited_share_honours_the_cdisc_target_and_its_r
     assert refused.status_code == 400 and 'no codes of its own' in refused.json()['detail']
 
 
+def test_the_public_cdisc_export_of_a_share_holding_cdisc_bc_beside_other_systems_leaves_it_out(anonymous):
+    """A share can hold several systems (#2795). CDISC BC among them must not
+    refuse the CDISC target for a visitor who cannot change the systems (#2799)."""
+    concept = loinc('55423-8', 'Number of steps')
+    proposal('STEPS', concept, source_vocabulary_id='Garmin')
+    proposal('HKSTEPS', concept, source_vocabulary_id='Apple')
+    proposal('BC1', concept, source_vocabulary_id='CDISC-BC')
+    share = make_share(sources=['Garmin', 'CDISC-BC'])
+    response = anonymous.post(EXPORT, {'token': share.token, 'destination': 'cdisc-bc'}, format='json')
+    assert response.status_code == 200
+    text = response.content.decode('utf-8-sig')
+    assert 'STEPS' in text
+    # Still the share's systems and no others.
+    assert 'HKSTEPS' not in text
+    # The OMOP target keeps every system the share holds, CDISC BC included.
+    omop = anonymous.post(EXPORT, {'token': share.token}, format='json')
+    assert omop.status_code == 200
+    assert 'BC1' in omop.content.decode('utf-8-sig') and 'STEPS' in omop.content.decode('utf-8-sig')
+
+
 def test_a_share_whose_stored_systems_have_all_left_the_tab_exports_nothing_rather_than_everything(anonymous):
     proposal('STEPS', source_vocabulary_id='Garmin')
     share = make_share()

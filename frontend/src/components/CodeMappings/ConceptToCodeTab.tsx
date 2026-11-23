@@ -488,7 +488,8 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
         }}>
         <option value="category">Category, then priority</option><option value="priority">Priority</option>
       </select>
-      {/* Wearables has a handful of categories, each opened from its own header (#2795). */}
+      {/* Not under Wearables (#2795): its row holds From, To and the files, and
+          each category opens and folds from its own header. */}
       {groups && !wearables && <div role="group" aria-label="Categories" className="flex items-center gap-2">
         <button type="button" className={button} disabled={tooManyToExpand || listCategories.every(name => expanded.has(name))}
           title={tooManyToExpand ? `Expand all is offered for ${EXPAND_ALL_LIMIT} categories or fewer: this list has ${listCategories.length}. Open the categories you need.` : undefined}

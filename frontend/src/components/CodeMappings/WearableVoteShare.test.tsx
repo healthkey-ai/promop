@@ -101,7 +101,7 @@ describe("WearableVoteShare", () => {
     mockPost.mockImplementation(() => Promise.resolve({ data: share(6, { source_vocabularies: ["Apple", "Garmin"] }) }));
     await openDialog(SYSTEMS);
     // The boxes sit in the dialog itself: a list dropping below a button would be cut off by it.
-    const list = () => screen.getByRole("group", { name: "Source code systems" });
+    const list = () => screen.getByRole("group", { name: "Source code systems on the page" });
     const all = () => within(list()).getByLabelText("All source systems");
     expect(within(list()).getAllByRole("checkbox").map((box) => box.closest("label")?.textContent))
       .toEqual(["All source systems", "HealthKit", "Garmin", "OpenWearables"]);
@@ -122,11 +122,18 @@ describe("WearableVoteShare", () => {
     // The choice goes back to every system for the next share.
     await waitFor(() => expect(all()).toBeChecked());
     expect(within(list()).getByLabelText("Garmin")).not.toBeChecked();
+
+    // Every box ticked is every system: nothing is sent, so a system added later is covered (#2799).
+    await userEvent.type(screen.getByLabelText("Title (shown to voters)"), "Each one ticked");
+    for (const label of ["HealthKit", "Garmin", "OpenWearables"]) await userEvent.click(within(list()).getByLabelText(label));
+    expect(all()).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Create link" }));
+    await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(SHARES, { title: "Each one ticked", note: "" }));
   });
 
-  it("offers no system menu when the page has none to offer", async () => {
+  it("offers no system tick-boxes when the page has none to offer", async () => {
     await openDialog();
-    expect(screen.queryByRole("group", { name: "Source code systems" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Source code systems on the page" })).not.toBeInTheDocument();
   });
 
   it("names the systems a listed share is limited to", async () => {

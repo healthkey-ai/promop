@@ -25,6 +25,11 @@ const wordButton = () => within(group()).getByRole("button", { name: WORD });
 beforeEach(() => { mockGet.mockReset(); mockSaveBlob.mockReset(); });
 
 describe("WearableMappingsDownload", () => {
+  it("reads source systems, then target, then the files, under its label", () => {
+    render(<WearableMappingsDownload systems={[{ id: "Apple", label: "HealthKit" }, { id: "Garmin", label: "Garmin" }]} />);
+    expect(group()).toHaveTextContent(/^Download all wearable mappings\s*All source systems\s*OMOP conceptCDISC Biomedical Concept\s*CSV\s*Word document$/);
+  });
+
   it("offers a CSV and a Word document under one label", () => {
     render(<WearableMappingsDownload />);
     expect(group()).toHaveTextContent("Download all wearable mappings");
@@ -112,7 +117,52 @@ describe("WearableMappingsDownload", () => {
       expect(screen.queryByRole("group", { name: "Source code systems" })).not.toBeInTheDocument();
     });
 
-    it("limits the file to the chosen system, for either format and either target", async () => {
+    it("treats every box ticked as all systems (#2799)", async () => {
+      mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
+      render(<WearableMappingsDownload systems={SYSTEMS} />);
+      await tick("HealthKit");
+      expect(systemsButton()).toHaveTextContent("HealthKit");
+      await tick("Garmin");
+      expect(systemsButton()).toHaveTextContent("All source systems");
+      expect(within(list()).getByLabelText("All source systems")).toBeChecked();
+      expect(within(list()).getByLabelText("HealthKit")).not.toBeChecked();
+      await userEvent.click(csvButton());
+      expect(mockGet).toHaveBeenLastCalledWith(URL_PATH, { params: { file_format: "csv" }, responseType: "blob" });
+    });
+
+    it("is a disclosure: the button names the list it opens, and closes it when focus moves on (#2799)", async () => {
+      mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
+      render(<WearableMappingsDownload systems={SYSTEMS} />);
+      expect(systemsButton()).toHaveAttribute("aria-expanded", "false");
+      expect(systemsButton()).not.toHaveAttribute("aria-haspopup");
+      systemsButton().focus();
+      await userEvent.keyboard("{Enter}");
+      expect(systemsButton()).toHaveAttribute("aria-expanded", "true");
+      expect(systemsButton()).toHaveAttribute("aria-controls", list().id);
+      // All, HealthKit, Garmin, and then out of the list.
+      await userEvent.tab();
+      await userEvent.tab();
+      await userEvent.keyboard(" ");
+      await userEvent.tab();
+      expect(list()).toBeInTheDocument();
+      await userEvent.tab();
+      expect(screen.queryByRole("group", { name: "Source code systems" })).not.toBeInTheDocument();
+      expect(systemsButton()).toHaveTextContent("HealthKit");
+      // A download does not bring the list back.
+      await userEvent.click(csvButton());
+      await waitFor(() => expect(mockSaveBlob).toHaveBeenCalledTimes(1));
+      expect(screen.queryByRole("group", { name: "Source code systems" })).not.toBeInTheDocument();
+    });
+
+    it("closes on Escape when the focus is not in the list", async () => {
+      render(<WearableMappingsDownload systems={SYSTEMS} />);
+      await userEvent.click(systemsButton());
+      (document.activeElement as HTMLElement | null)?.blur();
+      await userEvent.keyboard("{Escape}");
+      expect(screen.queryByRole("group", { name: "Source code systems" })).not.toBeInTheDocument();
+    });
+
+    it("limits the file to a single ticked system, for either format and either target", async () => {
       mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
       render(<WearableMappingsDownload systems={SYSTEMS} />);
       await tick("Garmin");
@@ -144,9 +194,24 @@ describe("WearableMappingsDownload", () => {
       });
     });
 
+    it("forgets a CDISC BC tick once the target hides it, whatever else is ticked (#2799)", async () => {
+      const systems = [...SYSTEMS, { id: "HL7-PHR", label: "HL7 PHR" }, { id: "CDISC-BC", label: "CDISC BC" }];
+      render(<WearableMappingsDownload systems={systems} />);
+      await tick("HealthKit");
+      await tick("CDISC BC");
+      expect(systemsButton()).toHaveTextContent("HealthKit, CDISC BC");
+      const target = within(group()).getByLabelText("Map codes to");
+      await userEvent.selectOptions(target, "cdisc-bc");
+      expect(systemsButton()).toHaveTextContent("HealthKit");
+      await userEvent.selectOptions(target, "omop");
+      expect(systemsButton()).toHaveTextContent("HealthKit");
+      await userEvent.click(systemsButton());
+      expect(within(list()).getByLabelText("CDISC BC")).not.toBeChecked();
+    });
+
     it("hands a custom fetch the chosen systems, as the public page's does not use them", async () => {
       const fetchFile = vi.fn().mockResolvedValue({ data: new Blob(["x"]), headers: {} });
-      render(<WearableMappingsDownload systems={SYSTEMS} fetchFile={fetchFile} />);
+      render(<WearableMappingsDownload systems={[...SYSTEMS, { id: "HL7-PHR", label: "HL7 PHR" }]} fetchFile={fetchFile} />);
       await tick("HealthKit");
       await tick("Garmin");
       await userEvent.click(csvButton());
@@ -168,14 +233,23 @@ describe("WearableMappingsDownload", () => {
       }
     });
 
-    it("leaves From out until the systems are known", () => {
+    it("holds From's place, disabled on all systems, until the systems are known (#2799)", () => {
       render(<WearableMappingsDownload layout="from-to" />);
-      expect(group()).toHaveTextContent(/^To/);
+      expect(group()).toHaveTextContent(/^From\s*All source systems\s*To/);
+      expect(within(group()).getByRole("button", { name: "Source code systems: All source systems" })).toBeDisabled();
+    });
+
+    it("lists the systems in plain weight under the From label", async () => {
+      render(<WearableMappingsDownload systems={SYSTEMS} layout="from-to" />);
+      await userEvent.click(within(group()).getByRole("button", { name: /^Source code systems:/ }));
+      expect(screen.getByLabelText("HealthKit").closest("label")).toHaveClass("font-normal");
+      expect(screen.getByLabelText("All source systems").closest("label")).toHaveClass("font-medium");
+      expect(screen.getByText("From").closest("span")).not.toContainElement(screen.getByLabelText("HealthKit"));
     });
 
     it("downloads what From and To say", async () => {
       mockGet.mockResolvedValue({ data: new Blob(["x"]), headers: {} });
-      render(<WearableMappingsDownload systems={SYSTEMS} layout="from-to" />);
+      render(<WearableMappingsDownload systems={[...SYSTEMS, { id: "HL7-PHR", label: "HL7 PHR" }]} layout="from-to" />);
       await userEvent.click(within(group()).getByRole("button", { name: /^Source code systems:/ }));
       await userEvent.click(screen.getByLabelText("HealthKit"));
       await userEvent.click(screen.getByLabelText("Garmin"));
