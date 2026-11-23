@@ -56,6 +56,7 @@ def purpose_payload(state: svc.PurposeState) -> dict:
         'asks_frequency': p.asks_frequency,
         'frequency_options': p.frequency_options if p.asks_frequency else [],
         'stage': p.stage,
+        'requires': p.requires or None,
         'available': state.available,
         'text': _text(state.text),
         'decision': state.decision,

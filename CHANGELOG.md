@@ -16,7 +16,14 @@ All notable changes to PRomop are documented here.
   put there is removed, or the one it replaced restored; an address the record
   already held stays, and so does the person (#2786). Invitations record when
   they were last sent and whether they set the address (migration
-  `patient_portal` 0030); each run writes an audit event.
+  `patient_portal` 0031); each run writes an audit event.
+
+- **A consent purpose that requires another** (`requires`, migration
+  `patient_portal` 0030) — it cannot be granted while the purpose it requires
+  is not, and is withdrawn with it (a `system` event, in the history and the
+  ledger) when that grant ends: withdrawing "My record" switches off the
+  permissions that depend on it. See
+  [Consent v2](docs/consent-v2.md#a-purpose-that-requires-another) (#2782).
 
 - **`INVITE_TTL_DAYS`** — how long a patient invitation link lasts, in days
   (default 7, as before; 1 to 90, anything else stops startup), from the

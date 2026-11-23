@@ -13,7 +13,7 @@ def sent_when_created(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('patient_portal', '0029_identity_suggest_auto_approve'),
+        ('patient_portal', '0030_consent_purpose_requires'),
     ]
 
     operations = [
