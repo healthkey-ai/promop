@@ -3,6 +3,11 @@
 GET record/export/?format=fhir   the member's record as a signed FHIR R4 Bundle
 GET record/export/?format=pdf    the same record as a PDF, one page per section
 
+Both include what the member agreed to (#2784): their permissions and contact
+choices, the documents they accepted and every answer given, dated, so a
+full access request is answered. In the FHIR file these are Consent
+resources, which the staff export (``export-fhir``) does not carry.
+
 Both are resolved through the member's own PatientUser link, like every other
 PHR view, so the member never needs a person id. The FHIR export is the same
 bundle ``/api/v1/patient-records/{person_id}/export-fhir/`` serves, with the
@@ -36,6 +41,8 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 
 from patient_portal.api.fhir.integrity import check_fhir_version, signed_fhir_response
+
+from patient_portal.consent import consent_fhir_resources, consent_history
 
 from .consent import language_of
 from .labs import labs
@@ -134,7 +141,10 @@ class RecordExportView(PhrView):
             return error
 
         if fmt == 'fhir':
-            response = signed_fhir_response(person, filename='my-record.fhir.json')
+            response = signed_fhir_response(
+                person, filename='my-record.fhir.json',
+                add_resources=lambda patient_ref: consent_fhir_resources(person, patient_ref),
+            )
         else:
             response = pdf_response(person, record, language_of(request))
         # The middleware writes one audit row per request; this marks it as an
@@ -222,6 +232,19 @@ LABELS: dict[str, dict[str, str]] = {
         'source': 'Source',
         'source_patient': 'entered by you',
         'source_record': 'from your medical record',
+        'consent': 'Permissions and contact choices',
+        'consent_now': 'Your answers now',
+        'documents': 'Documents you accepted',
+        'consent_history': 'Every answer you have given',
+        'what': 'What',
+        'answer': 'Your answer',
+        'version': 'Version',
+        'document': 'Document',
+        'recorded_by': 'Recorded',
+        'decision': {'granted': 'Yes', 'declined': 'No', 'withdrawn': 'Withdrawn', 'ask_later': 'Ask me later',
+                     'accepted': 'Accepted'},
+        'by': {'member': 'by you', 'staff': 'by staff, as you asked', 'system': 'automatically',
+               'migration': 'carried over'},
     },
 }
 
@@ -480,6 +503,41 @@ def _labs(person, record, labels, styles, diagnosed) -> list:
     return [_table(rows, [130, 60, 85, 75, 140, 40], styles)]
 
 
+def _consent(person, record, labels, styles, diagnosed) -> list:
+    from reportlab.platypus import Paragraph
+
+    history = consent_history(person, include_legacy=True)
+    if not history:
+        return []
+
+    def answer(row):
+        said = labels['decision'].get(row['decision'], row['decision'])
+        return f"{said}, {row['frequency']}" if row['frequency'] else said
+
+    def day(row):
+        return timezone.localtime(row['recorded_at']).date().isoformat()
+
+    out = []
+    now = [r for r in history if r['current'] and r['kind'] in ('consent', 'legacy')]
+    if now:
+        out.append(Paragraph(labels['consent_now'], styles['h2']))
+        rows = [[labels['what'], labels['answer'], labels['version'], labels['date']]]
+        rows += [[r['title'], answer(r), r['version'] or '—', day(r)] for r in now]
+        out.append(_table(rows, [240, 110, 70, 80], styles))
+    documents = [r for r in history if r['current'] and r['kind'] == 'document']
+    if documents:
+        out.append(Paragraph(labels['documents'], styles['h2']))
+        rows = [[labels['document'], labels['version'], labels['date']]]
+        rows += [[r['title'], r['version'], day(r)] for r in documents]
+        out.append(_table(rows, [310, 90, 100], styles))
+    out.append(Paragraph(labels['consent_history'], styles['h2']))
+    rows = [[labels['date'], labels['what'], labels['answer'], labels['version'], labels['recorded_by']]]
+    rows += [[day(r), r['title'], answer(r), r['version'] or '—', labels['by'].get(r['source'], r['source'])]
+             for r in history]
+    out.append(_table(rows, [70, 200, 90, 60, 90], styles))
+    return out
+
+
 SECTIONS = (
     ('about', _about),
     ('diagnoses', _diagnoses),
@@ -488,6 +546,7 @@ SECTIONS = (
     ('medications', _medications),
     ('procedures', _procedures),
     ('labs', _labs),
+    ('consent', _consent),
 )
 
 

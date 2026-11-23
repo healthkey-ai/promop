@@ -129,7 +129,7 @@ def test_pdf_export_carries_each_section_of_the_record():
     assert 'VRd' in text
     assert 'Hemoglobin' in text and '11.5 g/dL' in text
     for heading in ('About me', 'Diagnoses', 'Lines of therapy', 'Check-ins', 'Medications', 'Procedures',
-                    'Lab results'):
+                    'Lab results', 'Permissions and contact choices'):
         assert heading in text
 
 
@@ -139,8 +139,10 @@ def test_pdf_export_has_a_page_per_section_even_when_empty():
     response = signed_in(member()).get(EXPORT + '?format=pdf')
 
     assert response.status_code == 200
-    # A title page, then one page per section.
-    assert len(PdfReader(io.BytesIO(response.content)).pages) == 8
+    from patient_portal.api.phr.export import SECTIONS
+
+    # A title page, then one page per section (the last, permissions, #2784).
+    assert len(PdfReader(io.BytesIO(response.content)).pages) == 1 + len(SECTIONS) == 9
     assert 'Nothing recorded.' in pdf_text(response.content)
 
 
@@ -316,3 +318,92 @@ def test_a_refused_export_is_audited_without_the_marker():
 
     event = AuditEvent.objects.get(path=EXPORT)
     assert event.status_code == 400 and event.detail is None
+
+
+# ---------------------------------------------------------------- permissions (#2784)
+
+
+@pytest.fixture
+def agreed():
+    """A member who answered two permissions (one twice, by way of a withdrawal) and accepted the Terms."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from patient_portal import consent as svc
+    from patient_portal.models import ConsentPurpose, ConsentText, LegalDocument, LegalDocumentVersion
+
+    earlier = timezone.now() - timedelta(days=10)
+    for key, title in (('my_record', 'My record'), ('contact_updates', 'Updates from us')):
+        p = ConsentPurpose.objects.create(key=key, kind='contact_preference' if key == 'contact_updates' else 'permission')
+        ConsentText.objects.create(purpose=p, version='0.4', language='en', title=title, body='...', published_at=earlier)
+    terms = LegalDocument.objects.create(key='terms', name='Terms of Service')
+    LegalDocumentVersion.objects.create(document=terms, version='1.0', language='en', title='Terms of Service',
+                                        body='...', published_at=earlier)
+    record = member()
+    person = record.person
+    svc.record_consent(person, 'my_record', 'granted', version='0.4', recorded_at=earlier, email='ada@example.test')
+    svc.record_consent(person, 'contact_updates', 'granted', version='0.4', recorded_at=earlier, email='ada@example.test')
+    svc.record_consent(person, 'contact_updates', 'withdrawn', version='0.4', email='ada@example.test')
+    svc.accept_document(person, 'terms', version='1.0', email='ada@example.test')
+    return record
+
+
+def test_the_fhir_export_carries_every_answer_as_a_consent(agreed):
+    bundle = json.loads(signed_in(agreed).get(EXPORT + '?format=fhir').content)
+    patient = next(e['resource'] for e in bundle['entry'] if e['resource']['resourceType'] == 'Patient')
+    consents = [e['resource'] for e in bundle['entry'] if e['resource']['resourceType'] == 'Consent']
+
+    by = {(c['policyRule']['coding'][0]['code'], c['status']): c for c in consents}
+    assert set(by) == {('my_record', 'active'), ('contact_updates', 'active'), ('contact_updates', 'inactive'),
+                       ('terms', 'active')}
+    # The withdrawal is the member's position now, a "no" that stands; the grant it replaced is inactive.
+    assert by[('contact_updates', 'active')]['provision']['type'] == 'deny'
+    assert by[('contact_updates', 'inactive')]['provision']['type'] == 'permit'
+    assert by[('my_record', 'active')]['policyRule']['text'] == 'My record (version 0.4): granted'
+    # The wording's version is in the policy, not the coding.
+    assert by[('my_record', 'active')]['policy'] == [{'uri': 'urn:promop:consent-purpose:my_record:0.4'}]
+    assert 'version' not in by[('my_record', 'active')]['policyRule']['coding'][0]
+    assert by[('terms', 'active')]['policyRule']['coding'][0]['system'] == 'urn:promop:legal-document'
+    assert all(c['patient'] == {'reference': f"Patient/{patient['id']}"} for c in consents)
+    assert bundle['total'] == len(bundle['entry'])
+
+
+def test_the_staff_export_does_not_carry_consents(agreed):
+    from omop_core.services.fhir_export import build_fhir_bundle
+
+    bundle = build_fhir_bundle(agreed.person)
+    assert not [e for e in bundle['entry'] if e['resource']['resourceType'] == 'Consent']
+
+
+def test_the_pdf_lists_the_answers_now_the_documents_and_the_history(agreed):
+    text = pdf_text(signed_in(agreed).get(EXPORT + '?format=pdf').content)
+
+    assert 'Permissions and contact choices' in text
+    assert 'Your answers now' in text and 'Documents you accepted' in text and 'Every answer you have given' in text
+    assert 'My record' in text and 'Updates from us' in text and 'Terms of Service' in text
+    assert 'Withdrawn' in text and 'by you' in text
+
+
+def test_the_history_endpoint_keeps_its_shape(agreed):
+    rows = signed_in(agreed).get('/api/v1/phr/consent/history/').json()['history']
+    assert [r['key'] for r in rows][:2] == ['terms', 'contact_updates']
+    assert set(rows[0]) == {'kind', 'key', 'decision', 'version', 'language', 'frequency', 'source', 'recorded_at'}
+
+
+def test_the_export_includes_the_legacy_data_sharing_choice(agreed):
+    """The HealthKit switch still sets PatientConsent: an access request sees it too."""
+    from patient_portal.models import PatientConsent, PatientUser
+
+    client = signed_in(agreed)
+    link = PatientUser.objects.get(person=agreed.person)
+    PatientConsent.objects.create(patient_user=link, consent_type='data_sharing', consent_granted=True)
+
+    bundle = json.loads(client.get(EXPORT + '?format=fhir').content)
+    legacy = [e['resource'] for e in bundle['entry'] if e['resource']['resourceType'] == 'Consent'
+              and e['resource']['policyRule']['coding'][0]['system'] == 'urn:promop:legacy-consent']
+    assert [(c['policyRule']['coding'][0]['code'], c['status'], c['provision']['type']) for c in legacy] == [
+        ('data_sharing', 'active', 'permit')]
+    assert 'Data Sharing' in pdf_text(client.get(EXPORT + '?format=pdf').content)
+    # The history endpoint is consent v2's and keeps its rows.
+    assert 'legacy' not in {r['kind'] for r in client.get('/api/v1/phr/consent/history/').json()['history']}
