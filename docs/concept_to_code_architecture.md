@@ -110,8 +110,8 @@ request each, so it is offered only for a list of twelve categories or fewer
 categories remembered as open are fetched when the page loads, after the
 headers, and no others. Drag-to-reorder needs visible rows, so it works among
 the categories that are open. Under the Wearables domain neither button is
-shown and the folded line ends at "its concepts." (#2795): it has a handful of
-categories, each opened from its own header.
+shown and the folded line ends at "its concepts." (#2795): the row holds From,
+To and the files there, and each category opens and folds from its own header.
 
 Priority remains one list across every category. Typing a number, the arrows
 and a drop onto a row in another category all set the global position, and the

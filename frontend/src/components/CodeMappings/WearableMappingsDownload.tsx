@@ -45,7 +45,7 @@ const SELECT = "rounded-md border border-slate-300 bg-white px-2 py-1 text-xs fo
  * The target menu picks what the codes are mapped to in the file: the OMOP
  * concept, or the CDISC Biomedical Concept linked to it.
  *
- * The source system menu limits the file to the source code systems ticked
+ * The source system list limits the file to the source code systems ticked
  * in it, any number of them; the default is all of them. It is offered when `systems` are given, and not on
  * the public vote page, where the share already decides which systems it holds.
  *
@@ -94,15 +94,23 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
       title="What each wearable code is mapped to in the file"
       value={destination}
       disabled={busy !== null}
-      onChange={(e) => setDestination(e.target.value as Destination)}
+      onChange={(e) => {
+        const next = e.target.value as Destination;
+        setDestination(next);
+        // That target hides the CDISC BC system; its tick goes with it, so it
+        // does not come back, or not, depending on what else was ticked since.
+        if (next === "cdisc-bc") setSources((ticked) => ticked.filter((id) => id !== CDISC_BC));
+      }}
       className={SELECT}
     >
       <option value="omop">OMOP concept</option>
       <option value="cdisc-bc">CDISC Biomedical Concept</option>
     </select>
   );
-  const sourceSystem = <WearableSourceSystemSelect systems={offered} value={chosen} onChange={setSources} disabled={busy !== null} />;
   const fromTo = layout === "from-to";
+  const sourceSystem = (
+    <WearableSourceSystemSelect systems={offered} value={chosen} onChange={setSources} disabled={busy !== null} pending={fromTo} />
+  );
   const files = CHOICES.map(({ format, label, short, name, title }) => (
     <button
       key={format}
@@ -125,9 +133,14 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
     return (
       <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
         <div role="group" aria-label={LABEL} className="flex flex-wrap items-center gap-2">
-          {/* No systems yet (the reference is loading, or failed): the file is every system. */}
-          {offered.length > 0 && <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">From {sourceSystem}</span>}
-          <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">To {target}</span>
+          {/* No systems yet (the reference is loading, or failed): the file is
+              every system, and the control says so in its place. */}
+          <div className="inline-flex items-center gap-1.5">
+            <span className="font-medium text-slate-700">From</span>{sourceSystem}
+          </div>
+          <div className="inline-flex items-center gap-1.5">
+            <span className="font-medium text-slate-700">To</span>{target}
+          </div>
           {files}
         </div>
         {error && <span role="alert" className="text-red-700">{error}</span>}
@@ -142,8 +155,9 @@ export default function WearableMappingsDownload({ fetchFile = fromTheTab, syste
         <span className="inline-flex items-center gap-1 font-medium text-slate-700">
           <Download size={12} aria-hidden="true" /> {LABEL}
         </span>
-        {target}
+        {/* Source, then target, as the Concept to Code row reads. */}
         {sourceSystem}
+        {target}
         {files}
       </div>
     </div>

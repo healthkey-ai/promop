@@ -1323,7 +1323,8 @@ describe('Download and Share on the Concept tab under Wearables', () => {
 
     await chooseDomain('wearables');
     const download = await screen.findByRole('group', { name: 'Download all wearable mappings' });
-    expect(within(download).getAllByRole('button')).toHaveLength(2);
+    // From (waiting for the systems here), CSV and Word.
+    expect(within(download).getAllByRole('button')).toHaveLength(3);
     expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
 
     await chooseDomain('measurement');
@@ -1352,7 +1353,8 @@ describe('Download and Share on the Concept tab under Wearables', () => {
 
   it('reads From the source systems, To the target, CSV and Word, then Share (#2795)', async () => {
     URL.createObjectURL = vi.fn(() => 'blob:x'); URL.revokeObjectURL = vi.fn();
-    wearableSystems = [{ id: 'Apple', label: 'HealthKit' }, { id: 'HealthConnect', label: 'Health Connect' }, { id: 'HL7-PHR', label: 'HL7 PHR' }];
+    wearableSystems = [{ id: 'Apple', label: 'HealthKit' }, { id: 'HealthConnect', label: 'Health Connect' },
+      { id: 'Garmin', label: 'Garmin' }, { id: 'HL7-PHR', label: 'HL7 PHR' }];
     render(<ConceptToCodeTab canWrite canApprove />);
     await chooseDomain('wearables');
     const row = await screen.findByRole('group', { name: 'Wearable mappings' });
