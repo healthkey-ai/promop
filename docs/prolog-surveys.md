@@ -179,6 +179,20 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.8.0 added
+
+One setting, no migration:
+
+- **`PROLOG_STATS_MIN_COUNT`** (RUN-24): the smallest count PROlog's survey
+  report and its admin statistics show. A count from 1 to N−1 reads "fewer
+  than N", and a second count is hidden wherever one could be worked out from
+  a total. Rates and averages over a hidden count are hidden too. 0, the
+  default, shows every count. A deployment whose privacy policy promises no
+  figure for a small group sets it: `PROLOG_STATS_MIN_COUNT=20` in the
+  environment, which `promop/settings.py` reads. A value that isn't a whole
+  number of 0 or more stops startup (PROlog's system check
+  `prolog_surveys.E003` refuses it too).
+
 ### What v0.7.0 added
 
 **Facts about the participant** (PROlog DEF-14, RUN-23), and `prolog_surveys`
