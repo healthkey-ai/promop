@@ -269,6 +269,10 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **PROlog 0.8.0** (from 0.7.0) — `PROLOG_STATS_MIN_COUNT` (RUN-24): small
+  numbers are not shown in PROlog's survey report and admin. No migrations,
+  no dependency changes, no promop code changes. See
+  [PROlog surveys](docs/prolog-surveys.md#what-v080-added).
 - **PROlog 0.7.0** (from 0.6.0) — facts about the participant, supplied by
   the host (DEF-14, RUN-23), and `prolog_surveys` migration `0004` (the
   response's facts). See [PROlog surveys](docs/prolog-surveys.md#what-v070-added).
