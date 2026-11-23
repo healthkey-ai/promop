@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
+import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
@@ -366,6 +367,10 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         className="hidden"
         onChange={handleFileChange}
       />
+
+      {/* A Garmin account linked once, where this deployment has a Garmin app:
+          Garmin then sends the data by itself (#2802). */}
+      {canSyncOwnDevice && <GarminAccountLink disabled={uploading || syncing || deletingId !== null} />}
 
       {/* Garmin Connect: the same rows as a .fit upload, read through Garmin's API */}
       {canSyncOwnDevice && (

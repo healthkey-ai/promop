@@ -393,6 +393,24 @@ describe('WearableTab — Garmin Connect sync', () => {
     fireEvent.change(keyField(), { target: { value } });
   }
 
+  it('offers the Garmin account panel to a patient on their own record, where a Garmin app is set up (#2802)', async () => {
+    const first = renderTab();
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    // A clinician's view of the record never asks for the patient's connection.
+    expect(mockGet.mock.calls.some(([url]) => String(url).includes('/v1/garmin/connection/'))).toBe(false);
+    first.unmount();
+
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: String(url).includes('/v1/garmin/connection/')
+        ? { configured: true, connected: false, connected_at: null, last_push_at: null, permissions: [] }
+        : [],
+    }));
+    renderOwn();
+    expect(await screen.findByRole('button', { name: 'Connect Garmin' })).toBeInTheDocument();
+    // Beside it, not in place of, the sync by Personal API key.
+    expect(screen.getByText('Sync from Garmin Connect')).toBeInTheDocument();
+  });
+
   it('is offered only to a patient on their own record', () => {
     // The server files a sync under whoever is signed in. A clinician on a
     // patient's page, or a read-only embed, must not be asked for a key.

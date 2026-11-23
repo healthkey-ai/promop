@@ -69,6 +69,9 @@ def close_account(person: Person, identity: Identity | None = None, *, actor: Id
     actor_id = _actor_id(actor)
     with transaction.atomic():
         files = _document_files(person)
+        # A linked Garmin account keeps sending until Garmin is told; the
+        # token that can tell it is deleted with the person (#2802).
+        _forget_garmin(person)
         # Survey responses PROTECT the person and EpisodeEvent has a bare
         # integer key, so both go first; then the person's cascade does the rest.
         with suppress_patient_record_refresh():
@@ -90,6 +93,7 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
     """
     with transaction.atomic():
         files = _document_files(person)
+        _forget_garmin(person)
         # One derivation at the end, not one per deleted row (AGENTS.md, Bulk OMOP Row Deletes).
         with suppress_patient_record_refresh():
             old = PatientRecord.objects.filter(person=person).first()
@@ -109,6 +113,12 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
         _remove_files_on_commit(files, person.person_id)
         _log('record', person.person_id, _actor_id(actor), purpose=purpose)
     return record
+
+
+def _forget_garmin(person: Person) -> None:
+    from omop_core.services import garmin_oauth
+
+    garmin_oauth.forget(person)
 
 
 def _scrub_person(person: Person) -> None:

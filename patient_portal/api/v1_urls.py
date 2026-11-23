@@ -1,5 +1,5 @@
 from .canonical_units import canonical_unit
-from django.urls import include, path
+from django.urls import include, path, re_path
 from .co_occurring import code_mapping_co_occurring
 from .loinc_axes import (
     code_mapping_axis_variant, code_mapping_axis_variant_suggest, code_mapping_loinc_axes,
@@ -7,6 +7,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
+from . import garmin_oauth
 from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
@@ -242,6 +243,14 @@ urlpatterns = [
          name='v1-mapping-vote-share-votes-export'),
     path('code-mappings/<int:mapping_id>/votes/', mapping_votes.code_mapping_votes,
          name='v1-code-mapping-votes'),
+    # A Garmin account linked by OAuth, and Garmin's push (#2802).
+    path('garmin/connection/', garmin_oauth.connection, name='v1-garmin-connection'),
+    path('garmin/oauth/start/', garmin_oauth.oauth_start, name='v1-garmin-oauth-start'),
+    # With or without the final slash: these two are called by Garmin with
+    # exactly the URL registered there, and the site's catch-all would answer
+    # the other spelling with the app's page.
+    re_path(r'^garmin/oauth/callback/?$', garmin_oauth.oauth_callback, name='v1-garmin-oauth-callback'),
+    re_path(r'^garmin/webhooks/(?P<secret>[^/]+)/?$', garmin_oauth.webhook, name='v1-garmin-webhook'),
     path('public/mapping-votes/', mapping_votes.PublicVotePageView.as_view(),
          name='v1-public-mapping-vote-page'),
     path('public/mapping-votes/export/', mapping_votes.PublicVoteExportView.as_view(),

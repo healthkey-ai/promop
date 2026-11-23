@@ -325,6 +325,7 @@ def test_every_table_a_withdrawal_reaches_is_a_decision():
     assert erased == {
         'omop_core.ConditionEra', 'omop_core.ConditionOccurrence', 'omop_core.Death', 'omop_core.DoseEra',
         'omop_core.DrugEra', 'omop_core.DrugExposure', 'omop_core.FhirConnection', 'omop_core.FhirOauthState',
+        'omop_core.GarminConnection',
         'omop_core.ImageOccurrence', 'omop_core.Measurement', 'omop_core.Note', 'omop_core.Observation',
         'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
         'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional', 'omop_core.PatientSourceCode',

@@ -8,7 +8,7 @@ from typing import Callable
 import sentry_sdk
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from promop.sentry import redact_path
+from promop.sentry import redact_path, redact_secret_segments
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
@@ -214,7 +214,9 @@ class AuditLogMiddleware:
             entry = {
                 'event': _classify_event_type(request),
                 'method': request.method,
-                'path': request.path,
+                # Never the webhook's secret segment: this row is kept for years
+                # and read by staff and service tokens.
+                'path': redact_secret_segments(request.path),
                 'status_code': response.status_code,
                 'client_id': _get_client_id(request),
                 'user_id': str(user.pk) if authed else None,
