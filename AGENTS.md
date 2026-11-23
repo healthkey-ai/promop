@@ -2173,8 +2173,9 @@ through `GroupAccess`.
 
 Writes are grouped by patched column set, one `bulk_update` per distinct shape.
 Before the groups run, one `UPDATE ... SET source_record_key = NULL` releases the
-keys the batch itself changes (a payload whose `source_record_key` differs from
-the stored one), inside the same transaction and after the rows are locked and
+keys the batch itself changes (a row that holds a key and whose payload's
+`source_record_key` differs from it; a first stamp has nothing to release),
+inside the same transaction and after the rows are locked and
 validated. A key transfer between two rows of one batch is therefore allowed and
 does not depend on group order; if any group fails, the rollback restores every
 key.

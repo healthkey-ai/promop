@@ -9472,7 +9472,11 @@ class _OmopBulkUpdateMixin:
             if not attrs:
                 continue
             instance = by_id[row_id]
+            # Only a row that holds a key has one to release: a first stamp
+            # (NULL to key) would otherwise get a NULL-to-NULL write before its
+            # real one (#2720 review).
             if ('source_record_key' in attrs
+                    and instance.source_record_key is not None
                     and attrs['source_record_key'] != instance.source_record_key):
                 releasing_keys.append(row_id)
             for name, value in attrs.items():
