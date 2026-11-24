@@ -6,7 +6,9 @@ import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, useWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
+import {
+  addedMark, addedMarks, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks,
+} from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
@@ -141,6 +143,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
         // Only the keys still being edited go back over the server's object.
         rebased[field] = mergeAddedFields(
           initialInfo[field], pickAddedFields(pending[field], dirtyAddedFieldsRef.current));
+        kept.push(...addedMarks(dirtyAddedFieldsRef.current));
         continue;
       }
       // A touched proposal is kept even on the proposed value: that is confirming it.
@@ -264,7 +267,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
 
       const result = await patchMutation.mutateAsync(payload);
       // The fields the save wrote, not the request body: rejected_proposals is no field.
-      serverInfoRef.current = withoutMarks(serverInfoRef.current, Object.keys(patchFields));
+      serverInfoRef.current = withoutMarks(
+        serverInfoRef.current, [...Object.keys(patchFields), ...addedMarks(Object.keys(addedSent))]);
       for (const f of Object.keys(patchFields)) {
         if (f === ADDED_FIELDS) {
           const now = pickAddedFields(pendingDataRef.current?.[f], Object.keys(addedSent));
@@ -300,13 +304,15 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     }, 2000);
   }, [doSave]);
 
-  const handleFieldChange = useCallback((field: string, value: unknown) => {
+  const handleFieldChange = useCallback((field: string, value: unknown, alsoApproved: string[] = []) => {
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
     // Touching a proposed field makes it the user's answer: its indicator goes and
     // it is sent as an edit even if they land on the proposed value (#2659).
+    // `alsoApproved` names marks the edit settles beyond the field: an added field's
+    // value is a key of custom_fields, marked `custom_fields.<name>` (#2857).
     const proposed = field in marksOf(serverInfoRef.current);
-    const updated = withoutMarks({ ...base, [field]: value }, [field]);
+    const updated = withoutMarks({ ...base, [field]: value }, [field, ...alsoApproved]);
     if (value === serverInfoRef.current[field] && !proposed) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
@@ -330,7 +336,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
     dirtyAddedFieldsRef.current.add(fieldName);
-    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }));
+    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }),
+      [addedMark(fieldName)]);
   }, [handleFieldChange, readOnly]);
 
   const handleNameChange = useCallback((name: string) => {

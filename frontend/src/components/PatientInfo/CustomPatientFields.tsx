@@ -3,6 +3,7 @@ import Field from "./Field";
 import type { CustomPatientField } from "@/hooks/useCustomPatientFields";
 import type { FieldDescriptors } from "@/hooks/useWritableFields";
 import { fieldDiseases } from "@/utils/fieldScope";
+import { addedMark } from "./provisional";
 
 /**
  * What an input hands back, as the field's type stores it. A number box
@@ -67,6 +68,7 @@ export function CustomPatientFields({ fields, tabs, diseases, formData, descript
               <Field
                 label={field.unit ? `${field.display_name} (${field.unit})` : field.display_name}
                 name={field.field_name}
+                markName={addedMark(field.field_name)}
                 type={field.field_type}
                 value={values[field.field_name] ?? (field.field_type === "boolean" ? null : "")}
                 onChange={(name, value) => onChange?.(name, entered(field, value))}

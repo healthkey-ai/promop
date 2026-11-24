@@ -191,3 +191,11 @@ PROVISIONAL_JSON_FIELDS = (
     'disease_slugs', 'active_malignancies', 'prior_procedures', 'genetic_mutations',
     *_genomic_patient_fields(),
 )
+
+# The JSON *objects* that carry a provisional confidence: one key per member, and
+# the confidence column is itself JSON, ``{key: percent}`` for the keys that are
+# proposals. ``custom_fields`` holds one value per created field
+# (``CustomPatientField``), which has no column of its own to hang a confidence
+# on. Unlike the lists above, each key is a scalar: a proposal fills a key the
+# approved record leaves empty and is read, marked and approved key by key.
+PROVISIONAL_OBJECT_FIELDS = ('custom_fields',)

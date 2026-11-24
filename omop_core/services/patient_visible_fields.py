@@ -113,12 +113,18 @@ _FUNCTION_NAME = re.compile(r'(?:export default )?function (\w+)')
 
 
 def scalar_confidence_columns() -> frozenset[str]:
-    """The scalar fields that can carry a proposal (a list field never blocks)."""
-    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
+    """The scalar fields that can carry a proposal (a list field never blocks).
+
+    ``custom_fields`` is not one: it is an object of created fields, which are
+    runtime data, so the tabs cannot name them in a file. They are judged by their
+    definitions instead (``provisional_record.custom_attestation_blockers``).
+    """
+    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS
     from omop_core.models import PatientRecordConfidence
     return frozenset(
         field.name for field in PatientRecordConfidence._meta.concrete_fields
         if field.name != 'person' and field.name not in PROVISIONAL_JSON_FIELDS
+        and field.name not in PROVISIONAL_OBJECT_FIELDS
     )
 
 
@@ -183,9 +189,17 @@ def scan_disease(root: pathlib.Path = ROOT) -> dict[str, list[str]]:
     }
 
 
+def placeable_custom_field_tabs() -> list[str]:
+    """The tabs a created field can be placed on and a patient page renders: every
+    field tab but the unplaced one (#2857)."""
+    from omop_core.models import FIELD_TAB_CHOICES, UNPLACED_TAB
+    return [code for code, _label in FIELD_TAB_CHOICES if code != UNPLACED_TAB]
+
+
 def render(names: list[str], disease: dict[str, list[str]]) -> str:
     return json.dumps({
         'columns': sorted(scalar_confidence_columns()),
+        'custom_field_tabs': placeable_custom_field_tabs(),
         'not_for_patients': list(NOT_FOR_PATIENTS),
         'not_editable': list(NOT_EDITABLE),
         'fields': names,
@@ -199,6 +213,11 @@ def render(names: list[str], disease: dict[str, list[str]]) -> str:
 @functools.lru_cache(maxsize=1)
 def _stored() -> dict:
     return json.loads((ROOT / LIST_FILE).read_text())
+
+
+def custom_field_tabs() -> frozenset[str]:
+    """The tabs whose created fields a patient sees (the stored list, as the page reads it)."""
+    return frozenset(_stored()['custom_field_tabs'])
 
 
 def names() -> frozenset[str]:

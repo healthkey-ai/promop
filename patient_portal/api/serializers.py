@@ -391,7 +391,7 @@ class PatientListSerializer(serializers.ModelSerializer):
         from omop_core.services.provisional_record import overlay
         # The list rows show scalars only: the list summaries (genomics, data gaps)
         # read the approved lists, and the proposed items are the record read's.
-        instance, marks = overlay(instance, lists=False)
+        instance, marks = overlay(instance, lists=False, custom=False)
         data = super().to_representation(instance)
         if marks:
             data['provisional_fields'] = marks

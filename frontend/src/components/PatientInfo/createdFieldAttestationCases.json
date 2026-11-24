@@ -1,0 +1,20 @@
+{
+  "_comment": "One list of cases for whether a marked created field blocks 'Confirm my record' (#2857). tests/test_provisional_custom_fields.py runs each against the server rule (custom_field_values.shown_to_patient) and provisional.test.ts against the page's rule (attestationBlockers), so the two cannot drift apart. disease is the record's disease text; category is the Disease Category the page resolves for it; diseases is the field's scope.",
+  "cases": [
+    { "name": "a base field on the General tab blocks", "tab": "general", "diseases": [], "disease": "Multiple myeloma", "category": "MM", "blocks": true },
+    { "name": "it blocks for a record with no disease too", "tab": "general", "diseases": [], "disease": "", "category": "", "blocks": true },
+    { "name": "a field on the Labs tab blocks", "tab": "labs", "diseases": [], "disease": "", "category": "", "blocks": true },
+    { "name": "a field placed on the Blood tab shows on Labs and blocks", "tab": "blood", "diseases": [], "disease": "", "category": "", "blocks": true },
+    { "name": "a field on the behavior tab blocks", "tab": "behavior", "diseases": [], "disease": "", "category": "", "blocks": true },
+    { "name": "a field placed on no tab never blocks", "tab": "omop", "diseases": [], "disease": "", "category": "", "blocks": false },
+    { "name": "a computed field never blocks", "tab": "general", "mode": "computed", "diseases": [], "disease": "", "category": "", "blocks": false },
+    { "name": "a field with no approved mapping never blocks", "tab": "general", "approved": false, "diseases": [], "disease": "", "category": "", "blocks": false },
+    { "name": "a field of the record's own disease blocks", "tab": "general", "diseases": ["MM"], "disease": "Multiple myeloma", "category": "MM", "blocks": true },
+    { "name": "a field of another disease never blocks", "tab": "general", "diseases": ["BC"], "disease": "Multiple myeloma", "category": "MM", "blocks": false },
+    { "name": "a disease-scoped field never blocks the base record", "tab": "general", "diseases": ["MM"], "disease": "", "category": "", "blocks": false },
+    { "name": "a base field on the disease tab blocks when the record has a disease tab", "tab": "disease", "diseases": [], "disease": "Multiple myeloma", "category": "MM", "blocks": true },
+    { "name": "a disease-tab field of the record's disease blocks", "tab": "disease", "diseases": ["MM"], "disease": "Multiple myeloma", "category": "MM", "blocks": true },
+    { "name": "a disease-tab field never blocks a record with no disease tab", "tab": "disease", "diseases": [], "disease": "", "category": "", "blocks": false },
+    { "name": "a disease-tab field of another disease never blocks", "tab": "disease", "diseases": ["BC"], "disease": "Multiple myeloma", "category": "MM", "blocks": false }
+  ]
+}

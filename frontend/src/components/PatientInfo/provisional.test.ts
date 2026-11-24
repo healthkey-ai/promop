@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks } from './provisional';
+import {
+  addedMark, addedMarks, attestationBlockers, createdFieldShown, diseaseTypeOf, diseaseTypeOfCategory, marksOf,
+  rejectedProposals, withoutMarks,
+} from './provisional';
+import createdFieldCases from './createdFieldAttestationCases.json';
+import patientVisibleFields from './patientVisibleFields.json';
 
 describe('rejectedProposals', () => {
   const proposed = { hemoglobin_g_dl: 82, smoking_status: 70 };
@@ -180,5 +185,61 @@ describe('diseaseTypeOfCategory', () => {
     ['DLBCL', 'other'], ['', 'other'],
   ])('reads %j as %s', (code, expected) => {
     expect(diseaseTypeOfCategory(code)).toBe(expected);
+  });
+});
+
+describe('created fields in the marks (#2857)', () => {
+  const field = (name: string, extra: Record<string, unknown> = {}) => ({
+    field_name: name, tab: 'general', mode: 'editable', diseases: [] as string[], ...extra,
+  });
+
+  it('names a created field by the key it lives under, as a pending edit of it is', () => {
+    expect(addedMark('frailty_index')).toBe('custom_fields.frailty_index');
+    expect(addedMarks(['a', 'b'])).toEqual(['custom_fields.a', 'custom_fields.b']);
+  });
+
+  it('drops the mark of an edited created field and leaves its neighbour', () => {
+    const info = { provisional_fields: { 'custom_fields.a': 80, 'custom_fields.b': 70 } };
+    expect(withoutMarks(info, addedMarks(['a'])).provisional_fields).toEqual({ 'custom_fields.b': 70 });
+  });
+
+  it('blocks on a marked, placed, editable created field the page loaded', () => {
+    const info = { provisional_fields: { 'custom_fields.frailty_note': 82 } };
+    const fields = [field('frailty_note')];
+    expect(attestationBlockers(info, { frailty_note: { writable: true } }, '', fields)).toEqual(['custom_fields.frailty_note']);
+    // Counted with the column marks, in one sorted list.
+    expect(attestationBlockers({ provisional_fields: { 'custom_fields.frailty_note': 82, esr: 70 } },
+      { frailty_note: { writable: true } }, '', fields)).toEqual(['custom_fields.frailty_note', 'esr']);
+  });
+
+  it('counts none of them until the definitions have loaded, and none for an undefined name', () => {
+    const info = { provisional_fields: { 'custom_fields.frailty_note': 82, 'custom_fields.gone': 70 } };
+    expect(attestationBlockers(info, null, '', [])).toEqual([]);
+    expect(attestationBlockers(info, null, '', [field('frailty_note')])).toEqual(['custom_fields.frailty_note']);
+  });
+
+  it('does not block on a field the write descriptor says the patient cannot write', () => {
+    const info = { provisional_fields: { 'custom_fields.frailty_note': 82 } };
+    expect(attestationBlockers(info, { frailty_note: { writable: false } }, '', [field('frailty_note')])).toEqual([]);
+  });
+
+  it('lists the same tabs the server reads from the generated file', () => {
+    expect(patientVisibleFields.custom_field_tabs).toEqual(
+      ['general', 'disease', 'treatment', 'blood', 'labs', 'genomics', 'behavior', 'wearable']);
+    expect(createdFieldShown(field('x', { tab: 'omop' }), '', [])).toBe(false);
+  });
+
+  // The server runs these very cases against `custom_field_values.shown_to_patient`
+  // (tests/test_provisional_custom_fields.py), so the rule cannot differ between the two.
+  describe.each(createdFieldCases.cases)('$name', (c) => {
+    it('agrees with the server rule', () => {
+      const definition = field('frailty_note', { tab: c.tab, mode: c.mode ?? 'editable', diseases: c.diseases });
+      const approved = c.approved !== false && (c.mode ?? 'editable') === 'editable';
+      const info = { disease: c.disease, provisional_fields: { 'custom_fields.frailty_note': 82 } };
+
+      const blockers = attestationBlockers(info, { frailty_note: { writable: approved } }, c.category, [definition]);
+
+      expect(blockers).toEqual(c.blocks ? ['custom_fields.frailty_note'] : []);
+    });
   });
 });

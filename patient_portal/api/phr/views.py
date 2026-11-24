@@ -333,7 +333,10 @@ def _primary_fields(stage_field, risk) -> tuple[str, ...]:
     """The record fields the primary cancer entry is built from."""
     return ('disease', 'histologic_type', stage_field, *([risk[0]] if risk else []),
             'metastasis_status', 'bone_only_metastasis_status', 'metastatic_status',
-            *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status')
+            *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status',
+            # The created field the spread is read from: a proposal is marked by its
+            # name in the object (#2857), as a pending edit of it is named.
+            'custom_fields.hematologic_spread')
 
 
 def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, Any] | None:

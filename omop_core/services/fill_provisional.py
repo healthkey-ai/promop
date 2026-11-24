@@ -413,7 +413,10 @@ def rederive(person):
     if marks is not None:
         for name in confidence_field_names():
             value = getattr(marks, name, None)
-            if value is not None and name not in NEVER_OVERLAID:
+            if isinstance(value, dict):
+                # An object field (created fields): one entry per key, as the record read names them.
+                fields.update({f'{name}.{key}': percent for key, percent in value.items()})
+            elif value is not None and name not in NEVER_OVERLAID:
                 fields[name] = value
     return {'provisional_fields': fields, 'changed': changed,
             'provisional': PatientRecordProvisional.objects.filter(person=person).first()}
