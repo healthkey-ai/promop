@@ -6838,18 +6838,23 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     @action(detail=True, methods=['get'], url_path='source-code-rows',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def source_code_rows(self, request: Request, pk: str | None = None) -> Response:
-        """GET .../source-code-rows/?table=&code=&vocabulary=[&cursor=&limit=]
+        """GET .../source-code-rows/?table=&code=[&vocabulary=][&cursor=&limit=]
 
-        The readings stored for one wearable code of this patient's inventory,
-        newest first, a page at a time (#2863): what the Source Codes tab opens
-        under a device code. Admin only, as the Source Codes list is.
+        The rows stored for one source code of this patient, newest first, a
+        page at a time (#2863): what the Source Codes tab opens under any code
+        of its list. Admin only, as the Source Codes list is, and nothing is
+        read until a code is opened.
 
-        Scoped as ``wearable_rows.describe`` counts them: the importer's rows
-        (type concept 32865) filed under the code, so a hospital's code of the
-        same spelling is never shown as a device's, and entered-in-error rows
-        stay out. A code the patient does not hold under that device
-        vocabulary and table is a 404, so the endpoint is not a way to read
-        rows by arbitrary source value.
+        ``table`` is the clinical table the list files the code under
+        (``measurement``, ``observation``, ``condition``, ``drug_exposure``,
+        ``procedure``). Only a measurement and an observation have a number and
+        a unit; a drug and a procedure show their quantity, a condition no
+        value. Scoping is ``omop_row_pages.code_rows``: the code as a row holds
+        it, a device's code only its wearable rows, a hospital's code never a
+        device holder's wearable rows. A device code the patient's inventory
+        does not hold is a 404, so the endpoint is not a way to read rows of a
+        device by arbitrary source value. Entered-in-error rows are listed and
+        flagged.
         """
         person, _patient_info, err = self._resolve_patient_with_auth(request, pk)
         if err:
@@ -6858,37 +6863,23 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             return Response({'detail': 'Only administrators can view source codes.'},
                             status=status.HTTP_403_FORBIDDEN)
 
-        from omop_core.models import PatientSourceCode
-        from omop_core.services import wearable_rows as device_rows
-        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
-
         table = request.query_params.get('table', '')
         code = request.query_params.get('code', '')
         vocabulary = request.query_params.get('vocabulary', '')
-        spec = omop_row_pages.SPECS.get(f'{table}s')
-        if spec is None:
-            return Response({'table': 'table must be measurement or observation.'},
-                            status=status.HTTP_400_BAD_REQUEST)
-        if vocabulary not in device_rows.DEVICE_VOCABULARIES:
-            return Response({'vocabulary': 'vocabulary must be a wearable device vocabulary.'},
-                            status=status.HTTP_400_BAD_REQUEST)
+        if table not in omop_row_pages.CODE_SPECS:
+            return Response(
+                {'table': 'table must be one of ' + ', '.join(omop_row_pages.CODE_SPECS) + '.'},
+                status=status.HTTP_400_BAD_REQUEST)
         if not code:
             return Response({'code': 'code is required.'}, status=status.HTTP_400_BAD_REQUEST)
         cursor, limit, err = self._row_page_params(request)
         if err:
             return err
 
-        if not PatientSourceCode.objects.filter(
-                person=person, source_vocabulary_id=vocabulary, omop_table=table,
-                source_value=code).exists():
+        qs = omop_row_pages.code_rows(person, table, code, vocabulary)
+        if qs is None:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
-
-        model, _pk, _concept, type_col, source_col, _date = device_rows.TABLES[table]
-        width = model._meta.get_field(source_col).max_length or 50
-        qs = model.objects.filter(
-            person=person, is_erroneous=False,
-            **{source_col: code[:width], type_col: WEARABLE_TYPE_CONCEPT_ID})
-        return Response(omop_row_pages.read_page(qs, spec, cursor, limit))
+        return Response(omop_row_pages.read_page(qs, omop_row_pages.CODE_SPECS[table], cursor, limit))
 
     def _patch_source_code(self, request: Request, person: Person) -> Response:
         """Correct displayed source context without rewriting ETL evidence."""

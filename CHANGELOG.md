@@ -23,8 +23,10 @@ All notable changes to PRomop are documented here.
   value, and a purple watch on a group of a wearable's rows. Opening a concept
   reads its rows, newest first, a page at a time
   (`GET /api/v1/patient-records/<id>/omop-rows/`); every table section folds.
-  On the Source Codes tab an arrow under each wearable code opens the
-  readings stored for it (`GET /api/v1/patient-records/<id>/source-code-rows/`).
+  On the Source Codes tab an arrow under **every** source code (wearable or
+  not, in the Wearables, Unmapped, Proposed and Approved sections; measurement,
+  observation, condition, drug and procedure codes) opens the rows stored for
+  it, closed until asked (`GET /api/v1/patient-records/<id>/source-code-rows/`).
   Wearable rows store only a date, and are shown as such (#2863). See
   [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#reading-the-rows-back).
 >>>>>>> f77fd29c (OMOP tab: group measurements and observations by concept; Source Codes: open a wearable code to its readings (#2863))

@@ -15,7 +15,7 @@ from django.test.utils import CaptureQueriesContext, override_settings
 from rest_framework.test import APIClient
 
 from omop_core.models import (
-    ConditionOccurrence, GroupAccess, Measurement, Observation,
+    ConditionOccurrence, DrugExposure, GroupAccess, Measurement, Observation, ProcedureOccurrence,
     PatientSourceCode,
 )
 from omop_core.services import omop_row_pages
@@ -530,25 +530,20 @@ def test_a_wearable_code_lists_its_readings_newest_first_with_their_status(world
     assert resp.data['next_cursor'] is None
 
 
-def test_a_hospitals_code_of_the_same_spelling_is_not_shown_as_the_devices(world):
+def test_a_devices_code_lists_only_the_importers_rows_under_exactly_that_code(world):
     w = world
-    PatientSourceCode.objects.create(
-        person=w['person'], source_value='spo2', source_vocabulary_id='Garmin',
-        omop_table='measurement', occurrence_count=1)
-    PatientSourceCode.objects.create(
-        person=w['person'], source_value='spo2', source_vocabulary_id='HT-Epic',
-        omop_table='measurement', occurrence_count=1)
+    hold(w, 'spo2', 'Garmin', 'measurement')
+    hold(w, 'spo2', 'HT-Epic', 'measurement')
     mine = measurement(w, 0, date(2024, 1, 2), source='spo2', value=97, type_id=WEARABLE_TYPE_CONCEPT_ID)
     measurement(w, 0, date(2024, 1, 3), source='spo2', value=88)                       # a hospital's
-    measurement(w, 0, date(2024, 1, 4), source='spo2', value=99, type_id=WEARABLE_TYPE_CONCEPT_ID,
-                erroneous=True)
+    flagged = measurement(w, 0, date(2024, 1, 4), source='spo2', value=99, type_id=WEARABLE_TYPE_CONCEPT_ID,
+                          erroneous=True)
     measurement(w, 0, date(2024, 1, 5), source='SPO2', value=96, type_id=WEARABLE_TYPE_CONCEPT_ID)
 
     resp = code_rows(w, table='measurement', code='spo2')
 
-    assert [r['id'] for r in resp.data['rows']] == [mine.pk]
-    # And not under the hospital's vocabulary, which is no device's.
-    assert code_rows(w, table='measurement', code='spo2', vocabulary='HT-Epic').status_code == 400
+    # Entered in error is shown, marked, not hidden.
+    assert [(r['id'], r['is_erroneous']) for r in resp.data['rows']] == [(flagged.pk, True), (mine.pk, False)]
 
 
 def test_a_code_the_patient_does_not_hold_is_a_404(world):
@@ -603,11 +598,167 @@ def test_a_code_cut_to_the_column_width_matches_its_rows(world):
 
 
 @pytest.mark.parametrize('params', [
-    {'table': 'conditions'}, {'table': ''}, {'vocabulary': ''}, {'vocabulary': 'HT-Epic'},
-    {'code': ''}, {'limit': 0}, {'cursor': 'junk'},
+    {'table': 'conditions'}, {'table': ''}, {'code': ''}, {'limit': 0}, {'cursor': 'junk'},
 ])
 def test_a_bad_code_request_is_a_400(held_wearable_code, params):
     assert code_rows(held_wearable_code, **params).status_code == 400
+
+
+# ── Any source code's rows ───────────────────────────────────────────────────────────
+
+
+def condition(w, day, *, when=None, source='C50.9', confidence=None, erroneous=False, concept=0, person=None):
+    return ConditionOccurrence.objects.create(
+        condition_occurrence_id=next(_ids), person=person or w['person'], condition_concept_id=concept,
+        condition_type_concept_id=HOSPITAL_TYPE_ID, condition_start_date=day,
+        condition_start_datetime=when, condition_source_value=source, confidence=confidence,
+        is_erroneous=erroneous)
+
+
+def drug(w, day, *, source='RX-1', quantity=None, unit=None, person=None):
+    return DrugExposure.objects.create(
+        drug_exposure_id=next(_ids), person=person or w['person'], drug_concept_id=0,
+        drug_type_concept_id=HOSPITAL_TYPE_ID, drug_exposure_start_date=day,
+        drug_exposure_end_date=day, drug_source_value=source, quantity=quantity,
+        dose_unit_source_value=unit)
+
+
+def procedure(w, day, *, source='PX-1', quantity=None, person=None):
+    return ProcedureOccurrence.objects.create(
+        procedure_occurrence_id=next(_ids), person=person or w['person'], procedure_concept_id=0,
+        procedure_type_concept_id=HOSPITAL_TYPE_ID, procedure_date=day, procedure_source_value=source,
+        quantity=quantity)
+
+
+def any_code_rows(w, table_key, code, vocabulary='', who=None, **params):
+    return client_as(who or w['staff']).get(
+        omop_url(w, 'source-code-rows'),
+        {'table': table_key, 'code': code, 'vocabulary': vocabulary, **params})
+
+
+def test_a_hospital_measurement_code_lists_its_rows_with_value_unit_and_status(world):
+    w = world
+    glucose = w['glucose'].concept_id
+    a = measurement(w, glucose, date(2024, 1, 1), when=utc(2024, 1, 1, 8, 0), value=5.5, source='GLU-1')
+    b = measurement(w, 0, date(2024, 2, 1), value=6, source='GLU-1')
+    c = measurement(w, glucose, date(2024, 3, 1), value=7, source='GLU-1', confidence=70)
+    d = measurement(w, glucose, date(2024, 4, 1), value=8, source='GLU-1', erroneous=True)
+    measurement(w, glucose, date(2024, 5, 1), source='GLU-2')                       # another code
+    measurement(w, glucose, date(2024, 5, 2), source='GLU-1', person=PersonFactory())  # another patient
+
+    resp = any_code_rows(w, 'measurement', 'GLU-1', 'HT-Epic')
+
+    assert resp.status_code == 200
+    assert [(r['id'], r['value_as_number'], r['unit'], r['status'], r['is_erroneous'])
+            for r in resp.data['rows']] == [
+        (d.pk, 8.0, 'mg/dL', 'accepted', True),
+        (c.pk, 7.0, 'mg/dL', 'provisional', False),
+        (b.pk, 6.0, 'mg/dL', 'unresolved', False),
+        (a.pk, 5.5, 'mg/dL', 'accepted', False)]
+    assert resp.data['rows'][-1]['datetime'] == '2024-01-01T08:00:00+00:00'
+    # No vocabulary: a code the list aggregated from the clinical tables has none.
+    assert len(any_code_rows(w, 'measurement', 'GLU-1').data['rows']) == 4
+
+
+def test_a_code_is_matched_as_a_row_holds_it_cut_to_the_column_and_without_case(world):
+    w = world
+    row = measurement(w, 0, date(2024, 1, 1), source='Glu-One')
+    long_code = 'L' * 70
+    long_row = measurement(w, 0, date(2024, 1, 2), source='L' * 50)
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'GLU-ONE').data['rows']] == [row.pk]
+    assert [r['id'] for r in any_code_rows(w, 'measurement', long_code).data['rows']] == [long_row.pk]
+
+
+def test_a_condition_code_shows_its_day_or_moment_and_status_and_no_value(world):
+    w = world
+    a = condition(w, date(2024, 1, 1), when=utc(2024, 1, 1, 9, 0))
+    b = condition(w, date(2024, 2, 1), confidence=80, concept=w['glucose'].concept_id)
+    c = condition(w, date(2024, 3, 1), erroneous=True)
+    condition(w, date(2024, 4, 1), source='OTHER')
+
+    resp = any_code_rows(w, 'condition', 'C50.9')
+
+    assert [(r['id'], r['date'], r['datetime'], r['status'], r['value_as_number'], r['value_as_string'],
+             r['unit'], r['is_erroneous']) for r in resp.data['rows']] == [
+        (c.pk, '2024-03-01', None, 'unresolved', None, None, None, True),
+        (b.pk, '2024-02-01', None, 'provisional', None, None, None, False),
+        (a.pk, '2024-01-01', '2024-01-01T09:00:00+00:00', 'unresolved', None, None, None, False)]
+
+
+def test_a_drug_code_shows_its_quantity_and_dose_unit(world):
+    w = world
+    a = drug(w, date(2024, 1, 1), quantity=Decimal('2.50000'), unit='mg')
+    b = drug(w, date(2024, 2, 1))
+    drug(w, date(2024, 3, 1), source='RX-2')
+    resp = any_code_rows(w, 'drug_exposure', 'RX-1', 'RxNorm')
+    assert [(r['id'], r['value_as_number'], r['unit']) for r in resp.data['rows']] == [
+        (b.pk, None, None), (a.pk, 2.5, 'mg')]
+
+
+def test_a_procedure_code_shows_its_quantity(world):
+    w = world
+    a = procedure(w, date(2024, 1, 1), quantity=3)
+    procedure(w, date(2024, 1, 2), source='PX-2')
+    resp = any_code_rows(w, 'procedure', 'PX-1')
+    assert [(r['id'], r['value_as_number'], r['unit'], r['status']) for r in resp.data['rows']] == [
+        (a.pk, 3.0, None, 'unresolved')]
+
+
+def test_a_device_and_a_hospital_sharing_a_spelling_each_list_only_their_own_rows(world):
+    w = world
+    hold(w, 'spo2', 'Garmin', 'measurement')
+    hold(w, 'SPO2', 'HT-Epic', 'measurement')
+    device = measurement(w, 0, date(2024, 1, 2), source='spo2', value=97, type_id=WEARABLE_TYPE_CONCEPT_ID)
+    local = measurement(w, 0, date(2024, 1, 3), source='SPO2', value=88)
+
+    # The device's code lists the importer's rows, never the hospital's.
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'spo2', 'Garmin').data['rows']] == [device.pk]
+    # The hospital's code leaves a device holder's wearable rows out (and matches without case).
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'SPO2', 'HT-Epic').data['rows']] == [local.pk]
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'SPO2').data['rows']] == [local.pk]
+
+
+def test_a_hospital_row_of_the_importers_type_is_listed_when_the_patient_holds_no_device_code(world):
+    w = world
+    mine = measurement(w, 0, date(2024, 1, 2), source='SPO2', type_id=WEARABLE_TYPE_CONCEPT_ID)
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'SPO2', 'HT-Epic').data['rows']] == [mine.pk]
+    # Another patient holding the device code changes nothing for this one.
+    stranger = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=stranger, source_value='spo2', source_vocabulary_id='Garmin', omop_table='measurement',
+        occurrence_count=1)
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'SPO2', 'HT-Epic').data['rows']] == [mine.pk]
+
+
+def test_a_device_spelling_held_as_an_observation_does_not_hide_a_measurements_rows(world):
+    w = world
+    hold(w, 'steps', 'Garmin', 'observation')
+    row = measurement(w, 0, date(2024, 1, 2), source='steps', type_id=WEARABLE_TYPE_CONCEPT_ID)
+    assert [r['id'] for r in any_code_rows(w, 'measurement', 'steps', 'HT-Epic').data['rows']] == [row.pk]
+
+
+def test_any_code_is_read_in_pages_with_no_repeats(world):
+    w = world
+    made = [condition(w, date(2024, 1, 1 + i % 5), when=utc(2024, 1, 1 + i % 5, 8, 0) if i % 2 else None)
+            for i in range(13)]
+    expected = [r['id'] for r in any_code_rows(w, 'condition', 'C50.9', limit=200).data['rows']]
+    assert len(expected) == len(made)
+    seen, cursor = [], None
+    while True:
+        resp = any_code_rows(w, 'condition', 'C50.9', limit=5, **({'cursor': cursor} if cursor else {}))
+        seen += [r['id'] for r in resp.data['rows']]
+        cursor = resp.data['next_cursor']
+        if not cursor:
+            break
+    assert seen == expected
+
+
+@pytest.mark.parametrize('who,expected', [
+    ('staff', 200), ('org_admin', 200), ('doctor', 403), ('analyst', 404), ('patient', 403), ('outsider', 404),
+])
+def test_who_reads_a_hospital_codes_rows(world, who, expected):
+    condition(world, date(2024, 1, 1))
+    assert any_code_rows(world, 'condition', 'C50.9', who=world[who]).status_code == expected
 
 
 # ── Cost does not grow with the rows ─────────────────────────────────────────────────
@@ -621,6 +772,21 @@ def _count(client, url, params=None):
 
 
 def _fill(w, n, start):
+    ConditionOccurrence.objects.bulk_create([
+        ConditionOccurrence(
+            condition_occurrence_id=start + i, person=w['person'], condition_concept_id=0,
+            condition_type_concept_id=HOSPITAL_TYPE_ID, condition_start_date=date(2024, 1, 1) + timedelta(days=i % 90),
+            condition_source_value='C50.9') for i in range(n)])
+    DrugExposure.objects.bulk_create([
+        DrugExposure(
+            drug_exposure_id=start + i, person=w['person'], drug_concept_id=0,
+            drug_type_concept_id=HOSPITAL_TYPE_ID, drug_exposure_start_date=date(2024, 1, 1) + timedelta(days=i % 90),
+            drug_exposure_end_date=date(2024, 1, 1), drug_source_value='RX-1', quantity=i) for i in range(n)])
+    ProcedureOccurrence.objects.bulk_create([
+        ProcedureOccurrence(
+            procedure_occurrence_id=start + i, person=w['person'], procedure_concept_id=0,
+            procedure_type_concept_id=HOSPITAL_TYPE_ID, procedure_date=date(2024, 1, 1) + timedelta(days=i % 90),
+            procedure_source_value='PX-1', quantity=i) for i in range(n)])
     concepts = [w['glucose'].concept_id, w['rest_hr'].concept_id, 0]
     Measurement.objects.bulk_create([
         Measurement(
@@ -644,6 +810,10 @@ def test_the_queries_do_not_grow_with_the_rows(held_wearable_code):
         (omop_url(w, 'omop-rows'), {'table': 'measurements', 'concept': w['glucose'].concept_id}),
         (omop_url(w, 'omop-rows'), {'table': 'measurements', 'concept': 0, 'source_value': 'code-1'}),
         (omop_url(w, 'source-code-rows'), {'table': 'observation', 'code': 'steps', 'vocabulary': 'Garmin'}),
+        (omop_url(w, 'source-code-rows'), {'table': 'measurement', 'code': 'code-1', 'vocabulary': 'HT-Epic'}),
+        (omop_url(w, 'source-code-rows'), {'table': 'condition', 'code': 'C50.9'}),
+        (omop_url(w, 'source-code-rows'), {'table': 'drug_exposure', 'code': 'RX-1'}),
+        (omop_url(w, 'source-code-rows'), {'table': 'procedure', 'code': 'PX-1'}),
     ]
     _fill(w, 12, 90_000_000)
     small = [_count(client, url, params) for url, params in urls]

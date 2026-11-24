@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import api from "../../api/axios";
 import { useAuth } from "../../hooks/useAuth";
@@ -11,6 +11,7 @@ import {
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
 import PatientWearableCodes from "./PatientWearableCodes";
+import { SourceCodeReadingsRow } from "./OmopReadings";
 import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
 import {
   type CodeMappingRow,
@@ -121,8 +122,11 @@ const SECTIONS: { key: SectionKey; label: string; defaultOpen: boolean }[] = [
 function SourceCodeTable({
   rows,
   onRowClick,
+  personId,
 }: {
   rows: PatientSourceCode[];
+  /** The patient, for opening a code to the rows stored for it (#2863). */
+  personId: string;
   /** Absent for a reader: the row opens nothing (#2416). */
   onRowClick?: (sc: PatientSourceCode) => void;
 }) {
@@ -139,10 +143,10 @@ function SourceCodeTable({
             <th className="px-3 py-2 text-left font-medium">Destination</th>
           </tr>
         </thead>
-        <tbody className="divide-y">
+        <tbody>
           {rows.map((sc, i) => (
+            <Fragment key={`${sc.omop_table}-${sc.source_value}-${i}`}>
             <tr
-              key={`${sc.omop_table}-${sc.source_value}-${i}`}
               className={onRowClick ? "cursor-pointer hover:bg-muted/30" : undefined}
               onClick={onRowClick ? () => onRowClick(sc) : undefined}
             >
@@ -175,6 +179,14 @@ function SourceCodeTable({
                 )}
               </td>
             </tr>
+            <SourceCodeReadingsRow
+              personId={personId}
+              table={sc.omop_table}
+              code={sc.source_value}
+              vocabulary={sc.source_vocabulary_id || ""}
+              colSpan={6}
+            />
+            </Fragment>
           ))}
         </tbody>
       </table>
@@ -502,6 +514,7 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
                 <SourceCodeTable
                   rows={expanded[key] ? rows : rows.slice(0, SECTION_ROW_LIMIT)}
                   onRowClick={canWrite ? handleRowClick : undefined}
+                  personId={personId}
                 />
                 {!expanded[key] && rows.length > SECTION_ROW_LIMIT && (
                   <button

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import api from "@/api/axios";
 import { DASH, DATE_ONLY_TITLE, formatMoment, type Reading } from "./omopRows";
 
@@ -170,5 +171,61 @@ export default function ReadingsTable({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * The arrow under a source code of the Source Codes tab (#2863): a table row
+ * that opens the rows stored for the code, newest first, a page at a time.
+ * Closed by default, and nothing is read until it is opened. It is its own
+ * row, so a click on it is not a click on the code's row above (which opens
+ * the mapping dialog). ``count`` is shown only where the server counts the
+ * code's rows exactly (a wearable's); any other code says "Readings".
+ */
+export function SourceCodeReadingsRow({
+  personId,
+  table,
+  code,
+  vocabulary,
+  count,
+  colSpan,
+  testId,
+}: {
+  personId: string;
+  table: string;
+  code: string;
+  vocabulary: string;
+  count?: number;
+  colSpan: number;
+  testId?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const bodyId = useId();
+  const name = [vocabulary, code].filter(Boolean).join(" ");
+  return (
+    <tr className="border-b" data-testid={testId ?? "source-code-readings"}>
+      <td colSpan={colSpan} className="px-3 pb-2 pt-0">
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={bodyId}
+          aria-label={`${open ? "Hide" : "Show"} readings of ${name}`}
+          onClick={() => setOpen((current) => !current)}
+          className="flex items-center gap-1 rounded px-1 py-0.5 text-xs text-muted-foreground hover:bg-muted/50"
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <span>{count != null ? `Readings (${count})` : "Readings"}</span>
+        </button>
+        {open && (
+          <div id={bodyId} className="mt-2 pl-5">
+            <ReadingsTable
+              url={`/v1/patient-records/${personId}/source-code-rows/`}
+              params={{ table, code, vocabulary }}
+              label={`Readings of ${name}`}
+            />
+          </div>
+        )}
+      </td>
+    </tr>
   );
 }

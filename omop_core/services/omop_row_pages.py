@@ -28,9 +28,12 @@ from dataclasses import dataclass
 from datetime import date, datetime
 
 from django.db.models import BooleanField, Case, CharField, Count, F, IntegerField, Max, Min, Q, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, Substr, Upper
 
-from omop_core.models import Concept, Measurement, Observation, PatientSourceCode
+from omop_core.models import (
+    Concept, ConditionOccurrence, DrugExposure, Measurement, Observation, PatientSourceCode,
+    ProcedureOccurrence,
+)
 from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
 from omop_core.services.source_vocabularies import WEARABLE_DEVICE_VOCABULARIES
 
@@ -52,13 +55,43 @@ class Spec:
     source: str
     date: str
     datetime: str
+    # What a row holds as its value, where it has one: a measurement's and an
+    # observation's number, string and unit; a drug's and a procedure's quantity;
+    # a condition holds none.
+    number: str | None = None
+    string: str | None = None
+    unit: str | None = None
+    unit_concept: str | None = None
 
+
+_RESULT = dict(number='value_as_number', string='value_as_string', unit='unit_source_value',
+               unit_concept='unit_concept__concept_code')
 
 SPECS = {
     'measurements': Spec(Measurement, 'measurement_id', 'measurement_concept_id',
-                         'measurement_type_concept_id', 'measurement_source_value', 'measurement_date', 'measurement_datetime'),
+                         'measurement_type_concept_id', 'measurement_source_value',
+                         'measurement_date', 'measurement_datetime', **_RESULT),
     'observations': Spec(Observation, 'observation_id', 'observation_concept_id',
-                         'observation_type_concept_id', 'observation_source_value', 'observation_date', 'observation_datetime'),
+                         'observation_type_concept_id', 'observation_source_value',
+                         'observation_date', 'observation_datetime', **_RESULT),
+}
+
+# A source code's rows, by the clinical table the Source Codes tab files the
+# code under (``CLINICAL_TABLES``' keys). Only a measurement and an observation
+# have a number and a unit; the others show their day and their status.
+CODE_SPECS = {
+    'measurement': SPECS['measurements'],
+    'observation': SPECS['observations'],
+    'condition': Spec(ConditionOccurrence, 'condition_occurrence_id', 'condition_concept_id',
+                      'condition_type_concept_id', 'condition_source_value',
+                      'condition_start_date', 'condition_start_datetime'),
+    'drug_exposure': Spec(DrugExposure, 'drug_exposure_id', 'drug_concept_id',
+                          'drug_type_concept_id', 'drug_source_value',
+                          'drug_exposure_start_date', 'drug_exposure_start_datetime',
+                          number='quantity', unit='dose_unit_source_value'),
+    'procedure': Spec(ProcedureOccurrence, 'procedure_occurrence_id', 'procedure_concept_id',
+                      'procedure_type_concept_id', 'procedure_source_value',
+                      'procedure_date', 'procedure_datetime', number='quantity'),
 }
 
 
@@ -118,25 +151,29 @@ def read_page(qs, spec: Spec, cursor=None, limit: int = PAGE_SIZE) -> dict:
                      | Q(**{spec.datetime: moment, f'{spec.pk}__lt': row_id}))
         qs = qs.filter(Q(**{f'{spec.date}__lt': day}) | (same_day & after))
 
+    columns = [spec.pk, spec.date, spec.datetime, spec.source, spec.concept, 'confidence', 'is_erroneous']
+    columns += [c for c in (spec.number, spec.string, spec.unit, spec.unit_concept) if c]
     fetched = list(
         qs.order_by(F(spec.date).desc(), F(spec.datetime).desc(nulls_last=True), F(spec.pk).desc())
-        .values(spec.pk, spec.date, spec.datetime, 'value_as_number', 'value_as_string',
-                'unit_source_value', 'unit_concept__concept_code', spec.source, spec.concept,
-                'confidence', 'is_erroneous')[:limit + 1])
+        .values(*columns)[:limit + 1])
     page = fetched[:limit]
-    rows = [{
-        'id': row[spec.pk],
-        'date': row[spec.date].isoformat(),
-        'datetime': row[spec.datetime].isoformat() if row[spec.datetime] else None,
-        'value_as_number': float(row['value_as_number']) if row['value_as_number'] is not None else None,
-        'value_as_string': row['value_as_string'],
-        'unit': row['unit_source_value'] or row['unit_concept__concept_code'] or None,
-        'source_value': row[spec.source],
-        'concept_id': row[spec.concept],
-        'status': status_of(row[spec.concept], row['confidence']),
-        'confidence': row['confidence'],
-        'is_erroneous': row['is_erroneous'],
-    } for row in page]
+    rows = []
+    for row in page:
+        number = row[spec.number] if spec.number else None
+        rows.append({
+            'id': row[spec.pk],
+            'date': row[spec.date].isoformat(),
+            'datetime': row[spec.datetime].isoformat() if row[spec.datetime] else None,
+            'value_as_number': float(number) if number is not None else None,
+            'value_as_string': row[spec.string] if spec.string else None,
+            'unit': ((row[spec.unit] if spec.unit else None)
+                     or (row[spec.unit_concept] if spec.unit_concept else None) or None),
+            'source_value': row[spec.source],
+            'concept_id': row[spec.concept],
+            'status': status_of(row[spec.concept], row['confidence']),
+            'confidence': row['confidence'],
+            'is_erroneous': row['is_erroneous'],
+        })
     next_cursor = None
     if len(fetched) > limit:
         last = page[-1]
@@ -165,6 +202,45 @@ def group_rows(person, spec: Spec, concept_id: int, source_value: str | None,
         qs = qs.filter(empty if not source_value else Q(**{spec.source: source_value}))
         if wearable is not None:
             qs = qs.filter(is_device_row(spec, held)) if wearable else qs.exclude(is_device_row(spec, held))
+    return qs
+
+
+def _width(spec: Spec) -> int:
+    return spec.model._meta.get_field(spec.source).max_length or 50
+
+
+def code_rows(person, table: str, code: str, vocabulary: str):
+    """The patient's rows of one source code, or ``None`` for a device code they do not hold.
+
+    The same rule the resolver's sweeps use (``code_resolution._scope_to_holders``),
+    in both directions, for a person who may hold one spelling under a device
+    and a hospital:
+
+    * a **device's** code (a device vocabulary) lists only the importer's rows
+      (type concept 32865), filed under exactly that code, and only when the
+      patient's inventory holds the code under that vocabulary and table;
+    * any **other** code lists the rows filed under it as a row holds it (cut
+      to the column, case-insensitive, as the resolver matches), and, for a
+      patient who also holds the spelling under a device, leaves that device's
+      wearable rows out.
+
+    Entered-in-error rows are included: the caller marks them.
+    """
+    spec = CODE_SPECS[table]
+    stored = code[:_width(spec)]
+    if vocabulary in WEARABLE_DEVICE_VOCABULARIES:
+        if not PatientSourceCode.objects.filter(
+                person=person, source_vocabulary_id=vocabulary, omop_table=table,
+                source_value=code).exists():
+            return None
+        return spec.model.objects.filter(
+            person=person, **{spec.source: stored, spec.type: WEARABLE_TYPE_CONCEPT_ID})
+    qs = spec.model.objects.filter(person=person, **{f'{spec.source}__iexact': stored})
+    if table in ('measurement', 'observation') and PatientSourceCode.objects.filter(
+            person=person, omop_table=table, source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES,
+    ).annotate(stored_code=Upper(Substr('source_value', 1, _width(spec)))).filter(
+            stored_code=stored.upper()).exists():
+        qs = qs.exclude(**{spec.type: WEARABLE_TYPE_CONCEPT_ID})
     return qs
 
 
