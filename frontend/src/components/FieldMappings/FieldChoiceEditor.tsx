@@ -304,6 +304,7 @@ export function FieldChoiceEditor({
                         signature={(choice.value_mappings ?? []).map((m) => `${m.id}:${m.status}`).join(",")} />
                     )}
                   </div>
+                  {canApprove && (
                   <button
                     onClick={() => handleDeleteChoice(choice)}
                     disabled={removingCodeId !== null}
@@ -313,6 +314,7 @@ export function FieldChoiceEditor({
                   >
                     <Trash2 size={12} /> Delete choice
                   </button>
+                  )}
                 </div>
               ))}
               {choices.length > 0 && shown.length === 0 && (

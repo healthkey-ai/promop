@@ -17595,12 +17595,13 @@ def field_choice_detail(request, pk):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
-        if (choice.value_mappings.filter(status='approved').exists()
-                and not _can_approve_mappings(request.user)):
-            # Deleting takes the approved decision and its revisions with it.
+        if not _can_approve_mappings(request.user):
+            # Deleting takes the answer's codes, spellings, scope and decisions
+            # with it, which is what a curator may not change, and an answer
+            # could be deleted and added again plain to get around that.
             return Response(
-                {'detail': 'This answer has an approved concept mapping. Only org admins and staff can '
-                           'delete it; retire it to stop offering it.'},
+                {'detail': 'Only org admins and staff can delete an answer; '
+                           'a mapping curator can ask for it to be retired.'},
                 status=status.HTTP_403_FORBIDDEN)
         choice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

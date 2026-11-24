@@ -12,7 +12,7 @@ from omop_core.models import (
     DiseaseCategoryChoice, FieldChoice, FieldChoiceAlias, FieldChoiceCode, FieldChoiceDisease, GroupAccess,
 )
 from patient_portal.models import Identity
-from tests.factories import OrganizationFactory
+from tests.factories import ConceptFactory, DomainFactory, OrganizationFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -39,7 +39,12 @@ def categories():
 
 @pytest.fixture
 def choice():
-    return FieldChoice.objects.create(field_name='stage', display='Stage IV')
+    """An answer that is live: it has a code, a spelling and a scope."""
+    made = FieldChoice.objects.create(field_name='stage', display='Stage IV')
+    FieldChoiceCode.objects.create(choice=made, code='4', vocabulary_id='LOCAL', is_primary=True)
+    FieldChoiceAlias.objects.create(choice=made, field_name='stage', alias='IV', alias_key='iv', source='curator')
+    FieldChoiceDisease.objects.create(choice=made, disease='FL')
+    return made
 
 
 @pytest.mark.parametrize('body', (
@@ -50,6 +55,7 @@ def choice():
     {'value': '4'},
     {'value_type': 'integer'},
     {'codes': []},
+    {'codes': [{'code': '9', 'vocabulary_id': 'LOCAL', 'is_primary': True}]},
     {'sort_order': 3, 'retired': True},
 ))
 def test_an_analyst_cannot_change_a_live_answer(choice, body):
@@ -57,8 +63,11 @@ def test_an_analyst_cannot_change_a_live_answer(choice, body):
     assert response.status_code == 403
     assert 'org admins and staff' in response.data['detail']
     choice.refresh_from_db()
-    assert (choice.display, choice.retired_at, choice.sort_order, choice.value) == ('Stage IV', None, 0, '')
-    assert not choice.aliases.filter(source='curator').exists() and not choice.disease_scope.exists()
+    assert (choice.display, choice.retired_at, choice.sort_order, choice.value, choice.value_type) == (
+        'Stage IV', None, 0, '', 'text')
+    assert sorted(choice.aliases.values_list('alias', flat=True)) == ['IV']
+    assert list(choice.disease_scope.values_list('disease', flat=True)) == ['FL']
+    assert list(choice.codes.values_list('code', flat=True)) == ['4']
 
 
 def test_an_analyst_can_reorder(choice):
@@ -108,16 +117,41 @@ def test_an_approver_adds_an_answer_with_scope_and_codes():
 
 def test_codes_are_for_approvers(choice):
     code = FieldChoiceCode.objects.create(choice=choice, code='1', vocabulary_id='LOCAL', is_primary=True)
+    before = choice.codes.count()
     analyst = client_as('analyst')
     body = {'code': '2', 'vocabulary_id': 'LOCAL', 'is_primary': False}
     assert analyst.post(f'{CHOICES}{choice.pk}/codes/', body, format='json').status_code == 403
     assert analyst.delete(f'{CHOICES}{choice.pk}/codes/?code_id={code.pk}').status_code == 403
-    assert choice.codes.count() == 1
+    assert choice.codes.count() == before
     admin = client_as('org_admin')
     assert admin.post(f'{CHOICES}{choice.pk}/codes/', body, format='json').status_code == 201
     assert admin.delete(f'{CHOICES}{choice.pk}/codes/?code_id={code.pk}').status_code == 204
 
 
+def test_an_analyst_cannot_delete_an_answer_and_add_it_again_plain(choice):
+    analyst = client_as('analyst')
+    assert analyst.delete(f'{CHOICES}{choice.pk}/').status_code == 403
+    assert FieldChoice.objects.filter(pk=choice.pk).exists()
+    assert choice.codes.count() == 1 and choice.disease_scope.count() == 1
+    assert client_as('org_admin').delete(f'{CHOICES}{choice.pk}/').status_code == 204
+
+
+@pytest.mark.parametrize('body', ([], [{'retired': True}]))
+def test_a_body_that_is_not_an_object_changes_nothing(choice, body):
+    analyst = client_as('analyst')
+    assert analyst.patch(f'{CHOICES}{choice.pk}/', body, format='json').status_code in (400, 403)
+    assert analyst.post(CHOICES, body, format='json').status_code in (400, 403)
+    choice.refresh_from_db()
+    assert choice.retired_at is None and FieldChoice.objects.count() == 1
+
+
 def test_an_analyst_still_proposes_a_concept_for_an_answer(choice):
-    response = client_as('analyst').get(f'{CHOICES}{choice.pk}/value-mappings/')
-    assert response.status_code == 200
+    VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED', vocabulary_version='2026-09')
+    DomainFactory(domain_id='Observation', domain_name='Observation')
+    ConceptFactory(vocabulary_id='SNOMED', concept_code='4', domain_id='Observation', concept_name='Stage 4')
+    analyst = client_as('analyst')
+    response = analyst.post(f'{CHOICES}{choice.pk}/value-mappings/',
+                            {'vocabulary_id': 'SNOMED', 'concept_code': '4', 'rationale': 'ok'}, format='json')
+    assert response.status_code == 201, response.data
+    approve = analyst.post(f"{CHOICES}{choice.pk}/value-mappings/{response.data['id']}/approve/", {}, format='json')
+    assert approve.status_code == 403

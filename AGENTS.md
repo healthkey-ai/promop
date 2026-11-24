@@ -791,8 +791,8 @@ A change that takes effect at once with no proposal to approve is an approval
 too, so it is org admins' and staff's (`_can_approve_mappings`, 403 for an
 analyst, #1225): a field's scope (`PUT field-mappings/<name>/diseases/`, and
 `diseases` sent with a field mapping), and an existing answer's label,
-spellings, scope, retired flag and codes (`PATCH`/`codes` of
-`field-choices/<id>`). An analyst may still add an answer (without scope,
+spellings, scope, retired flag and codes, and deleting it (`PATCH`/`DELETE`/
+`codes` of `field-choices/<id>`). An analyst may still add an answer (without scope,
 spellings, codes or retirement), reorder answers and propose their concepts;
 the editors show the rest read-only to them. `tests/test_choice_approver_only.py`
 holds it.

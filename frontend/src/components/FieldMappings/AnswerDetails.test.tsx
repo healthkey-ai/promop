@@ -351,6 +351,7 @@ describe("FieldChoiceEditor with answer details", () => {
     expect(screen.queryByRole("button", { name: /Retire In remission/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Remove code/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Add code to/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Delete choice/ })).not.toBeInTheDocument();
     // What a curator does: reorder, add an answer, propose a concept.
     expect(screen.getByPlaceholderText(/New choice display name/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Map In remission to a concept/ })).toBeInTheDocument();
@@ -363,11 +364,21 @@ describe("FieldChoiceEditor with answer details", () => {
     expect(screen.queryByRole("button", { name: /Show the history/ })).not.toBeInTheDocument();
   });
 
+  it("offers deleting an answer only to an approver", async () => {
+    mockGet.mockResolvedValue({ data: choices() });
+    const { unmount } = render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} />);
+    await screen.findByText("in_remission");
+    expect(screen.queryByRole("button", { name: /Delete choice/ })).not.toBeInTheDocument();
+    unmount();
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} canApprove />);
+    expect(await screen.findByRole("button", { name: /Delete choice In remission/ })).toBeInTheDocument();
+  });
+
   it("says why a delete was refused and points to retiring", async () => {
     mockGet.mockResolvedValue({ data: choices() });
     mockDelete.mockRejectedValue(refused({ detail: "This answer has an approved concept mapping. Only org admins and staff can delete it; retire it to stop offering it." }));
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} />);
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: /Delete choice In remission/ }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("retire it instead"));
     expect(await screen.findByText(/retire it to stop offering it/)).toBeInTheDocument();

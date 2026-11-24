@@ -367,8 +367,9 @@ existing answer's label, spellings, scope, retired flag and codes
 `field-choices/<id>/codes/`): a curator may add an answer (with no scope,
 spellings, codes or retirement), reorder answers and propose a concept, and the
 choice editor shows the rest to a non-approver read-only, with no code controls.
-Deleting an answer keeps its own rule (approvers only once it has an approved
-concept).
+Deleting an answer is approvers only too: it takes the answer's codes,
+spellings, scope and decisions with it, and an answer deleted and added again
+plain would get around the rest. The editor shows no Delete to anyone else.
 
 `CustomPatientFields.tsx` renders created fields last on their tab, for
 every reader of the record, in the app's patient page and in the federated

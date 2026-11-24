@@ -482,7 +482,7 @@ def test_deleting_an_answer_with_an_approved_mapping_is_for_approvers(staff, cho
     assert staff.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 204
 
 
-def test_an_answer_with_only_a_proposal_can_be_deleted_by_a_curator(choice):
+def test_a_curator_who_is_not_an_approver_cannot_delete_an_answer_even_with_only_a_proposal(staff, choice):
     from omop_core.models import GroupAccess, Organization
     concept('511')
     fvm.propose(choice, vocabulary_id='SNOMED', concept_code='511')
@@ -491,7 +491,9 @@ def test_an_answer_with_only_a_proposal_can_be_deleted_by_a_curator(choice):
     GroupAccess.objects.create(identity=analyst, org=org, role='analyst')
     client = APIClient()
     client.force_authenticate(analyst)
-    assert client.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 204
+    assert client.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 403
+    assert Mapping.objects.filter(choice=choice).exists()
+    assert staff.delete(f'/api/v1/field-choices/{choice.pk}/').status_code == 204
 
 
 def test_a_non_object_body_is_a_400_not_a_500(staff, choice):
