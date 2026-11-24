@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import api from "../../api/axios";
 import { useAuth } from "../../hooks/useAuth";
-import type {
-  PatientSourceCode,
-  ResolveRunStatus,
-  SourceCodesResponse,
+import {
+  type PatientSourceCode,
+  type ResolveRunStatus,
+  type SourceCodesResponse,
+  isWearableSourceCode,
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
+import PatientWearableCodes from "./PatientWearableCodes";
 import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
 import {
   type CodeMappingRow,
@@ -381,11 +383,22 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
 
   const { source_codes, summary } = data;
 
+  // A wearable device's codes get a section of their own, first (#2835), and
+  // are listed nowhere else: the three status sections hold the other codes.
+  const wearableCodes = source_codes.filter(isWearableSourceCode);
+  const otherCodes = source_codes.filter((sc) => !isWearableSourceCode(sc));
+
   const grouped: Record<SectionKey, PatientSourceCode[]> = {
-    unmapped: source_codes.filter((sc) => sc.mapping_status === "unmapped"),
-    proposed: source_codes.filter((sc) => sc.mapping_status === "proposed"),
-    approved: source_codes.filter((sc) => sc.mapping_status === "approved"),
+    unmapped: otherCodes.filter((sc) => sc.mapping_status === "unmapped"),
+    proposed: otherCodes.filter((sc) => sc.mapping_status === "proposed"),
+    approved: otherCodes.filter((sc) => sc.mapping_status === "approved"),
   };
+
+  // The summary counts every code. With wearable codes on the tab it names
+  // them as a group and counts the rest by status, so each number is the
+  // count of the section below it and together they are the total.
+  const outsideWearables = (key: SectionKey) =>
+    Math.max(summary[key] - wearableCodes.filter((sc) => sc.mapping_status === key).length, 0);
 
   return (
     <div className="space-y-4 p-6">
@@ -394,9 +407,10 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
         <div className="text-sm text-muted-foreground">
           <span className="font-medium text-foreground">{summary.total}</span> source
           codes &mdash;{" "}
-          <span className="text-red-600">{summary.unmapped} unmapped</span>,{" "}
-          <span className="text-yellow-600">{summary.proposed} proposed</span>,{" "}
-          <span className="text-green-600">{summary.approved} approved</span>
+          {wearableCodes.length > 0 && <>{wearableCodes.length} wearable,{" "}</>}
+          <span className="text-red-600">{outsideWearables("unmapped")} unmapped</span>,{" "}
+          <span className="text-yellow-600">{outsideWearables("proposed")} proposed</span>,{" "}
+          <span className="text-green-600">{outsideWearables("approved")} approved</span>
           {loading && (
             <span className="ml-2 inline-flex items-center gap-1" role="status">
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -457,6 +471,9 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
           )}
         </div>
       )}
+
+      {/* A wearable device's codes, and what their stored rows are now */}
+      <PatientWearableCodes codes={wearableCodes} onRowClick={canWrite ? handleRowClick : undefined} />
 
       {/* Collapsible status sections */}
       {SECTIONS.map(({ key, label }) => {

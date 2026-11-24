@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
+import { pendingClause } from './wearableResult';
 
 /** How far back one sync may read. The server allows 1 to 90 days. */
 const RANGES = [
@@ -25,6 +26,12 @@ interface SyncResult {
   unmapped_metrics?: string[];
   /** Whether a key is saved for this patient once the sync has run (#2834). */
   key_saved?: boolean;
+  /** Of the readings this sync stored, those a proposed mapping gave a concept; sent only when there are some (#2835). */
+  provisional_samples?: number;
+  /** Of the readings this sync stored, those still waiting for a mapping; sent only when there are some. */
+  unresolved_samples?: number;
+  /** Stored rows, this sync's or earlier ones', that a mapping settled during it; sent only when there are some. */
+  settled_rows?: number;
 }
 
 /** What the server says about a saved key: that there is one, never the key. */
@@ -81,7 +88,8 @@ function describe(result: SyncResult): string {
   const parts = [`${count(result.samples_created, 'new value')}`];
   if (result.replaced > 0) parts.push(`${result.replaced} replaced`);
   if (result.duplicates_skipped > 0) parts.push(`${result.duplicates_skipped} already stored`);
-  return `Synced ${result.start_date} to ${result.end_date}: ${parts.join(', ')}.`;
+  const pending = pendingClause(result);
+  return `Synced ${result.start_date} to ${result.end_date}: ${parts.join(', ')}.${pending ? ` ${pending}` : ''}`;
 }
 
 /**
@@ -177,7 +185,7 @@ export default function GarminConnectSync({
       const told = typeof res.data.key_saved === 'boolean';
       if (told) setKeyStatus(status => ({ ...status, saved: res.data.key_saved === true }));
       if (!told || !statusKnown) void refreshStatus();
-      onSynced(res.data.samples_created > 0 || res.data.replaced > 0);
+      onSynced(res.data.samples_created > 0 || res.data.replaced > 0 || (res.data.settled_rows ?? 0) > 0);
     } catch (err: unknown) {
       const data = (err as { response?: { data?: { error?: string; detail?: string; key_saved?: boolean } } })
         ?.response?.data;

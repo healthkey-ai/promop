@@ -5194,23 +5194,31 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         day, a file's or an earlier sync's."""
         from django.db import connection
         from omop_core.services.pk import next_pk_batch as _next_pk_batch
+        from omop_core.services import wearable_rows as device_rows
         from omop_core.services.mappings import (
             WEARABLE_ARTIFACT_BOUNDS,
-            WEARABLE_TYPE_CONCEPT_ID, resolve_wearable_mappings,
+            WEARABLE_TYPE_CONCEPT_ID,
         )
         from omop_core.services.wearable_parsers import CUMULATIVE_METRICS
 
-        # Resolve each metric's concept exclusively from approved
-        # SourceCodeConceptMapping rows for this device type.
-        metric_concepts: dict[str, Concept | None] = resolve_wearable_mappings(device_type)
-
-        unresolved = sorted(k for k, c in metric_concepts.items() if c is None)
-        if unresolved:
-            logger.warning(
-                'wearable_concepts_unresolved person_id=%s metrics=%s — samples for these '
-                'metrics will be discarded. Run load_athena_vocabularies.',
-                person.person_id, unresolved,
-            )
+        # Each metric comes in as the device's own source code (#2835), as a
+        # hospital's results do. An approved mapping for that code gives the
+        # row its concept. Without one the row is stored unresolved and the
+        # resolver takes it from there: provisional under a proposal that
+        # qualifies, accepted when the mapping is approved.
+        codes = device_rows.device_codes(device_type, [s.metric_key for s in samples])
+        # The record's row is locked before any clinical row is touched: an
+        # approval's re-point marks records stale and then moves rows, and
+        # this write resolves rows and then marks the record stale. Taken in
+        # the re-point's order, the two cannot wait on each other.
+        PatientRecord.objects.select_for_update().filter(person=person).first()
+        # Concept 0 is what an unresolved row points at. An instance without
+        # it (no migration 0077) cannot hold one, and drops the reading as it
+        # always did.
+        can_wait = Concept.objects.filter(concept_id=device_rows.NO_MATCHING_CONCEPT_ID).exists()
+        if not can_wait:
+            codes = {key: code for key, code in codes.items() if code.concept is not None}
+        device_rows.queue_unmapped(codes.values())
 
         # Provenance type for every row written below. 32865 is
         # 'Patient self-report' — OMOP's Type Concept vocabulary has no
@@ -5275,52 +5283,40 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'body_mass': 'kg',
         }
 
-        # OMOP routes a row by its concept's domain, not by a hard-coded metric
-        # list: steps, active_minutes, sleep_duration and flights_climbed are
-        # Observation-domain concepts, the rest are Measurement.
-        def _is_observation(concept):
-            return concept.domain_id == 'Observation'
-
+        # A row is filed in its code's table (``DeviceCode.table``): the
+        # mapping's, which follows its concept's domain: steps, active
+        # minutes, sleep and flights are Observation, the rest Measurement.
         existing_keys = set()
-        # (metric_key, date) -> [(pk, value)] for the rows a wearable upload
-        # wrote: the only rows replace_daily may remove.
+        # (metric_key, date) -> [(table, pk, value)] for the rows a wearable
+        # upload wrote: the only rows replace_daily may remove.
         wearable_rows = defaultdict(list)
+        # Which stored rows are this device's: (table, pk). A row filed under
+        # the device's own code is; so is one an upload's history names
+        # (row_id), which is what says so for a row from before rows carried
+        # their code. An entry older still has only the value, which counts
+        # when no other device's upload lists it.
+        own_rows, other_rows = set(), set()
+        own_values = set()                          # (metric_key, date, value)
         # Only the days in this upload can hold a duplicate of one of its samples.
         days = (min(s.date for s in samples), max(s.date for s in samples))
-        # Build set of (metric_key, date, value) that already exist, reading
-        # whichever table the concept's domain routes it to.
-        for metric_key in set(s.metric_key for s in samples):
-            concept = metric_concepts.get(metric_key)
-            if concept is None:
-                continue
-            if _is_observation(concept):
-                existing_rows = Observation.objects.filter(
-                    person=person,
-                    observation_concept=concept,
-                    observation_date__range=days,
-                    # Entered in error: kept, but not a value the patient has.
-                    is_erroneous=False,
-                ).values_list('observation_id', 'observation_date', 'value_as_number',
-                              'observation_type_concept_id')
-            else:
-                existing_rows = Measurement.objects.filter(
-                    person=person,
-                    measurement_concept=concept,
-                    measurement_date__range=days,
-                    is_erroneous=False,
-                ).values_list('measurement_id', 'measurement_date', 'value_as_number',
-                              'measurement_type_concept_id')
-            for row_id, row_date, row_val, row_type_id in existing_rows:
+        # Build set of (metric_key, date, value) that already exist. Both
+        # tables are read: a code whose mapping moved table has rows in the
+        # one it left until they are relocated, and a day must not be stored
+        # in each.
+        for metric_key, code in codes.items():
+            # Filed under the device's code, or (rows from before they carried
+            # one, another device's reading) at the code's concept. A row
+            # entered in error is kept, but is not a value the patient has.
+            for row_table, row_id, row_date, row_val, row_type_id, under_code in (
+                    device_rows.existing_rows(person, code, days)):
                 if row_val is not None:
                     existing_keys.add((metric_key, row_date, float(row_val)))
                     if row_type_id == WEARABLE_TYPE_CONCEPT_ID:
-                        wearable_rows[(metric_key, row_date)].append((row_id, float(row_val)))
+                        wearable_rows[(metric_key, row_date)].append(
+                            (row_table, row_id, float(row_val)))
+                        if under_code:
+                            own_rows.add((row_table, row_id))
 
-        # Which stored rows are this device's. A summary entry names the row
-        # its upload wrote (row_id); an entry from before that was recorded has
-        # only the value, which counts when no other device's upload lists it.
-        own_rows, other_rows = set(), set()         # (table, pk)
-        own_values = set()                          # (metric_key, date, value)
         if replace_daily:
             other_values = set()
             # The entries for these days only, unnested in the database: a
@@ -5370,12 +5366,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         unmapped_samples = 0
         unmapped_metrics = set()
 
+        unresolved_samples = 0
+
         for sample in samples:
-            concept = metric_concepts.get(sample.metric_key)
-            if concept is None:
+            code = codes.get(sample.metric_key)
+            if code is None:
+                # No code for this metric on this device, or nowhere to keep
+                # an unresolved row.
                 unmapped_samples += 1
                 unmapped_metrics.add(sample.metric_key)
                 continue
+            concept = code.concept
 
             # Artifact filter
             bounds = WEARABLE_ARTIFACT_BOUNDS.get(sample.metric_key)
@@ -5385,7 +5386,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Dedup check
             dedup_key = (sample.metric_key, sample.date, round(sample.value, 2))
 
-            table = 'observation' if _is_observation(concept) else 'measurement'
+            table = code.table
             day_rows = wearable_rows.get((sample.metric_key, sample.date), ())
             summed = sample.metric_key in CUMULATIVE_METRICS
 
@@ -5393,8 +5394,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if synced_row is not None:
                 # The sync's row for this day, if it is still stored: a row
                 # since deleted, or flagged entered in error, holds nothing.
-                held = next((value for row_id, value in day_rows
-                             if (table, row_id) == synced_row), None)
+                held = next((value for row_table, row_id, value in day_rows
+                             if (row_table, row_id) == synced_row), None)
                 if held is not None:
                     if not (summed and sample.value > held):
                         duplicates_skipped += 1
@@ -5402,12 +5403,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     # A summed metric and the file has more of the day than
                     # the phone sent (it stopped syncing part way through):
                     # the file's figure takes the sync's place.
-                    (stale_observation_ids if table == 'observation'
+                    (stale_observation_ids if synced_row[0] == 'observation'
                      else stale_measurement_ids).append(synced_row[1])
 
             if replace_daily and keep_larger and summed and any(
-                    value > sample.value for row_id, value in day_rows
-                    if (table, row_id) in own_rows):
+                    value > sample.value for row_table, row_id, value in day_rows
+                    if (row_table, row_id) in own_rows):
                 # A running total below what this device already stored: the
                 # phone has not sent the whole day (yet). Left as stored.
                 duplicates_skipped += 1
@@ -5419,13 +5420,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 # earlier sync's value from before the day was complete.
                 day = sample.date.isoformat()
                 kept = False
-                for row_id, row_val in day_rows:
+                for row_table, row_id, row_val in day_rows:
                     if round(row_val, 2) == dedup_key[2] and not kept:
                         kept = True
-                    elif (table, row_id) in own_rows or (
-                            (table, row_id) not in other_rows
+                    elif (row_table, row_id) in own_rows or (
+                            (row_table, row_id) not in other_rows
                             and (sample.metric_key, day, round(row_val, 2)) in own_values):
-                        (stale_observation_ids if table == 'observation'
+                        (stale_observation_ids if row_table == 'observation'
                          else stale_measurement_ids).append(row_id)
 
             if dedup_key in existing_keys:
@@ -5434,13 +5435,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             existing_keys.add(dedup_key)
 
             unit = unit_map.get(sample.metric_key)
-            source_code = concept.concept_code
+            source_code = code.stored_code()
+            concept_id = (concept.pk if concept is not None
+                          else device_rows.NO_MATCHING_CONCEPT_ID)
+            if concept is None:
+                unresolved_samples += 1
 
-            if _is_observation(concept):
+            if table == 'observation':
                 obs = Observation(
                     observation_id=0,  # allocated below
                     person=person,
-                    observation_concept=concept,
+                    observation_concept_id=concept_id,
                     observation_date=sample.date,
                     observation_type_concept=type_concept,
                     value_as_number=sample.value,
@@ -5454,7 +5459,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 m = Measurement(
                     measurement_id=0,  # allocated below
                     person=person,
-                    measurement_concept=concept,
+                    measurement_concept_id=concept_id,
                     measurement_date=sample.date,
                     measurement_type_concept=type_concept,
                     value_as_number=sample.value,
@@ -5517,6 +5522,53 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             uploaded_by=uploaded_by,
         )
 
+        # The patient holds these codes under the device's vocabulary: the
+        # resolver reads that to tell a device's code from a hospital's of the
+        # same spelling, and the Source Codes tab lists it.
+        device_rows.record_inventory(person, codes.values(), unit_map)
+
+        # What a mapping makes of the rows still waiting, this upload's and
+        # earlier ones': accepted where the code's mapping is approved now,
+        # provisional under a proposal that qualifies, reverted when a
+        # proposal no longer does. The resolver's own rules, the ones a
+        # hospital's codes get; the caller derives the record.
+        settled_rows = 0
+        waiting = device_rows.needs_resolving(person, codes.values())
+        if waiting:
+            from omop_core.mapping.code_resolution import resolve_person_source_codes
+            try:
+                # In a savepoint: a resolver that fails costs the resolving,
+                # never the readings. They stay unresolved for the next
+                # import, or for Generate OMOP.
+                with transaction.atomic():
+                    outcome = resolve_person_source_codes(
+                        person, source_values=sorted({code.stored_code() for code in waiting}),
+                        omop_tables=sorted({code.table for code in waiting}), derive=False)
+                settled_rows = sum(outcome.get(key, 0) for key in ('resolved', 'provisional', 'reverted'))
+            except Exception:
+                logger.exception('wearable_resolve_failed device=%s person_id=%s',
+                                 device_type, person.person_id)
+
+        # Of the rows this upload stored without an approved mapping, what
+        # they are now. The two are counted apart, over the same rows.
+        provisional_count = waiting_count = 0
+        waiting_metrics = set()
+        if unresolved_samples:
+            by_pk = {('measurement', m.pk): m for m in pending_measurements}
+            by_pk.update({('observation', o.pk): o for o in pending_observations})
+            metric_of = {id(row): key[0] for key, (_table, row) in written.items()}
+            for row_table, model, concept_col in (
+                    ('measurement', Measurement, 'measurement_concept_id'),
+                    ('observation', Observation, 'observation_concept_id')):
+                pks = [pk for (t, pk) in by_pk if t == row_table]
+                for pk, concept_id, confidence in model.objects.filter(pk__in=pks).values_list(
+                        'pk', concept_col, 'confidence'):
+                    if confidence is not None:
+                        provisional_count += 1
+                    elif concept_id == device_rows.NO_MATCHING_CONCEPT_ID:
+                        waiting_count += 1
+                        waiting_metrics.add(metric_of.get(id(by_pk[row_table, pk]), ''))
+
         if unmapped_samples:
             logger.warning(
                 'wearable_upload_unmapped device=%s person_id=%s samples=%d metrics=%s',
@@ -5537,6 +5589,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'unmapped_samples': unmapped_samples,
             'unmapped_metrics': sorted(unmapped_metrics),
         }
+        if waiting_count:
+            # Stored under a code no mapping answers for yet: kept, and
+            # resolved when one does.
+            result['unresolved_samples'] = waiting_count
+            result['unresolved_metrics'] = sorted(waiting_metrics - {''})
+        if provisional_count:
+            # Stored at the concept a proposed mapping names: provisional
+            # until it is approved.
+            result['provisional_samples'] = provisional_count
+        if settled_rows:
+            # Stored rows, this upload's or earlier ones', that a mapping
+            # settled just now: the record has changed even if nothing new was stored.
+            result['settled_rows'] = settled_rows
         if replace_daily or replaced_count:
             result['replaced'] = replaced_count
         return result
@@ -5840,6 +5905,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     ).delete()
                 deleted_count += count
 
+            # A named row that is no longer under its id was relocated when its
+            # code's mapping moved table (a new id in the other table), or is
+            # simply gone. It is looked for again by what it is.
+            from omop_core.services import wearable_rows as device_rows
+            still = {
+                'measurement': set(Measurement.objects.filter(
+                    person=person, measurement_id__in=row_ids['measurement']).values_list('pk', flat=True)),
+                'observation': set(Observation.objects.filter(
+                    person=person, observation_id__in=row_ids['observation']).values_list('pk', flat=True)),
+            }
+            moved = [entry for entry in upload.sample_summary or []
+                     if isinstance(entry, dict) and isinstance(entry.get('row_id'), int)
+                     and entry.get('row_table') in still
+                     and entry['row_id'] not in still[entry['row_table']]]
             if row_ids['measurement']:
                 count, _ = Measurement.objects.filter(
                     person=person, measurement_id__in=row_ids['measurement']).delete()
@@ -5848,9 +5927,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 count, _ = Observation.objects.filter(
                     person=person, observation_id__in=row_ids['observation']).delete()
                 deleted_count += count
+            if moved:
+                deleted_count += device_rows.delete_moved(person, upload.device_type, moved)
 
             self._close_synced_days(person, upload)
             upload.delete()
+            # A device code with no row left is no longer one the patient holds.
+            device_rows.prune_inventory(person)
 
         # Refresh PatientRecord to recompute 30-day summaries
         try:
@@ -6559,6 +6642,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             )
 
         source_codes = _get_patient_source_codes(person)
+        # A device's code also says what its rows are now: accepted,
+        # provisional or still unresolved (#2835).
+        from omop_core.services import wearable_rows as device_rows
+        device_rows.describe(person, source_codes)
         summary = {'total': 0, 'unmapped': 0, 'proposed': 0, 'approved': 0}
         for sc in source_codes:
             summary['total'] += 1
@@ -6844,7 +6931,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 for sv, svid, ot in request_keys:
                     keep |= Q(source_value=sv, source_vocabulary_id=svid,
                               omop_table=ot)
-                gone = PatientSourceCode.objects.filter(person=person).exclude(keep)
+                # Not a wearable device's codes: the ETL never sends those,
+                # and the patient's own imports keep them (#2835).
+                gone = PatientSourceCode.objects.filter(person=person).exclude(keep).exclude(
+                    source_vocabulary_id__in=source_vocabularies.WEARABLE_DEVICE_VOCABULARIES)
                 removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
                 deleted, _ = gone.delete()
 
@@ -6874,7 +6964,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 # After the upsert, so this chunk's own rows carry the token.
                 # Every other row belongs to a run that has finished or been
                 # abandoned, because an overlapping run was refused above.
-                gone = PatientSourceCode.objects.filter(person=person).exclude(upload_id=upload_id)
+                gone = PatientSourceCode.objects.filter(person=person).exclude(
+                    upload_id=upload_id,
+                ).exclude(
+                    # A wearable device's codes are the patient's own imports', not a run's.
+                    source_vocabulary_id__in=source_vocabularies.WEARABLE_DEVICE_VOCABULARIES)
                 removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
                 deleted, _ = gone.delete()
                 run.finalized_at = timezone.now()
@@ -8866,6 +8960,17 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
     if not psc_rows:
         return _aggregate_patient_source_codes(person)
 
+    # A wearable import writes inventory for its own codes only (#2835). Those
+    # say nothing about whether an ETL populated the rest, so a patient whose
+    # only inventory is a device's still gets the other codes from the
+    # clinical tables, with the device's rows left out of that aggregation.
+    devices = source_vocabularies.WEARABLE_DEVICE_VOCABULARIES
+    device_rows = [row for row in psc_rows if row['source_vocabulary_id'] in devices]
+    fallback: list[dict] = []
+    if len(device_rows) == len(psc_rows):
+        held = {(row['omop_table'], row['source_value'][:50]) for row in device_rows}
+        fallback = _aggregate_patient_source_codes(person, without=held)
+
     by_table: dict[str, list[dict]] = defaultdict(list)
     for row in psc_rows:
         by_table[row['omop_table'] or ''].append({
@@ -8884,15 +8989,23 @@ def _get_patient_source_codes(person: Person) -> list[dict]:
             'source_metadata': row.get('source_metadata') or {},
         })
 
-    return _resolve_source_code_mappings(by_table)
+    results = _resolve_source_code_mappings(by_table)
+    if fallback:
+        status_order = {'unmapped': 0, 'proposed': 1, 'approved': 2, 'rejected': 3}
+        results = sorted(results + fallback,
+                         key=lambda e: (status_order.get(e['mapping_status'], 9), -e['row_count']))
+    return results
 
 
-def _aggregate_patient_source_codes(person: Person) -> list[dict]:
+def _aggregate_patient_source_codes(person: Person, without=frozenset()) -> list[dict]:
     """Aggregate distinct source codes across all clinical tables for a person.
 
     For each (source_value, omop_table), count clinical rows and left-join the
     SourceCodeConceptMapping to get mapping status.  Returns a list sorted by
     unmapped first, then by row count descending.
+
+    *without* is ``(omop_table, source value)`` pairs to leave out: the device
+    codes the patient's inventory already lists.
     """
     by_table: dict[str, list[dict]] = {}
 
@@ -8905,6 +9018,7 @@ def _aggregate_patient_source_codes(person: Person) -> list[dict]:
             .annotate(row_count=Count('pk'))
             .order_by(source_col)
         )
+        groups = [g for g in groups if (table_key, g[source_col]) not in without]
         if not groups:
             continue
 

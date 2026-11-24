@@ -382,6 +382,8 @@
     "walking_speed_avg_30d",
     "walking_step_length_avg_30d",
     "wbc_count_thousand_per_ul",
+    "wearable_coverage_ratio_30d",
+    "wearable_last_sync_at",
     "weight"
   ],
   "disease_rules": [

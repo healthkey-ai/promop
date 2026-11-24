@@ -2,6 +2,7 @@ import { act, render, screen, fireEvent, waitFor, within } from '@testing-librar
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import WearableTab from './WearableTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
+import { ProvisionalContext } from '../ProvisionalContext';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -863,5 +864,193 @@ describe('WearableTab — Garmin Connect sync', () => {
       vi.useRealTimers();
       if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
     }
+  });
+});
+
+describe('WearableTab — every 30-day value says Accepted or Provisional (#2835)', () => {
+  /** The tab with the record's provisional marks, as the patient page provides them. */
+  async function renderMarked(formData: Record<string, unknown>, marks: Record<string, number> = {}) {
+    const view = render(
+      <ProvisionalContext.Provider value={{ marks, patientMode: false }}>
+        <WearableTab formData={formData} onChange={vi.fn()} onRefresh={vi.fn()} ownRecord />
+      </ProvisionalContext.Provider>,
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    return view;
+  }
+
+  it('marks a metric that has a value and no provisional mark Accepted', async () => {
+    await renderMarked({ median_daily_steps_30d: 8000, activity_trend_30d: 'stable' });
+
+    const badge = screen.getByTestId('accepted-median_daily_steps_30d');
+    expect(badge).toHaveTextContent('Accepted');
+    expect(badge.title).toMatch(/code mapping is approved/);
+    expect(screen.getByTestId('accepted-activity_trend_30d')).toBeInTheDocument();
+    expect(screen.queryByTestId('provisional-median_daily_steps_30d')).not.toBeInTheDocument();
+  });
+
+  it('marks a metric the record holds as a proposal Provisional, and not Accepted', async () => {
+    await renderMarked(
+      { median_daily_steps_30d: 8000, vo2_max_avg_30d: 42, resting_heart_rate_avg_30d: 61 },
+      { median_daily_steps_30d: 70, vo2_max_avg_30d: 80 },
+    );
+
+    expect(screen.getByTestId('provisional-median_daily_steps_30d').textContent).toBe('Provisional 70%');
+    expect(screen.getByTestId('provisional-vo2_max_avg_30d').textContent).toBe('Provisional 80%');
+    expect(screen.queryByTestId('accepted-median_daily_steps_30d')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('accepted-vo2_max_avg_30d')).not.toBeInTheDocument();
+    // The value beside them came in under an approved mapping.
+    expect(screen.getByTestId('accepted-resting_heart_rate_avg_30d')).toBeInTheDocument();
+  });
+
+  it('marks a metric with no value neither', async () => {
+    await renderMarked({
+      median_daily_steps_30d: null, vo2_max_avg_30d: '', activity_trend_30d: '', resting_heart_rate_avg_30d: 61,
+    });
+
+    for (const name of ['median_daily_steps_30d', 'vo2_max_avg_30d', 'activity_trend_30d', 'body_mass_avg_30d']) {
+      expect(screen.queryByTestId(`accepted-${name}`)).not.toBeInTheDocument();
+      expect(screen.queryByTestId(`provisional-${name}`)).not.toBeInTheDocument();
+    }
+    expect(screen.getAllByText('Accepted')).toHaveLength(1);
+  });
+
+  it('does not call the absence of a trend Accepted', async () => {
+    await renderMarked({ activity_trend_30d: 'insufficient_data', median_daily_steps_30d: 9000 });
+    expect(screen.queryByTestId('accepted-activity_trend_30d')).not.toBeInTheDocument();
+    expect(screen.getByTestId('accepted-median_daily_steps_30d')).toBeInTheDocument();
+  });
+
+  it('marks the coverage figures when the readings behind them are provisional', async () => {
+    await renderMarked(
+      { wearable_last_sync_at: '2026-11-20T00:00:00Z', wearable_coverage_ratio_30d: 0.5 },
+      { wearable_last_sync_at: 70, wearable_coverage_ratio_30d: 70 });
+    expect(screen.getByTestId('provisional-wearable_last_sync_at')).toHaveTextContent('Provisional 70%');
+    expect(screen.getByTestId('provisional-wearable_coverage_ratio_30d')).toBeInTheDocument();
+  });
+
+  it('counts zero as a value', async () => {
+    await renderMarked({ flights_climbed_per_day_30d: 0 });
+    expect(screen.getByTestId('accepted-flights_climbed_per_day_30d')).toBeInTheDocument();
+  });
+
+  it('says what the two marks mean, once, in the note above the values', async () => {
+    await renderMarked({});
+    const note = screen.getByText(/a clinician does not enter a median/i);
+    expect(note).toHaveTextContent(
+      /Each value is marked Accepted or Provisional\. Provisional means the readings behind it have been stored and are not yet confirmed\./);
+    // Shown to the patient on their own record: no curator's words.
+    expect(note).not.toHaveTextContent(/mapping/i);
+  });
+});
+
+describe('WearableTab — samples stored as provisional or still waiting (#2835)', () => {
+  const dropZone = () => screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+
+  it('says how many uploaded samples are provisional', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 5, duplicates_skipped: 0, provisional_samples: 3 } });
+    renderTab();
+    fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
+
+    expect(await screen.findByText(
+      'Uploaded 5 samples. 3 are provisional: stored, and not yet confirmed.')).toBeInTheDocument();
+  });
+
+  it('adds them up across the files of one upload, after the duplicates', async () => {
+    mockPost
+      .mockResolvedValueOnce({ data: { samples_created: 2, duplicates_skipped: 1, provisional_samples: 1 } })
+      .mockResolvedValueOnce({ data: { samples_created: 3, duplicates_skipped: 0 } });
+    renderTab();
+    fireEvent.drop(dropZone(), createDropEvent([createFile('a.fit'), createFile('b.fit')]));
+
+    expect(await screen.findByText(
+      'Uploaded 5 samples (1 duplicate skipped). 1 is provisional: stored, and not yet confirmed.')).toBeInTheDocument();
+  });
+
+  it('says how many uploaded samples are stored and still waiting', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 5, duplicates_skipped: 0, unresolved_samples: 2 } });
+    renderTab();
+    fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
+
+    expect(await screen.findByText(
+      'Uploaded 5 samples. 2 are stored and waiting to be matched to a standard code.')).toBeInTheDocument();
+  });
+
+  it('says both counts as the server gives them: separate readings, provisional first', async () => {
+    mockPost.mockResolvedValue({
+      data: { samples_created: 9, duplicates_skipped: 0, unresolved_samples: 5, provisional_samples: 3 },
+    });
+    renderTab();
+    fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
+
+    expect(await screen.findByText(
+      'Uploaded 9 samples. 3 are provisional: stored, and not yet confirmed. 5 are stored and waiting to be matched to a standard code.',
+    )).toBeInTheDocument();
+  });
+
+  it('re-reads the record when an upload stored nothing new and settled earlier readings', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 0, duplicates_skipped: 5, settled_rows: 12 } });
+    const onRefresh = vi.fn();
+    renderTab({ onRefresh });
+    fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
+
+    await screen.findByText(/Uploaded 0 samples/);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('says nothing about provisional samples when the upload stored none', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 5, duplicates_skipped: 0 } });
+    renderTab();
+    fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
+
+    expect(await screen.findByText('Uploaded 5 samples')).toBeInTheDocument();
+    expect(screen.queryByText(/provisional: stored/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting to be matched/i)).not.toBeInTheDocument();
+  });
+
+  const SYNCED = {
+    samples_created: 210, duplicates_skipped: 30, replaced: 12, unmapped_metrics: [],
+    start_date: '2026-10-24', end_date: '2026-11-22', datasets_failed: [],
+  };
+
+  async function sync(data: Record<string, unknown>) {
+    mockPost.mockResolvedValue({ data });
+    renderTab({ canSyncOwnDevice: true });
+    fireEvent.change(screen.getByLabelText('Garmin Connect Personal API key'), { target: { value: 'gcpk_TEST-key' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sync' }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+  }
+
+  it('says how many synced values are provisional', async () => {
+    await sync({ ...SYNCED, provisional_samples: 40 });
+
+    expect(await screen.findByText(
+      'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored. '
+      + '40 are provisional: stored, and not yet confirmed.')).toBeInTheDocument();
+  });
+
+  it('says how many synced values are stored and still waiting, after the provisional ones', async () => {
+    await sync({ ...SYNCED, unresolved_samples: 30, unresolved_metrics: ['vo2_max', 'spo2'], provisional_samples: 40 });
+
+    expect(await screen.findByText(
+      'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored. '
+      + '40 are provisional: stored, and not yet confirmed. 30 are stored and waiting to be matched to a standard code.')).toBeInTheDocument();
+  });
+
+  it('says how many synced values wait when none is provisional', async () => {
+    await sync({ ...SYNCED, unresolved_samples: 1, unresolved_metrics: ['vo2_max'] });
+
+    expect(await screen.findByText(
+      'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored. '
+      + '1 is stored and waiting to be matched to a standard code.')).toBeInTheDocument();
+  });
+
+  it('says nothing about provisional values when the sync stored none', async () => {
+    await sync(SYNCED);
+
+    expect(await screen.findByText(
+      'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored.')).toBeInTheDocument();
+    expect(screen.queryByText(/provisional: stored/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting to be matched/i)).not.toBeInTheDocument();
   });
 });

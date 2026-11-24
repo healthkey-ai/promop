@@ -1,18 +1,32 @@
-import type { ReactNode } from 'react';
-import { useProvisionalMark } from './ProvisionalContext';
+import { useContext, type ReactNode } from 'react';
+import { ProvisionalContext, useProvisionalMark } from './ProvisionalContext';
 
 /** "Provisional 82%" after a field's label when its value is a proposal. `via` names
  *  what the reader edits instead when the value is not typed in directly (the FLIPI
- *  score follows its risk factors). */
-export default function ProvisionalBadge({ name, via }: { name: string; via?: string }) {
+ *  score follows its risk factors).
+ *  `fromDevice` is a value nobody types in at all, a summary of device readings: it
+ *  is settled by approving the readings' code mapping, so the tooltip says that and
+ *  does not tell the reader to edit the field. */
+export default function ProvisionalBadge(
+  { name, via, fromDevice }: { name: string; via?: string; fromDevice?: boolean },
+) {
   const mark = useProvisionalMark(name);
   if (!mark) return null;
-  const title = mark.patientMode
-    ? 'Not yet confirmed. This value comes from a record that has not been fully checked. '
-      + (via ? `If it is wrong or right, you can confirm it by choosing ${via} yourself.`
-        : 'If it is wrong or right, you can enter it yourself.')
-    : `From a code mapping that is not approved yet (${mark.confidence}% confidence). `
-      + (via ? `Edit ${via} to confirm it as approved data.` : 'Edit the field to confirm it as approved data.');
+  const confidence = ` (${mark.confidence}% confidence)`;
+  let title: string;
+  if (fromDevice) {
+    title = mark.patientMode
+      ? 'Not yet confirmed. This value comes from device readings that have not been fully checked.'
+      : `From device readings whose code mapping is not approved yet${confidence}. `
+        + 'It becomes accepted when that mapping is approved.';
+  } else {
+    title = mark.patientMode
+      ? 'Not yet confirmed. This value comes from a record that has not been fully checked. '
+        + (via ? `If it is wrong or right, you can confirm it by choosing ${via} yourself.`
+          : 'If it is wrong or right, you can enter it yourself.')
+      : `From a code mapping that is not approved yet${confidence}. `
+        + (via ? `Edit ${via} to confirm it as approved data.` : 'Edit the field to confirm it as approved data.');
+  }
   return (
     <span
       className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
@@ -20,6 +34,29 @@ export default function ProvisionalBadge({ name, via }: { name: string; via?: st
       data-testid={`provisional-${name}`}
     >
       Provisional {mark.confidence}%
+    </span>
+  );
+}
+
+/**
+ * "Accepted" after the label of a wearable metric that holds a value and is not
+ * a proposal (#2835): the counterpart of the provisional mark, so each 30-day
+ * value says which it is. Silent for a field marked provisional; the caller
+ * decides whether the field holds a value at all.
+ */
+export function AcceptedBadge({ name }: { name: string }) {
+  const mark = useProvisionalMark(name);
+  const { patientMode } = useContext(ProvisionalContext);
+  if (mark) return null;
+  return (
+    <span
+      className="rounded bg-green-100 px-1.5 py-0.5 text-xs font-medium text-green-800"
+      title={patientMode
+        ? 'From your device readings, checked and confirmed.'
+        : 'From device readings whose code mapping is approved.'}
+      data-testid={`accepted-${name}`}
+    >
+      Accepted
     </span>
   );
 }

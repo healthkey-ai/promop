@@ -107,3 +107,29 @@ describe('ClinicalField writability', () => {
     expect(screen.getByDisplayValue('24.2')).toBeDisabled();
   });
 });
+
+describe('ClinicalField accepted mark (#2835)', () => {
+  const COMPUTED = { kind: 'computed', writable: false, reason: 'A 30-day aggregate.' } as unknown as FieldDescriptor;
+
+  it('is opt-in: a valued field says nothing unless the tab asks', () => {
+    render(
+      <ClinicalField label="Weight" name="weight_kg" type="number" value={70} descriptor={COMPUTED} onChange={() => {}} />,
+    );
+    expect(screen.queryByTestId('accepted-weight_kg')).not.toBeInTheDocument();
+    expect(screen.queryByText('Accepted')).not.toBeInTheDocument();
+  });
+
+  it('marks a valued field Accepted when asked, read-only or writable, and an empty one not', () => {
+    const WRITABLE = { kind: 'profile', writable: true, target: 'person', payload_field: 'x' } as unknown as FieldDescriptor;
+    render(
+      <>
+        <ClinicalField label="Steps" name="median_daily_steps_30d" type="number" value={0} descriptor={COMPUTED} onChange={() => {}} showAccepted />
+        <ClinicalField label="Notes" name="notes" type="text" value="seen" descriptor={WRITABLE} onChange={() => {}} showAccepted />
+        <ClinicalField label="VO2" name="vo2_max_avg_30d" type="number" value={null} descriptor={COMPUTED} onChange={() => {}} showAccepted />
+      </>,
+    );
+    expect(screen.getByTestId('accepted-median_daily_steps_30d')).toHaveTextContent('Accepted');
+    expect(screen.getByTestId('accepted-notes')).toBeInTheDocument();
+    expect(screen.queryByTestId('accepted-vo2_max_avg_30d')).not.toBeInTheDocument();
+  });
+});

@@ -223,6 +223,14 @@ WEARABLE_SOURCE_VOCABULARIES = {
     'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect', CDISC_BC_VOCABULARY,
 }
 
+# The three of those a device import files a patient's rows under (#2835): a
+# reading arrives as its device's own code, ``steps`` under ``Garmin``, and a
+# patient's source-code inventory says which device it came from. The others
+# name codes no import writes.
+WEARABLE_DEVICE_VOCABULARIES = frozenset({'Apple', 'Garmin', 'HealthConnect'})
+# The local vocabulary the wearable metrics with no LOINC equivalent live in.
+WEARABLE_LOCAL_VOCABULARY = 'HK-Wearable'
+
 # The metric categories a wearable mapping may carry, in the order the Edit
 # Mapping dialog offers them: those of the wearable mapping proposal, plus the
 # five (Symptoms, Reproductive Health, Mental Wellbeing, Self-care, Hearing)

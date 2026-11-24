@@ -29,6 +29,8 @@ interface Props {
    *  one reason — repeating the same paragraph beside 25 boxes buries it. The
    *  tab states it once instead. */
   showReason?: boolean;
+  /** Mark a value that is not a proposal "Accepted" (the Wearables tab, #2835). */
+  showAccepted?: boolean;
 }
 
 /**
@@ -58,6 +60,7 @@ export default function ClinicalField({
   date,
   onDateChange,
   showReason = true,
+  showAccepted,
 }: Props) {
   const empty = value === undefined || value === null || value === ''
     || (Array.isArray(value) && value.length === 0);
@@ -103,6 +106,7 @@ export default function ClinicalField({
           onChange={onChange}
           readOnly
           precision={precision}
+          showAccepted={showAccepted}
         />
         {showReason && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
@@ -124,6 +128,7 @@ export default function ClinicalField({
         vocabSource={vocabSource}
         onChange={onChange}
         precision={precision}
+        showAccepted={showAccepted}
       />
       {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
         <div className="mt-1 flex items-center gap-2">

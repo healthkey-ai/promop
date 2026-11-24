@@ -8,6 +8,21 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: readings come in as source codes, provisional or accepted by
+  their mapping** — a device import (Garmin, Apple Health, a phone's sync)
+  now files each row under the device's own code (`steps` under `Garmin`)
+  and records it in the patient's source-code inventory, so a wearable code
+  is resolved exactly as a hospital's is (#2835). An approved mapping gives
+  accepted rows; a proposed one gives provisional rows while
+  `PROVISIONAL_DATA_ENABLED` is on; with neither the reading is stored
+  unresolved and waits, where it used to be dropped. Approving the mapping
+  accepts its rows and rejecting it reverts them, through the same re-point
+  as any other code. A wearable device's curated proposal qualifies with no
+  ranker's score, at the confidence floor. The Source Codes tab opens with a
+  Wearables section saying what each device code's rows are, and each 30-day
+  metric on the Wearables tab is marked Accepted or Provisional. Migration
+  0371 re-files the wearable rows already stored.
+
 - **Garmin Connect sync: the Personal API key is saved for next time** — the
   sync by key used the key once and kept it nowhere, so a patient pasted it
   for every sync. A key Garmin has accepted is now saved, encrypted under

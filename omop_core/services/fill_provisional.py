@@ -48,7 +48,7 @@ from django.utils import timezone
 from omop_core.mapping import suggestions
 from omop_core.mapping.code_resolution import (
     _DOMAIN_FOR_TABLE, CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, SOURCE_CODE_MAX,
-    _confidence_percent, _usable_destination, choose_proposal, normalize_omop_table,
+    _confidence_percent, choose_proposal, normalize_omop_table, proposal_percent,
 )
 from omop_core.models import (
     Concept, PatientRecordConfidence, PatientRecordProvisional, PatientSourceCode, Person,
@@ -514,10 +514,12 @@ def proposal_report(codes) -> dict:
             continue
         scored = [(r, _confidence_percent(r.suggestion_confidence))
                   for r in proposals if r.suggestion_confidence is not None]
+        # The resolver's own statement of what qualifies, a wearable device's
+        # unscored curated proposal included (#2835).
         qualifying = [
             (r.target_concept_id, percent, canonical_source_vocabulary(r.source_vocabulary_id))
-            for r, percent in scored
-            if percent >= floor and _usable_destination(r.target_concept, code.table)]
+            for r in proposals
+            if (percent := proposal_percent(r, code.table)) is not None]
         if qualifying:
             status['provisional' if choose_proposal(qualifying, code.held or None) else 'conflict'] += 1
         elif any(percent >= floor for _r, percent in scored):

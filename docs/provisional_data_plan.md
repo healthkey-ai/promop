@@ -580,6 +580,29 @@ rows that joined its answer. JSON-typed fields were in this group; the lists
 a reader can run over provisional rows alone are now covered
 ([List fields as built](#list-fields-as-built-2534)).
 
+### Wearable readings as built (#2835)
+
+A device import files its rows under the device's own code and records the
+code in the patient's source-code inventory, so a wearable code follows this
+plan like any other: unresolved until a mapping answers, provisional under a
+qualifying proposal, real once approved. Two things are particular to it.
+
+- **Which proposal qualifies.** A wearable device's proposal (`Garmin`,
+  `Apple`, `HealthConnect`) qualifies with no ranker's confidence, and its row
+  carries `PROVISIONAL_CONFIDENCE_FLOOR`: the wearable mappings are a curated
+  proposal nobody put to a ranker. A ranker's score below the floor still
+  disqualifies one, and its destination may be a local `HK-Wearable` concept,
+  which is not standard. The number is never 0 and never null: null is a real
+  row everywhere a confidence is read, the PHR API's `confidence` included, and
+  a consumer that tests the number for truth would take 0 for one. The rule is
+  `code_resolution.proposal_percent`, the one statement the resolver, the
+  sweep's index, the mapping trigger and the `fill_provisional_record` report
+  read.
+- **The reader.** `_get_wearable_data` joins the phase 1 readers, so a 30-day
+  summary whose readings are all provisional is laid over the empty field and
+  marked. The summaries are not writable, so one never blocks a patient's
+  "Confirm my record", and a mark is lifted only by the mapping's approval.
+
 ### Composite readers as built (#2534)
 
 Two composite readers join the pass, over provisional conditions and drug

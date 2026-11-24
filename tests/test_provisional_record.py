@@ -438,14 +438,16 @@ def test_the_provisional_readers_are_the_real_refreshs_readers_in_its_order():
     """The pass runs a subset of the refresh's own list, so the relative order is
     the refresh's and a new or reordered reader cannot be missed (#2646)."""
     from omop_core.services.patient_record_service import (
-        _get_assertion_data, _get_laboratory_data, _get_vitals_data, _section_readers,
-        provisional_section_readers,
+        _get_assertion_data, _get_laboratory_data, _get_vitals_data, _get_wearable_data,
+        _section_readers, provisional_section_readers,
     )
     real = list(_section_readers())
     mine = list(provisional_section_readers())
 
     assert mine == [fn for fn in real if fn in set(mine)]
-    assert set(mine) == {_get_assertion_data, _get_laboratory_data, _get_vitals_data}
+    # The wearable summaries joined with #2835: a 30-day metric from provisional readings.
+    assert set(mine) == {_get_assertion_data, _get_laboratory_data, _get_vitals_data,
+                         _get_wearable_data}
     assert real.index(_get_assertion_data) < real.index(_get_laboratory_data)
     assert len(real) == len(set(real))
 

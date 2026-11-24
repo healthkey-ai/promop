@@ -357,7 +357,8 @@ def _ingest(garmin_user_id, samples, readings):
             # missing). Garmin keeps the push for a later try.
             raise RuntimeError(f'wearable rows cannot be stored (status {result.status_code})')
         _fold_history(person, label, result)
-    changed = bool(result.get('samples_created') or result.get('replaced'))
+    # A push that stored nothing new can still have settled earlier rows (#2835).
+    changed = bool(result.get('samples_created') or result.get('replaced') or result.get('settled_rows'))
     return person if changed else None
 
 

@@ -33,7 +33,8 @@ from django.db import transaction
 from django.db.models import Case, Q, Value, When
 
 from omop_core.mapping.code_resolution import (
-    CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, _source_value_match, normalize_omop_table,
+    CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, _scope_to_holders, _source_value_match,
+    normalize_omop_table,
 )
 from omop_core.models import MeasurementOwnership, PatientRecord, PatientSourceCode, ProvenanceRecord
 from omop_core.services.pk import next_pk_batch
@@ -105,7 +106,9 @@ def _own_rows(from_model, from_concept_col, from_source_col, mapping):
                *(mapping.deferred_repoint_concept_ids or []), *(mapping.pending_repoint_concept_ids or [])}
         match |= (_source_value_match(from_model, from_source_col, mapping)
                   & Q(**{f'{from_concept_col}__in': [c for c in own if c is not None]}))
-    return from_model.objects.filter(match)
+    # A device's code is its holders' wearable rows and nobody else's (#2835).
+    table = next((key for key, (model, _c, _s) in CLINICAL_TABLES.items() if model is from_model), '')
+    return _scope_to_holders(from_model.objects.filter(match), mapping, table)
 
 
 def relocate_clinical_rows(*, mapping, from_table, to_table, person_id=None, apply_changes=True):
