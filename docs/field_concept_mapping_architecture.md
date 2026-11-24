@@ -197,7 +197,26 @@ and never the model.
   so it is not offered) and without them the scope is shown, not edited. A
   category the list lacks but the answer already names stays ticked. Scope
   changes which answers a record of that category is offered; a value already
-  saved is neither changed nor hidden. Still not here: the typed `value` in the
+  saved is neither changed nor hidden.
+  **Answer coverage** heads the editor for a reader of the mapping pages
+  (`AnswerCoverage.tsx`, `answerCoverage` in `answerConcept.ts`), computed from
+  the list the editor already holds so it costs no request. It is the stricter
+  count: only the `value_as_concept` role is read, and an approved concept the
+  server can no longer use ("needs attention") is not counted as mapped, which
+  the server's `answer-coverage` totals do count as mapped. Each offered answer
+  is in one of four groups: decided (a concept, or a reviewed no standard
+  equivalent), needs attention, nothing approved or proposed, or retired
+  (not counted). "Nothing approved or proposed" is not "writes no concept": an
+  answer with a legacy code may still write that code's concept. **Waiting for
+  approval** is separate and overlaps the groups: every answer with an open
+  proposal, including a replacement for an approved concept that cannot be
+  used, so an approver filtering on it finds the whole queue. The summary says
+  it counts the answers only, the field's own question concept being mapped on
+  the field. The chips list one group; a filtered view cannot reorder, the rows
+  it listed when it was chosen stay listed (with their new state) until the
+  filter changes, so a decision does not take its row away, and adding an
+  answer returns to the whole list. The summary sticks to the top of the
+  scrolling editor. Still not here: the typed `value` in the
   editor (what a patient's save stores for an answer, label or value, is its own
   decision), and lookup-backed (therapy catalog) choices.
 - **Transfer** carries the decision in force and the open proposal as

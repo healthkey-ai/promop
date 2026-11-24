@@ -123,7 +123,7 @@ describe("answer concept panel in the choice editor", () => {
   it("offers approve and reject on a proposal only to approvers", async () => {
     mockGet.mockImplementation(() => Promise.resolve({ data: [choice([mapping()])] }));
     const { unmount } = render(<FieldChoiceEditor fieldName="disease_activity" onClose={vi.fn()} />);
-    expect(await screen.findByText(/waiting for approval/)).toBeInTheDocument();
+    expect(await screen.findByText(/^Proposed: .*waiting for approval/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Approve proposal for In remission" })).toBeNull();
     unmount();
 
