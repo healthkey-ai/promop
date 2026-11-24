@@ -1,6 +1,7 @@
 /**
- * The Garmin account panel on the Wearables tab (#2802): connect by OAuth,
- * what the callback said, and disconnect.
+ * The linked-account part ("Automatic updates") of the Wearables tab's Garmin
+ * section (#2802, #2832): connect by OAuth, what the callback said, and
+ * disconnect.
  */
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';

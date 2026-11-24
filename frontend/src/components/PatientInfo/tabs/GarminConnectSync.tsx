@@ -68,6 +68,9 @@ function describe(result: SyncResult): string {
  *
  * The server files the rows under the signed-in person's own record, so the
  * tab renders this only for a patient on their own record.
+ *
+ * A part of the tab's Garmin section, under the linked account (#2832): the
+ * account sends each new day by itself, this reads past days when asked.
  */
 export default function GarminConnectSync({
   personId, disabled = false, onSynced, onBusyChange, metricLabels = {},
@@ -115,11 +118,12 @@ export default function GarminConnectSync({
   const unmapped = (result?.unmapped_metrics ?? []).map(key => metricLabels[key] ?? key);
 
   return (
-    <div className="mb-4 rounded-md border border-gray-200 px-4 py-3">
-      <h3 className="text-sm font-medium text-portal-text-primary">Sync from Garmin Connect</h3>
+    <div className="py-3 last:pb-1">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Sync past days</h4>
       <p id={helpId} className="mt-1 text-xs text-gray-500">
-        Create a Personal API key in Garmin Connect on the web (Settings, Account, Personal API
-        Token) and paste it here. The key is used for this sync only and is not stored.
+        Bring in up to 90 past days from Garmin Connect when you ask. Create a Personal API key in
+        Garmin Connect on the web (Settings, Account, Personal API Token) and paste it here. The key
+        is used for this sync only and is not stored.
       </p>
       <div className="mt-3 flex flex-wrap items-end gap-3">
         <div className="w-full sm:w-auto sm:min-w-[16rem] sm:flex-1">
