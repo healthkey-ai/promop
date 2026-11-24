@@ -1071,7 +1071,8 @@ class ConsentLedgerEntry(AppendOnlyModel):
     """The permission history kept after the account is gone.
 
     Holds the member's email address and what they decided (which purpose or
-    document, which version, when) and nothing else: no foreign key to the
+    document, which version, when, and for a change staff recorded on their
+    behalf the date they asked) and nothing else: no foreign key to the
     account or person, so deleting either leaves this row in place. Written
     in the same transaction as every ConsentEvent and DocumentAcceptance.
     """

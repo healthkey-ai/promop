@@ -93,8 +93,9 @@ def _classify_event_type(request):
     path = request.path
     method = request.method
 
-    # Access to the audit trail itself is auditable (TI.2.2#04).
-    if '/audit-events' in path:
+    # Access to the audit trail itself is auditable (TI.2.2#04), through the
+    # API or the admin.
+    if '/audit-events' in path or path.startswith('/admin/patient_portal/auditevent'):
         return AuditEvent.EVENT_AUDIT_REVIEW
     # Emergency-access authorization (TI.2.3#04).
     if '/break-glass' in path:
@@ -143,6 +144,12 @@ def _get_client_id(request):
             _AUDIT_CLIENT_ID_MAX_LENGTH,
         )
     return _bounded_text(token, _AUDIT_CLIENT_ID_MAX_LENGTH)
+
+
+def _detail_person(request):
+    detail = getattr(request, 'audit_detail', None)
+    person_id = detail.get('person_id') if isinstance(detail, dict) else None
+    return str(person_id) if person_id is not None else None
 
 
 def _get_resource_id(request):
@@ -221,7 +228,9 @@ class AuditLogMiddleware:
                 'client_id': _get_client_id(request),
                 'user_id': str(user.pk) if authed else None,
                 'user_email': (getattr(user, 'email', '') or None) if authed else None,
-                'resource_id': _get_resource_id(request),
+                # The URL's id, or the person a view names in its note (the
+                # member's own export has no id in its URL).
+                'resource_id': _get_resource_id(request) or _detail_person(request),
                 'ip_address': (
                     request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
                     or request.META.get('REMOTE_ADDR')

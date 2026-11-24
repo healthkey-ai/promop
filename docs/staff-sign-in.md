@@ -13,6 +13,8 @@ tests: `tests/test_staff_sign_in.py`.
 | `STAFF_PASSWORD_SIGN_IN` | `false`: staff and superuser accounts cannot sign in with a password at all, only through a provider. Members are not affected. Default `true`. |
 | `STAFF_ROLES` | Comma-separated group names: the roles a staff invitation may give and a staff manager may set. |
 | `STAFF_INVITATION_DAYS` | How long an invitation link works. Default 7. |
+| `STAFF_ORGANIZATIONS` | Comma-separated organisation slugs. Role staff's member actions reach only members every one of whose records is in one of them; empty means none. Full staff are not limited. |
+| `STAFF_TIME_ZONE` | The time zone staff's dates are in ("the date the member asked"). Default `TIME_ZONE`. |
 | `STAFF_SESSION_HOURS` | How long a provider sign-in lasts, from the sign-in (a deadline kept in the session, not the cookie's idle expiry). Default 8, so someone whose provider account is switched off is out within a working day. |
 
 Each provider:
@@ -98,7 +100,9 @@ Two kinds of staff account, kept apart on purpose:
   superuser invites one ("Full staff access").
 
 Roles are Django groups, named in `STAFF_ROLES` and set up by the deployment.
-promop adds two permissions on `Identity` for them:
+promop adds three permissions on `Identity` for them, and a role may also
+hold `view_auditevent`. Every member action of a role reaches only members of
+`STAFF_ORGANIZATIONS`, and never a staff account of either kind:
 
 - `support_member_accounts`: the account actions on members, never on staff of
   either kind: "Email password reset link", "Require password change at next
@@ -113,8 +117,15 @@ promop adds two permissions on `Identity` for them:
 - `close_member_accounts`: "Close the account on the member's behalf", one
   member at a time, confirmed by typing their address. Everything goes at once,
   as when the member closes it (`erasure.close_account`), except the consent
-  ledger and the audit trail; the admin's history of actions on the account
-  stays, without the account's name. Never a staff account.
+  ledger and the audit trail. Never a staff account, even for a superuser; if
+  the sign-in has provider access, the record goes and the sign-in stays, and
+  the message says so. Every close path rewrites the names the admin's history
+  keeps for the member (account, person, invitations), so the history of who
+  did what stays without their name or address.
+- A withdrawal staff record is refused when the date the member asked is
+  before their latest grant of it (they gave it again since), and is recorded
+  under the version the member granted. The date asked and the note are in the
+  member's download (PDF and FHIR Consent extensions).
 - `manage_staff`: invite staff with a role (Staff invitations → Add), cancel an
   invitation, set another role staff member's role (only to a `STAFF_ROLES`
   group; the account's other groups are kept; never their own), and "Remove
@@ -141,9 +152,15 @@ admin shows it an empty index:
 | Staff manager | `patient_portal.view_identity`, `patient_portal.change_identity` (the role field only), `patient_portal.manage_staff` |
 
 Support actions are one at a time where they are heavy or irreversible
-("Withdraw a permission", "Send the invitation again"), and every support and
-manager action is in the admin's history (`LogEntry`) naming the account it
-acted on. "Send the invitation again" acts on any organisation's invitation
+("Withdraw a permission", "Close the account", "Send the invitation again"),
+and every support and manager action is in the admin's history (`LogEntry`).
+
+The audit trail admin is read-only for everyone. Its list never counts the
+whole table and searches match exactly or by prefix (a person id, a user id,
+the start of an address or path); IP addresses are shown to superusers only.
+Opening it is recorded as an `audit_review` row with the search used. Staff
+sign-in rows carry the staff member's address, and a member's own export names
+their person id, so both are found by those searches. "Send the invitation again" acts on any organisation's invitation
 in the deployment, unlike the API's per-organisation invite. "Remove staff
 access" removes the staff roles only; groups and permissions a superuser gave
 outside them stay, as a role change keeps them.

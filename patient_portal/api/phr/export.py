@@ -241,6 +241,7 @@ LABELS: dict[str, dict[str, str]] = {
         'version': 'Version',
         'document': 'Document',
         'recorded_by': 'Recorded',
+        'asked': 'asked',
         'decision': {'granted': 'Yes', 'declined': 'No', 'withdrawn': 'Withdrawn', 'ask_later': 'Ask me later',
                      'accepted': 'Accepted'},
         'by': {'member': 'by you', 'staff': 'by staff, as you asked', 'system': 'automatically',
@@ -532,8 +533,14 @@ def _consent(person, record, labels, styles, diagnosed) -> list:
         out.append(_table(rows, [310, 90, 100], styles))
     out.append(Paragraph(labels['consent_history'], styles['h2']))
     rows = [[labels['date'], labels['what'], labels['answer'], labels['version'], labels['recorded_by']]]
-    rows += [[day(r), r['title'], answer(r), r['version'] or '—', labels['by'].get(r['source'], r['source'])]
-             for r in history]
+    def by(row):
+        said = labels['by'].get(row['source'], row['source'])
+        if row.get('requested_on'):  # staff recorded it for the member: when they asked, and how
+            said += f" ({labels.get('asked', 'asked')} {row['requested_on'].isoformat()}"
+            said += f": {row['note']})" if row.get('note') else ')'
+        return said
+
+    rows += [[day(r), r['title'], answer(r), r['version'] or '—', by(r)] for r in history]
     out.append(_table(rows, [70, 200, 90, 60, 90], styles))
     return out
 

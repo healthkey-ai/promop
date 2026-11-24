@@ -13,17 +13,42 @@ def _is_superuser(request) -> bool:
     return bool(request.user.is_active and request.user.is_superuser)
 
 
+def _staff_today():
+    """Today in staff's own time zone (STAFF_TIME_ZONE), not the server's."""
+    from zoneinfo import ZoneInfo
+
+    from django.conf import settings
+    from django.utils import timezone
+
+    return timezone.localdate(timezone=ZoneInfo(settings.STAFF_TIME_ZONE))
+
+
 def _requested_on(request):
     """The date the member asked, from the withdrawal form: today or earlier."""
     import datetime
-
-    from django.utils import timezone
 
     try:
         day = datetime.date.fromisoformat(request.POST.get('requested_on', ''))
     except ValueError:
         return None
-    return day if day <= timezone.localdate() else None
+    return day if day <= _staff_today() else None
+
+
+def _in_staff_organizations(request, queryset, person_path):
+    """For role staff, only members every one of whose records is in one of
+    STAFF_ORGANIZATIONS (``person_path`` leads from the queryset's model to
+    the person). Full staff and superusers are not limited."""
+    from django.conf import settings
+    from omop_core.models import PatientRecord
+
+    if request.user.is_staff or request.user.is_superuser:
+        return queryset
+    allowed = settings.STAFF_ORGANIZATIONS
+    if not allowed:
+        return queryset.none()
+    elsewhere = PatientRecord.objects.exclude(organization__slug__in=allowed).values('person_id')
+    inside = PatientRecord.objects.filter(organization__slug__in=allowed).values('person_id')
+    return queryset.filter(**{f'{person_path}__in': inside}).exclude(**{f'{person_path}__in': elsewhere})
 
 
 @admin.register(Identity)
@@ -120,15 +145,17 @@ class IdentityAdmin(UserAdmin):
         return super().user_change_password(request, id, form_url)
 
     @staticmethod
-    def _members_only(request, queryset):
+    def _members_only(request, queryset, *, even_for_superusers=False):
         """What member support may act on: members, never staff accounts of
-        either kind."""
+        either kind, and for role staff only members of the deployment's
+        organisations (STAFF_ORGANIZATIONS)."""
         from django.conf import settings
 
-        if _is_superuser(request):
+        if _is_superuser(request) and not even_for_superusers:
             return queryset
-        return queryset.filter(is_staff=False, is_superuser=False).exclude(
+        members = queryset.filter(is_staff=False, is_superuser=False).exclude(
             groups__name__in=settings.STAFF_ROLES).distinct()
+        return _in_staff_organizations(request, members, 'patient_user__person_id')
 
     @admin.action(description='Grant Premium access', permissions=['superuser'])
     def grant_premium(self, request, queryset):
@@ -193,10 +220,10 @@ class IdentityAdmin(UserAdmin):
         if account is None:
             self.message_user(request, f'{identity.email} is not a member.', level=messages.WARNING)
             return None
-        latest = (ConsentEvent.objects.filter(person=account.person)
-                  .order_by('purpose_id', '-recorded_at', '-id').distinct('purpose_id'))
+        latest = {e.purpose_id: e for e in ConsentEvent.objects.filter(person=account.person)
+                  .order_by('purpose_id', '-recorded_at', '-id').distinct('purpose_id')}
         granted = ConsentPurpose.objects.filter(
-            pk__in=[e.purpose_id for e in latest if e.decision == ConsentEvent.GRANTED], is_active=True,
+            pk__in=[pk for pk, e in latest.items() if e.decision == ConsentEvent.GRANTED], is_active=True,
         ).order_by('sort_order', 'key')
         key = request.POST.get('purpose')
         requested_on, note, error = _requested_on(request), request.POST.get('note', '').strip(), ''
@@ -205,26 +232,38 @@ class IdentityAdmin(UserAdmin):
             if purpose is None:
                 self.message_user(request, 'That permission is not granted.', level=messages.WARNING)
                 return None
+            standing = latest[purpose.pk]
+            from zoneinfo import ZoneInfo
+
+            from django.conf import settings
+            from django.utils import timezone as tz
+
+            granted_on = tz.localtime(standing.recorded_at, ZoneInfo(settings.STAFF_TIME_ZONE)).date()
             if requested_on is None:
                 error = 'Give the date the member asked, today or earlier.'
+            elif requested_on < granted_on:
+                # They gave it again after asking: a request older than the
+                # grant must not end it (and, for some, erase their answers).
+                error = (f'The member gave this permission on {granted_on.isoformat()}, after the date they asked. '
+                         'Check the date, or ask them whether they still want it withdrawn.')
             elif len(note) > 500:
                 error = 'Keep the note to 500 characters.'
             else:
+                # Under the wording the member granted, as the history keeps it.
                 record_consent(account.person, purpose, ConsentEvent.WITHDRAWN, source=ConsentEvent.STAFF,
-                               recorded_by=request.user, requested_on=requested_on, note=note)
+                               recorded_by=request.user, requested_on=requested_on, note=note,
+                               version=standing.version, language=standing.language)
                 self.log_change(request, identity, f'Withdrew {purpose.key} on the member\'s behalf')
                 self.message_user(request, f'Withdrew "{purpose.key}" for {identity.email}.')
                 return None
         for purpose in granted:  # named as the member saw it
             text = purpose.texts.filter(published_at__isnull=False).order_by('-published_at').first()
             purpose.title = text.title if text else purpose.key
-        from django.utils import timezone
-
         return TemplateResponse(request, 'admin/withdraw_permission.html', {
             **self.admin_site.each_context(request), 'title': 'Withdraw a permission',
             'identity': identity, 'purposes': granted, 'action': 'withdraw_permission',
             'selected': identity.pk, 'opts': self.model._meta, 'error': error,
-            'requested_on': request.POST.get('requested_on') or timezone.localdate().isoformat(),
+            'requested_on': request.POST.get('requested_on') or _staff_today().isoformat(),
             'note': note, 'chosen': key,
         })
 
@@ -243,7 +282,8 @@ class IdentityAdmin(UserAdmin):
         from .erasure import close_account, sign_in_to_close
         from .models import PatientUser
 
-        members = self._members_only(request, queryset)
+        # Never a staff account, whoever asks: this is a member's request.
+        members = self._members_only(request, queryset, even_for_superusers=True)
         if members.count() != 1:
             self.message_user(request, 'Choose one member.', level=messages.WARNING)
             return None
@@ -256,8 +296,16 @@ class IdentityAdmin(UserAdmin):
         if request.POST.get('confirm') == 'close':
             if typed and typed == (identity.email or '').lower():
                 person_id = account.person.person_id
-                close_account(account.person, sign_in_to_close(account.person), actor=request.user)
-                self.message_user(request, f'Closed the account of person {person_id}: everything is deleted.')
+                sign_in = sign_in_to_close(account.person)
+                # The history keeps who closed it and when; closing then
+                # rewrites the name it keeps for the account.
+                self.log_change(request, identity, "Closed the account on the member's behalf")
+                close_account(account.person, sign_in, actor=request.user)
+                if sign_in is None:
+                    self.message_user(request, f'Deleted the record of person {person_id}. The sign-in stays: it '
+                                      'has other access (a provider role).', level=messages.WARNING)
+                else:
+                    self.message_user(request, f'Closed the account of person {person_id}: everything is deleted.')
                 return None
             error = "That isn't the member's address."
         else:
@@ -359,6 +407,7 @@ class PatientInvitationAdmin(admin.ModelAdmin):
             self.message_user(request, 'Choose one invitation.', level=messages.WARNING)
             return
         sent, refused, failed = 0, [], []
+        queryset = _in_staff_organizations(request, queryset, 'person_id')
         for invitation in queryset.filter(accepted_at__isnull=True, cancelled_at__isnull=True).select_related('person'):
             person = invitation.person
             latest = PatientInvitation.objects.filter(person=person).order_by('-created_at', '-pk').first() \
@@ -532,11 +581,37 @@ class StaffInvitationAdmin(admin.ModelAdmin):
 
 @admin.register(AuditEvent)
 class AuditEventAdmin(admin.ModelAdmin):
-    list_display = ['timestamp', 'event_type', 'method', 'path', 'status_code', 'user_email', 'ip_address']
-    list_filter = ['event_type', 'method', 'timestamp']
-    search_fields = ['path', 'user_id', 'user_email', 'client_id', 'resource_id', 'ip_address']
+    """The audit trail, read-only for everyone. The table grows with every
+    request, so the list never counts it all and searches match exactly or by
+    prefix. IP addresses are for superusers. Reading it is itself recorded,
+    with the search (an ``audit_review`` row)."""
+    list_display = ['timestamp', 'event_type', 'method', 'path', 'status_code', 'user_email', 'resource_id',
+                    'ip_address']
+    list_filter = ['event_type', 'method']
+    date_hierarchy = 'timestamp'
+    show_full_result_count = False
+    search_fields = ['=resource_id', '=user_id', '^user_email', '^path', '=client_id', '=ip_address']
     readonly_fields = [f.name for f in AuditEvent._meta.fields]
     ordering = ['-timestamp']
+
+    def get_list_display(self, request):
+        return self.list_display if _is_superuser(request) else [f for f in self.list_display if f != 'ip_address']
+
+    def get_search_fields(self, request):
+        return self.search_fields if _is_superuser(request) else [f for f in self.search_fields if 'ip_address' not in f]
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = super().get_readonly_fields(request, obj)
+        return fields if _is_superuser(request) else [f for f in fields if f != 'ip_address']
+
+    def get_fields(self, request, obj=None):
+        fields = super().get_fields(request, obj)
+        return fields if _is_superuser(request) else [f for f in fields if f != 'ip_address']
+
+    def changelist_view(self, request, extra_context=None):
+        # The review row says what was looked for, not only that the list opened.
+        request.audit_detail = {'audit_search': {k: v[:100] for k, v in request.GET.items()}}
+        return super().changelist_view(request, extra_context)
 
     def has_add_permission(self, request):
         return False  # audit rows are written only by the middleware
@@ -744,7 +819,7 @@ class DocumentAcceptanceAdmin(_AppendOnlyAdmin):
 
 @admin.register(ConsentLedgerEntry)
 class ConsentLedgerEntryAdmin(_AppendOnlyAdmin):
-    list_display = ['recorded_at', 'email', 'kind', 'key', 'decision', 'version', 'frequency']
+    list_display = ['recorded_at', 'email', 'kind', 'key', 'decision', 'version', 'frequency', 'requested_on']
     list_filter = ['kind', 'key', 'decision']
     search_fields = ['email', 'key']
 

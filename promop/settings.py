@@ -588,6 +588,12 @@ STAFF_INVITATION_DAYS = max(1, int(os.environ.get('STAFF_INVITATION_DAYS', '7'))
 # last request): a working day by default, so someone whose provider account
 # is switched off is out by the end of it.
 STAFF_SESSION_HOURS = max(1, float(os.environ.get('STAFF_SESSION_HOURS', '8')))
+# The organisations whose members role staff act on (comma-separated slugs):
+# their support actions reach only members every one of whose records is in
+# one of them. Empty: role staff act on no member. Full staff are not limited.
+STAFF_ORGANIZATIONS = [o.strip() for o in os.environ.get('STAFF_ORGANIZATIONS', '').split(',') if o.strip()]
+# The time zone staff's dates are in ("the date the member asked").
+STAFF_TIME_ZONE = os.environ.get('STAFF_TIME_ZONE', '') or TIME_ZONE
 
 # ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
 # PROMOP issues the HealthKey family's RS256 tokens for its own identities, so
