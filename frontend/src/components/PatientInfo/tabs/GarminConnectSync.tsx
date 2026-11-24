@@ -119,7 +119,7 @@ export default function GarminConnectSync({
 
   return (
     <div className="py-3 last:pb-1">
-      <h4 className="text-sm font-medium text-portal-text-primary">Sync past days</h4>
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Sync past days</h4>
       <p id={helpId} className="mt-1 text-xs text-gray-500">
         Bring in up to 90 past days from Garmin Connect when you ask. Create a Personal API key in
         Garmin Connect on the web (Settings, Account, Personal API Token) and paste it here. The key

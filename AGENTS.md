@@ -1123,7 +1123,7 @@ Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
   `IsAuthenticated` replaces the viewset's scope checks, so `sync_garmin`
   itself requires `is_interactive_session`: a service credential or a
   delegated OAuth token is a 403. The rows go to the caller's own record, so
-  the tab renders the panel only with `canSyncOwnDevice` and sends the
+  the tab renders its Garmin section only with `canSyncOwnDevice` and sends the
   page's `person_id`, which the server refuses unless it is the caller's.
   `canSyncOwnDevice` is the page showing the signed-in person's own record:
   patient mode, or a provider-console page whose person is the one the

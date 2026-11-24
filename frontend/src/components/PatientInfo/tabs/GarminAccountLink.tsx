@@ -156,7 +156,7 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
 
   return (
     <div className="py-3 last:pb-1">
-      <h4 className="text-sm font-medium text-portal-text-primary">Automatic updates</h4>
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Automatic updates</h4>
       {connection.connected ? (
         <>
           <p className="mt-1 text-xs text-gray-500">

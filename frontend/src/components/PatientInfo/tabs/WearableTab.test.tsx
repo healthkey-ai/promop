@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import WearableTab from './WearableTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -511,7 +511,7 @@ describe('WearableTab — Garmin Connect sync', () => {
     fireEvent.change(keyField(), { target: { value } });
   }
 
-  it('offers the Garmin account panel to a patient on their own record, where a Garmin app is set up (#2802)', async () => {
+  it('offers Garmin\'s automatic updates (Connect Garmin) to a patient on their own record, where a Garmin app is set up (#2802)', async () => {
     const first = renderTab({ ownRecord: false });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     // A clinician's view of the record never asks for the patient's connection.
@@ -565,10 +565,17 @@ describe('WearableTab — Garmin Connect sync', () => {
   });
 
   it('shows the Garmin section with the sync by key alone where no Garmin app is set up (#2832)', async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: String(url).includes('/v1/garmin/connection/')
+        ? { configured: false, connected: false, connected_at: null, last_push_at: null, permissions: [] }
+        : [],
+    }));
     renderOwn();
     const garmin = screen.getByRole('region', { name: 'Garmin' });
     await waitFor(() => expect(
       mockGet.mock.calls.some(([url]) => String(url).includes('/v1/garmin/connection/'))).toBe(true));
+    // Let the answer land before saying what it did not bring.
+    await act(async () => {});
     expect(within(garmin).getByRole('heading', { name: 'Sync past days' })).toBeInTheDocument();
     expect(within(garmin).queryByRole('heading', { name: 'Automatic updates' })).not.toBeInTheDocument();
     expect(within(garmin).queryByRole('button', { name: 'Connect Garmin' })).not.toBeInTheDocument();

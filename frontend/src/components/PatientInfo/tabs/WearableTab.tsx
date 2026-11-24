@@ -410,7 +410,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           reads past days through Garmin's API when asked (#2794). */}
       {canSyncOwnDevice && (
         <section aria-labelledby={garminHeadingId} className="mb-4 rounded-md border border-gray-200 px-4 pt-3 pb-2">
-          <h3 id={garminHeadingId} className="text-sm font-semibold text-portal-text-primary">Garmin</h3>
+          <h3 id={garminHeadingId} className="text-sm font-medium text-portal-text-primary">Garmin</h3>
           <div className="divide-y divide-gray-200">
             <GarminAccountLink disabled={uploading || syncing || deletingId !== null} />
             <GarminConnectSync
