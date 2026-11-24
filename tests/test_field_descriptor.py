@@ -363,3 +363,11 @@ def test_descriptors_have_choices_and_formula_keys():
         assert 'choices' in d, f"Descriptor for {d['field_name']} missing 'choices' key"
         assert 'formula' in d, f"Descriptor for {d['field_name']} missing 'formula' key"
         assert 'derivation_error' in d, f"Descriptor for {d['field_name']} missing 'derivation_error' key"
+
+
+def test_the_concomitant_medication_answer_is_an_editable_answer():
+    descriptor = next(
+        d for d in get_all_field_descriptors()
+        if d['field_name'] == 'no_concomitant_medication_status')
+    assert descriptor['category'] == 'editable'
+    assert descriptor['mappable'] is True

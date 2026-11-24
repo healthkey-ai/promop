@@ -661,6 +661,16 @@ _TRI_STATE_ANSWERS = frozenset({
     'no_concomitant_medication_status',
 })
 
+#: The question a host without its own label shows. The medication column's name
+#: reads as a negation while Yes means "takes medication"; pregnancy is a
+#: negative-result question. The two test-done labels are part of the follow-up
+#: wording change ("Normal" -> "Done").
+_TRI_STATE_LABELS = {
+    'pregnancy_test_result': 'Negative pregnancy test result?',
+    'no_concomitant_medication_status': (
+        'Does the patient take concomitant medication?'),
+}
+
 _MAPPING_TARGETS = {
     'measurement': 'measurement',
     'observation': 'observation',
@@ -2053,6 +2063,12 @@ def build_writable_field_descriptor():
         if (entry is not None and entry.get('writable')
                 and entry.get('value_kind') == 'boolean'):
             entry['tri_state'] = True
+            # A curator-managed string choice for this field would make the
+            # renderer show a picker instead of Yes / No / Unknown.
+            entry.pop('options', None)
+            label = _TRI_STATE_LABELS.get(field)
+            if label:
+                entry['label'] = label
 
     # The envelope goes last so no field block can overwrite it. It is a dict
     # like any entry, but it is not one: `kind` is absent on purpose, and the

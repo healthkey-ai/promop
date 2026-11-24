@@ -85,12 +85,33 @@ def test_the_shared_form_writes_false_and_clears_to_unknown(field):
 
 @pytest.mark.parametrize('field', FIELDS)
 def test_omitting_the_field_preserves_the_answer(field):
-    record = PatientRecordFactory(**{field: False})
+    record = PatientRecordFactory(**{field: False, 'consent_capability': True})
 
-    apply_patient_form_patch(record.person, {})
+    saved, result = apply_patient_form_patch(
+        record.person, {'consent_capability': False})
+    assert 'consent_capability' in result.applied
 
     record.refresh_from_db()
     assert getattr(record, field) is False
+
+
+def test_the_shared_labels_ask_the_positive_question():
+    descriptor = build_writable_field_descriptor()
+    assert (descriptor['no_concomitant_medication_status']['label']
+            == 'Does the patient take concomitant medication?')
+    assert (descriptor['pregnancy_test_result']['label']
+            == 'Negative pregnancy test result?')
+
+
+def test_a_curator_choice_cannot_replace_the_three_state_control():
+    from omop_core.models import FieldChoice
+
+    FieldChoice.objects.create(
+        field_name='pulmonary_function_test_result', display='Normal')
+    entry = build_writable_field_descriptor()['pulmonary_function_test_result']
+
+    assert entry['tri_state'] is True
+    assert 'options' not in entry
 
 
 def test_the_shared_form_api_clears_to_unknown():

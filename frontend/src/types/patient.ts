@@ -210,6 +210,7 @@ export interface PatientInfo {
   using_contraceptive?: boolean;
   is_pregnant?: boolean;
   pregnancy_test_result?: boolean | null;
+  no_concomitant_medication_status?: boolean | null;
   is_lactating?: boolean;
   tobacco_use_status?: string;
   recreational_drug_use?: string;

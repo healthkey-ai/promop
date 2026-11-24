@@ -76,9 +76,9 @@ _EDITABLE_TREATMENT_FIELDS = frozenset({
     'supportive_therapies', 'supportive_therapy_start_date',
     'supportive_therapy_end_date', 'supportive_therapy_intent',
     'supportive_therapy_date',
-    # Concomitant medication (editable; no_concomitant_medication_status is computed)
+    # Concomitant medication, including the explicit tri-state answer.
     'concomitant_medication_date', 'concomitant_medications',
-    'concomitant_medication_details',
+    'concomitant_medication_details', 'no_concomitant_medication_status',
     # Other editable treatment fields
     'toxicity_grade', 'planned_therapies', 'concomitant_medication',
     'remission_duration',
@@ -96,8 +96,6 @@ _COMPUTED_THERAPY_FIELDS = frozenset({
     'treatment_refractory_status', 'relapse_count', 'refractory_status',
     'washout_period_duration', 'prior_therapy', 'line_of_therapy',
     'later_therapies', 'later_date',
-    # Negation field
-    'no_concomitant_medication_status',
 })
 
 # Every per-line projection is code-computed from the persisted Episode and

@@ -48,3 +48,20 @@ def test_the_reverse_refuses_an_unanswered_row(module, field):
 
     PatientRecord.objects.filter(pk=record.pk).update(**{field: False})
     guard(None, _Editor())
+
+
+def test_0347_refuses_a_null_in_any_of_the_four_answers():
+    migration = import_module(
+        'omop_core.migrations.0347_nullable_test_done_flags')
+    last = migration.Migration.operations[-1]
+    assert isinstance(last, migrations.RunPython)
+    assert last.reverse_code is migration.refuse_if_nulls
+
+    record = PatientRecordFactory()
+    for field in migration.FIELDS:
+        PatientRecord.objects.filter(pk=record.pk).update(**{field: None})
+        with pytest.raises(RuntimeError, match='NOT NULL'):
+            migration.refuse_if_nulls(None, _Editor())
+        PatientRecord.objects.filter(pk=record.pk).update(**{field: False})
+
+    migration.refuse_if_nulls(None, _Editor())
