@@ -127,6 +127,23 @@ def test_only_the_reviewed_answers_are_three_state():
     assert tri == set(FIELDS) | set(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
 
 
+def test_the_native_patch_clears_to_unknown():
+    record = PatientRecordFactory(bone_imaging_result=True)
+    client = APIClient()
+    client.force_authenticate(
+        Identity.objects.create_user(email='tri-state-native@example.test', is_staff=True))
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'bone_imaging_result': None},
+        format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.bone_imaging_result is None
+
+
 def test_the_shared_form_api_clears_to_unknown():
     record = PatientRecordFactory(pulmonary_function_test_result=False)
     client = APIClient()

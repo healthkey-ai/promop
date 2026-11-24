@@ -1,3 +1,15 @@
+"""Make the test-done and medication answers tri-state (#2759).
+
+Forward is metadata only (``DROP NOT NULL``); no row is rewritten. Existing
+rows keep their stored ``False``/``True``, so ``field IS NULL`` is **not** the
+set of historically unanswered records — only the ones cleared after this
+migration. The deferred label/provenance work must not treat ``IS NULL`` as the
+legacy set.
+
+The reverse refuses while any of the four columns holds ``NULL``: restoring
+``NOT NULL`` would fill it with the old default and record an answer nobody
+gave (the 0329 pattern).
+"""
 from django.db import migrations, models
 
 FIELDS = (

@@ -79,7 +79,7 @@ write.
   leaves the stored answer alone.
 - `answer_labels` (when present) replaces the generic Yes / No wording for a
   question phrased in the negative or positively, for example a medication
-  flag whose `true` means "takes medication".
+  flag whose `true` means "no concomitant medication".
 - A `tri_state` field never renders curator string choices: the boolean control
   is the contract.
 
