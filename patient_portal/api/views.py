@@ -2168,11 +2168,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         person_id = person.person_id
-        # Remove a purely-patient login alongside the record; keep an Identity that
-        # also holds provider access (GroupAccess) so we don't revoke a provider.
+        # Remove a purely-patient login alongside the record; keep an Identity
+        # that is staff or holds provider access, so we don't revoke a provider.
+        # A `patient` grant (an invitation's) is no reason to keep it: a
+        # sign-in left behind opens a new, empty record on its next request (#2851).
         linked_identity = None
         pu = PatientUser.objects.filter(person=person).select_related('identity').first()
-        if pu and not GroupAccess.objects.filter(identity=pu.identity).exists():
+        if pu and not (
+            pu.identity.is_staff or pu.identity.is_superuser
+            or GroupAccess.objects.filter(identity=pu.identity).exclude(role='patient').exists()
+        ):
             linked_identity = pu.identity
 
         from patient_portal.erasure import close_account
@@ -6550,6 +6555,37 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if suppressed:
             data['name'] = data['email'] = None
         return data
+
+    def list(self, request):
+        """The patient list, with ``other_roles`` on the rows that have any (#2838).
+
+        A row whose patient signs in with an account that also holds another
+        role (a staff account, an org admin, doctor or analyst grant) names
+        those roles, so the page can mark the record. It is told only to a
+        signed-in person who may already read those grants: see
+        ``omop_core.services.account_roles.other_roles_by_person``. Everyone
+        else, and every row whose demographics are withheld, gets no key.
+        """
+        response = super().list(request)
+        data = response.data
+        self._mark_other_roles(request, data['results'] if isinstance(data, dict) else data)
+        return response
+
+    def _mark_other_roles(self, request, rows):
+        # A person at the page, never a credential that can be presented
+        # without them.
+        if not is_interactive_session(request) or is_machine_request(request):
+            return
+        from omop_core.services.account_roles import other_roles_by_person
+        # A record whose demographics this reader is not shown is not marked:
+        # "also a doctor here" can name the one person it could be. That is
+        # every row but their own for the de-identified reader (#2460), who
+        # administers nothing and so is told nothing by the service either.
+        shown = [row for row in rows if not row.get('demographics_redacted')]
+        roles = other_roles_by_person(request.user, [row['person_id'] for row in shown])
+        for row in shown:
+            if row['person_id'] in roles:
+                row['other_roles'] = roles[row['person_id']]
 
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:

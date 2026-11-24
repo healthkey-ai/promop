@@ -330,6 +330,7 @@ describe('OrgDetail access administration permissions', () => {
     for (const resource of ['trusts', 'access', 'invitations']) {
       expect(mockGet).not.toHaveBeenCalledWith(`/orgs/acme/${resource}/`);
     }
+    expect(mockGet).not.toHaveBeenCalledWith('/v1/orgs/acme/access/');
     expect(screen.queryByRole('button', { name: /send invite/i })).not.toBeInTheDocument();
   });
 });
@@ -437,5 +438,51 @@ describe("roles reference (#2473)", () => {
     // Beside the Doctor select only the info link, not a second "Doctor".
     expect(screen.getByRole("link", { name: "What the Doctor role can do" })).toHaveAttribute("href", "/roles");
     expect(screen.getAllByText("Doctor").every((el) => el.tagName === "OPTION")).toBe(true);
+  });
+});
+
+describe("the Patient role on the Access Grants tab (#2838)", () => {
+  const grant = (id: number, email: string, role: string, person_id: number | null = null) => ({
+    id, email, name: "", is_premium: false, org_slug: "acme", group_name: null,
+    role, redirect_url: null, expires_at: null, granted_at: "2024-01-01", person_id,
+  });
+
+  it("links a patient grant to the record the server names, and no other role", async () => {
+    setupMocks();
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes("/orgs/acme/access/")) return Promise.resolve({ data: [
+        grant(1, "both@test.com", "patient", 42),
+        grant(2, "both@test.com", "doctor"),
+        grant(3, "hidden@test.com", "patient"),
+        grant(4, "boss@test.com", "org_admin"),
+      ] });
+      if (url.includes("/orgs/acme/trusts/") || url.includes("/orgs/acme/invitations/")) return Promise.resolve({ data: [] });
+      if (url.includes("/orgs/acme/")) return Promise.resolve({ data: ORG_DATA });
+      return Promise.resolve({ data: [] });
+    });
+    renderOrgDetail();
+    await screen.findByText("Acme Clinic");
+    // The grants come from the v1 list, the only one that names the record.
+    expect(mockGet).toHaveBeenCalledWith("/v1/orgs/acme/access/");
+    expect(mockGet).not.toHaveBeenCalledWith("/orgs/acme/access/");
+    fireEvent.click(screen.getByText("Access Grants"));
+
+    const link = await screen.findByRole("link", { name: "Open the patient record of both@test.com" });
+    expect(link).toHaveAttribute("href", "/patient/42");
+    expect(link).toHaveTextContent("Patient");
+    // A patient grant with no record this reader can open stays plain text.
+    expect(screen.queryByRole("link", { name: /patient record of hidden@test.com/ })).not.toBeInTheDocument();
+    const hidden = screen.getByText("hidden@test.com").closest("tr")!;
+    expect(hidden).toHaveTextContent("Patient");
+    // A patient grant is not a role to swap: only the doctor row has the select.
+    expect(hidden.querySelector("select")).toBeNull();
+    expect(link.closest("tr")!.querySelector("select")).toBeNull();
+    // Nor one to mark Premium: the server refuses any change to a patient grant.
+    expect(hidden.querySelector("input[type=checkbox]")).toBeNull();
+    expect(link.closest("tr")!.querySelector("input[type=checkbox]")).toBeNull();
+    // The invite form's role select also reads "Doctor"; the grant row's is in the table.
+    const doctorRow = screen.getAllByDisplayValue("Doctor").find((el) => el.closest("table"))!.closest("tr")!;
+    expect(doctorRow.querySelector("input[type=checkbox]")).not.toBeNull();
+    expect(screen.getAllByRole("link", { name: /^Open the patient record of/ })).toHaveLength(1);
   });
 });

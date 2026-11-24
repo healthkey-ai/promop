@@ -100,3 +100,17 @@ export function isOwnRecord(
   const own = ownPersonId(user);
   return own != null && personId != null && personId !== '' && String(own) === String(personId);
 }
+
+/** Where this account opens its own patient record, for the Patient role in
+ *  its list of roles (#2838); null when it holds no record or cannot open
+ *  one. A patient-only account's home is its record. One that is also staff
+ *  or a professional opens it in the provider console, except an
+ *  analyst-only account, which the patient pages turn away (`isAnalystOnly`).
+ *  The server decides on its own whether the record opens. */
+export function ownRecordPath(user: User | null | undefined): string | null {
+  const own = ownPersonId(user);
+  if (own == null) return null;
+  if (user?.is_patient) return '/';
+  if (isAnalystOnly(user)) return null;
+  return `/patient/${own}`;
+}

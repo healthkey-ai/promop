@@ -8,6 +8,15 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A closed account's partner token no longer opens a new account** — a
+  Firebase or PHR-host token stays valid after the account it opened is
+  closed, and the next request carrying it used to provision a new, empty
+  account. The deletion log now keeps a keyed digest of the closed sign-in,
+  and a partner sign-in whose account was closed within
+  `ACCOUNT_CLOSED_BLOCK_SECONDS` (a day by default, `0` for off) gets a 401
+  "This account was closed." (#2851). See
+  [member erasure](docs/member_erasure_architecture.md#a-closed-accounts-partner-token).
+
 - **Erasures survive a backup restore** — `manage.py export_erasures` writes
   the deletion log (the audit trail's signed `ERASE` rows) as JSON lines to
   keep outside the database, and `manage.py replay_erasures <file>` erases
@@ -33,6 +42,20 @@ All notable changes to PRomop are documented here.
   metric on the Wearables tab is marked Accepted or Provisional. Migration
   0371 re-files the wearable rows already stored.
 
+- **Patients: a record whose patient also works here is marked, and the
+  Patient role links to the record** — a patient whose sign-in account also
+  holds another role (a staff account, or an org admin, doctor or analyst
+  grant) now shows "Staff", "Also org admin", "Also doctor" or "Also analyst"
+  under the name on the Patients list. Staff see every such role; an org
+  admin sees the roles granted at the organizations they administer by a
+  direct grant; nobody else is told, a record whose demographics are
+  withheld is never marked, and the grant every sign-up at a public demo
+  organization receives is not counted. On My Profile the Patient role links to the
+  account's own record, and on an organization's Access Grants a patient
+  grant links to its record when the reader can open it (it is shown as
+  "Patient" there, no longer as a Doctor/Analyst choice with a Premium box
+  the server refuses). The new fields are
+  on `/api/v1/` only (#2838).
 - **Garmin Connect sync: the Personal API key is saved for next time** — the
   sync by key used the key once and kept it nowhere, so a patient pasted it
   for every sync. A key Garmin has accepted is now saved, encrypted under

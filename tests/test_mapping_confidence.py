@@ -58,7 +58,8 @@ def test_forward_suggest_stores_the_winners_confidence(monkeypatch, concepts):
         candidates[0], 'high confidence: match',
         [{'concept_id': candidates[0]['concept_id'], 'confidence': 0.85, 'ranker': 'anthropic'}],
     ))
-    suggestions.suggest_mappings('condition', strategies=['umls'], min_occurrences=1, resuggest=True)
+    suggestions.suggest_mappings('condition', strategies=['umls'], min_occurrences=1, resuggest=True,
+                                ranking_model='anthropic')
     row.refresh_from_db()
     assert row.target_concept_id == curator_pick.pk
     assert row.suggestion_confidence == 0.85

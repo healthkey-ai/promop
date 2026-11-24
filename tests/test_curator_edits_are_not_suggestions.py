@@ -211,6 +211,7 @@ def test_curator_can_approve_a_saved_result_before_batch_finishes(
 
     results = suggestions.suggest_mappings(
         'condition', strategies=['umls'], min_occurrences=1, resuggest=True, activity=activity,
+        ranking_model='anthropic',
     )
     assert len(results) == len(completed) == 2
     approved = SourceCodeConceptMapping.objects.get(pk=completed[0])
@@ -234,7 +235,7 @@ def _run_with_decision_during_ranking(monkeypatch, row, decide):
         return candidates[0], 'ranked', []
     monkeypatch.setattr(suggestions, 'rank_candidates', rank)
     return suggestions.suggest_mappings('condition', strategies=['umls'], min_occurrences=1,
-                                        resuggest=True)
+                                        resuggest=True, ranking_model='anthropic')
 
 
 def test_a_row_approved_during_the_run_is_left_alone(monkeypatch, concepts):
@@ -408,7 +409,8 @@ def test_declined_replacement_keeps_rejected_state_and_feedback(monkeypatch, con
     row = suggested_row(model_pick, status='rejected', suggestion_outcome='rejected')
     monkeypatch.setattr(suggestions, 'umls_candidates', lambda *a: ([], None))
     monkeypatch.setattr(suggestions, '_query_expand_failed_jobs', lambda *a, **kw: None)
-    suggestions.suggest_mappings('condition', strategies=['umls'], min_occurrences=1, resuggest=True)
+    suggestions.suggest_mappings('condition', strategies=['umls'], min_occurrences=1, resuggest=True,
+                              ranking_model='anthropic')
     row.refresh_from_db()
     assert row.status == row.suggestion_outcome == 'rejected'
     assert row.target_concept_id == row.suggested_target_concept_id == model_pick.pk

@@ -83,7 +83,7 @@ from .org_views import (
     OrgListCreateView, OrgDetailView,
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
-    OrgAccessListView, OrgAccessDetailView, OrgVocabularyUsageView,
+    OrgAccessListV1View, OrgAccessDetailView, OrgVocabularyUsageView,
     confirm_invitation, org_invitation_lookup, org_public_info, org_signup_directory,
     OrgPatientSignupView,
 )
@@ -189,7 +189,7 @@ urlpatterns = [
     path('orgs/<slug:slug>/invitations/<int:invitation_id>/', OrgInvitationDetailView.as_view(), name='v1-org-invitation-detail'),
     path('orgs/<slug:slug>/trusts/', OrgTrustListCreateView.as_view(), name='v1-org-trust-list'),
     path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='v1-org-trust-detail'),
-    path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='v1-org-access-list'),
+    path('orgs/<slug:slug>/access/', OrgAccessListV1View.as_view(), name='v1-org-access-list'),
     path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='v1-org-access-detail'),
     path('orgs/<slug:slug>/vocabulary/', OrgVocabularyUsageView.as_view(), name='v1-org-vocabulary-usage'),
     path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),

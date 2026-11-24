@@ -45,7 +45,7 @@ def test_rewrite_recovers_missing_candidate_and_keeps_original_source(initial_hi
     responses = ([select()] if initial_hit else []) + [reply({'search_query': 'formal assay name'}), select(right.pk)]
     llm.messages.create.side_effect = responses
     result = suggest.suggest_one_mapping('LOCAL', 'Local lab', 'measurement',
-        source_description='Original ambiguous assay', strategies=['lexical'])
+        source_description='Original ambiguous assay', strategies=['lexical'], ranking_model='anthropic')
     assert result['suggested']['concept_id'] == right.pk
     assert result['query_expansion'] == 'formal assay name'
     assert 'Search expanded' in result['note']
@@ -63,7 +63,7 @@ def test_no_shortcut_for_close_cosine_score(monkeypatch, llm):
     target = candidate(ConceptFactory()) | {'retrieval': 'vectors', 'semantic_score': 0.9999}
     monkeypatch.setattr(suggest, 'semantic_candidates', Mock(return_value=[target]))
     llm.messages.create.return_value = select(target['concept_id'])
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['vectors'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['vectors'], ranking_model='anthropic')
     assert result['suggested']['concept_id'] == target['concept_id']
     assert result['query_expansion'] is None
     assert llm.messages.create.call_count == 1
@@ -73,7 +73,7 @@ def test_retry_abstention_stops_without_another_rewrite(monkeypatch, llm):
     target = ConceptFactory()
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(side_effect=[[], [candidate(target)]]))
     llm.messages.create.side_effect = [reply({'search_query': 'formal assay name'}), select()]
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'], ranking_model='anthropic')
     assert result['suggested'] is None
     assert llm.messages.create.call_count == 2
 
@@ -82,7 +82,7 @@ def test_retry_model_failure_does_not_promote_retrieved_candidate(monkeypatch, l
     target = ConceptFactory()
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(side_effect=[[], [candidate(target)]]))
     llm.messages.create.side_effect = [reply({'search_query': 'formal assay name'}), RuntimeError('unavailable')]
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'], ranking_model='anthropic')
     assert result['suggested'] is None
     assert 'Ranking model unavailable' in result['note']
 
@@ -91,14 +91,14 @@ def test_unsupported_id_after_rewrite_is_rejected(monkeypatch, llm):
     target = ConceptFactory()
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(side_effect=[[], [candidate(target)]]))
     llm.messages.create.side_effect = [reply({'search_query': 'formal assay name'}), select(123456)]
-    assert suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'])['suggested'] is None
+    assert suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'], ranking_model='anthropic')['suggested'] is None
 
 
 def test_duplicate_only_retry_does_not_rerank_or_loop(monkeypatch, llm):
     target = candidate(ConceptFactory())
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(return_value=[target]))
     llm.messages.create.side_effect = [select(), reply({'search_query': 'formal assay name'})]
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'], ranking_model='anthropic')
     assert result['suggested'] is None
     assert result['candidates_considered'] == 1
     assert 'no new candidates found' in result['note']
@@ -116,7 +116,7 @@ def test_retry_database_failure_preserves_original_result_and_transaction(monkey
 
     monkeypatch.setattr(suggest, 'lexical_candidates', retrieve)
     llm.messages.create.side_effect = [select(), reply({'search_query': 'formal assay name'})]
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['lexical'], ranking_model='anthropic')
     assert result['suggested'] is None
     assert 'was unavailable' in result['note']
     assert result['candidates_considered'] == 1
@@ -129,7 +129,7 @@ def test_unchanged_query_does_not_repeat_retrieval(query, monkeypatch, llm):
     monkeypatch.setattr(suggest, 'lexical_candidates', retrieved)
     llm.messages.create.return_value = reply({'search_query': query})
     result = suggest.suggest_one_mapping('LOCAL', '', 'measurement',
-        source_description='Original assay', strategies=['lexical'])
+        source_description='Original assay', strategies=['lexical'], ranking_model='anthropic')
     assert result['suggested'] is None
     assert result['query_expansion'] is None
     retrieved.assert_called_once()
@@ -139,7 +139,7 @@ def test_umls_only_does_not_enable_disabled_text_retrievers(monkeypatch, llm):
     lexical, semantic = Mock(), Mock()
     monkeypatch.setattr(suggest, 'lexical_candidates', lexical)
     monkeypatch.setattr(suggest, 'semantic_candidates', semantic)
-    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['umls'])
+    result = suggest.suggest_one_mapping('LOCAL', '', 'measurement', strategies=['umls'], ranking_model='anthropic')
     assert result['suggested'] is None
     lexical.assert_not_called()
     semantic.assert_not_called()
@@ -153,7 +153,7 @@ def test_batch_saves_retry_provenance_without_replacing_original_description(mon
         status='proposed', occurrence_count=12)
     monkeypatch.setattr(suggest, 'lexical_candidates', Mock(side_effect=[[], [candidate(target)]]))
     llm.messages.create.side_effect = [reply({'search_query': 'formal assay name'}), select(target.pk)]
-    result = suggest.suggest_mappings('measurement', strategies=['lexical'])[0]
+    result = suggest.suggest_mappings('measurement', strategies=['lexical'], ranking_model='anthropic')[0]
     mapping.refresh_from_db()
     assert mapping.target_concept_id == target.pk
     assert mapping.status == 'proposed'

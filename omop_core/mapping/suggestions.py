@@ -194,7 +194,7 @@ RANKING_MODELS = {'anthropic', 'jev', 'both'}
 # Map Anthropic's qualitative confidence labels to numeric values for comparison
 # with Jev's probabilistic scores.
 ANTHROPIC_CONFIDENCE_MAP = {'high': 0.85, 'medium': 0.55, 'low': 0.25}
-DEFAULT_RANKING_MODEL = 'anthropic'
+DEFAULT_RANKING_MODEL = 'jev'
 # Backwards compat: old code that reads RANKING_MODEL gets the Anthropic model.
 RANKING_MODEL = RANKING_MODEL_ANTHROPIC
 

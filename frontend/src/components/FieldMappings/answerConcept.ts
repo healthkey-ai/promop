@@ -168,3 +168,78 @@ export function newestFirst(entries: HistoryEntry[]): HistoryEntry[] {
       ? b.mapping_id - a.mapping_id || b.revision - a.revision
       : a.created_at < b.created_at ? 1 : -1);
 }
+
+/** Where an answer stands for review, one bucket each. `attention` is an
+ *  approved concept the server can no longer use; `unmapped` means no decision
+ *  and no open proposal, not "writes no concept": an answer with a legacy code
+ *  may still write that code's concept. */
+export type CoverageBucket = "unmapped" | "proposed" | "attention" | "done" | "retired";
+/** `waiting` is every offered answer with an open proposal, whatever else it
+ *  has: a replacement for an approved concept is a proposal an approver must
+ *  find, so it overlaps the buckets. */
+export type CoverageFilter = "all" | CoverageBucket | "waiting";
+
+interface Reviewable {
+  retired?: boolean;
+  value_mappings?: ValueMapping[];
+}
+
+export function hasOpenProposal(choice: Reviewable): boolean {
+  return !choice.retired && answerState(choice.value_mappings).proposed !== null;
+}
+
+/** Whether an answer belongs in the view a filter names. */
+export function inCoverageView(choice: Reviewable, filter: CoverageFilter): boolean {
+  if (filter === "all") return true;
+  if (filter === "waiting") return hasOpenProposal(choice);
+  return coverageBucket(choice) === filter;
+}
+
+export function coverageBucket(choice: Reviewable): CoverageBucket {
+  if (choice.retired) return "retired";
+  switch (answerState(choice.value_mappings).kind) {
+    case "approved":
+    case "approved_no_equivalent":
+      return "done";
+    case "approved_invalid":
+      return "attention";
+    case "proposed":
+      return "proposed";
+    default:
+      return "unmapped";
+  }
+}
+
+export interface AnswerCoverage {
+  /** Answers still offered; retired ones are not counted. */
+  offered: number;
+  mapped: number;
+  no_equivalent: number;
+  /** Answers with an open proposal, including a replacement for an approved concept. */
+  waiting: number;
+  attention: number;
+  unmapped: number;
+  retired: number;
+}
+
+/** The field's answer coverage from the list the editor already holds, apart
+ *  from the field's own question concept, which is mapped on the field. */
+export function answerCoverage(choices: Reviewable[]): AnswerCoverage {
+  const out: AnswerCoverage = { offered: 0, mapped: 0, no_equivalent: 0, waiting: 0, attention: 0, unmapped: 0, retired: 0 };
+  for (const choice of choices) {
+    const bucket = coverageBucket(choice);
+    if (bucket === "retired") {
+      out.retired += 1;
+      continue;
+    }
+    out.offered += 1;
+    if (hasOpenProposal(choice)) out.waiting += 1;
+    if (bucket === "done") {
+      if (answerState(choice.value_mappings).kind === "approved") out.mapped += 1;
+      else out.no_equivalent += 1;
+    } else if (bucket === "attention" || bucket === "unmapped") {
+      out[bucket] += 1;
+    }
+  }
+  return out;
+}

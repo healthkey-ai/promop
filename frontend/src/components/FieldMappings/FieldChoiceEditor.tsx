@@ -4,7 +4,11 @@ import api from "@/api/axios";
 import { AnswerConceptPanel } from "./AnswerConceptPanel";
 import { AnswerDetailsPanel } from "./AnswerDetailsPanel";
 import { AnswerHistory } from "./AnswerHistory";
-import { refusalText, type ValueMapping } from "./answerConcept";
+import type { DiseaseCategoryOption } from "@/types/fieldScope";
+import { AnswerCoverage } from "./AnswerCoverage";
+import {
+  answerCoverage, inCoverageView, refusalText, type CoverageFilter, type ValueMapping,
+} from "./answerConcept";
 
 interface ChoiceCode {
   id?: number;
@@ -24,6 +28,8 @@ interface Choice {
   code?: string;
   aliases?: string[];
   retired?: boolean;
+  context_key?: string;
+  diseases?: string[];
   /** Only for a reader of the mapping pages. */
   value_mappings?: ValueMapping[];
 }
@@ -33,9 +39,15 @@ interface Props {
   onClose: () => void;
   /** Org admins and staff approve or reject a proposed concept. */
   canApprove?: boolean;
+  /** The Disease Categories an answer can be offered to; without them scope is read only. */
+  diseaseOptions?: DiseaseCategoryOption[];
+  /** The categories could not be loaded, so `diseaseOptions` is only what is already in use. */
+  diseaseOptionsIncomplete?: boolean;
 }
 
-export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Props) {
+export function FieldChoiceEditor({
+  fieldName, onClose, canApprove = false, diseaseOptions, diseaseOptionsIncomplete = false,
+}: Props) {
   const [choices, setChoices] = useState<Choice[]>([]);
   const [loading, setLoading] = useState(true);
   const [newDisplay, setNewDisplay] = useState("");
@@ -43,6 +55,10 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
   const [reordering, setReordering] = useState(false);
   const [removingCodeId, setRemovingCodeId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const [filter, setFilter] = useState<CoverageFilter>("all");
+  // The answers a filter listed when it was chosen stay listed, so a decision
+  // made on one does not take its row (and what is open in it) away.
+  const [pinned, setPinned] = useState<Set<number>>(new Set());
 
   // ``silent`` reads the list again without replacing it with "Loading...", so
   // an open answer panel keeps what was typed and the scroll position.
@@ -75,6 +91,9 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
         sort_order: choices.length,
       });
       setNewDisplay("");
+      // A new answer has no decision; show it wherever the list is looking.
+      setFilter("all");
+      setPinned(new Set());
       await fetchChoices();
     } catch {
       setError("Failed to add choice.");
@@ -146,6 +165,18 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
     }
   };
 
+  // Coverage is for a reader of the mapping pages, who is sent the decisions.
+  const reviewing = choices.some((c) => c.value_mappings !== undefined);
+  const coverage = answerCoverage(choices);
+  // An answer keeps its place in the whole list; a filtered view cannot reorder.
+  const chooseFilter = (next: CoverageFilter) => {
+    setFilter(next);
+    setPinned(new Set(choices.filter((c) => inCoverageView(c, next)).map((c) => c.id!)));
+  };
+  const shown = choices
+    .map((choice, index) => ({ choice, index }))
+    .filter(({ choice }) => inCoverageView(choice, filter) || pinned.has(choice.id!));
+
   // Close on Escape
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -181,8 +212,11 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
         ) : (
           <>
             {/* Existing choices */}
+            {reviewing && choices.length > 0 && (
+              <AnswerCoverage coverage={coverage} filter={filter} onFilter={chooseFilter} />
+            )}
             <div className="mb-4 space-y-2">
-              {choices.map((choice, index) => (
+              {shown.map(({ choice, index }) => (
                 <div
                   key={choice.id}
                   className={`flex items-start gap-2 rounded border border-gray-200 p-2 ${choice.retired ? "bg-gray-50" : ""}`}
@@ -190,14 +224,14 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                   <div className="flex flex-col gap-0.5">
                     <button
                       onClick={() => handleMoveChoice(index, "up")}
-                      disabled={index === 0}
+                      disabled={index === 0 || filter !== "all"}
                       className="text-gray-400 hover:text-gray-600 disabled:opacity-30"
                     >
                       <ChevronUp size={12} />
                     </button>
                     <button
                       onClick={() => handleMoveChoice(index, "down")}
-                      disabled={index === choices.length - 1}
+                      disabled={index === choices.length - 1 || filter !== "all"}
                       className="text-gray-400 hover:text-gray-600 disabled:opacity-30"
                     >
                       <ChevronDown size={12} />
@@ -212,6 +246,10 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                         code={choice.code}
                         aliases={choice.aliases}
                         retired={choice.retired}
+                        diseases={choice.diseases}
+                        contextKey={choice.context_key}
+                        diseaseOptions={diseaseOptions}
+                        optionsIncomplete={diseaseOptionsIncomplete}
                         onChanged={() => fetchChoices(true)}
                       />
                     )}
@@ -272,6 +310,9 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                   </button>
                 </div>
               ))}
+              {choices.length > 0 && shown.length === 0 && (
+                <div className="py-3 text-center text-sm text-gray-400">No answers in this view.</div>
+              )}
               {choices.length === 0 && (
                 <div className="py-3 text-center text-sm text-gray-400">
                   No choices defined yet.

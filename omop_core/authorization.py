@@ -87,6 +87,59 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     ).exists() or _administers_patient(actor_identity, target_person_id)
 
 
+def accessible_person_ids(actor_identity, person_ids) -> set:
+    """The subset of ``person_ids`` the actor may read.
+
+    ``can_access_patient`` for many patients at once, in a fixed number of
+    queries: a list that offers a link to each record it names must not ask
+    once per row (#2838). The paths are the same three, and
+    ``tests/test_account_roles.py`` holds the two to one answer: change one
+    and change the other.
+    """
+    from patient_portal.models import PatientUser
+
+    from .models import PatientGroupMembership, PatientRecord
+    from .services.access import get_admin_orgs
+
+    wanted = {person_id for person_id in person_ids if person_id is not None}
+    if actor_identity is None or not wanted:
+        return set()
+    if getattr(actor_identity, 'is_staff', False):
+        return wanted
+
+    # 1. Self-access, and 2. a verified personal representative.
+    found = set(PatientUser.objects.filter(
+        identity=actor_identity, person_id__in=wanted,
+    ).values_list('person_id', flat=True))
+    found.update(PersonalRepresentative.objects.filter(
+        representative=actor_identity, person_id__in=wanted,
+        verification_status='VERIFIED',
+    ).values_list('person_id', flat=True))
+
+    # 3. Professional access: the groups and organizations of the actor's
+    # active curation grants, and the organizations it administers.
+    group_ids, org_ids = set(), set()
+    for group_id, org_id in GroupAccess.objects.filter(
+        identity=actor_identity, role__in=_READ_ROLES,
+    ).filter(
+        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now()),
+    ).values_list('group_id', 'org_id'):
+        group_ids.add(group_id)
+        org_ids.add(org_id)
+    group_ids.discard(None)
+    org_ids.discard(None)
+    org_ids.update(get_admin_orgs(actor_identity).values_list('id', flat=True))
+    if group_ids:
+        found.update(PatientGroupMembership.objects.filter(
+            group_id__in=group_ids, person_id__in=wanted,
+        ).values_list('person_id', flat=True))
+    if org_ids:
+        found.update(PatientRecord.objects.filter(
+            organization_id__in=org_ids, person_id__in=wanted,
+        ).values_list('person_id', flat=True))
+    return found
+
+
 def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """Return True if the actor may write (create/update/delete) patient data.
 

@@ -418,3 +418,131 @@ def test_a_mapping_job_for_an_erased_response_is_not_an_error():
         srm.run_response(uuid.uuid4())
 
     assert error.call_count == 0 and 'no longer exists' in info.call_args.args[0]
+
+
+# --- A closed account's partner sign-in (#2851) ---------------------------
+
+def partner_member(sub='uid-closed'):
+    """A member signed in through a partner (Firebase, the PHR host): the
+    identity, person and record a first request with their token provisions."""
+    from patient_portal.api.authentication import PartnerAuthentication, _ensure_person
+    from patient_portal.api.providers.base import TokenClaims
+
+    claims = TokenClaims(issuer='https://securetoken.google.com/proj', sub=sub,
+                         email=f'{sub}@example.test', name='Pat', raw={}, email_verified=True)
+    identity = PartnerAuthentication._get_or_create_identity(claims)
+    _ensure_person(identity, claims)
+    return claims, identity, PatientUser.objects.get(identity=identity).person
+
+
+def sign_in(claims):
+    from patient_portal.api.authentication import PartnerAuthentication
+
+    return PartnerAuthentication._get_or_create_identity(claims)
+
+
+def test_a_partner_token_cannot_reopen_the_account_it_closed():
+    from rest_framework.exceptions import AuthenticationFailed
+
+    from patient_portal.erasure import close_account
+
+    claims, identity, person = partner_member()
+    identities, people = Identity.objects.count(), Person.objects.count()
+
+    close_account(person, identity, actor=identity)
+
+    with pytest.raises(AuthenticationFailed, match='closed'):
+        sign_in(claims)
+    assert Identity.objects.count() == identities - 1 and Person.objects.count() == people - 1
+    # The log can say this sign-in was closed without naming it.
+    detail = AuditEvent.objects.get(method='ERASE').detail
+    assert len(detail['subject']) == 64 and claims.sub not in json.dumps(detail)
+
+
+def test_closing_one_partner_account_refuses_no_other_sign_in():
+    from patient_portal.erasure import close_account
+
+    _, identity, person = partner_member('uid-a')
+    other, _, _ = partner_member('uid-b')
+    close_account(person, identity, actor=identity)
+
+    assert sign_in(other).sub == 'uid-b'
+    newcomer = other.__class__(issuer=other.issuer, sub='uid-c', email='', name=None, raw={})
+    assert sign_in(newcomer).sub == 'uid-c'
+
+
+def test_a_closed_partner_account_can_sign_up_again_once_the_block_has_run_out(settings, monkeypatch):
+    from datetime import timedelta
+
+    from django.utils import timezone
+    from rest_framework.exceptions import AuthenticationFailed
+
+    from patient_portal import erasure
+
+    claims, identity, person = partner_member()
+    erasure.close_account(person, identity, actor=identity)
+    with pytest.raises(AuthenticationFailed):
+        sign_in(claims)
+
+    later = timezone.now() + timedelta(seconds=settings.ACCOUNT_CLOSED_BLOCK_SECONDS + 1)
+    monkeypatch.setattr(erasure.timezone, 'now', lambda: later)
+    again = sign_in(claims)
+
+    assert again.pk != identity.pk and again.sub == claims.sub
+
+
+def test_the_block_can_be_turned_off(settings):
+    from patient_portal.erasure import close_account
+
+    settings.ACCOUNT_CLOSED_BLOCK_SECONDS = 0
+    claims, identity, person = partner_member()
+    close_account(person, identity, actor=identity)
+
+    assert sign_in(claims).sub == claims.sub
+
+
+def test_a_record_erased_with_the_sign_in_kept_refuses_nothing():
+    """An admin delete that keeps the sign-in (a clinician who is also a
+    member), and a withdrawal, close no sign-in: the token goes on working."""
+    from patient_portal.erasure import close_account, erase_record
+
+    claims, identity, person = partner_member('uid-kept')
+    erase_record(person, actor=identity, purpose='my_record')
+    assert sign_in(claims).pk == identity.pk
+    close_account(person, None, actor=None)
+
+    assert sign_in(claims).pk == identity.pk
+    assert all('subject' not in e.detail for e in AuditEvent.objects.filter(method='ERASE'))
+
+
+def test_staff_deleting_an_invited_member_closes_their_sign_in_too(member):
+    """A `patient` grant, which an invitation leaves on the sign-in, is not
+    provider access: the sign-in goes with the record, so a partner token
+    still in a browser cannot open a new one."""
+    from omop_core.models import GroupAccess
+
+    GroupAccess.objects.create(identity=member['identity'], org=member['record'].organization, role='patient')
+    staff = Identity.objects.create_user(email='staff3@example.test', is_staff=True)
+    client = APIClient()
+    client.force_authenticate(staff)
+    pid, identity_id = member['person'].person_id, member['identity'].pk
+
+    assert client.delete(f'/api/v1/patient-records/{pid}/admin-delete/', {'confirm': 'DELETE'},
+                         format='json').status_code == 200
+
+    assert not Identity.objects.filter(pk=identity_id).exists()
+    assert erasures() == [(str(staff.pk), {'erasure': 'account', 'person_id': pid, 'identity_id': identity_id})]
+
+
+def test_staff_deleting_the_record_of_a_staff_account_keeps_its_sign_in(member):
+    Identity.objects.filter(pk=member['identity'].pk).update(is_staff=True)
+    staff = Identity.objects.create_user(email='staff4@example.test', is_staff=True)
+    client = APIClient()
+    client.force_authenticate(staff)
+    pid = member['person'].person_id
+
+    assert client.delete(f'/api/v1/patient-records/{pid}/admin-delete/', {'confirm': 'DELETE'},
+                         format='json').status_code == 200
+
+    assert not Person.objects.filter(person_id=pid).exists()
+    assert Identity.objects.filter(pk=member['identity'].pk).exists()

@@ -767,6 +767,26 @@ wire format is frozen for the federation host, whose source is not in this
 repo, and the React detail page reads the v1 path. A new reader of this block
 goes on the v1 path. Tests: `tests/test_patient_record_account_block.py`.
 
+An account can be a patient and something else, and two lists say so, on
+`/api/v1/` only (#2838; `omop_core/services/account_roles.py`). A patient-list
+row carries `other_roles` (`staff`, `org_admin`, `doctor`, `analyst`) when the
+patient's active sign-in link belongs to an account that holds them, and the
+page marks the record ("Also doctor"); an access-grants row for a `patient`
+grant carries `person_id`, and the page links the Patient role to that record,
+as My Profile links the account's own. Which roles an account holds is access
+administration, so `other_roles` goes only to a signed-in person who may
+already read those grants: staff (every role, and staff status), or a direct
+org admin of the organization a role is granted at (`get_access_admin_orgs`,
+the rule behind `IsStaffOrAccessAdmin`), never to a trust-derived admin, a
+doctor, an analyst, a patient, a machine credential or the de-identified
+reader, and never on a row whose demographics are withheld. A grant at a
+public demo org is not counted: every self-signup there has one. `person_id`
+is set only for a record the reader can open (`accessible_person_ids`, the
+batched `can_access_patient`) and whose demographics they are shown. Neither
+adds a query per row. The rule covers these two fields only: the record
+detail's `user` block has long returned the linked account's `UserSerializer`
+data, roles included, to any reader of the record.
+
 Adding a field to PatientRecord is an approval, not a mapping write: `POST
 /api/v1/custom-patient-fields/` creates the field with an approved mapping, so
 it is gated by `_can_approve_mappings` and an analyst or a doctor gets 403
@@ -1727,7 +1747,7 @@ because trigram similarity and embedding cosine are different signals.
 `vector_rerank()` exists in the code but is unused in the default pipeline.
 
 `rank_candidates_dispatch()` routes the merged pool to the configured ranking
-model: **Anthropic** (Claude, the default), **Jev** (Typesafe API), or
+model: **Jev** (Typesafe API, the default), **Anthropic** (Claude), or
 **both** (concurrent, highest confidence wins). The ranker scores each candidate
 with a qualitative confidence level (high / medium / low, mapped to numeric
 values) and either picks a winner or declines. A declined code stays in the

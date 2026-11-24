@@ -1,6 +1,17 @@
 import { useState } from "react";
 import api from "@/api/axios";
+import type { DiseaseCategoryOption } from "@/types/fieldScope";
 import { refusalText } from "./answerConcept";
+import { FieldScopeControl } from "./FieldScopeControl";
+
+const scopeWords = (label: string) => ({
+  legend: `Scope — which patients are offered "${label}"`,
+  base: "Every patient",
+  disease: "Only some Disease Categories",
+  tip:
+    "Every patient: the answer is offered wherever the field is. Only some Disease Categories: it is offered "
+    + "only to records of the ticked categories. A value already saved is never changed or hidden by this.",
+});
 
 interface Props {
   choiceId: number;
@@ -9,6 +20,13 @@ interface Props {
   code?: string;
   aliases?: string[];
   retired?: boolean;
+  /** Disease Category codes the answer is offered to; none means every patient. */
+  diseases?: string[];
+  /** Separates answers that share a label, such as one staging system from another. */
+  contextKey?: string;
+  /** The categories a scope can name; without them the scope is shown but not edited. */
+  diseaseOptions?: DiseaseCategoryOption[];
+  optionsIncomplete?: boolean;
   /** Called after any change, so the list is read again. */
   onChanged: () => Promise<void> | void;
 }
@@ -28,13 +46,20 @@ const clean = (text: string): string[] => {
  *  label as another spelling (the server does that) and nothing already saved
  *  stops matching. Retiring stops offering the answer without deleting it or its
  *  concept decision. */
-export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retired = false, onChanged }: Props) {
+const sameSet = (a: string[], b: string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
+
+export function AnswerDetailsPanel({
+  choiceId, label, code, aliases = [], retired = false, diseases = [], contextKey = "",
+  diseaseOptions, optionsIncomplete = false, onChanged,
+}: Props) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(label);
   const [spellings, setSpellings] = useState(aliases.join("\n"));
   // What the form was opened on: only what the curator changed from it is
   // sent, so an unedited box never writes back a stale copy of the other one.
-  const [baseline, setBaseline] = useState({ label, aliases });
+  const [baseline, setBaseline] = useState({ label, aliases, diseases });
+  const [scope, setScope] = useState<"base" | "disease">(diseases.length ? "disease" : "base");
+  const [ticked, setTicked] = useState<string[]>(diseases);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -57,7 +82,9 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
   const open = () => {
     setName(label);
     setSpellings(aliases.join("\n"));
-    setBaseline({ label, aliases });
+    setBaseline({ label, aliases, diseases });
+    setScope(diseases.length ? "disease" : "base");
+    setTicked(diseases);
     setError("");
     setEditing(true);
   };
@@ -72,6 +99,12 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
     if (trimmed !== baseline.label) body.display = trimmed;
     const next = clean(spellings);
     if (next.join("\n") !== baseline.aliases.join("\n")) body.aliases = next;
+    const wanted = scope === "base" ? [] : ticked;
+    if (scope === "disease" && wanted.length === 0) {
+      setError("Tick at least one Disease Category, or offer the answer to every patient.");
+      return;
+    }
+    if (diseaseOptions && !sameSet(wanted, baseline.diseases)) body.diseases = wanted;
     if (Object.keys(body).length === 0) {
       setEditing(false);
       return;
@@ -93,11 +126,13 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
         )}
         {code && <span>Code <span className="font-mono">{code}</span></span>}
         {aliases.length > 0 && <span>Also written: {aliases.join(", ")}</span>}
+        {contextKey && <span>Context <span className="font-mono">{contextKey}</span></span>}
+        <span>{diseases.length ? `Offered to: ${diseases.join(", ")}` : "Offered to every patient"}</span>
         <button type="button" disabled={busy} onClick={editing ? () => setEditing(false) : open}
           aria-expanded={editing}
-          aria-label={editing ? `Cancel editing ${label}` : `Edit label and spellings of ${label}`}
+          aria-label={editing ? `Cancel editing ${label}` : `Edit details of ${label}`}
           className="rounded px-1 py-0.5 text-gray-500 underline hover:text-gray-700 disabled:opacity-50">
-          {editing ? "Cancel" : "Edit label"}
+          {editing ? "Cancel" : "Edit details"}
         </button>
         <button type="button" disabled={busy || editing} onClick={toggleRetired}
           aria-label={`${retired ? "Restore" : "Retire"} ${label}`}
@@ -120,6 +155,17 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
               aria-label="Other spellings" rows={3}
               className="mt-0.5 w-full rounded border border-gray-300 px-2 py-1 text-sm" />
           </label>
+          {diseaseOptions && (
+            <FieldScopeControl
+              scope={scope}
+              diseases={ticked}
+              options={diseaseOptions}
+              optionsIncomplete={optionsIncomplete}
+              onChange={(next, codes) => { setScope(next); setTicked(codes); }}
+              words={scopeWords(label)}
+              disabled={busy}
+            />
+          )}
           <div className="text-[10px] text-gray-400">
             A new label keeps the old one as another spelling, so saved values and imports still match.
             The code stays the same.

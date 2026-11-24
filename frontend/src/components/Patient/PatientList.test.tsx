@@ -55,11 +55,11 @@ it('sorts unmapped counts on the server and preserves the ordering preference', 
   const { unmount } = render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByRole('button', { name: 'Unmapped Source Codes' });
   fireEvent.click(screen.getByRole('button', { name: /next/i }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
   fireEvent.click(await screen.findByRole('button', { name: 'Unmapped Source Codes' }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 1, ordering: 'unmapped_source_codes' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ page: 1, ordering: 'unmapped_source_codes' }) })));
   fireEvent.click(screen.getByRole('button', { name: /Unmapped Source Codes/ }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-unmapped_source_codes' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-unmapped_source_codes' }) })));
   expect(screen.getByRole('columnheader', { name: /Unmapped Source Codes/ })).toHaveAttribute('aria-sort', 'descending');
   unmount();
   render(<MemoryRouter><PatientList /></MemoryRouter>);
@@ -98,9 +98,9 @@ it('saves clinical filters and sort in this browser, carrying over an audience-p
   expect(screen.getByLabelText('ECOG')).toHaveValue('1');
   expect(screen.getByRole('columnheader', { name: /Latest Clinical Result/ })).toHaveAttribute('aria-sort', 'descending');
   fireEvent.change(screen.getByLabelText('ECOG'), { target: { value: '0' } });
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ecog: '0', page: 1 }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ecog: '0', page: 1 }) })));
   fireEvent.click(screen.getByRole('button', { name: 'Key Data Gaps' }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-gaps' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-gaps' }) })));
   await screen.findByText('Recorded regimen');
   unmount();
   render(<MemoryRouter><PatientList /></MemoryRouter>);
@@ -114,9 +114,9 @@ it('sorts A to Z first on text columns and reverses on a second click', async ()
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   fireEvent.click(screen.getByRole('button', { name: 'Disease' }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: 'disease', page: 1 }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ordering: 'disease', page: 1 }) })));
   fireEvent.click(screen.getByRole('button', { name: /Disease/ }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-disease' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-disease' }) })));
   expect(screen.getByRole('columnheader', { name: /Disease/ })).toHaveAttribute('aria-sort', 'descending');
 });
 
@@ -160,11 +160,11 @@ it('applies text searches across the server cohort and resets the page', async (
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   fireEvent.click(screen.getByRole('button', { name: /next/i }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
   const search = await screen.findByLabelText('Subtype / biomarker');
   fireEvent.change(search, { target: { value: 'HER2' } });
   fireEvent.blur(search);
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 1, biomarker: 'HER2' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ page: 1, biomarker: 'HER2' }) })));
 });
 
 it('searches names or email and keeps Org All when selecting unassigned patients', async () => {
@@ -181,7 +181,7 @@ it('searches names or email and keeps Org All when selecting unassigned patients
   const search = await screen.findByLabelText('Name or email');
   fireEvent.change(search, { target: { value: 'ada@example.test' } });
   fireEvent.blur(search);
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({
     params: expect.objectContaining({ page: 1, org: 'all', search: 'ada@example.test' }),
   })));
   fireEvent.click(screen.getAllByRole('checkbox')[0]);
@@ -324,10 +324,10 @@ it('does not apply a saved contact or location filter whose control the reader c
   vi.mocked(api.get).mockResolvedValue({ data: cohort });
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
-  expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ contact: 'all', location: '', ecog: '1' }) }));
+  expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ contact: 'all', location: '', ecog: '1' }) }));
   // "Clear clinical filters" keeps the heading sort.
   fireEvent.click(screen.getByText('Clear clinical filters'));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ecog: 'all', ordering: '-freshness' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ecog: 'all', ordering: '-freshness' }) })));
 });
 
 it('falls back from a saved name sort for a reader whose names are withheld, and still sorts by another heading', async () => {
@@ -338,10 +338,10 @@ it('falls back from a saved name sort for a reader whose names are withheld, and
   vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [{ person_id: 5, patient_name: null, disease: 'Breast Cancer', therapy_lines_count: 1, unmapped_source_code_count: 2 }] } });
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Breast Cancer');
-  expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-updated' }) }));
+  expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-updated' }) }));
   expect(screen.getByRole('columnheader', { name: /Last Updated/ })).toHaveAttribute('aria-sort', 'descending');
   fireEvent.click(screen.getByRole('button', { name: 'Disease' }));
-  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: 'disease' }) })));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/v1/patient-records/', expect.objectContaining({ params: expect.objectContaining({ ordering: 'disease' }) })));
 });
 
 it('does not count unassigned patients as a second organization', async () => {
@@ -397,4 +397,37 @@ it('stays on the list and reads it again after adding somebody else', async () =
   expect(loadPage).not.toHaveBeenCalled();
   expect(navigate).not.toHaveBeenCalled();
   await waitFor(() => expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(reads));
+});
+
+it("marks a patient whose sign-in account holds another role, and no other (#2838)", async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 3, results: [
+    { person_id: 1, patient_name: 'Dana Doctor', disease: 'Breast Cancer', other_roles: ['org_admin', 'doctor'] },
+    { person_id: 2, patient_name: 'Sam Staff', disease: 'Breast Cancer', other_roles: ['staff'] },
+    { person_id: 3, patient_name: 'Pat Plain', disease: 'Breast Cancer' },
+  ] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  const dana = within((await screen.findByTitle('Dana Doctor')).closest('tr')!);
+  expect(dana.getByText('Also org admin')).toHaveAttribute('title', "This patient's sign-in account also holds the Org Admin role.");
+  expect(dana.getByText('Also doctor')).toHaveAttribute('title', "This patient's sign-in account also holds the Doctor role.");
+  const sam = within(screen.getByTitle('Sam Staff').closest('tr')!);
+  expect(sam.getByText('Staff')).toHaveAttribute('title', "This patient's sign-in account is also a staff account.");
+  const pat = within(screen.getByTitle('Pat Plain').closest('tr')!);
+  expect(pat.queryByText(/^Also /)).not.toBeInTheDocument();
+  expect(pat.queryByText('Staff')).not.toBeInTheDocument();
+  // The marker is part of the row: clicking it opens the record like the name.
+  fireEvent.click(dana.getByText('Also doctor'));
+  expect(navigate).toHaveBeenCalledWith('/patient/1');
+  // The rows come from the v1 list, the only one that names the roles.
+  expect(api.get).toHaveBeenCalledWith('/v1/patient-records/', expect.anything());
+});
+
+it('shows no role marker to a reader whose list has no Name column (#2838, #2460)', async () => {
+  // The server sends such a reader no roles; were it to, nothing would show.
+  mockUseAuth.mockReturnValue({ currentUser: { org_accesses: [{ role: 'analyst', org_allows_patient_signup: true }] } });
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [
+    { person_id: 1, patient_name: null, demographics_redacted: true, disease: 'Breast Cancer', other_roles: ['doctor'] },
+  ] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Breast Cancer');
+  expect(screen.queryByText('Also doctor')).not.toBeInTheDocument();
 });

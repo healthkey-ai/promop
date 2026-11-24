@@ -221,6 +221,28 @@ def has_org_admin_access(user, slug: str | None = None) -> bool:
     return admin_orgs.filter(slug=slug).exists()
 
 
+def get_access_admin_orgs(user) -> QuerySet:
+    """The organizations whose access the user administers.
+
+    Staff, or a direct, unexpired organization-level ``org_admin`` grant at an
+    active organization. A trust gives access to data and must not let its
+    members delegate access to others, and a group-scoped grant does not
+    administer an entire org, so neither counts. This is who may read an
+    organization's access grants (``IsStaffOrAccessAdmin``), and so who may be
+    told which roles an account holds there (#2838).
+    """
+    if getattr(user, 'is_staff', False):
+        return Organization.objects.all()
+    return Organization.objects.filter(
+        is_active=True,
+        id__in=GroupAccess.objects.filter(
+            identity=user, role='org_admin', org__isnull=False,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
+        ).values('org_id'),
+    )
+
+
 def has_explicit_org_admin_access(user, slug: str) -> bool:
     """Access administration requires a direct organization-level admin grant.
 
@@ -229,11 +251,7 @@ def has_explicit_org_admin_access(user, slug: str) -> bool:
     """
     if getattr(user, 'is_staff', False):
         return True
-    return GroupAccess.objects.filter(
-        identity=user, org__slug=slug, org__is_active=True, role='org_admin',
-    ).filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
-    ).exists()
+    return get_access_admin_orgs(user).filter(slug=slug).exists()
 
 
 PROFESSIONAL_ROLES = ('org_admin', 'doctor', 'analyst')
