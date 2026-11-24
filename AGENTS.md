@@ -2063,6 +2063,19 @@ never a patient, a date or a result value.
   plain text, and a reader without mapping write access is told why nothing
   opened.
 
+### Browse by facility (#2839)
+
+`/code-mappings/facilities` (`FacilityBrowsePage.tsx`, `GET /api/v1/code-mappings/facility-browse/`,
+`patient_portal/api/facility_browse.py`, mapping readers) is a navigation layer: facility
+-> source code system -> source code. A facility is a `SourceSystemFacility` name (case-insensitive,
+rejected associations ignored); its codes are every `SourceCodeConceptMapping` row under its
+systems, so codes no sampled patient carries are included. A system used by other facilities is
+flagged shared. Systems with no usable association are the `Unattributed` facility. Rows sort by
+code number (length, then text), filter by system, status, domain and text, and link to Edit
+Mapping (`?mapping=<id>`); nothing here changes a mapping. Not built: grouping matching codes or
+descriptions across systems, per-patient counts.
+Tests: `tests/test_facility_browse.py`, `FacilityBrowsePage.test.tsx`.
+
 ### Delete in Edit Mapping keeps a code patient data carries
 
 A mapping row is a destination and the queue entry for a source code, so

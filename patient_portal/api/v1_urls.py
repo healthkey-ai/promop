@@ -19,6 +19,7 @@ from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
 from .source_catalog import source_catalog
 from .source_system_facilities import source_system_facilities
+from .facility_browse import facility_browse
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -222,6 +223,7 @@ urlpatterns = [
     path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
     path('code-mappings/source-catalog/', source_catalog, name='v1-source-catalog'),
     path('code-mappings/source-systems/', source_system_facilities, name='v1-source-system-facilities'),
+    path('code-mappings/facility-browse/', facility_browse, name='v1-facility-browse'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
     path('relevance/', disease_relevance_view, name='v1-disease-relevance'),
