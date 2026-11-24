@@ -1101,20 +1101,66 @@ follow the copied rows. A missing concept becomes 0 where required, else null.
 
 ## Wearables — Garmin Connect Sync
 
-`POST /api/v1/patient-records/sync-garmin/` (`{api_key, days?, end_date?,
-person_id?}`, #2794) reads a patient's daily metrics from the Garmin Connect
+`POST /api/v1/patient-records/sync-garmin/` (`{api_key?, remember?, days?,
+end_date?, person_id?}`, #2794) reads a patient's daily metrics from the Garmin Connect
 Personal API with the patient's own key and writes them as the `.fit` upload
 does. Full description:
 [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#garmin-connect-sync).
 Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
 `upload_wearable`: `PatientRecordViewSet._store_wearable_samples`.
 
-- **The key is never kept.** Not in the database, a log line, an error message
-  or a Celery task argument. The sync therefore runs inside the request (90
-  days at most, no call started after 15s), and the token exchange is our own
-  `_exchange_key`: the client's `PersonalApiAuthenticator` writes the bearer
-  token to a plaintext cache file. Storing a key, or syncing on a schedule, is
-  a separate decision; do not add either as a side effect.
+- **The key is in no log line, error message or Celery task argument.** The
+  sync therefore runs inside the request (90 days at most, no call started
+  after 15s), and the token exchange is our own `_exchange_key`: the client's
+  `PersonalApiAuthenticator` writes the bearer token to a plaintext cache
+  file.
+- **A key Garmin accepted is saved for the patient's next sync (#2834)**,
+  a decision of 2026-11-24 that replaced "the key is never kept".
+  Rules in `omop_core/services/garmin_saved_key.py`, one `GarminPersonalKey`
+  row per person:
+  - **Encrypted under `GARMIN_TOKEN_KEY`** (`garmin_oauth.encrypt`, the key
+    the linked account's tokens use, in no database; the fallbacks still
+    decrypt). A deployment without it saves nothing and syncs as before.
+  - **Returned by nothing.** `GET /api/v1/patient-records/garmin-key/`
+    answers `{can_save, saved, saved_at, last_used_at}`; `DELETE` removes the
+    key and answers the same. Both are the person's own session, as the sync.
+  - **Saved after Garmin's answer, never before**, and only when the body
+    says `remember: true`. The default is false (anything but a boolean is a
+    400): a page from before #2834 says the key is not stored and sends no
+    `remember`, and that has to stay true. The save locks the person and
+    checks `record_permitted` again, so a record erased or switched off
+    during the read is left no key. A sync that sends no `api_key` uses the
+    saved one.
+  - **The account's own.** A key is used only by the account that saved it
+    (`saved_by`). An account linked to the record later reads as having none,
+    and the earlier key is removed when it syncs without one: it never pulls
+    its predecessor's Garmin data.
+  - **Removed** by the patient (allowed while the record is off), when
+    Garmin answers **401** to a sync that used it (the answer then has its
+    own wording), and with the person or their record (`erase_record`). Not
+    on a 403, which can be this server's address being blocked; not on a
+    rate limit or an outage; not when a typed key is refused; and a refusal
+    of an earlier key never removes one saved since (`refused` matches the
+    row it read).
+  - **Unreadable is not deleted.** A key that cannot be decrypted
+    (`GARMIN_TOKEN_KEY` unset, mistyped, or replaced without a fallback)
+    reads as not saved and stays: putting the key back restores it, and a
+    newly entered key overwrites it. Deleting it would make one bad deploy
+    cost every patient who pressed Sync.
+  - **Every answer says where the key stands.** A sync's response carries
+    `key_saved` (a usable key saved for this account now) on success, on a
+    failure after the key was saved, and on any failure of a sync that sent
+    no key. The tab sets its state from it, and reads the status again when
+    an answer does not say.
+  - **The tab** (`GarminConnectSync.tsx`) asks for the status once; "Save
+    this key for next time" starts ticked, sits before the fields, and is
+    shown only where `can_save`. Until the status is known it sends
+    `remember: false`, so the page never says "not stored" of a key that is.
+  - System data: never copied, and `copy_patient --replace` refuses a person
+    who has one.
+  - **Syncing on a schedule is still a separate decision.** Nothing reads a
+    saved key except a sync its patient starts; do not add a scheduled read
+    as a side effect.
 - **Garmin's error text is not relayed** to the patient or the log; failures
   are fixed wording by status (`GarminSyncError`): 400 a refused key, 429 a
   rate limit, 424 Garmin unreachable or slow (not a 5xx, which is reported as
@@ -1163,7 +1209,9 @@ Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
   weight wait on #444.
 
 Tests: `tests/test_garmin_connect.py` (Garmin's real client over a fake HTTP
-session), `patient_portal.tests.GarminSyncEndpointTest`, `WearableTab.test.tsx`.
+session), `patient_portal.tests.GarminSyncEndpointTest`,
+`patient_portal.tests.GarminSavedKeyTest`, `WearableTab.test.tsx`,
+`GarminConnectSync.test.tsx`.
 
 ---
 
@@ -1191,7 +1239,7 @@ The Starter tier is push only: no on-demand read and no history. Rules in
   |---|---|
   | `GARMIN_CLIENT_ID`, `GARMIN_CLIENT_SECRET` | the app's consumer key and secret |
   | `GARMIN_WEBHOOK_SECRET` | random, at least 32 characters (`MIN_WEBHOOK_SECRET_LENGTH`); shorter reads as unset |
-  | `GARMIN_TOKEN_KEY` | a Fernet key, the key patients' tokens are stored under; `GARMIN_TOKEN_KEY_FALLBACKS` lists earlier keys that still decrypt |
+  | `GARMIN_TOKEN_KEY` | a Fernet key, the key patients' tokens, and a saved Personal API key (#2834), are stored under; `GARMIN_TOKEN_KEY_FALLBACKS` lists earlier keys that still decrypt |
 
   All four or the tab offers nothing (`configured()`). Registered with Garmin:
   the redirect URL `<APP_BASE_URL>/api/v1/garmin/oauth/callback/`

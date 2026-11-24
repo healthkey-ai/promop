@@ -470,10 +470,11 @@ server reads one summary per day.
 
 ```
 POST /api/v1/patient-records/sync-garmin/
-     {"api_key": "...", "days": 30, "end_date": "2026-11-22", "person_id": 16813}
+     {"api_key": "...", "remember": true, "days": 30, "end_date": "2026-11-22", "person_id": 16813}
   200 {"samples_created": 210, "duplicates_skipped": 30, "replaced": 12,
        "unmapped_samples": 0, "unmapped_metrics": [],
-       "start_date": "2026-10-24", "end_date": "2026-11-22", "datasets_failed": []}
+       "start_date": "2026-10-24", "end_date": "2026-11-22", "datasets_failed": [],
+       "key_saved": true}
 ```
 
 Code: `omop_core/services/garmin_connect.py` reads Garmin and returns `WearableSample`s;
@@ -502,8 +503,21 @@ deletable like a file.
   tab), the history is not read anywhere else, and
   `upload-wearable` refuses a `person_id` that is not the caller's own with a 403. On somebody
   else's record the tab shows the wearable fields and says the patient adds the data.
-- **The key is used and dropped.** It is sent with one request and kept nowhere: not in the
-  database, a log line, an error message or a queued task. That is why the sync runs inside the
+- **The key is saved for the next sync, encrypted, where the patient lets it be (#2834).** Once
+  Garmin has accepted a key the server keeps it under `GARMIN_TOKEN_KEY` (the Fernet key the
+  linked account's tokens use, which is in no database) when the request says `remember: true`,
+  which the tab sends while "Save this key for next time" is ticked. The default is false, so a
+  page loaded before this existed, which says the key is not stored, stays right. A later sync
+  then sends no key and the saved one is used, by the account that saved it and no other. No
+  endpoint returns it: `GET /api/v1/patient-records/garmin-key/` says only
+  `{can_save, saved, saved_at, last_used_at}`, and `DELETE` there ("Remove saved key") deletes it.
+  It is also removed when Garmin answers 401 to a sync that used it, and with the person or their
+  record. A key that cannot be decrypted reads as not saved and is left in place. Every sync
+  answer carries `key_saved`, failures included, so the tab knows where the key stands. A
+  deployment with no `GARMIN_TOKEN_KEY` saves nothing: the key is then used for the one sync and
+  dropped, as it was before. Nothing syncs on a schedule; a saved key is read only by a sync its
+  patient starts.
+- **The key is in no log line, error message or queued task.** That is why the sync runs inside the
   request and not on a worker, where the key would sit in the broker. Garmin's own
   `PersonalApiAuthenticator` is not used, because it caches the bearer token in a plaintext file
   with no way to turn that off; `_exchange_key` makes the same request and holds the token in
@@ -621,7 +635,7 @@ watch ─► Garmin Connect ─► POST garmin/webhooks/<secret>/ ─► read_pu
 |---|---|
 | `GARMIN_CLIENT_ID`, `GARMIN_CLIENT_SECRET` | the app's consumer key and secret from the developer portal |
 | `GARMIN_WEBHOOK_SECRET` | a random string of at least 32 characters: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
-| `GARMIN_TOKEN_KEY` | the key patients' Garmin tokens are stored under: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `GARMIN_TOKEN_KEY` | the key patients' Garmin tokens, and a saved Personal API key (#2834), are stored under: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 
 In the developer portal, register the redirect URL `<APP_BASE_URL>/api/v1/garmin/oauth/callback/`
 and, for each push type (Dailies, Sleeps, HRV, Pulse Ox, Respiration, User Metrics,
@@ -1078,9 +1092,9 @@ handling, and scheduled pulls. That work sits *above* the parser boundary and is
 those vendors rather than duplicated per vendor — `upload_wearable`'s `request.FILES` handling is
 the wrong entry point for them, but everything from `WearableSample` onward is reused unchanged.
 [Garmin Connect sync](#garmin-connect-sync) is the first such path and shows the split: its own
-entry point (`sync_garmin`), the shared writer (`_store_wearable_samples`). It stores no token,
-because the patient supplies a key per sync; a vendor that needs a stored grant and scheduled
-pulls still has that work to do.
+entry point (`sync_garmin`), the shared writer (`_store_wearable_samples`). It refreshes no token
+and pulls on no schedule: the patient's key is used when they press Sync, saved encrypted between
+syncs if they choose (#2834). A vendor that needs scheduled pulls still has that work to do.
 
 **Do not map a vendor field onto a concept it doesn't mean** to make a column look populated. The
 gait metrics (`walking_step_length`, `walking_double_support_pct`, `walking_speed`,

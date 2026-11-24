@@ -19241,6 +19241,9 @@ class WearableUploadEndpointTest(TestCase):
         self.assertIn(resp.status_code, [401, 403])
 
 
+# No key to encrypt under, whatever the environment holds: these are the sync
+# with nothing saved. GarminSavedKeyTest covers the saved key (#2834).
+@override_settings(GARMIN_TOKEN_KEY='', GARMIN_TOKEN_KEY_FALLBACKS=[])
 class GarminSyncEndpointTest(TestCase):
     """POST /api/v1/patient-records/sync-garmin/ (#2794).
 
@@ -19342,7 +19345,7 @@ class GarminSyncEndpointTest(TestCase):
             'samples_created': 4, 'duplicates_skipped': 0, 'replaced': 0,
             'unmapped_samples': 0, 'unmapped_metrics': [],
             'start_date': start.isoformat(), 'end_date': self.day.isoformat(),
-            'datasets_failed': [],
+            'datasets_failed': [], 'key_saved': False,
         })
 
         # Routed by the concept's domain, typed and coded as the file upload does.
@@ -19490,7 +19493,7 @@ class GarminSyncEndpointTest(TestCase):
         with mock.patch('patient_portal.consent.record_permitted', side_effect=[True, False]):
             resp, fetch = self._sync([self._sample('steps', 9200.0)], expect=403)
         fetch.assert_called_once()
-        self.assertEqual(resp.data, {'error': RECORD_OFF})
+        self.assertEqual(resp.data, {'error': RECORD_OFF, 'key_saved': False})
         self.assertEqual(self._values('steps'), [])
 
     def test_a_row_another_ingest_path_wrote_is_left_alone(self):
@@ -19817,6 +19820,367 @@ class GarminSyncEndpointTest(TestCase):
             fetch.assert_not_called()
             # Another user's bucket is their own.
             self._sync([], identity=self.unlinked_identity, expect=403)
+
+
+class GarminSavedKeyTest(TestCase):
+    """The Personal API key saved for later syncs (#2834).
+
+    Saved encrypted once Garmin has accepted it and the patient asked, used
+    when a sync sends no key, returned by nothing, and removed by the patient
+    or when Garmin says it is no key of its. The Garmin read is patched, as
+    in GarminSyncEndpointTest.
+    """
+
+    URL = '/api/v1/patient-records/sync-garmin/'
+    KEY_URL = '/api/v1/patient-records/garmin-key/'
+    KEY = 'gcpk_TEST-key.0123456789'
+    OTHER_KEY = 'gcpk_OTHER-key.9876543210'
+    # Fernet keys made for each run; they protect nothing.
+    TOKEN_KEY = __import__('cryptography.fernet', fromlist=['Fernet']).Fernet.generate_key().decode()
+    NEXT_TOKEN_KEY = __import__('cryptography.fernet', fromlist=['Fernet']).Fernet.generate_key().decode()
+    WITH_KEY = override_settings(GARMIN_TOKEN_KEY=TOKEN_KEY, GARMIN_TOKEN_KEY_FALLBACKS=[])
+    NOTHING_SAVED = {'can_save': True, 'saved': False, 'saved_at': None, 'last_used_at': None}
+
+    @classmethod
+    def setUpTestData(cls):
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _client(self, identity=None):
+        c = APIClient()
+        c.force_login(identity or self.identity)
+        return c
+
+    def _sync(self, body=None, identity=None, expect=200, error=None):
+        """A sync with Garmin answering no data, or refusing with ``error``.
+        With no ``body``, the key is typed and the box left ticked."""
+        from unittest import mock
+        outcome = {'side_effect': error} if error else {'return_value': ([], [])}
+        with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples', **outcome) as fetch:
+            resp = self._client(identity).post(
+                self.URL, {'api_key': self.KEY, 'remember': True} if body is None else body, format='json')
+        self.assertEqual(resp.status_code, expect, getattr(resp, 'data', None))
+        return resp, fetch
+
+    def _row(self, person=None):
+        from omop_core.models import GarminPersonalKey
+        return GarminPersonalKey.objects.filter(person=person or self.person).first()
+
+    def _stored_key(self):
+        from omop_core.services import garmin_oauth
+        return garmin_oauth.decrypt(self._row().api_key)
+
+    def _refusal(self, upstream):
+        from omop_core.services import garmin_connect
+        if upstream in (401, 403):
+            return garmin_connect.GarminSyncError(garmin_connect.KEY_REJECTED, 400, upstream=upstream)
+        if upstream == 429:
+            return garmin_connect.GarminSyncError(garmin_connect.RATE_LIMITED, 429, upstream=upstream)
+        return garmin_connect.GarminSyncError(garmin_connect.UNREACHABLE, 424, upstream=upstream)
+
+    def _another_account(self, email='garmin-key-next@test.com'):
+        return Identity.objects.create_user(email=email, password='x')
+
+    @WITH_KEY
+    def test_a_key_garmin_accepted_is_saved_encrypted(self):
+        from omop_core.services import garmin_oauth
+        with self.assertLogs('omop_core.services.garmin_saved_key', level='INFO') as logs:
+            resp, fetch = self._sync()
+        self.assertIs(resp.data['key_saved'], True)
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+        row = self._row()
+        self.assertEqual(row.saved_by, self.identity)
+        self.assertIsNotNone(row.last_used_at)
+        # What is stored is not the key, and reads back only under the deployment's key.
+        self.assertNotIn(self.KEY, row.api_key)
+        self.assertEqual(garmin_oauth.decrypt(row.api_key), self.KEY)
+        with override_settings(GARMIN_TOKEN_KEY=''):
+            self.assertIsNone(garmin_oauth.decrypt(row.api_key))
+        self.assertNotIn(self.KEY, json.dumps(resp.data))
+        self.assertNotIn(self.KEY, '\n'.join(logs.output))
+
+    @WITH_KEY
+    def test_a_sync_that_does_not_ask_saves_nothing(self):
+        """A page from before the key could be saved says it is not stored,
+        and sends no ``remember``. It must stay true."""
+        for body in ({'api_key': self.KEY}, {'api_key': self.KEY, 'remember': False}):
+            resp, _ = self._sync(body=body)
+            self.assertIs(resp.data['key_saved'], False)
+            self.assertIsNone(self._row())
+
+    def test_nothing_is_saved_where_the_deployment_has_no_key_to_encrypt_under(self):
+        with override_settings(GARMIN_TOKEN_KEY='', GARMIN_TOKEN_KEY_FALLBACKS=[]):
+            resp, _ = self._sync()
+            self.assertIs(resp.data['key_saved'], False)
+            self.assertIsNone(self._row())
+            status_ = self._client().get(self.KEY_URL).data
+        self.assertEqual(status_, {**self.NOTHING_SAVED, 'can_save': False})
+
+    @WITH_KEY
+    def test_a_key_garmin_refused_is_not_saved(self):
+        for upstream in (401, 403, 429, 503):
+            self._sync(error=self._refusal(upstream), expect=self._refusal(upstream).status)
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_one_off_sync_leaves_a_saved_key_alone(self):
+        self._sync()
+        resp, fetch = self._sync(body={'api_key': self.OTHER_KEY, 'remember': False})
+        self.assertEqual(fetch.call_args.args[0], self.OTHER_KEY)
+        self.assertIs(resp.data['key_saved'], True)
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_remember_must_be_true_or_false(self):
+        for value in ('no', 0, None, []):
+            resp, fetch = self._sync(body={'api_key': self.KEY, 'remember': value}, expect=400)
+            fetch.assert_not_called()
+            self.assertIn('remember', resp.data['error'])
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_sync_that_sends_no_key_uses_the_saved_one(self):
+        from omop_core.models import GarminPersonalKey
+        self._sync()
+        GarminPersonalKey.objects.filter(person=self.person).update(last_used_at=None)
+        for body in ({}, {'api_key': ''}, {'api_key': '   '}, {'api_key': None, 'days': 7}):
+            resp, fetch = self._sync(body=body)
+            self.assertEqual(fetch.call_args.args[0], self.KEY)
+            self.assertIs(resp.data['key_saved'], True)
+            self.assertNotIn(self.KEY, json.dumps(resp.data))
+        self.assertIsNotNone(self._row().last_used_at)
+
+    @WITH_KEY
+    def test_no_key_sent_and_none_saved_asks_for_one(self):
+        resp, fetch = self._sync(body={}, expect=400)
+        fetch.assert_not_called()
+        self.assertIn('Enter your Garmin Connect Personal API key', resp.data['error'])
+        # A page that believed a key was saved stops offering it.
+        self.assertIs(resp.data['key_saved'], False)
+
+    @WITH_KEY
+    def test_a_new_key_replaces_the_saved_one(self):
+        from omop_core.models import GarminPersonalKey
+        self._sync()
+        self._sync(body={'api_key': self.OTHER_KEY, 'remember': True})
+        self.assertEqual(GarminPersonalKey.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(self._stored_key(), self.OTHER_KEY)
+
+    @WITH_KEY
+    def test_a_saved_key_garmin_says_is_no_key_is_removed_and_the_patient_is_told(self):
+        from omop_core.services import garmin_saved_key
+        self._sync()
+        resp, fetch = self._sync(body={}, error=self._refusal(401), expect=400)
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+        self.assertEqual(resp.data, {'error': garmin_saved_key.SAVED_KEY_REJECTED, 'key_saved': False})
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_saved_key_is_kept_when_garmin_forbids_is_busy_or_is_unreachable(self):
+        """A 403 can be this server's address being blocked, which says
+        nothing about any one patient's key."""
+        from omop_core.services import garmin_connect
+        self._sync()
+        for upstream, message in ((403, garmin_connect.KEY_REJECTED), (429, garmin_connect.RATE_LIMITED),
+                                  (503, garmin_connect.UNREACHABLE)):
+            resp, _ = self._sync(body={}, error=self._refusal(upstream), expect=self._refusal(upstream).status)
+            self.assertEqual(resp.data, {'error': message, 'key_saved': True})
+            self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_a_typed_key_garmin_refuses_does_not_cost_the_saved_one(self):
+        from omop_core.services import garmin_connect
+        self._sync()
+        resp, _ = self._sync(body={'api_key': self.OTHER_KEY, 'remember': True},
+                             error=self._refusal(401), expect=400)
+        self.assertEqual(resp.data, {'error': garmin_connect.KEY_REJECTED})
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_the_refusal_of_an_earlier_key_does_not_remove_a_later_one(self):
+        """A sync is in flight on the saved key when the patient saves another
+        in a second tab. Garmin then refuses the first."""
+        from unittest import mock
+        from omop_core.services import garmin_saved_key
+        self._sync()
+
+        def replaced_meanwhile(*_args, **_kwargs):
+            garmin_saved_key.save(self.person, self.identity, self.OTHER_KEY)
+            raise self._refusal(401)
+
+        with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                        side_effect=replaced_meanwhile):
+            resp = self._client().post(self.URL, {}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIs(resp.data['key_saved'], True)
+        self.assertEqual(self._stored_key(), self.OTHER_KEY)
+
+    @WITH_KEY
+    def test_a_saved_key_that_cannot_be_read_is_not_saved_and_not_deleted(self):
+        """The deployment's key unset, or replaced without a fallback: the
+        saved key reads as absent, and is back when the key is."""
+        self._sync()
+        stored = self._row().api_key
+        for broken in ({'GARMIN_TOKEN_KEY': ''}, {'GARMIN_TOKEN_KEY': self.NEXT_TOKEN_KEY}):
+            with override_settings(**broken):
+                self.assertIs(self._client().get(self.KEY_URL).data['saved'], False)
+                resp, fetch = self._sync(body={}, expect=400)
+                fetch.assert_not_called()
+                self.assertIn('Enter your Garmin Connect Personal API key', resp.data['error'])
+                self.assertIs(resp.data['key_saved'], False)
+            self.assertEqual(self._row().api_key, stored)
+        resp, fetch = self._sync(body={})
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+        # A key entered under the new deployment key takes the row over.
+        with override_settings(GARMIN_TOKEN_KEY=self.NEXT_TOKEN_KEY):
+            self._sync(body={'api_key': self.OTHER_KEY, 'remember': True})
+            self.assertEqual(self._stored_key(), self.OTHER_KEY)
+
+    @WITH_KEY
+    def test_an_earlier_deployment_key_still_reads_a_saved_key(self):
+        self._sync()
+        with override_settings(GARMIN_TOKEN_KEY=self.NEXT_TOKEN_KEY,
+                               GARMIN_TOKEN_KEY_FALLBACKS=[self.TOKEN_KEY]):
+            resp, fetch = self._sync(body={})
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+
+    @WITH_KEY
+    def test_the_status_says_a_key_is_saved_and_never_what_it_is(self):
+        client = self._client()
+        self.assertEqual(client.get(self.KEY_URL).data, self.NOTHING_SAVED)
+        self._sync()
+        data = client.get(self.KEY_URL).data
+        self.assertEqual(set(data), {'can_save', 'saved', 'saved_at', 'last_used_at'})
+        self.assertIs(data['saved'], True)
+        self.assertIsNotNone(data['saved_at'])
+        self.assertNotIn(self.KEY, json.dumps(data))
+        self.assertNotIn(self._row().api_key, json.dumps(data))
+
+    @WITH_KEY
+    def test_the_patient_removes_their_saved_key(self):
+        self._sync()
+        client = self._client()
+        with self.assertLogs('omop_core.services.garmin_saved_key', level='INFO') as logs:
+            resp = client.delete(self.KEY_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, self.NOTHING_SAVED)
+        self.assertIsNone(self._row())
+        self.assertIn('reason=patient', '\n'.join(logs.output))
+        # Again is the same answer, and the next sync asks for a key.
+        self.assertEqual(client.delete(self.KEY_URL).status_code, 200)
+        self._sync(body={}, expect=400)
+
+    @WITH_KEY
+    def test_a_saved_key_can_be_removed_while_the_record_is_off(self):
+        from unittest import mock
+        self._sync()
+        with mock.patch('patient_portal.consent.record_permitted', return_value=False):
+            self._sync(body={}, expect=403)
+            self.assertIsNotNone(self._row())
+            self.assertEqual(self._client().delete(self.KEY_URL).status_code, 200)
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_key_is_not_saved_for_a_record_switched_off_while_garmin_was_read(self):
+        from unittest import mock
+        from patient_portal.consent import RECORD_OFF
+        from omop_core.services.wearable_parsers import WearableSample
+        day = timezone.now().date() - timedelta(days=3)
+        answers = iter([True])
+        with mock.patch('patient_portal.consent.record_permitted',
+                        side_effect=lambda _person: next(answers, False)), \
+                mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                           return_value=([WearableSample(metric_key='steps', date=day, value=9200.0)], [])) as fetch:
+            resp = self._client().post(self.URL, {'api_key': self.KEY, 'remember': True}, format='json')
+        fetch.assert_called_once()
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertEqual(resp.data, {'error': RECORD_OFF, 'key_saved': False})
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_the_answer_says_a_key_was_saved_when_the_rows_could_not_be_written(self):
+        """Garmin accepted the key, so it is saved; the page has to learn that
+        from the failure too, or it would show no way to remove it."""
+        from unittest import mock
+        from rest_framework.response import Response
+        from patient_portal.api.views import PatientRecordViewSet
+        with mock.patch.object(PatientRecordViewSet, '_store_wearable_samples',
+                               return_value=Response({'error': 'No.'}, status=503)):
+            resp, _ = self._sync(expect=503)
+        self.assertEqual(resp.data, {'error': 'No.', 'key_saved': True})
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_one_patients_saved_key_is_nobody_elses(self):
+        from omop_core.models import Person
+        other_person = Person.objects.create(
+            person_id=self.person.person_id + 1000, gender_concept_id=0, year_of_birth=1980,
+            race_concept_id=0, ethnicity_concept_id=0)
+        other = self._another_account('garmin-key-other@test.com')
+        PatientUser.objects.create(identity=other, person=other_person)
+        self._sync()
+        self.assertIs(self._client(other).get(self.KEY_URL).data['saved'], False)
+        resp, fetch = self._sync(body={}, identity=other, expect=400)
+        fetch.assert_not_called()
+        self.assertEqual(self._client(other).delete(self.KEY_URL).status_code, 200)
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_an_account_linked_to_the_record_later_never_syncs_with_its_predecessors_key(self):
+        """The key reads one person's Garmin account. Whoever holds the record
+        next is asked for their own, and the earlier one is removed."""
+        self._sync()
+        successor = self._another_account()
+        PatientUser.objects.filter(person=self.person).update(identity=successor)
+        self.assertEqual(self._client(successor).get(self.KEY_URL).data, self.NOTHING_SAVED)
+        self.assertIsNotNone(self._row())
+        with self.assertLogs('omop_core.services.garmin_saved_key', level='INFO') as logs:
+            resp, fetch = self._sync(body={}, identity=successor, expect=400)
+        fetch.assert_not_called()
+        self.assertIs(resp.data['key_saved'], False)
+        self.assertIsNone(self._row())
+        self.assertIn('reason=other_account', '\n'.join(logs.output))
+        # Their own key is theirs.
+        self._sync(identity=successor)
+        self.assertEqual(self._row().saved_by, successor)
+
+    @WITH_KEY
+    def test_a_key_whose_account_was_deleted_is_nobodys(self):
+        from omop_core.models import GarminPersonalKey
+        self._sync()
+        GarminPersonalKey.objects.filter(person=self.person).update(saved_by=None)
+        self.assertEqual(self._client().get(self.KEY_URL).data, self.NOTHING_SAVED)
+        resp, fetch = self._sync(body={}, expect=400)
+        fetch.assert_not_called()
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_the_status_and_removal_are_for_the_signed_in_patient(self):
+        self._sync()
+        self.assertIn(APIClient().get(self.KEY_URL).status_code, [401, 403])
+        self.assertIn(APIClient().delete(self.KEY_URL).status_code, [401, 403])
+        # A credential that is not the person's own session.
+        token = APIClient()
+        token.force_authenticate(user=self.identity)
+        self.assertEqual(token.get(self.KEY_URL).status_code, 403)
+        self.assertEqual(token.delete(self.KEY_URL).status_code, 403)
+        # An account with no patient record.
+        self.assertEqual(self._client(self.unlinked_identity).get(self.KEY_URL).status_code, 403)
+        self.assertEqual(self._client(self.unlinked_identity).delete(self.KEY_URL).status_code, 403)
+        self.assertEqual(self._client().post(self.KEY_URL, {}, format='json').status_code, 405)
+        self.assertIsNotNone(self._row())
+
+    @WITH_KEY
+    def test_a_saved_key_goes_with_the_record_and_with_the_person(self):
+        from omop_core.models import GarminPersonalKey
+        from patient_portal.erasure import withdrawal_tables
+        self.assertIn(GarminPersonalKey, [model for model, _ in withdrawal_tables()])
+        self._sync()
+        self.person.delete()
+        self.assertFalse(GarminPersonalKey.objects.exists())
 
 
 # ---------------------------------------------------------------------------

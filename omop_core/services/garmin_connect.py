@@ -10,8 +10,9 @@ parser returns, so the Wearables upload writes both the same way (#2794).
 Three rules hold for the key, which is a credential for the patient's whole
 Garmin account:
 
-* **It is used and dropped.** Nothing here stores it, and it is never passed
-  to a log call, an exception message or a queued task.
+* **Nothing here stores it**, and it is never passed to a log call, an
+  exception message or a queued task. Saving it for the patient's next sync
+  is ``garmin_saved_key``'s (#2834), encrypted, after this module's read.
 * **The bearer token it buys never touches disk.** The client's own
   ``PersonalApiAuthenticator`` caches tokens in a plaintext file with no way to
   turn that off, which suits one person's laptop and not a server holding many

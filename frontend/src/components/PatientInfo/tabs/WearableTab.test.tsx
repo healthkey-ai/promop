@@ -488,8 +488,9 @@ describe('WearableTab — descriptor-driven', () => {
 
 /**
  * Sync from Garmin Connect with the patient's own Personal API key (#2794).
- * The key goes in one request and is kept nowhere, so the field empties as
- * soon as the server has accepted a sync.
+ * The key is never kept in the page, so the field empties as soon as the
+ * server has accepted a sync. Saving it on the server (#2834) is covered in
+ * GarminConnectSync.test.tsx; here the site has not said it can save.
  */
 describe('WearableTab — Garmin Connect sync', () => {
   const KEY = 'gcpk_TEST-key.0123456789';
@@ -630,7 +631,7 @@ describe('WearableTab — Garmin Connect sync', () => {
     expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
   });
 
-  it('asks for the key in a masked field no browser will store, and says it is not stored', () => {
+  it('asks for the key in a masked field no browser will store, and says it is not stored where the site cannot save', () => {
     renderOwn();
     // Not a password field: that would invite the browser to fill in the
     // saved sign-in password, and to save the key as the site's password.
@@ -672,8 +673,9 @@ describe('WearableTab — Garmin Connect sync', () => {
       fireEvent.click(syncButton());
 
       await waitFor(() => {
+        // Nothing here has said the site can save a key, so the sync is a one-off (#2834).
         expect(mockPost).toHaveBeenCalledWith('/v1/patient-records/sync-garmin/', {
-          api_key: KEY, days: 90, end_date: '2026-11-22',
+          api_key: KEY, remember: false, days: 90, end_date: '2026-11-22',
         });
       });
       await waitFor(() => {
