@@ -233,9 +233,11 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000, o
   // Nothing to offer where connecting a phone is not set up, unless a phone
   // is already connected: that one can still be disconnected.
   const shown = !!connection && (connection.enabled || connection.connected);
+  const loaded = connection !== null;
   useEffect(() => {
-    onShownChange?.(shown);
-  }, [shown, onShownChange]);
+    // Not before the panel has asked: until then it can say neither.
+    if (loaded) onShownChange?.(shown);
+  }, [loaded, shown, onShownChange]);
   if (!connection || !shown) return null;
 
   const idle = busy !== null || disabled;

@@ -131,8 +131,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const [expandedUpload, setExpandedUpload] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   // Whether the phone-app panel is on the page: it offers nothing, and draws
-  // nothing, where connecting a phone is not set up.
-  const [phonePanelShown, setPhonePanelShown] = useState(false);
+  // nothing, where connecting a phone is not set up. Null until it has asked.
+  const [phonePanelShown, setPhonePanelShown] = useState<boolean | null>(null);
 
   const fetchUploads = useCallback(async () => {
     try {
@@ -347,7 +347,11 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     ? uploads.filter(u => PHONE_DEVICES.includes(u.device_type))
     : [];
   const placed = new Set([...garminUploads, ...phoneUploads].map(u => u.id));
-  const leftoverUploads = uploads.filter(u => !placed.has(u.id));
+  // The phone uploads wait while the panel has not said whether it is there,
+  // rather than show here for a moment and then move.
+  const waiting = canSyncOwnDevice && phonePanelShown === null;
+  const leftoverUploads = uploads.filter(
+    u => !placed.has(u.id) && !(waiting && PHONE_DEVICES.includes(u.device_type)));
   const uploadsProps = {
     deviceLabel,
     metricLabel: (metric: string) => METRIC_LABELS[metric] || metric,
