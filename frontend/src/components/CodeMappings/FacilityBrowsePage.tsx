@@ -103,7 +103,7 @@ function FacilityCodes({ facility }: { facility: string }) {
 
   return <>
     <p className="mt-2 text-sm"><Link to="?" className="text-sky-700 underline">← All facilities</Link></p>
-    <h2 className="mt-2 text-lg font-semibold">{label(facility)}</h2>
+    <h2 className="mt-2 break-all text-lg font-semibold">{facility ? label(facility) : system}</h2>
     {facility === UNATTRIBUTED && <p className="text-sm text-slate-600">
       Source systems with no observed or confirmed facility association.</p>}
     <form key={q} onSubmit={submit} className="mt-3 flex flex-wrap items-end gap-3 rounded-md border border-slate-200 bg-white p-3">
@@ -187,6 +187,6 @@ export default function FacilityBrowsePage() {
     <p className="mt-2 max-w-4xl text-sm text-slate-600">
       Pick a hospital or laboratory, then browse its source code systems and codes, including sibling codes no sampled patient carries. Facilities come from observed or curator-confirmed associations; Edit mapping opens the existing mapping form.
     </p>
-    {facility ? <FacilityCodes facility={facility} /> : <FacilityList search={params.get("search") || ""} />}
+    {facility || params.get("system") ? <FacilityCodes facility={facility} /> : <FacilityList search={params.get("search") || ""} />}
   </main></div>;
 }

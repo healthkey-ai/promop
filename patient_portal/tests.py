@@ -35001,7 +35001,7 @@ class AnalystRoleScopeTest(TestCase):
 
     def test_every_mapping_page_is_reachable_and_writable(self):
         for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/relevance/signals/',
-                    '/api/v1/code-mappings/source-systems/'):
+                    '/api/v1/code-mappings/facility-browse/'):
             self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
         self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
                          {'can_accept': False, 'can_reject': True})
@@ -35023,7 +35023,7 @@ class AnalystRoleScopeTest(TestCase):
         self.client.force_authenticate(user=doctor)
         for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/code-mappings/',
                     '/api/v1/concept-to-code/', '/api/v1/code-mappings/reference/',
-                    '/api/v1/relevance/signals/', '/api/v1/code-mappings/source-systems/'):
+                    '/api/v1/relevance/signals/', '/api/v1/code-mappings/facility-browse/'):
             self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
         self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
                          {'can_accept': False, 'can_reject': False})

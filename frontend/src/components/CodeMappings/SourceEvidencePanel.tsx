@@ -202,7 +202,7 @@ export default function SourceEvidencePanel({ evidence, mappingId, sourceSystem,
                 {visibleFacilities.map((facility, index) => <tr key={`${facility.id || facility.name}|${facility.level || ""}|${index}`}>
                   <td className="py-2 pr-3 text-slate-900">
                     {sourceSystem ? <a className="font-medium text-sky-700 underline hover:text-sky-900"
-                      href={sourceSystemManagementUrl(sourceSystem, facility.name)} target="_blank" rel="noopener noreferrer"
+                      href={sourceSystemManagementUrl(sourceSystem)} target="_blank" rel="noopener noreferrer"
                       title={`Inspect ${facility.name} under this exact source system`}>{facility.name}</a>
                       : <span className="font-medium">{facility.name}</span>}
                     {facility.parent_name && facility.parent_name !== facility.name && <span className="block text-[10px] text-slate-500">
