@@ -3926,8 +3926,8 @@ class PatientRecord(models.Model):
     monoclonal_protein_serum = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     monoclonal_protein_urine = models.DecimalField(decimal_places=2, max_digits=10, blank=True, null=True)
     lactate_dehydrogenase_level = models.IntegerField(blank=True, null=True)
-    pulmonary_function_test_result = models.BooleanField(blank=False, null=False, default=False)
-    bone_imaging_result = models.BooleanField(blank=False, null=False, default=False)
+    pulmonary_function_test_result = models.BooleanField(blank=True, null=True)
+    bone_imaging_result = models.BooleanField(blank=True, null=True)
     # Values like 4.2% are routine and 60% is a decision point.
     clonal_plasma_cells = models.DecimalField(decimal_places=2, max_digits=6, blank=True, null=True, help_text="Clonal plasma cells in bone marrow (%)")
     ejection_fraction = models.IntegerField(blank=True, null=True)
@@ -3937,9 +3937,9 @@ class PatientRecord(models.Model):
     caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=True, null=True, default=None)
     contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=True, null=True, default=None)
     no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=True, null=True, default=None)
-    pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=False, null=False, default=False)
+    pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=True, null=True)
     no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=True, null=True, default=None)
-    no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=False, null=False, default=True)
+    no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=True, null=True)
     concomitant_medication_details = models.CharField(max_length=255, help_text="Details about the patient's concomitant medications", blank=True, null=True)
     
     # Behavior tab - Lifestyle Factors

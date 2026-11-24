@@ -652,6 +652,15 @@ def _resolve_concepts(pairs):
     return {(c.vocabulary_id, c.concept_code): c for c in rows}
 
 
+#: Explicit Yes / No / Unknown clinical answers. The shared form must offer
+#: Unknown instead of relying on a generic clear (#2759).
+_TRI_STATE_ANSWERS = frozenset({
+    'pulmonary_function_test_result',
+    'bone_imaging_result',
+    'pregnancy_test_result',
+    'no_concomitant_medication_status',
+})
+
 _MAPPING_TARGETS = {
     'measurement': 'measurement',
     'observation': 'observation',
@@ -2035,6 +2044,15 @@ def build_writable_field_descriptor():
                 target['unit_options'] = kept
             else:
                 del target['unit_options']
+
+    # Yes / No / Unknown are three distinct answers for these clinical
+    # questions; the shared form must offer Unknown explicitly instead of
+    # relying on a generic clear (#2759).
+    for field in _TRI_STATE_ANSWERS:
+        entry = descriptor.get(field)
+        if (entry is not None and entry.get('writable')
+                and entry.get('value_kind') == 'boolean'):
+            entry['tri_state'] = True
 
     # The envelope goes last so no field block can overwrite it. It is a dict
     # like any entry, but it is not one: `kind` is absent on purpose, and the

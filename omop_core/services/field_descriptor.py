@@ -142,7 +142,7 @@ _COMPUTED_THERAPY_EXPLANATIONS = {
     'refractory_status': 'Computed from therapy line outcomes',
     'washout_period_duration': 'Computed from last therapy received',
     'line_of_therapy': 'Derived from therapy line Episode records',
-    'no_concomitant_medication_status': 'Computed negation of concomitant medication presence',
+    'no_concomitant_medication_status': 'Explicit answer: does the patient take concomitant medication?',
     'english_speak': 'Derived from PersonLanguageSkill rows for this language',
     'english_read': 'Derived from PersonLanguageSkill rows for this language',
     'english_write': 'Derived from PersonLanguageSkill rows for this language',
