@@ -120,6 +120,12 @@ describe("AnswerDetailsPanel", () => {
       expect(screen.queryByText("Offered to every patient")).not.toBeInTheDocument();
     });
 
+    it("names the answer on its scope control", () => {
+      panel({ diseaseOptions: options });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      expect(screen.getByText(/which patients are offered "In remission"/)).toBeInTheDocument();
+    });
+
     it("offers no scope control without the categories", () => {
       panel();
       fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));

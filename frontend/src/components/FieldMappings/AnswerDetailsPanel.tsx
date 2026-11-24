@@ -4,14 +4,14 @@ import type { DiseaseCategoryOption } from "@/types/fieldScope";
 import { refusalText } from "./answerConcept";
 import { FieldScopeControl } from "./FieldScopeControl";
 
-const SCOPE_WORDS = {
-  legend: "Scope — which patients are offered this answer",
+const scopeWords = (label: string) => ({
+  legend: `Scope — which patients are offered "${label}"`,
   base: "Every patient",
   disease: "Only some Disease Categories",
   tip:
     "Every patient: the answer is offered wherever the field is. Only some Disease Categories: it is offered "
     + "only to records of the ticked categories. A value already saved is never changed or hidden by this.",
-};
+});
 
 interface Props {
   choiceId: number;
@@ -162,7 +162,7 @@ export function AnswerDetailsPanel({
               options={diseaseOptions}
               optionsIncomplete={optionsIncomplete}
               onChange={(next, codes) => { setScope(next); setTicked(codes); }}
-              words={SCOPE_WORDS}
+              words={scopeWords(label)}
               disabled={busy}
             />
           )}

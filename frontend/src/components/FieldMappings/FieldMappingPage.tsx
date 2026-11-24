@@ -1196,7 +1196,9 @@ export default function FieldMappingPage() {
         <FieldChoiceEditor
           fieldName={choiceEditorField.field_name}
           canApprove={canApprove}
-          diseaseOptions={diseaseOptions}
+          // Until the categories have loaded the list is only what fields already
+          // use, so the scope is shown but not offered for editing.
+          diseaseOptions={categoriesState === "loading" ? undefined : diseaseOptions}
           diseaseOptionsIncomplete={categoriesState === "failed"}
           onClose={() => {
             setChoiceEditorField(null);
