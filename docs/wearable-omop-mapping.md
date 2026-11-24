@@ -883,6 +883,15 @@ The table is the code's mapping's (`omop_table`), which follows its concept's
 domain; a code no mapping holds yet goes where its metric usually does
 (`default_table`).
 
+### Reading the rows back
+
+The patient's OMOP tab lists Measurements and Observations by concept and the
+Source Codes tab opens a device code to its stored readings (#2863); both read
+`omop_core/services/omop_row_pages.py`, newest first. A wearable row stores
+only the day (Gap D below), so its "datetime" is shown as the date and marked
+"date only". Giving a daily total a time of day (the end of the day, say) would
+be a decision about what a sample means, and is not made here.
+
 ### What a mapping makes of a row
 
 | The code's mapping | The row | 30-day metrics |

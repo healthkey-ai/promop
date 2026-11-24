@@ -473,7 +473,11 @@ export default function PatientSourceCodesTab({ personId, onRecordRefreshed }: P
       )}
 
       {/* A wearable device's codes, and what their stored rows are now */}
-      <PatientWearableCodes codes={wearableCodes} onRowClick={canWrite ? handleRowClick : undefined} />
+      <PatientWearableCodes
+        codes={wearableCodes}
+        onRowClick={canWrite ? handleRowClick : undefined}
+        personId={personId}
+      />
 
       {/* Collapsible status sections */}
       {SECTIONS.map(({ key, label }) => {
