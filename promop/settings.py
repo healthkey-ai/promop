@@ -182,6 +182,9 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
     'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
+    # Signs out a staff session that began with a password, once staff
+    # passwords are off (STAFF_PASSWORD_SIGN_IN; docs/staff-sign-in.md).
+    'patient_portal.api.middleware.StaffPasswordSessionMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
 
@@ -325,7 +328,10 @@ STAFF_PASSWORD_SIGN_IN = _env_bool('STAFF_PASSWORD_SIGN_IN', True)
 # The groups a staff invitation may give, and a staff manager may set: the
 # deployment's staff roles. Comma-separated names of existing groups.
 STAFF_ROLES = [r.strip() for r in os.environ.get('STAFF_ROLES', '').split(',') if r.strip()]
-STAFF_INVITATION_DAYS = int(os.environ.get('STAFF_INVITATION_DAYS', '7'))
+STAFF_INVITATION_DAYS = max(1, int(os.environ.get('STAFF_INVITATION_DAYS', '7')))
+# How long a provider sign-in lasts, in hours: a working day by default, so
+# someone whose provider account is switched off is out by the end of it.
+STAFF_SESSION_HOURS = max(1, float(os.environ.get('STAFF_SESSION_HOURS', '8')))
 
 AUTHENTICATION_BACKENDS = [
     "patient_portal.backends.EmailBackend",

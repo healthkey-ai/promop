@@ -12,7 +12,9 @@ _ID_SEGMENT = re.compile(
 
 # A path segment that is itself a credential: Garmin's push webhook is
 # authenticated by the last segment of its URL (#2802).
-_SECRET_SEGMENT = re.compile(r'(/garmin/webhooks/)[^/?#]+')
+# A path segment that is a credential: a Garmin webhook's secret, a staff
+# invitation's token (only its hash is stored).
+_SECRET_SEGMENT = re.compile(r'(/garmin/webhooks/|/admin/sign-in/invitation/)[^/?#]+')
 
 
 def redact_secret_segments(path: str) -> str:

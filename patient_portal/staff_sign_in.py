@@ -7,17 +7,27 @@ provider applies its own two-step verification; a provider marked
 ``require_mfa`` must also say, in the token, that it did (``amr`` holds
 ``mfa``), or the sign-in is refused.
 
+Two kinds of staff account, kept apart on purpose:
+
+- **Role staff**: in a group named in ``STAFF_ROLES`` and *not* ``is_staff``.
+  They reach the admin through their role (``has_admin_access``) and see only
+  what its permissions open there. Everywhere else, the API included, they are
+  ordinary accounts with no patient data: across promop, ``is_staff`` means
+  full access.
+- **Full staff**: ``is_staff`` (or superuser), as promop has always had them.
+
 An account is the provider's (issuer, subject) pair, never an email address,
-so renaming an address at the provider moves nothing. The first sign-in
-needs a staff invitation (``StaffInvitation``): the link names the provider
-and the address, the sign-in must come back with that address, and the
-account it makes is staff with the invitation's role (a group listed in
-``STAFF_ROLES``) and no password. After that, the same provider account
-signs in directly.
+so renaming an address at the provider moves nothing. A first sign-in needs a
+staff invitation (``StaffInvitation``) for the address the provider vouches
+for; it makes the account, with the invitation's role (or full staff, which
+only a superuser can invite). An invitation also restores or changes an
+existing account's access. After that, the same provider account signs in
+directly while it keeps staff access.
 
 The exchange is the authorization-code flow with PKCE, a one-time ``state``
 and ``nonce`` kept in the session, and the ID token's signature checked
-against the provider's published keys.
+against the provider's published keys. A provider sign-in lasts
+``STAFF_SESSION_HOURS``.
 """
 from __future__ import annotations
 
@@ -28,14 +38,14 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass, field
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import jwt
 import requests
 from django.conf import settings
 from django.contrib.auth import login
 from django.core.cache import cache
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -45,8 +55,12 @@ from django.views.decorators.http import require_GET
 logger = logging.getLogger(__name__)
 
 SESSION_KEY = 'staff_sign_in'
+# Set on the session of a provider sign-in: which provider. A staff session
+# without it began with a password (StaffPasswordSessionMiddleware).
+PROVIDER_SESSION_KEY = 'staff_sign_in_provider'
 TIMEOUT = 10  # seconds, for every call to the provider
 LEEWAY = 60  # seconds of clock difference allowed on the ID token
+ATTEMPT_SECONDS = 600  # from start to callback
 
 
 @dataclass(frozen=True)
@@ -60,6 +74,11 @@ class Provider:
     # organisation, e.g. {"tid": "<tenant id>"} or {"hd": "example.org"}.
     claims: dict = field(default_factory=dict)
     require_mfa: bool = False
+    # Which claim is the address an invitation is matched on: "email" (only
+    # when the provider says it is verified) or "preferred_username"
+    # (Microsoft's sign-in name, which the tenant owns; its "email" is not
+    # verified and can be edited).
+    address_claim: str = 'email'
 
     @property
     def client_secret(self) -> str:
@@ -67,7 +86,12 @@ class Provider:
 
 
 class SignInRefused(Exception):
-    """A sign-in that must not go ahead; the message is shown to the person."""
+    """A sign-in that must not go ahead: ``message`` is shown to the person,
+    ``code`` goes to the audit trail (never an address or a claim)."""
+
+    def __init__(self, message: str, code: str):
+        super().__init__(message)
+        self.code = code
 
 
 def providers() -> dict[str, Provider]:
@@ -77,9 +101,26 @@ def providers() -> dict[str, Provider]:
             key=entry['key'], label=entry['label'], issuer=entry['issuer'].rstrip('/'),
             client_id=entry['client_id'], client_secret_env=entry['client_secret_env'],
             claims=dict(entry.get('claims') or {}), require_mfa=bool(entry.get('require_mfa')),
+            address_claim=entry.get('address_claim') or 'email',
         )
         found[provider.key] = provider
     return found
+
+
+def staff_role_names() -> list[str]:
+    return list(getattr(settings, 'STAFF_ROLES', []) or [])
+
+
+def is_role_staff(user) -> bool:
+    """In a staff role and not full staff: the admin, through the role only."""
+    if not getattr(user, 'is_authenticated', False) or user.is_staff or user.is_superuser:
+        return False
+    return user.groups.filter(name__in=staff_role_names()).exists()
+
+
+def has_admin_access(user) -> bool:
+    """The admin's own test (AdminSite.has_permission), widened to role staff."""
+    return bool(getattr(user, 'is_active', False) and (user.is_staff or is_role_staff(user)))
 
 
 def discovery(provider: Provider) -> dict:
@@ -91,9 +132,19 @@ def discovery(provider: Provider) -> dict:
         response.raise_for_status()
         config = response.json()
         if config.get('issuer', '').rstrip('/') != provider.issuer:
-            raise SignInRefused('The sign-in provider is not set up correctly.')
+            raise SignInRefused('The sign-in provider is not set up correctly.', 'issuer_mismatch')
         cache.set(key, config, 3600)
     return config
+
+
+_jwk_clients: dict[str, jwt.PyJWKClient] = {}
+
+
+def _jwk_client(jwks_uri: str) -> jwt.PyJWKClient:
+    """One client per key set, so its cache of the provider's keys lasts."""
+    if jwks_uri not in _jwk_clients:
+        _jwk_clients[jwks_uri] = jwt.PyJWKClient(jwks_uri, timeout=TIMEOUT)
+    return _jwk_clients[jwks_uri]
 
 
 def callback_url() -> str:
@@ -103,6 +154,10 @@ def callback_url() -> str:
 
 def _b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
+
+
+def _same(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode(), b.encode())
 
 
 def hash_token(token: str) -> str:
@@ -126,6 +181,9 @@ def authorization_redirect(request, provider: Provider, *, invitation_id: int | 
     return redirect(f"{config['authorization_endpoint']}?{urlencode(params)}")
 
 
+_COULD_NOT = 'The sign-in could not be completed. Please try again.'
+
+
 def verified_claims(provider: Provider, code: str, *, verifier: str, nonce: str) -> dict:
     """Exchange the code for an ID token, and return its claims once every
     check has passed."""
@@ -136,96 +194,143 @@ def verified_claims(provider: Provider, code: str, *, verifier: str, nonce: str)
     })
     if response.status_code != 200:
         logger.warning('staff sign-in: %s token endpoint answered %s', provider.key, response.status_code)
-        raise SignInRefused('The sign-in could not be completed. Please try again.')
+        raise SignInRefused(_COULD_NOT, 'token_endpoint')
     id_token = response.json().get('id_token')
     if not id_token:
-        raise SignInRefused('The sign-in could not be completed. Please try again.')
-    key = jwt.PyJWKClient(config['jwks_uri'], timeout=TIMEOUT).get_signing_key_from_jwt(id_token)
+        raise SignInRefused(_COULD_NOT, 'no_id_token')
     try:
+        key = _jwk_client(config['jwks_uri']).get_signing_key_from_jwt(id_token)
         claims = jwt.decode(
             # Google writes its issuer with or without the scheme.
             id_token, key.key, algorithms=['RS256'], audience=provider.client_id,
             issuer=[provider.issuer, provider.issuer.removeprefix('https://')],
             leeway=LEEWAY, options={'require': ['iss', 'sub', 'aud', 'exp', 'iat']},
         )
+    except jwt.PyJWKClientConnectionError as exc:
+        logger.warning('staff sign-in: %s keys could not be fetched', provider.key)
+        raise SignInRefused(f'{provider.label} could not be reached. Please try again.', 'keys_unreachable') from exc
     except jwt.PyJWTError as exc:
         logger.warning('staff sign-in: %s ID token refused: %s', provider.key, type(exc).__name__)
-        raise SignInRefused('The sign-in could not be completed. Please try again.') from exc
-    if not hmac.compare_digest(str(claims.get('nonce', '')), nonce):
-        raise SignInRefused('The sign-in could not be completed. Please try again.')
+        raise SignInRefused(_COULD_NOT, 'invalid_token') from exc
+    if not _same(str(claims.get('nonce', '')), nonce):
+        raise SignInRefused(_COULD_NOT, 'nonce')
     for name, expected in provider.claims.items():
         if str(claims.get(name, '')) != str(expected):
-            raise SignInRefused(f'Only accounts of the organisation set up for {provider.label} can sign in here.')
+            raise SignInRefused(
+                f'Only accounts of the organisation set up for {provider.label} can sign in here.', 'organisation')
     if provider.require_mfa and 'mfa' not in (claims.get('amr') or []):
         raise SignInRefused(
             f'{provider.label} did not confirm two-step verification for this sign-in. '
-            'Ask your IT team to require it for this app, then try again.'
+            'Ask your IT team to require it for this app, then try again.', 'no_mfa',
         )
     return claims
 
 
-def address_of(claims: dict) -> str:
-    """The address the provider vouches for: Google's verified email, or a
-    Microsoft account's email or sign-in name (its tenant owns both)."""
-    if claims.get('email') and claims.get('email_verified') is not False:
-        return claims['email'].strip().lower()
-    return (claims.get('preferred_username') or '').strip().lower()
+def address_of(provider: Provider, claims: dict) -> str:
+    """The address the provider vouches for, in the claim its settings name:
+    ``email`` only when the provider says it is verified, never a fallback."""
+    if provider.address_claim == 'email':
+        verified = claims.get('email_verified')
+        if verified is True or str(verified).lower() == 'true':
+            return (claims.get('email') or '').strip().lower()
+        return ''
+    return (claims.get(provider.address_claim) or '').strip().lower()
+
+
+def _give_access(identity, invitation) -> None:
+    """What an invitation gives: full staff, or exactly its staff role (any
+    other staff role is replaced; groups outside STAFF_ROLES are kept)."""
+    from django.contrib.auth.models import Group
+
+    if invitation.full_staff:
+        identity.is_staff = True
+        identity.save(update_fields=['is_staff'])
+        return
+    identity.groups.remove(*identity.groups.filter(name__in=staff_role_names()))
+    group = Group.objects.filter(name=invitation.role, name__in=staff_role_names()).first()
+    if group is None:  # renamed or removed since it was sent: the account has no role yet
+        logger.warning('staff sign-in: invitation %s names no current staff role', invitation.pk)
+    else:
+        identity.groups.add(group)
 
 
 def identity_for(provider: Provider, claims: dict, invitation_id: int | None):
-    """The staff account for this sign-in: the one already tied to this
-    provider account, or a new one from a valid invitation for its address."""
+    """The staff account for this sign-in. With an open invitation for this
+    provider and the address it vouches for: that account (made, or the one
+    already tied to this provider account) with the invitation's access.
+    Without: the account already tied to it, while it keeps admin access."""
     from .models import Identity, StaffInvitation
 
-    identity = Identity.objects.filter(issuer=provider.issuer, sub=claims['sub']).first()
-    if identity is not None:
-        if not (identity.is_active and identity.is_staff):
-            raise SignInRefused('This account has no staff access. Ask a platform administrator.')
-        return identity
     if invitation_id is None:
-        raise SignInRefused(
-            'There is no staff account for this sign-in yet. Ask a platform administrator for an invitation.'
-        )
-    with transaction.atomic():
-        invitation = StaffInvitation.objects.select_for_update().filter(pk=invitation_id).first()
-        if invitation is None or not invitation.is_open or invitation.provider != provider.key:
-            raise SignInRefused('This invitation has expired or has been used. Ask for a new one.')
-        if address_of(claims) != invitation.email.lower():
+        identity = Identity.objects.filter(issuer=provider.issuer, sub=claims['sub']).first()
+        if identity is None:
             raise SignInRefused(
-                f'This invitation is for {invitation.email}. Sign in to {provider.label} with that account.'
+                'There is no staff account for this sign-in yet. Ask a platform administrator for an invitation.',
+                'no_account',
             )
-        identity = Identity(
-            issuer=provider.issuer, sub=claims['sub'], email=invitation.email,
-            name=(claims.get('name') or '')[:255], is_staff=True,
-        )
-        identity.set_unusable_password()
-        identity.save()
-        if invitation.role:
-            from django.contrib.auth.models import Group
-
-            group = Group.objects.filter(name=invitation.role).first()
-            if group is None:  # renamed or removed since: staff with no role, for a manager to set
-                logger.warning('staff sign-in: invitation %s names no existing role', invitation.pk)
-            else:
-                identity.groups.add(group)
-        invitation.accepted_at = timezone.now()
-        invitation.accepted_identity = identity
-        invitation.save(update_fields=['accepted_at', 'accepted_identity'])
+        if not has_admin_access(identity):
+            raise SignInRefused('This account has no staff access. Ask a platform administrator.', 'no_access')
+        return identity
+    try:
+        with transaction.atomic():
+            invitation = StaffInvitation.objects.select_for_update().filter(pk=invitation_id).first()
+            if invitation is None or not invitation.is_open or invitation.provider != provider.key:
+                raise SignInRefused('This invitation has expired or has been used. Ask for a new one.', 'invitation_closed')
+            if address_of(provider, claims) != invitation.email.lower():
+                raise SignInRefused(
+                    f'This invitation is for {invitation.email}. Sign in to {provider.label} with that account.',
+                    'address_mismatch',
+                )
+            identity = Identity.objects.select_for_update().filter(issuer=provider.issuer, sub=claims['sub']).first()
+            if identity is None:
+                identity = Identity(issuer=provider.issuer, sub=claims['sub'], email=invitation.email,
+                                    name=(claims.get('name') or '')[:255])
+                identity.set_unusable_password()
+                identity.save()
+            elif not identity.is_active:
+                raise SignInRefused('This account has been switched off. Ask a superuser.', 'inactive')
+            _give_access(identity, invitation)
+            invitation.accepted_at = timezone.now()
+            invitation.accepted_identity = identity
+            invitation.save(update_fields=['accepted_at', 'accepted_identity'])
+    except IntegrityError as exc:  # the same provider account, in two first sign-ins at once
+        raise SignInRefused(_COULD_NOT, 'concurrent') from exc
     return identity
 
 
 def _audit(request, identity, provider: Provider, outcome: str, **detail):
+    """One audit row per outcome; an audit failure never fails the sign-in."""
     from .models import AuditEvent
 
-    AuditEvent.objects.create(
-        event_type=AuditEvent.EVENT_AUTH, method=request.method, path=request.path,
-        user_id=str(identity.pk) if identity is not None else None,
-        detail={'staff_sign_in': outcome, 'provider': provider.key, **detail},
-    )
+    try:
+        AuditEvent.objects.create(
+            event_type=AuditEvent.EVENT_AUTH, method=request.method, path=reverse('staff-sign-in-callback'),
+            user_id=str(identity.pk) if identity is not None else None,
+            detail={'staff_sign_in': outcome, 'provider': provider.key, **detail},
+        )
+    except Exception:  # noqa: BLE001 - the audit trail's own failure is logged, not raised
+        logger.exception('staff sign-in: audit event not written')
 
 
 def _refused(request, message: str, status: int = 403):
     return render(request, 'admin/staff_sign_in_refused.html', {'message': message}, status=status)
+
+
+def _on_own_host(request):
+    """A sign-in starts on the host the provider returns to, or its session
+    would be on another host's cookie: send it there first."""
+    base = urlsplit(settings.APP_BASE_URL)
+    if base.netloc and request.get_host() != base.netloc:
+        return redirect(f'{settings.APP_BASE_URL}{request.get_full_path()}')
+    return None
+
+
+def _start(request, provider: Provider, **kwargs):
+    try:
+        return authorization_redirect(request, provider, **kwargs)
+    except (requests.RequestException, ValueError, KeyError, SignInRefused):
+        logger.exception('staff sign-in: %s could not start', provider.key)
+        return _refused(request, f'{provider.label} could not be reached. Please try again.', status=502)
 
 
 @require_GET
@@ -234,12 +339,7 @@ def start(request, key: str):
     provider = providers().get(key)
     if provider is None:
         return _refused(request, 'This sign-in is not available.', status=404)
-    next_url = request.GET.get('next', '')
-    try:
-        return authorization_redirect(request, provider, next_url=next_url)
-    except (requests.RequestException, SignInRefused):
-        logger.exception('staff sign-in: %s could not start', key)
-        return _refused(request, f'{provider.label} could not be reached. Please try again.', status=502)
+    return _on_own_host(request) or _start(request, provider, next_url=request.GET.get('next', ''))
 
 
 @require_GET
@@ -247,15 +347,14 @@ def accept_invitation(request, token: str):
     """GET /admin/sign-in/invitation/<token>/: a staff invitation's link."""
     from .models import StaffInvitation
 
+    elsewhere = _on_own_host(request)
+    if elsewhere:
+        return elsewhere
     invitation = StaffInvitation.objects.filter(token_hash=hash_token(token)).first()
     provider = providers().get(invitation.provider) if invitation else None
     if invitation is None or not invitation.is_open or provider is None:
         return _refused(request, 'This invitation has expired or has been used. Ask for a new one.', status=404)
-    try:
-        return authorization_redirect(request, provider, invitation_id=invitation.pk)
-    except (requests.RequestException, SignInRefused):
-        logger.exception('staff sign-in: %s could not start', provider.key)
-        return _refused(request, f'{provider.label} could not be reached. Please try again.', status=502)
+    return _start(request, provider, invitation_id=invitation.pk)
 
 
 @require_GET
@@ -263,12 +362,12 @@ def callback(request):
     """GET /admin/sign-in/callback/: the provider sends the person back here."""
     attempt = request.session.pop(SESSION_KEY, None)
     state = request.GET.get('state', '')
-    if not attempt or not state or not hmac.compare_digest(attempt['state'], state):
+    if not attempt or not state or not _same(attempt['state'], state):
         return _refused(request, 'This sign-in has expired. Please start again.', status=400)
     provider = providers().get(attempt['provider'])
     if provider is None:
         return _refused(request, 'This sign-in is not available.', status=404)
-    if timezone.now().timestamp() - attempt['started'] > 600:
+    if timezone.now().timestamp() - attempt['started'] > ATTEMPT_SECONDS:
         return _refused(request, 'This sign-in took too long. Please start again.', status=400)
     if request.GET.get('error') or not request.GET.get('code'):
         _audit(request, None, provider, 'cancelled', error=request.GET.get('error', '')[:64])
@@ -277,12 +376,16 @@ def callback(request):
         claims = verified_claims(provider, request.GET['code'], verifier=attempt['verifier'], nonce=attempt['nonce'])
         identity = identity_for(provider, claims, attempt.get('invitation'))
     except SignInRefused as refusal:
-        _audit(request, None, provider, 'refused', reason=str(refusal)[:200])
+        _audit(request, None, provider, 'refused', reason=refusal.code)
         return _refused(request, str(refusal))
-    except requests.RequestException:
-        logger.exception('staff sign-in: %s could not be reached', provider.key)
+    except (requests.RequestException, ValueError, KeyError):
+        logger.exception('staff sign-in: %s could not be completed', provider.key)
         return _refused(request, f'{provider.label} could not be reached. Please try again.', status=502)
     login(request, identity, backend='patient_portal.backends.EmailBackend')
+    # A working day, not Django's two weeks: someone whose provider account is
+    # switched off is out by the end of it.
+    request.session.set_expiry(int(settings.STAFF_SESSION_HOURS * 3600))
+    request.session[PROVIDER_SESSION_KEY] = provider.key
     _audit(request, identity, provider, 'signed_in', mfa='mfa' in (claims.get('amr') or []))
     next_url = attempt.get('next') or reverse('admin:index')
     if not url_has_allowed_host_and_scheme(next_url, allowed_hosts={request.get_host()},

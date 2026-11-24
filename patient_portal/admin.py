@@ -20,8 +20,9 @@ class IdentityAdmin(UserAdmin):
     flags a password change and withdraws a permission for a member; a staff
     manager (``manage_staff``) sets or removes another staff member's role.
     Nobody but a superuser changes an address, staff or superuser status, or a
-    password, so no staff role can widen its own access or take an account over."""
-    list_display = ['email', 'name', 'is_premium', 'is_staff', 'is_active', 'created_at']
+    password, so no staff role can widen its own access or take an account over.
+    Role staff are not ``is_staff`` (patient_portal.staff_sign_in)."""
+    list_display = ['email', 'name', 'staff_role', 'is_premium', 'is_staff', 'is_active', 'created_at']
     list_filter = ['is_premium', 'is_staff', 'is_active']
     search_fields = ['email', 'name', 'sub']
     ordering = ['email']
@@ -47,11 +48,19 @@ class IdentityAdmin(UserAdmin):
     def has_superuser_permission(self, request):
         return _is_superuser(request)
 
+    @admin.display(description='Staff role')
+    def staff_role(self, obj):
+        from django.conf import settings
+
+        return ', '.join(obj.groups.filter(name__in=settings.STAFF_ROLES).values_list('name', flat=True))
+
     def get_readonly_fields(self, request, obj=None):
         if _is_superuser(request):
             return self.readonly_fields
         every = [f for fieldset in self.fieldsets for f in fieldset[1]['fields']]
-        if obj is not None and obj.is_staff and not obj.is_superuser and obj != request.user \
+        from .staff_sign_in import is_role_staff
+
+        if obj is not None and obj != request.user and is_role_staff(obj) \
                 and self.has_manage_staff_permission(request):
             return [f for f in every if f != 'groups']  # a staff manager sets another's role
         return every
@@ -64,6 +73,18 @@ class IdentityAdmin(UserAdmin):
             kwargs['queryset'] = Group.objects.filter(name__in=settings.STAFF_ROLES)
         return super().formfield_for_manytomany(db_field, request, **kwargs)
 
+    def save_related(self, request, form, formsets, change):
+        """A staff manager's form lists the staff roles only; saving it must
+        not drop the account's other groups, which a superuser gave."""
+        from django.conf import settings
+
+        kept = []
+        if change and not _is_superuser(request):
+            kept = list(form.instance.groups.exclude(name__in=settings.STAFF_ROLES))
+        super().save_related(request, form, formsets, change)
+        if kept:
+            form.instance.groups.add(*kept)
+
     def user_change_password(self, request, id, form_url=''):
         # UserAdmin lets anyone who may change an account set its password.
         from django.core.exceptions import PermissionDenied
@@ -74,8 +95,14 @@ class IdentityAdmin(UserAdmin):
 
     @staticmethod
     def _members_only(request, queryset):
-        """What member support may act on: members, never staff accounts."""
-        return queryset if _is_superuser(request) else queryset.filter(is_staff=False, is_superuser=False)
+        """What member support may act on: members, never staff accounts of
+        either kind."""
+        from django.conf import settings
+
+        if _is_superuser(request):
+            return queryset
+        return queryset.filter(is_staff=False, is_superuser=False).exclude(
+            groups__name__in=settings.STAFF_ROLES).distinct()
 
     @admin.action(description='Grant Premium access', permissions=['superuser'])
     def grant_premium(self, request, queryset):
@@ -158,14 +185,21 @@ class IdentityAdmin(UserAdmin):
 
     @admin.action(description='Remove staff access', permissions=['manage_staff'])
     def remove_staff_access(self, request, queryset):
-        """No longer staff: no role and no admin. A superuser, and the person
-        doing it, are left as they are."""
-        targets = queryset.filter(is_staff=True, is_superuser=False).exclude(pk=request.user.pk)
+        """No longer staff: no role, no permissions, no admin. A staff manager
+        removes role staff; full staff only a superuser. Never a superuser, and
+        never the person doing it."""
+        from .staff_sign_in import is_role_staff
+
         removed = 0
-        for identity in targets:
+        for identity in queryset.filter(is_superuser=False).exclude(pk=request.user.pk):
+            if not (is_role_staff(identity) or (identity.is_staff and _is_superuser(request))):
+                continue
             identity.groups.clear()
-            identity.is_staff = False
-            identity.save(update_fields=['is_staff'])
+            identity.user_permissions.clear()
+            if identity.is_staff:
+                identity.is_staff = False
+                identity.save(update_fields=['is_staff'])
+            self.log_change(request, identity, 'Removed staff access')
             removed += 1
         self.message_user(request, f'Removed staff access from {removed} account(s).')
 
@@ -202,58 +236,88 @@ class PatientInvitationAdmin(admin.ModelAdmin):
     readonly_fields = ['token', 'created_at', 'accepted_at']
     actions = ['resend']
 
+    def get_exclude(self, request, obj=None):
+        # The token is the whole credential for claiming the member's account.
+        return None if _is_superuser(request) else ['token']
+
+    def get_readonly_fields(self, request, obj=None):
+        return self.readonly_fields if _is_superuser(request) else ['created_at', 'accepted_at']
+
     def has_support_permission(self, request):
         return request.user.has_perm('patient_portal.support_member_accounts')
 
     @admin.action(description='Send the invitation again (a new link)', permissions=['support'])
     def resend(self, request, queryset):
-        """As POST /api/v1/patients/<id>/invite/ does: a new link to the same
-        address, the old one stops working; refused where it would be there."""
+        """As POST /api/v1/patients/<id>/invite/ does: a new link, the old one
+        stops working. Only the person's latest invitation, not cancelled, to
+        the address their record holds: support never sends a link to an
+        address someone replaced or cancelled, nor changes the record's."""
         from django.contrib import messages
         from omop_core.models import PatientRecord
 
         from .api.patient_invitations import _invitation_refusal, _issue_invitation
 
-        sent, refused = 0, []
-        for invitation in queryset.filter(accepted_at__isnull=True).select_related('person'):
+        sent, refused, failed = 0, [], []
+        for invitation in queryset.filter(accepted_at__isnull=True, cancelled_at__isnull=True).select_related('person'):
             person = invitation.person
-            if person is None or _invitation_refusal(person, invitation.email) is not None:
+            latest = PatientInvitation.objects.filter(person=person).order_by('-created_at', '-pk').first() \
+                if person is not None else None
+            if (person is None or latest != invitation
+                    or invitation.email.lower() != (person.email or '').lower()
+                    or _invitation_refusal(person, invitation.email) is not None):
                 refused.append(invitation.email)
                 continue
-            _issue_invitation(request, person, PatientRecord.objects.filter(person=person).first(),
-                              invitation.email.lower())
-            sent += 1
+            response = _issue_invitation(request, person, PatientRecord.objects.filter(person=person).first(),
+                                         invitation.email.lower())
+            self.log_change(request, invitation, 'Sent again')
+            if response.data.get('email_warning'):
+                failed.append(invitation.email)
+            else:
+                sent += 1
         self.message_user(request, f'Sent {sent} invitation(s) again.')
+        if failed:
+            self.message_user(request, 'A new link was made, but the email could not be sent: '
+                              + ', '.join(failed), level=messages.WARNING)
         if refused:
-            self.message_user(request, 'Not sent (an account exists already, or no person): '
-                              + ', '.join(refused), level=messages.WARNING)
+            self.message_user(request, 'Not sent (not the latest invitation, a changed address, or an account '
+                              'exists already): ' + ', '.join(refused), level=messages.WARNING)
 
 
 class StaffInvitationForm(forms.ModelForm):
     """Choices from the deployment's settings: its sign-in providers, and the
-    staff roles an invitation may give."""
+    staff roles an invitation may give. Full staff (``is_staff``, promop's full
+    access) is offered to a superuser only."""
+    FULL_STAFF = '__full_staff__'
 
     class Meta:
         model = StaffInvitation
         fields = ['email', 'provider', 'role']
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, inviter_is_superuser=False, **kwargs):
         from django.conf import settings
+        from django.contrib.auth.models import Group
 
         from .staff_sign_in import providers
 
         super().__init__(*args, **kwargs)
         self.fields['provider'] = forms.ChoiceField(
             choices=[(p.key, p.label) for p in providers().values()], label='Signs in with')
-        from django.contrib.auth.models import Group
-
         existing = set(Group.objects.filter(name__in=settings.STAFF_ROLES).values_list('name', flat=True))
-        self.fields['role'] = forms.ChoiceField(
-            choices=[('', 'No role yet')] + [(r, r) for r in settings.STAFF_ROLES if r in existing],
-            required=False)
+        choices = [(r, r) for r in settings.STAFF_ROLES if r in existing]
+        if inviter_is_superuser:
+            choices.append((self.FULL_STAFF, 'Full staff access (is_staff)'))
+        self.fields['role'] = forms.ChoiceField(choices=choices)
 
     def clean_email(self):
         return self.cleaned_data['email'].strip().lower()
+
+    def save(self, commit=True):
+        invitation = super().save(commit=False)
+        if invitation.role == self.FULL_STAFF:
+            invitation.role, invitation.full_staff = '', True
+        if commit:
+            invitation.save()
+        return invitation
 
 
 @admin.register(StaffInvitation)
@@ -262,7 +326,7 @@ class StaffInvitationAdmin(admin.ModelAdmin):
     staff account at its first sign-in with the named provider. Needs
     ``manage_staff``; an invitation is never changed, only cancelled."""
     form = StaffInvitationForm
-    list_display = ['email', 'role', 'provider', 'invited_by', 'created_at', 'expires_at', 'status']
+    list_display = ['email', 'role', 'full_staff', 'provider', 'invited_by', 'created_at', 'expires_at', 'status']
     search_fields = ['email']
     readonly_fields = ['email', 'provider', 'role', 'invited_by', 'created_at', 'expires_at', 'accepted_at',
                        'accepted_identity', 'cancelled_at']
@@ -300,7 +364,18 @@ class StaffInvitationAdmin(admin.ModelAdmin):
         return self._may_manage(request)
 
     def get_readonly_fields(self, request, obj=None):
-        return self.readonly_fields if obj is not None else []
+        return [*self.readonly_fields, 'full_staff'] if obj is not None else []
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        if obj is not None:
+            return form
+
+        class InviterForm(form):
+            def __init__(self, *args, **inner):
+                super().__init__(*args, inviter_is_superuser=_is_superuser(request), **inner)
+
+        return InviterForm
 
     def save_model(self, request, obj, form, change):
         import secrets
@@ -329,6 +404,9 @@ class StaffInvitationAdmin(admin.ModelAdmin):
             )
             self.message_user(request, f'Invitation emailed to {obj.email}.')
         except Exception:  # noqa: BLE001 - the link below still lets the inviter pass it on
+            import logging
+
+            logging.getLogger(__name__).exception('staff invitation %s: email not sent', obj.pk)
             self.message_user(request, f'The email could not be sent to {obj.email}.', level=messages.WARNING)
         # Shown once, to the inviter only: only the token's hash is stored.
         self.message_user(request, f'Their link, if they need it from you: {link}')
@@ -337,9 +415,13 @@ class StaffInvitationAdmin(admin.ModelAdmin):
     def cancel(self, request, queryset):
         from django.utils import timezone
 
-        updated = queryset.filter(accepted_at__isnull=True, cancelled_at__isnull=True).update(
-            cancelled_at=timezone.now())
-        self.message_user(request, f'Cancelled {updated} invitation(s).')
+        cancelled = 0
+        for invitation in queryset.filter(accepted_at__isnull=True, cancelled_at__isnull=True):
+            invitation.cancelled_at = timezone.now()
+            invitation.save(update_fields=['cancelled_at'])
+            self.log_change(request, invitation, 'Cancelled')
+            cancelled += 1
+        self.message_user(request, f'Cancelled {cancelled} invitation(s).')
 
 
 @admin.register(AuditEvent)
@@ -563,3 +645,15 @@ class ConsentLedgerEntryAdmin(_AppendOnlyAdmin):
 # The admin's sign-in page also offers the deployment's staff sign-in
 # providers, and no password form where staff passwords are off.
 admin.site.login_template = 'admin/staff_login.html'
+
+
+def _admin_has_permission(request):
+    """AdminSite.has_permission, widened to role staff (staff_sign_in): they
+    reach the admin through their role without being ``is_staff``, which
+    across promop's API means full access."""
+    from .staff_sign_in import has_admin_access
+
+    return has_admin_access(request.user)
+
+
+admin.site.has_permission = _admin_has_permission

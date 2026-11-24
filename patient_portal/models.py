@@ -235,7 +235,10 @@ class StaffInvitation(models.Model):
     email = models.EmailField()
     provider = models.CharField(max_length=50, help_text="A key of STAFF_SIGN_IN_PROVIDERS.")
     role = models.CharField(max_length=150, blank=True, default="",
-                            help_text="A group named in STAFF_ROLES, or none.")
+                            help_text="A group named in STAFF_ROLES; empty with full_staff.")
+    full_staff = models.BooleanField(
+        default=False, help_text="is_staff, promop's full access, instead of a role. Only a superuser invites it.",
+    )
     token_hash = models.CharField(max_length=64, unique=True, editable=False)
     invited_by = models.ForeignKey(
         Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
@@ -253,7 +256,7 @@ class StaffInvitation(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self):
-        return f"{self.email} ({self.role or 'no role'}, {self.provider})"
+        return f"{self.email} ({'full staff' if self.full_staff else self.role or 'no role'}, {self.provider})"
 
     @property
     def is_open(self) -> bool:

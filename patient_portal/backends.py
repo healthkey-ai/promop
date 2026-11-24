@@ -27,7 +27,10 @@ class EmailBackend(ModelBackend):
         # Where staff sign in only through a provider (STAFF_PASSWORD_SIGN_IN
         # off, docs/staff-sign-in.md), a staff password opens nothing, and a
         # wrong one counts nothing: nobody can lock a staff account out.
-        if not settings.STAFF_PASSWORD_SIGN_IN and (identity.is_staff or identity.is_superuser):
+        if not settings.STAFF_PASSWORD_SIGN_IN and (
+            identity.is_staff or identity.is_superuser
+            or identity.groups.filter(name__in=settings.STAFF_ROLES).exists()
+        ):
             Identity().set_password(password)  # the same work as a check, for timing
             return None
 

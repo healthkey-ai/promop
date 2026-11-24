@@ -297,6 +297,31 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
 _PUBLIC_VOTE_PREFIX = '/api/v1/public/mapping-votes/'
 
 
+class StaffPasswordSessionMiddleware:
+    """Once staff passwords are off (``STAFF_PASSWORD_SIGN_IN``), a staff
+    session that began with a password is signed out: switching passwords off
+    must also end the sessions they made, not only refuse new ones. A provider
+    sign-in marks its session (``staff_sign_in.PROVIDER_SESSION_KEY``)."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        from django.conf import settings
+
+        if not settings.STAFF_PASSWORD_SIGN_IN:
+            user = getattr(request, 'user', None)
+            if user is not None and user.is_authenticated:
+                from django.contrib.auth import logout
+
+                from patient_portal.staff_sign_in import PROVIDER_SESSION_KEY, is_role_staff
+
+                if (user.is_staff or user.is_superuser or is_role_staff(user)) \
+                        and not request.session.get(PROVIDER_SESSION_KEY):
+                    logout(request)
+        return self.get_response(request)
+
+
 class ForcePasswordChangeMiddleware:
     """
     Enforce Identity.must_change_password (HL7 PHR-S FM TI.1.1#09).
