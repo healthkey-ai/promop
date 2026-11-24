@@ -53,6 +53,26 @@ def concept_name_search_filter(query):
     return Q(concept_name__icontains=query) | token_match
 
 
+def concept_text_search(query):
+    """The filter for a typed search box, and the OMOP id it may also name.
+
+    A concept matches by name (``concept_name_search_filter``), by exact
+    vocabulary code, or by OMOP concept id. Every branch is indexable, or the
+    planner abandons the indexes for all of them (#1466). Numeric codes and ids
+    share the box, so both readings are kept, but an arbitrary-length code is
+    never cast to a database id. Returns ``(filter, concept_id or None)``; the
+    id feeds ``concept_match_ordering``.
+    """
+    search_filter = concept_name_search_filter(query) | Q(concept_code__iexact=query)
+    concept_id = None
+    numeric_id = query.lstrip('0') or '0'
+    if numeric_id.isascii() and numeric_id.isdecimal() and len(numeric_id) <= 10:
+        if int(numeric_id) <= 2_147_483_647:
+            concept_id = int(numeric_id)
+            search_filter |= Q(concept_id=concept_id)
+    return search_filter, concept_id
+
+
 def destination_concepts(queryset, query_params):
     """Narrow a search to what may be a mapping destination (#1465).
 

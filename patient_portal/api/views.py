@@ -10843,6 +10843,7 @@ from omop_core.api.concepts import (  # noqa: E402
     apply_concept_filters as _apply_concept_filters,
     concept_match_ordering as _concept_match_ordering,
     concept_name_search_filter as _concept_name_search_filter,
+    concept_text_search as _concept_text_search,
     destination_concepts as _destination_concepts,
     serialize_concept_base as _serialize_concept_base,
 )
@@ -10959,19 +10960,8 @@ def concept_search(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Every branch of this OR has to be indexable, or the planner abandons the
-    # indexes for all of them and filters each row of the vocabulary instead
-    # (#1466): the name by ix_concept_name_upper_trgm, the code by
-    # ix_concept_code_upper, the id by the pk.
-    search_filter = _concept_name_search_filter(query) | Q(concept_code__iexact=query)
-    # Numeric vocabulary codes and OMOP IDs share the same search box. Keep
-    # both interpretations, but never cast an arbitrary-length code to a DB ID.
-    concept_id = None
-    numeric_id = query.lstrip('0') or '0'
-    if numeric_id.isascii() and numeric_id.isdecimal() and len(numeric_id) <= 10:
-        if int(numeric_id) <= 2_147_483_647:
-            concept_id = int(numeric_id)
-            search_filter |= Q(concept_id=concept_id)
+    # Name, exact code or OMOP id, each branch indexable (#1466).
+    search_filter, concept_id = _concept_text_search(query)
     queryset = _apply_concept_filters(
         _destination_concepts(Concept.objects.filter(search_filter), request.query_params),
         request.query_params,
@@ -17549,6 +17539,49 @@ def field_choice_value_mapping_revisions(request, choice_pk, mapping_pk):
          'changed_by': r.changed_by_label, 'created_at': r.created_at}
         for r in mapping.revisions.all()
     ])
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def field_choice_value_mapping_targets(request, choice_pk):
+    """GET concepts this answer may be proposed to, for a role (#1225).
+
+    ``?q=`` (three characters or more: a name, an exact code or an OMOP id),
+    ``role`` (default ``value_as_concept``), ``question=1`` to search for a
+    recipe's question concept, ``vocabulary_id`` to narrow. The server's own
+    rules decide what is listed, so the editor offers nothing a proposal would
+    refuse: current, standard, in a vocabulary that is not withdrawn, not a
+    record-keeping domain, and for ``main_concept`` in the domain of the table
+    the field is stored in. The answer carries those ``rules`` so the editor can
+    say why a concept it knows of is missing.
+    """
+    from omop_core.api.concepts import ConceptPagination
+    from omop_core.models import FieldChoice
+    from omop_core.services import field_value_mappings as fvm
+
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
+    try:
+        choice = FieldChoice.objects.get(pk=choice_pk)
+    except FieldChoice.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    query = (request.query_params.get('q') or '').strip()
+    if len(query) < 3:
+        return Response({'detail': "Query parameter 'q' is required and must be at least 3 characters."},
+                        status=status.HTTP_400_BAD_REQUEST)
+    try:
+        queryset, rules = fvm.search_targets(
+            choice, query, role=request.query_params.get('role') or 'value_as_concept',
+            question=_truthy_param(request.query_params, 'question'),
+            vocabulary_id=(request.query_params.get('vocabulary_id') or '').strip())
+    except fvm.ValueMappingError as exc:
+        return _value_mapping_response(exc)
+    paginator = ConceptPagination()
+    page = paginator.paginate_queryset(queryset, request)
+    versions = _vocab_version_map()
+    response = paginator.get_paginated_response([_serialize_concept_base(c, versions) for c in page])
+    response.data['rules'] = rules
+    return response
 
 
 @api_view(['GET'])

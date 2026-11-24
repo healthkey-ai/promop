@@ -148,6 +148,20 @@ and never the model.
   `answer_coverage` (`choices`, `mapped`, `no_equivalent`, `proposed`,
   `unmapped`, over the choices still offered), kept apart from whether the
   field's question is mapped.
+- **Target search for the editor** (#1225): `GET
+  field-choices/<id>/value-mappings/targets/?q=&role=&question=&vocabulary_id=`
+  (readers of the mapping pages). `q` is three characters or more and matches a
+  name, an exact vocabulary code or an OMOP id, as the curator's concept search
+  does (`omop_core.api.concepts.concept_text_search`, shared). The server's
+  rules decide what is listed (`field_value_mappings.search_targets`, the
+  query form of `target_problem`): current, standard, outside withdrawn
+  vocabularies and record-keeping domains, and for `main_concept` in the domain
+  of the field's table; `question=1` (a recipe only) searches the question
+  concept with no domain rule. So the editor offers nothing a proposal would
+  refuse. The answer is the concept search's page plus `rules` (`required_domain`,
+  `excluded_domains`, `excluded_vocabularies`) so the editor can say why a
+  concept it knows is missing. Unlike the general search it never lists
+  non-standard concepts authored on this instance: those are not valid targets.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
   loaded, or that is not a valid target here, cannot be approved here: the

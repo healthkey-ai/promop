@@ -601,3 +601,67 @@ def test_the_resolver_command_runs_and_never_touches_an_approved_mapping(choice)
     call_command('resolve_field_value_mappings', stdout=out)
     approved.refresh_from_db()
     assert approved.status == 'approved' and approved.revision == 2
+
+
+# ── Target search (#1225) ──────────────────────────────────────────────────
+
+def targets(client, choice, **params):
+    return client.get(url(choice, 'targets'), params)
+
+
+def test_the_target_search_lists_only_what_a_proposal_would_accept(staff, choice):
+    ok = concept('600')
+    concept('601', standard_concept=None)
+    concept('602', standard_concept='C')
+    concept('603', invalid_reason='D')
+    concept('604', vocab='UCUM', domain='Unit')
+    r = targets(staff, choice, q='SNOMED 60')
+    assert r.status_code == 200, r.data
+    assert [c['concept_id'] for c in r.json()['results']] == [ok.pk]
+    # Whatever it lists, a proposal accepts.
+    assert fvm.propose(choice, concept_id=ok.pk).target_concept_id == ok.pk
+    # A concept is also found by exact code and by OMOP id.
+    assert [c['concept_id'] for c in targets(staff, choice, q='600').json()['results']] == [ok.pk]
+    assert [c['concept_id'] for c in targets(staff, choice, q=str(ok.pk)).json()['results']] == [ok.pk]
+
+
+def test_the_target_search_leaves_out_a_withdrawn_vocabulary(staff, choice):
+    concept('610')
+    concept('611', vocab='OLDVOC')
+    Vocabulary.objects.filter(pk='OLDVOC').update(is_deprecated=True)
+    r = targets(staff, choice, q='610').json()
+    assert r['results'] and r['rules']['excluded_vocabularies'] == ['OLDVOC']
+    assert targets(staff, choice, q='611').json()['results'] == []
+    assert [c['vocabulary_id'] for c in targets(staff, choice, q='SNOMED 61', vocabulary_id='SNOMED')
+            .json()['results']] == ['SNOMED']
+
+
+def test_a_main_concept_search_is_held_to_the_domain_of_the_fields_table(staff, choice):
+    FieldConceptMapping.objects.create(field_name='disease_activity', omop_table='condition_occurrence')
+    concept('620', domain='Observation')
+    cond = concept('621', domain='Condition')
+    r = targets(staff, choice, q='SNOMED 62', role='main_concept').json()
+    assert [c['concept_id'] for c in r['results']] == [cond.pk]
+    assert r['rules']['required_domain'] == 'Condition'
+    # As the value of the question, and as a question concept, the domain is free.
+    assert len(targets(staff, choice, q='SNOMED 62').json()['results']) == 2
+    assert len(targets(staff, choice, q='SNOMED 62', role='context_recipe',
+                       question='1').json()['results']) == 2
+    # And what is listed for the role is what a proposal for that role accepts.
+    assert fvm.propose(choice, role='main_concept', concept_id=cond.pk)
+
+
+def test_the_target_search_refuses_what_it_cannot_search(staff, reader, choice):
+    assert targets(staff, choice, q='ab').status_code == 400
+    assert targets(staff, choice, q='abc', role='nonsense').status_code == 400
+    assert targets(staff, choice, q='abc', question='1').status_code == 400   # not a recipe
+    assert staff.get('/api/v1/field-choices/999999/value-mappings/targets/', {'q': 'abc'}).status_code == 404
+    assert targets(reader, choice, q='abc').status_code == 403
+    assert APIClient().get(url(choice, 'targets'), {'q': 'abc'}).status_code in (401, 403)
+
+
+def test_the_target_search_query_count_is_flat(staff, choice, django_assert_max_num_queries):
+    for i in range(30):
+        concept(f'63{i:02d}')
+    with django_assert_max_num_queries(12):
+        assert len(targets(staff, choice, q='SNOMED 63').json()['results']) == 25

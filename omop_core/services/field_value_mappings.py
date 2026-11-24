@@ -133,6 +133,47 @@ def target_problem(concept, role: str, field_name: str = '', *, question: bool =
     return None
 
 
+def search_targets(choice, query: str, *, role: str = 'value_as_concept', question: bool = False,
+                   vocabulary_id: str = '', ctx: 'CheckContext | None' = None):
+    """The concepts ``choice`` may be proposed to, best match first (#1225).
+
+    Returns ``(queryset, rules)``. The filter is ``target_problem`` expressed as
+    a query, so the editor lists only what a proposal would accept; a concept
+    that fails a rule is absent rather than shown and refused. A match is by
+    name, exact vocabulary code or OMOP id, as in the curator's concept search.
+    ``question=True`` searches for a recipe's question concept, which has no
+    domain rule of its own.
+    """
+    from omop_core.api.concepts import concept_match_ordering, concept_text_search
+    from django.db.models import Q
+
+    if role not in ROLES:
+        raise ValueMappingError(f'{role!r} is not a mapping role.')
+    if question and role != 'context_recipe':
+        raise ValueMappingError('Only a contextual recipe has a question concept.')
+    ctx = ctx or CheckContext()
+    text, concept_id = concept_text_search(query)
+    queryset = _concept_model().objects.filter(text).filter(
+        standard_concept='S').filter(Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    queryset = queryset.exclude(domain_id__in=NON_ANSWER_DOMAINS)
+    if ctx.deprecated:
+        queryset = queryset.exclude(vocabulary_id__in=ctx.deprecated)
+    required_domain = None
+    if role == 'main_concept' and not question:
+        required_domain = TABLE_DOMAIN.get(ctx.tables.get(choice.field_name) or '')
+        if required_domain:
+            queryset = queryset.filter(domain_id=required_domain)
+    if vocabulary_id:
+        queryset = queryset.filter(vocabulary_id=vocabulary_id)
+    rules = {
+        'role': role, 'question': question, 'standard_only': True,
+        'required_domain': required_domain,
+        'excluded_domains': sorted(NON_ANSWER_DOMAINS),
+        'excluded_vocabularies': sorted(ctx.deprecated),
+    }
+    return queryset.order_by(*concept_match_ordering(query, concept_id)), rules
+
+
 def target_state(mapping, ctx: 'CheckContext | None' = None) -> str:
     """``ok``, or what is wrong now with the target of an approved mapping."""
     if mapping.outcome != 'mapped':
