@@ -130,13 +130,7 @@ def search_queryset(query, query_params, base_queryset=None):
     """
     from omop_core.models import Concept
 
-    search_filter = concept_name_search_filter(query) | Q(concept_code__iexact=query)
-    concept_id = None
-    numeric_id = query.lstrip('0') or '0'
-    if numeric_id.isascii() and numeric_id.isdecimal() and len(numeric_id) <= 10:
-        if int(numeric_id) <= 2_147_483_647:
-            concept_id = int(numeric_id)
-            search_filter |= Q(concept_id=concept_id)
+    search_filter, concept_id = concept_text_search(query)
     queryset = apply_concept_filters(
         destination_concepts((base_queryset or Concept.objects.all()).filter(search_filter),
                              query_params),
