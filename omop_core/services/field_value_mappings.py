@@ -334,35 +334,18 @@ def in_force(choice, role: str = 'value_as_concept'):
             .filter(choice=choice, role=role, status='approved').first())
 
 
-def answer_concept_ids(field_names) -> dict[str, dict[str, int]]:
-    """The concept each answer of the given fields writes as ``value_as_concept_id``.
+# An explicit "writes no concept", as against ``None``, "nothing says".
+_NO_CONCEPT = object()
 
-    ``{field_name: {spelling: concept_id}}``, where a spelling is the label, the
-    stored value or any alias of a choice, so a value saved under an earlier
-    label still projects. This is what the projection engine reads (#1224); it
-    asks for the approved ``value_as_concept`` decision of each choice, and the
-    rules are:
 
-    * an **approved, mapped** decision whose target is still a current standard
-      concept writes that concept. A target a vocabulary reload has since
-      retired, or made non-standard, writes none: the value still saves, with
-      no concept, rather than carry a concept that no longer means it;
-    * an **approved no-equivalent** decision writes none, even where the choice
-      has a legacy code, because a reviewer said no standard concept exists;
-    * a choice with **no decision yet**, or only an open proposal, keeps the
-      concept of its primary ``FieldChoiceCode``, as before this existed: the
-      proposal migration 0368 made from that code is not a new decision, and
-      holding projection back until each is approved would silently stop
-      writing concepts that are written today;
-    * a choice whose decision **was once made and is gone** (an approval since
-      withdrawn or superseded), or whose primary code's own concept a reviewer
-      **rejected**, does not fall back to that code. Rejecting some *other*
-      proposal for the choice leaves the code in place: nobody has answered for it.
+def _answer_meanings(field_names):
+    """What each choice of the given fields means as a concept (#1224).
 
-    A spelling that two choices of one field resolve to different concepts (the
-    same label in two contexts) writes none: a guess is worse than a plain
-    value. Retired choices are included, since stored values still carry them,
-    but a live choice's spelling wins over a retired one's.
+    Returns ``(choices, meanings, aliases, NONE)``: the choice rows, a
+    ``{choice pk: concept id | NONE}`` map that omits a choice nothing decides
+    and no code covers, and the aliases per choice. Both readers of an answer's
+    concept, the projection (answer to concept) and the derivation (concept to
+    answer), take it from here, so they cannot disagree about a decision.
     """
     from omop_core.models import (
         FieldChoice, FieldChoiceAlias, FieldChoiceCode, FieldValueConceptMapping as Mapping,
@@ -371,14 +354,14 @@ def answer_concept_ids(field_names) -> dict[str, dict[str, int]]:
 
     field_names = sorted(set(field_names))
     if not field_names:
-        return {}
+        return [], {}, {}, _NO_CONCEPT
     choices = list(FieldChoice.objects.filter(field_name__in=field_names)
                    .values('pk', 'field_name', 'display', 'value', 'retired_at'))
     if not choices:
-        return {}
+        return [], {}, {}, _NO_CONCEPT
     ids = [c['pk'] for c in choices]
 
-    NONE = object()    # an explicit "writes no concept", as against "nothing says"
+    NONE = _NO_CONCEPT
     decided: dict[int, object] = {}   # approved: concept id or NONE
     blocked: set[int] = set()         # had a decision once, none in force now
     turned_down: dict[int, set] = {}  # concept ids a reviewer rejected, per choice
@@ -432,31 +415,98 @@ def answer_concept_ids(field_names) -> dict[str, dict[str, int]]:
     for choice_id, alias in FieldChoiceAlias.objects.filter(choice_id__in=ids).values_list('choice_id', 'alias'):
         aliases.setdefault(choice_id, []).append(alias)
 
+    meanings: dict[int, object] = {}
+    for choice in choices:
+        pk = choice['pk']
+        if pk in decided:
+            meanings[pk] = decided[pk]
+        elif pk in blocked:
+            meanings[pk] = NONE
+        elif pk in legacy:
+            meanings[pk] = legacy[pk]
+    return choices, meanings, aliases, NONE
+
+
+def answer_concept_ids(field_names) -> dict[str, dict[str, int]]:
+    """The concept each answer of the given fields writes as ``value_as_concept_id``.
+
+    ``{field_name: {spelling: concept_id}}``, where a spelling is the label, the
+    stored value or any alias of a choice, so a value saved under an earlier
+    label still projects. This is what the projection engine reads (#1224); it
+    asks for the approved ``value_as_concept`` decision of each choice, and the
+    rules are:
+
+    * an **approved, mapped** decision whose target is still a current standard
+      concept writes that concept. A target a vocabulary reload has since
+      retired, or made non-standard, writes none: the value still saves, with
+      no concept, rather than carry a concept that no longer means it;
+    * an **approved no-equivalent** decision writes none, even where the choice
+      has a legacy code, because a reviewer said no standard concept exists;
+    * a choice with **no decision yet**, or only an open proposal, keeps the
+      concept of its primary ``FieldChoiceCode``, as before this existed: the
+      proposal migration 0368 made from that code is not a new decision, and
+      holding projection back until each is approved would silently stop
+      writing concepts that are written today;
+    * a choice whose decision **was once made and is gone** (an approval since
+      withdrawn or superseded), or whose primary code's own concept a reviewer
+      **rejected**, does not fall back to that code. Rejecting some *other*
+      proposal for the choice leaves the code in place: nobody has answered for it.
+
+    A spelling that two choices of one field resolve to different concepts (the
+    same label in two contexts) writes none: a guess is worse than a plain
+    value. Retired choices are included, since stored values still carry them,
+    but a live choice's spelling wins over a retired one's.
+    """
     # One entry per (field, spelling): the concepts its choices resolve to, with
     # NONE for a choice a decision says writes no concept. A choice nothing
     # decides and no code covers says nothing, as before. Only a spelling that
     # means exactly one concept is projected; where a live choice and a retired
     # one share a spelling, the live one speaks.
+    choices, meanings, aliases, NONE = _answer_meanings(field_names)
     live: dict[str, dict[str, set]] = {}
     retired: dict[str, dict[str, set]] = {}
     for choice in choices:
         pk = choice['pk']
-        if pk in decided:
-            meaning = decided[pk]
-        elif pk in blocked:
-            meaning = NONE
-        else:
-            meaning = legacy.get(pk)
-        if meaning is None:
+        if pk not in meanings:
             continue
         target = retired if choice['retired_at'] else live
         for text in {choice['display'], choice['value'] or choice['display'], *aliases.get(pk, ())}:
-            target.setdefault(choice['field_name'], {}).setdefault(text, set()).add(meaning)
+            target.setdefault(choice['field_name'], {}).setdefault(text, set()).add(meanings[pk])
     result: dict[str, dict[str, int]] = {}
     for field in {*live, *retired}:
         merged = {**retired.get(field, {}), **live.get(field, {})}
         result[field] = {text: next(iter(concepts)) for text, concepts in merged.items()
                          if len(concepts) == 1 and NONE not in concepts}
+    return result
+
+
+def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
+    """The answer a stored ``value_as_concept_id`` stands for, per field.
+
+    ``{field_name: {concept_id: stored_value}}``: the other direction of
+    ``answer_concept_ids``, for the derivation of a record from facts that
+    carry the answer as a concept and no text (an ETL's, #1224). It uses the
+    same decisions, so an approved answer reads back as what it writes. A
+    concept that two answers of one field share (a mapping the curators
+    allowed to be many-to-one, or the same concept in two contexts) reads as
+    nothing rather than as a guess, and a live answer speaks over a retired one.
+    The value is the choice's stored value, its ``value`` or else its label.
+    """
+    choices, meanings, _, NONE = _answer_meanings(field_names)
+    live: dict[str, dict[int, set]] = {}
+    retired: dict[str, dict[int, set]] = {}
+    for choice in choices:
+        meaning = meanings.get(choice['pk'])
+        if meaning is None or meaning is NONE:
+            continue
+        target = retired if choice['retired_at'] else live
+        target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(
+            choice['value'] or choice['display'])
+    result: dict[str, dict[int, str]] = {}
+    for field in {*live, *retired}:
+        merged = {**retired.get(field, {}), **live.get(field, {})}
+        result[field] = {concept: next(iter(values)) for concept, values in merged.items()
+                         if len(values) == 1}
     return result
 
 

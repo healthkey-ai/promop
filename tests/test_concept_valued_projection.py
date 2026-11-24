@@ -335,6 +335,126 @@ class TestApprovedAnswerConcepts:
 
 
 # ---------------------------------------------------------------------------
+# A fact that carries the answer as a concept is read back as the answer (#1224)
+# ---------------------------------------------------------------------------
+
+class TestConceptOnlyFactsRead:
+    """Derivation reads ``value_as_concept_id`` through the same decisions."""
+
+    @staticmethod
+    def _choice(display):
+        return FieldChoice.objects.get(field_name='disease_activity', display=display)
+
+    @staticmethod
+    def _fact(person, concept_id, *, string=None, day=date(2026, 1, 5)):
+        return Observation.objects.create(
+            observation_id=900000 + Observation.objects.count(), person=person,
+            observation_concept_id=1617595, observation_source_value='97509-4',
+            observation_date=day, observation_type_concept_id=32817,
+            value_as_concept_id=concept_id, value_as_string=string,
+        )
+
+    def _derived(self, person):
+        return refresh_patient_record(person).disease_activity
+
+    def test_a_concept_only_fact_reads_as_the_answer_its_legacy_code_names(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046)        # In remission, the code of 'Finished treatment ...'
+        assert self._derived(person) == 'Finished treatment and in remission'
+
+    def test_a_concept_two_answers_share_is_not_guessed(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.approve(fvm.propose(self._choice('Watch and wait'), vocabulary_id='SNOMED',
+                                concept_code='103338009'))
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046)        # now the concept of 'Watch and wait' too
+        # 'Finished treatment ...' still has it by its code: two answers claim
+        # the concept, so nothing is guessed.
+        assert self._derived(person) in (None, '')
+
+    def test_an_approved_decision_moves_the_reading_with_it(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.approve(fvm.propose(self._choice('Watch and wait'), vocabulary_id='SNOMED',
+                                concept_code='263855007'))
+        fvm.approve(fvm.propose(self._choice('Came back after treatment'), outcome='no_equivalent',
+                                rationale='Not a single standard concept'))
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4136153)
+        assert self._derived(person) == 'Watch and wait'
+
+    def test_a_no_equivalent_answer_has_no_concept_to_read(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_value_mappings as fvm
+        fvm.approve(fvm.propose(self._choice('Came back after treatment'), outcome='no_equivalent',
+                                rationale='Not a single standard concept'))
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4136153)
+        assert self._derived(person) in (None, '')
+
+    def test_the_text_of_a_fact_wins_over_its_concept(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046, string='Watch and wait')
+        assert self._derived(person) == 'Watch and wait'
+
+    def test_a_concept_no_answer_stands_for_is_not_read(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 1617595)        # the question concept itself
+        assert self._derived(person) in (None, '')
+
+    def test_a_retired_answer_is_still_read(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from django.utils import timezone
+        FieldChoice.objects.filter(display='Finished treatment and in remission').update(
+            retired_at=timezone.now())
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046)
+        assert self._derived(person) == 'Finished treatment and in remission'
+
+    def test_a_live_answer_speaks_over_a_retired_one_sharing_the_concept(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from django.utils import timezone
+        old = FieldChoice.objects.create(field_name='disease_activity', display='Remission (old)',
+                                         sort_order=9, retired_at=timezone.now())
+        FieldChoiceCode.objects.create(choice=old, vocabulary_id='SNOMED', code='103338009',
+                                       display='Remission (old)', is_primary=True)
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046)
+        assert self._derived(person) == 'Finished treatment and in remission'
+
+    def test_the_lookup_is_not_made_unless_a_fact_needs_it(
+        self, disease_activity_mapping, disease_activity_choices, django_assert_num_queries,
+    ):
+        from unittest import mock
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, None, string='Watch and wait')
+        with mock.patch('omop_core.services.field_value_mappings.answer_values_by_concept') as lookup:
+            assert self._derived(person) == 'Watch and wait'
+        lookup.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Migration outcome tests (mapping rows are correct after migration)
 # ---------------------------------------------------------------------------
 
