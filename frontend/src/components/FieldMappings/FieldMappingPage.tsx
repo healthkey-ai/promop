@@ -1195,6 +1195,7 @@ export default function FieldMappingPage() {
       {choiceEditorField && canWrite && (
         <FieldChoiceEditor
           fieldName={choiceEditorField.field_name}
+          canApprove={canApprove}
           onClose={() => {
             setChoiceEditorField(null);
             fetchDescriptors();

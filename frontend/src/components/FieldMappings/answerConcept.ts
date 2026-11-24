@@ -1,0 +1,108 @@
+/** What an answer's concept mapping means to a curator (#1225).
+ *
+ *  The server holds one decision in force and at most one open proposal per
+ *  answer and role. The editor only works with `value_as_concept`: the other
+ *  roles (`main_concept`, `context_recipe`) are recorded by the API but nothing
+ *  projects them yet. */
+
+export interface ConceptBrief {
+  concept_id: number;
+  vocabulary_id: string;
+  concept_code: string;
+  concept_name: string;
+  domain_id?: string;
+}
+
+export interface ValueMapping {
+  id: number;
+  role: string;
+  outcome: "mapped" | "no_equivalent";
+  status: "proposed" | "approved" | "rejected" | "superseded";
+  target: ConceptBrief | null;
+  vocabulary_id: string;
+  concept_code: string;
+  source_resolution: string;
+  target_state: "ok" | "retired" | "non_standard" | "invalid" | "unresolved" | "missing" | null;
+  rationale: string;
+  vocabulary_release: string;
+  proposed_by: string | null;
+  reviewer: string | null;
+}
+
+export type AnswerStateKind =
+  | "unmapped"
+  | "proposed"
+  | "approved"
+  | "approved_no_equivalent"
+  | "approved_invalid";
+
+export interface AnswerState {
+  kind: AnswerStateKind;
+  /** One line for the curator. */
+  summary: string;
+  /** What is wrong, when the decision in force cannot be used. */
+  warning: string | null;
+  approved: ValueMapping | null;
+  proposed: ValueMapping | null;
+}
+
+const label = (m: ValueMapping): string =>
+  m.target
+    ? `${m.target.vocabulary_id} ${m.target.concept_code} ${m.target.concept_name}`
+    : m.vocabulary_id && m.concept_code
+      ? `${m.vocabulary_id} ${m.concept_code}`
+      : "no concept";
+
+const INVALID_TARGET: Record<string, string> = {
+  retired: "The approved concept has been retired. The value is saved without a concept until a current one is approved.",
+  non_standard: "The approved concept is no longer standard. The value is saved without a concept until a standard one is approved.",
+  invalid: "The approved concept no longer fits this field. The value is saved without a concept until it is replaced.",
+  unresolved: "The approved concept is not loaded in this instance.",
+  missing: "The approved concept is missing.",
+};
+
+/** The state of one answer from its `value_mappings`, as the choice list carries them. */
+export function answerState(mappings: ValueMapping[] | undefined): AnswerState {
+  const own = (mappings ?? []).filter((m) => m.role === "value_as_concept");
+  const approved = own.find((m) => m.status === "approved") ?? null;
+  const proposed = own.find((m) => m.status === "proposed") ?? null;
+
+  if (approved) {
+    if (approved.outcome === "no_equivalent") {
+      return {
+        kind: "approved_no_equivalent", approved, proposed, warning: null,
+        summary: "Reviewed: no standard concept for this answer. No concept is written; the value is saved as normal.",
+      };
+    }
+    if (approved.target_state && approved.target_state !== "ok") {
+      return {
+        kind: "approved_invalid", approved, proposed,
+        summary: `Approved: ${label(approved)}`,
+        warning: INVALID_TARGET[approved.target_state] ?? "The approved concept cannot be used.",
+      };
+    }
+    return { kind: "approved", approved, proposed, warning: null, summary: `Approved: ${label(approved)}` };
+  }
+  if (proposed) {
+    const unresolved = proposed.outcome === "mapped" && !proposed.target;
+    return {
+      kind: "proposed", approved: null, proposed,
+      warning: unresolved
+        ? `${label(proposed)} is not loaded here, or is no longer a valid concept, so it cannot be approved yet.`
+        : null,
+      summary: proposed.outcome === "no_equivalent"
+        ? "Proposed: no standard concept for this answer (waiting for approval)"
+        : `Proposed: ${label(proposed)} (waiting for approval)`,
+    };
+  }
+  return {
+    kind: "unmapped", approved: null, proposed: null, warning: null,
+    summary: "No concept approved. An answer with a legacy code may still write that code's concept; one whose proposal was rejected, or whose approval was withdrawn, writes none.",
+  };
+}
+
+/** The server's own reason, else a fixed sentence: never the raw error. */
+export function errorText(error: unknown, fallback: string): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  return typeof detail === "string" && detail ? detail : fallback;
+}
