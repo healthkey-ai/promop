@@ -100,8 +100,11 @@ request is a 401 "This account was closed." and nothing is created. After
 that the member can sign up again, as a new member.
 
 - Only a closed sign-in is refused. A withdrawal keeps the account, and an
-  admin delete that keeps the sign-in (a clinician who is also a member)
-  closes none, so both leave the token working.
+  admin delete that keeps the sign-in closes none, so both leave the token
+  working. An admin delete keeps the sign-in only of an account that is
+  staff or holds provider access (a clinician who is also a member); a
+  `patient` grant, which an invitation leaves on the sign-in, does not keep
+  it.
 - A sign-in this deployment issued (`urn:local`) needs no check: its subject
   is a random id that goes with the row.
 - The check costs one query, and only for a token whose subject has no

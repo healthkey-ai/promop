@@ -513,3 +513,36 @@ def test_a_record_erased_with_the_sign_in_kept_refuses_nothing():
 
     assert sign_in(claims).pk == identity.pk
     assert all('subject' not in e.detail for e in AuditEvent.objects.filter(method='ERASE'))
+
+
+def test_staff_deleting_an_invited_member_closes_their_sign_in_too(member):
+    """A `patient` grant, which an invitation leaves on the sign-in, is not
+    provider access: the sign-in goes with the record, so a partner token
+    still in a browser cannot open a new one."""
+    from omop_core.models import GroupAccess
+
+    GroupAccess.objects.create(identity=member['identity'], org=member['record'].organization, role='patient')
+    staff = Identity.objects.create_user(email='staff3@example.test', is_staff=True)
+    client = APIClient()
+    client.force_authenticate(staff)
+    pid, identity_id = member['person'].person_id, member['identity'].pk
+
+    assert client.delete(f'/api/v1/patient-records/{pid}/admin-delete/', {'confirm': 'DELETE'},
+                         format='json').status_code == 200
+
+    assert not Identity.objects.filter(pk=identity_id).exists()
+    assert erasures() == [(str(staff.pk), {'erasure': 'account', 'person_id': pid, 'identity_id': identity_id})]
+
+
+def test_staff_deleting_the_record_of_a_staff_account_keeps_its_sign_in(member):
+    Identity.objects.filter(pk=member['identity'].pk).update(is_staff=True)
+    staff = Identity.objects.create_user(email='staff4@example.test', is_staff=True)
+    client = APIClient()
+    client.force_authenticate(staff)
+    pid = member['person'].person_id
+
+    assert client.delete(f'/api/v1/patient-records/{pid}/admin-delete/', {'confirm': 'DELETE'},
+                         format='json').status_code == 200
+
+    assert not Person.objects.filter(person_id=pid).exists()
+    assert Identity.objects.filter(pk=member['identity'].pk).exists()
