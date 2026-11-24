@@ -103,7 +103,7 @@ describe("FieldChoiceEditor", () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: "Delete choice Follicular Lymphoma" }));
-    expect(confirm).toHaveBeenCalledWith('Delete the entire choice "Follicular Lymphoma" and all of its codes?');
+    expect(confirm).toHaveBeenCalledWith('Delete the entire choice "Follicular Lymphoma" and all of its codes? To stop offering it and keep its history, retire it instead.');
     expect(mockDelete).not.toHaveBeenCalled();
     expect(screen.getByText("SNOMED:307618003")).toBeInTheDocument();
   });
