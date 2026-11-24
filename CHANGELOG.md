@@ -295,6 +295,32 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A `bulk_update` batch releases the keys it changes before writing any
+  group (#2709)** — the endpoint applies one `UPDATE` per patched column set,
+  so a key transfer between two rows (clear on one, set on another) failed with
+  409 whenever the destination group happened to run first. The rows are
+  locked and validated as before; the keys the batch changes are then cleared
+  in the same transaction before the groups are written, so the transfer no
+  longer depends on row or group order. Only a row that holds a key is
+  released, so stamping unkeyed rows writes each row once.
+- **The eligibility benchmark reads stage and the receptors the way their
+  extractors do, and the coded labs by their effective code (#2708)** — the number subqueries matched
+  `concept_code OR source_value`, so a row whose LOINC concept names a
+  different analyte was read through its source value (a creatinine concept
+  with an AST source value reported AST); they now use the effective-code
+  precedence of the paired labs, and creatinine clearance, AST and ALT take
+  their accepted codes from `resolve_lab_code_fields()`. `stage` follows
+  `_get_staging_data`: R-ISS before ISS, Measurement before Observation,
+  concept-coded rows before source-only ones, the first row with a usable
+  answer (not empty, not a boolean RECIST result), no entered-in-error or
+  provisional rows, and the reviewed stage label. HER2, ER and PR follow
+  `_first_by_code`: concept code only, the newest real row, its answer concept
+  before its string before its source value. The benchmark times the two reads
+  and does not compare values; the fields it still reads differently (age,
+  disease, performance scores, lab row selection and display-name labs,
+  cleared history, the stage's uncoded fallbacks and source units,
+  record-level overrides) are listed in the command's
+  docstring and stay in #2708.
 - **A row-level write cannot take another row's `source_record_key`, and the
   key field no longer trims (#2484)** — `PATCH /api/v1/measurements/<pk>/` and
   the observation equivalent skipped DRF's uniqueness validator so the keyed

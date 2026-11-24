@@ -16,7 +16,7 @@ for clinical trial eligibility screening, via two query paths:
 | Path | Mechanism |
 |------|-----------|
 | **PatientRecord** | Single indexed lookup on the `patient_record` table — the fast path used in production |
-| **Raw OMOP** | Reconstructs the same 20 fields live from `person`, `measurement`, `observation`, and `condition_occurrence` using 17 correlated subqueries |
+| **Raw OMOP** | Reconstructs the same 20 fields live from `person`, `measurement`, `observation`, and `condition_occurrence` in one statement with 21 correlated subqueries (counted at #2720) |
 
 ### 2. Full PatientRecord benchmark (`benchmark_patient_record`)
 
@@ -79,10 +79,12 @@ There are two, and Step 1 covers both:
 | Source | Zenodo [10.5281/zenodo.21430170](https://doi.org/10.5281/zenodo.21430170) | Synthea, on your machine |
 | Download | `synthea_bc_1000.json`, ~249 MB | none |
 | Needs the Synthea JAR | no | yes |
-| Reproduces published numbers | yes — same 1,000 patients | ratio yes, absolute values no |
+| Reproduces published numbers | same 1,000 patients; timings approximately (see below) | ratio approximately, absolute values no |
 
 **Route A** is the one to use when checking the paper's figures: it is the exact cohort those
-numbers came from. **Route B** needs no download and no citation, and is the better choice for
+numbers came from. The raw OMOP query has changed since they were measured (see the note on
+the Step 3 example output), so on either route a run on the current code checks the method and
+the approximate speedup, not the exact milliseconds or ratio. **Route B** needs no download and no citation, and is the better choice for
 adapting the benchmark to a different disease or cohort size. For Route B, see
 [Synthetic patient generation](SYNTHETIC_PATIENT_GENERATION.md) for obtaining
 `synthea-with-dependencies.jar`; pass its location with `--jar-path` if it is not on the
@@ -182,7 +184,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 > cache-dependent in any case. Use `--count 1000` to match the published cohort size, which
 > is what governs the ratio. **The reproducible result on Route B is the relative speedup
 > between the `PatientRecord` and raw-OMOP paths**, not the absolute millisecond figures.
-> Route A reproduces both.
+> Route A reproduces the cohort itself; its timings are subject to the same caveats.
 
 ---
 
@@ -232,7 +234,7 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 | `patient_age` | `person` | `year_of_birth` (computed) |
 | `gender` | `person` | `gender_concept.concept_name` |
 | `disease` | `condition_occurrence` | concept name contains cancer/neoplasm/carcinoma/… |
-| `stage` | `measurement` / `observation` | LOINC 21908-9 |
+| `stage` | `measurement` / `observation` | R-ISS (`21908-9-riss`) before ISS (LOINC 21908-9), concept code before source value, first usable answer |
 | `ecog_performance_status` | `observation` | concept name icontains `ecog` |
 | `karnofsky_performance_score` | `observation` | concept name icontains `karnofsky` |
 | `hemoglobin_g_dl` | `measurement` | LOINC 718-7 |
@@ -246,16 +248,22 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" SECRET_KEY=dev-on
 | `ast_u_l` | `measurement` | LOINC 1920-8 |
 | `alt_u_l` | `measurement` | LOINC 1742-6 |
 | `albumin_g_dl` | `measurement` | LOINC 1751-7 |
-| `her2_status` | `measurement` | LOINC 48676-1 |
-| `estrogen_receptor_status` | `measurement` | LOINC 16112-5 |
-| `progesterone_receptor_status` | `measurement` | LOINC 16113-3 |
+| `her2_status` | `measurement` | concept code LOINC 48676-1 |
+| `estrogen_receptor_status` | `measurement` | concept code LOINC 16112-5 |
+| `progesterone_receptor_status` | `measurement` | concept code LOINC 16113-3 |
 
-The raw OMOP path issues one correlated subquery per field against the
-appropriate table. The PatientRecord path reads all 20 fields in a single
+The raw OMOP path is one statement: `patient_age` and `gender` read the
+`person` row itself, `stage` takes four correlated subqueries (R-ISS and ISS,
+each in `measurement` then `observation`), and every other field takes one. Lab codes come from the curated field mappings, so a run may
+read approved aliases beyond the codes listed. The raw row is not the derived
+record: the command's module docstring lists the principal differences
+(#2708). The PatientRecord path reads all 20 fields in a single
 `.values()` call on the indexed `patient_record` table.
 
 **Example output.** Verbatim from a run against the 1,000-patient reference cohort
-(PostgreSQL 14, Apple Silicon, warm cache, `--repeat 3`):
+(PostgreSQL 14, Apple Silicon, warm cache, `--repeat 3`). The raw OMOP query
+has changed since this run (#2720 among others), so treat its timings as a
+historical measurement and rerun for current numbers:
 
 ```
 Benchmarking 1000 patient(s), 3 repeat pass(es) per path...

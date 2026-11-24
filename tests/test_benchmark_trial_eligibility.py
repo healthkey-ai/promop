@@ -12,9 +12,13 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
+from omop_core.management.commands.benchmark_trial_eligibility import (
+    PYTHON_WHITESPACE, _fetch_omop_trial_row,
+)
 from omop_core.models import Organization, PatientRecord
-from omop_core.services.patient_record_service import _get_laboratory_data
+from omop_core.services.patient_record_service import (
+    _get_biomarker_data, _get_laboratory_data, _get_staging_data,
+)
 from tests.factories import (
     ConditionOccurrenceFactory,
     ConceptFactory,
@@ -468,3 +472,242 @@ def test_a_newer_approved_count_alias_is_the_one_that_counts(lab_field_mappings)
 
     assert row['anc_thousand_per_ul'] == Decimal('1.5')
     assert _get_laboratory_data(person)['anc_thousand_per_ul'] == Decimal('1.5')
+
+
+def test_a_number_field_reads_its_own_concept_not_another_code_source():
+    """The number subquery names a row like `_measurement_code` (#2708): a
+    creatinine concept with an AST source value is not AST."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='2160-0'),
+        measurement_source_value='1920-8', value_as_number=Decimal('1.1'))
+
+    assert _fetch_omop_trial_row(person.person_id)['ast_u_l'] is None
+    assert _get_laboratory_data(person).get('ast_u_l') is None
+
+
+def test_the_stage_field_keeps_the_staging_extractors_source_fallback():
+    """`_get_staging_data` reads concept or source value, so the benchmark must
+    agree for stage (the receptors read the concept code only; see the
+    'source-only row' HER2 case below)."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='21905-5'),
+        measurement_source_value='21908-9', value_as_string='Stage II')
+
+    row = _fetch_omop_trial_row(person.person_id)
+
+    assert row['stage'] == 'Stage II'
+    assert _get_staging_data(person)['stage'] == 'Stage II'
+
+
+def test_a_number_field_reads_a_curated_code_and_an_approved_alias(lab_field_mappings):
+    """The number builders take the field's curated codes, so a positive result
+    and an approved alias both survive (#2708 review)."""
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='1920-8'),
+        measurement_source_value='1920-8', measurement_date='2024-01-01',
+        value_as_number=Decimal('41'))
+    mapping = FieldConceptMapping.objects.get(field_name='ast_u_l')
+    alias = ConceptFactory(concept_code='30239-9', concept_name='Aspartate aminotransferase')
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code=alias.concept_code,
+        target_concept_id=mapping.concept_id, status='approved',
+        omop_table='measurement', origin='curator')
+    MeasurementFactory(
+        person=person, measurement_concept=alias, measurement_source_value='30239-9',
+        measurement_date='2024-02-01', value_as_number=Decimal('55'))
+
+    assert _fetch_omop_trial_row(person.person_id)['ast_u_l'] == 55
+
+
+def test_stage_reads_a_concept_row_before_a_newer_source_row():
+    """`_get_staging_data` visits concept-coded rows first, so the benchmark
+    must not let a newer source-only row win (#2708 review)."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='21908-9'),
+        measurement_source_value='21908-9', measurement_date='2020-01-01',
+        value_as_string='Stage I')
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='21905-5'),
+        measurement_source_value='21908-9', measurement_date='2026-01-01',
+        value_as_string='Stage IV')
+
+    assert _fetch_omop_trial_row(person.person_id)['stage'] == 'Stage I'
+    assert _get_staging_data(person)['stage'] == 'Stage I'
+
+
+def test_an_entered_in_error_row_is_not_a_benchmark_fact():
+    """The derivation skips entered-in-error rows, so every measurement builder
+    must too (the pair builder already did)."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='1920-8'),
+        measurement_source_value='1920-8', value_as_number=Decimal('88'),
+        is_erroneous=True)
+
+    assert _fetch_omop_trial_row(person.person_id)['ast_u_l'] is None
+    assert _get_laboratory_data(person).get('ast_u_l') is None
+
+
+def test_stage_reads_the_r_iss_code_the_derivation_prefers():
+    """R-ISS is the MM stage the record derives; only the source value carries
+    it, so the benchmark must read that code too."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='21905-5'),
+        measurement_source_value='21908-9-riss', value_as_string='Stage III')
+
+    assert _fetch_omop_trial_row(person.person_id)['stage'] == 'Stage III'
+    assert _get_staging_data(person)['stage'] == 'Stage III'
+
+
+# --- stage and receptors follow their extractors (#2720 review) --------------
+#
+# Each case seeds rows for one person and asserts the benchmark and the
+# extractor agree on the value given. A row is (table, concept code, source
+# value, date, answer columns).
+
+_ISS, _RISS, _T = '21908-9', '21908-9-riss', '21905-5'
+
+
+def _seed_rows(person, rows):
+    for table, code, source, when, values in rows:
+        values = dict(values)
+        if 'answer_concept' in values:
+            values['value_as_concept'] = ConceptFactory(
+                concept_code=f'ANS-{when}', concept_name=values.pop('answer_concept'))
+        if table == 'm':
+            MeasurementFactory(
+                person=person, measurement_concept=ConceptFactory(concept_code=code),
+                measurement_source_value=source, measurement_date=when, **values)
+        else:
+            ObservationFactory(
+                person=person, observation_concept=ConceptFactory(concept_code=code),
+                observation_source_value=source, observation_date=when, **values)
+
+
+_STAGE_CASES = {
+    # The reported regression: an older concept-coded row without an answer
+    # must not hide a newer source-coded one.
+    'empty concept row': ([
+        ('m', _ISS, _ISS, '2020-01-01', {}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'boolean concept row': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': 'true'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    # The string is chosen before the row is judged, so a padded boolean
+    # rejects the row although its answer concept is a stage.
+    'padded boolean beside a concept answer': ([
+        ('m', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': ' Yes ', 'answer_concept': 'Stage II'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'whitespace string beside a concept answer': ([
+        ('m', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': '   ', 'answer_concept': 'Stage II'}),
+    ], None),
+    'empty string falls through to the concept': ([
+        ('m', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': '', 'answer_concept': 'Stage 4 (qualifier value)'}),
+    ], 'Stage IV'),
+    'number is truncated': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_number': Decimal('2.8')}),
+    ], '2'),
+    'source value is not an answer': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_source_value': 'Stage IV'}),
+    ], None),
+    # Stripped as `str.strip()` strips, whatever the database locale.
+    'NBSP-only string': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': '\xa0'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'boolean padded with NEL': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': 'true\x85'}),
+        ('m', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage IV'),
+    'label is normalised': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': ' stage 3a '}),
+    ], 'Stage IIIA'),
+    # Reported as finding 3: R-ISS in any table before ISS.
+    'R-ISS observation over ISS measurement': ([
+        ('m', _ISS, _ISS, '2026-01-01', {'value_as_string': 'Stage I'}),
+        ('o', _T, _RISS, '2020-01-01', {'value_as_string': 'Stage III'}),
+    ], 'Stage III'),
+    'entered-in-error observation': ([
+        ('o', _ISS, _ISS, '2020-01-01',
+         {'value_as_string': 'Stage II', 'is_erroneous': True}),
+    ], None),
+    'provisional measurement': ([
+        ('m', _ISS, _ISS, '2020-01-01', {'value_as_string': 'Stage II', 'confidence': 80}),
+    ], None),
+    'observation concept row before a newer source row': ([
+        ('o', _ISS, _ISS, '2020-01-01', {'value_as_string': 'Stage I'}),
+        ('o', _T, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+    ], 'Stage I'),
+    'measurement before observation': ([
+        ('o', _ISS, _ISS, '2026-01-01', {'value_as_string': 'Stage IV'}),
+        ('m', _T, _ISS, '2020-01-01', {'value_as_string': 'Stage I'}),
+    ], 'Stage I'),
+}
+
+
+@pytest.mark.parametrize('rows, expected', _STAGE_CASES.values(), ids=_STAGE_CASES)
+def test_stage_agrees_with_the_staging_extractor(rows, expected):
+    person = PersonFactory(year_of_birth=1960)
+    _seed_rows(person, rows)
+
+    assert _get_staging_data(person).get('stage') == expected
+    assert _fetch_omop_trial_row(person.person_id)['stage'] == expected
+
+
+_HER2 = '48676-1'
+
+_RECEPTOR_CASES = {
+    # Reported as finding 2: `_first_by_code` reads the concept code only.
+    'source-only row': ([
+        ('m', 'LOCAL-HER2', _HER2, '2020-01-01', {'value_as_string': 'Positive'}),
+    ], None),
+    'answer concept before string': ([
+        ('m', _HER2, _HER2, '2020-01-01',
+         {'answer_concept': 'Negative', 'value_as_string': 'Positive'}),
+    ], 'Negative'),
+    'empty string falls through to the source value': ([
+        ('m', _HER2, _HER2, '2020-01-01',
+         {'value_as_string': '', 'value_source_value': 'Equivocal (IHC 2+)'}),
+    ], 'Equivocal'),
+    # Unlike stage, the newest row wins even without an answer.
+    'empty newest row over an older positive': ([
+        ('m', _HER2, _HER2, '2020-01-01', {'value_as_string': 'Positive'}),
+        ('m', _HER2, _HER2, '2026-01-01', {}),
+    ], None),
+    'provisional row': ([
+        ('m', _HER2, _HER2, '2020-01-01', {'value_as_string': 'Positive', 'confidence': 80}),
+    ], None),
+}
+
+
+@pytest.mark.parametrize('rows, expected', _RECEPTOR_CASES.values(), ids=_RECEPTOR_CASES)
+def test_her2_agrees_with_the_biomarker_extractor(rows, expected):
+    person = PersonFactory(year_of_birth=1960)
+    _seed_rows(person, rows)
+
+    assert _get_biomarker_data(person).get('her2_status') == expected
+    assert _fetch_omop_trial_row(person.person_id)['her2_status'] == expected
+
+
+def test_the_strip_class_is_every_character_python_strips():
+    """The SQL strip spells out `str.isspace`; a character above the range it
+    scans would be stripped by the extractor and kept by the benchmark."""
+    import sys
+
+    assert PYTHON_WHITESPACE == ''.join(
+        c for c in map(chr, range(sys.maxunicode + 1)) if c.isspace())

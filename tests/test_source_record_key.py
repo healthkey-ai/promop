@@ -589,3 +589,125 @@ def test_a_bulk_collision_answers_the_generic_409(api, client):
     assert resp.status_code == 409, resp.content
     assert 'error' not in resp.json()
     assert 'k/a' not in resp.json()['detail']
+
+
+@pytest.mark.parametrize('destination_first', [True, False])
+def test_a_bulk_update_may_transfer_a_key_in_either_order(api, client, destination_first):
+    """The batch releases the keys it changes before writing any group, so a
+    destination group that sorts first cannot collide with the release (#2709)."""
+    first, second = api.post([api.row(key='k/a'), api.row(key='k/b')]).json()['ids']
+    rows = [
+        {'measurement_id': second, 'source_record_key': 'k/a', 'value_as_number': '37.7'},
+        {'measurement_id': first, 'source_record_key': None},
+    ]
+    if not destination_first:
+        rows.reverse()
+
+    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true',
+                        rows, format='json')
+
+    assert resp.status_code == 200, resp.content
+    keys = dict(Measurement.objects.filter(person=api.person)
+                .values_list('measurement_id', 'source_record_key'))
+    assert keys == {first: None, second: 'k/a'}
+
+
+def _keys(person, model=Measurement):
+    pk = model._meta.pk.attname
+    return dict(model.objects.filter(person=person).values_list(pk, 'source_record_key'))
+
+
+def test_a_bulk_update_may_rotate_keys_inside_one_column_set_group(api, client):
+    """Three rows patching only their key form one group, so one UPDATE moves
+    every key at once; the release keeps the rotation from colliding with a key
+    still held mid-statement (#2720 review)."""
+    a, b, c = api.post([api.row(key=k) for k in ('k/a', 'k/b', 'k/c')]).json()['ids']
+
+    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true', [
+        {'measurement_id': a, 'source_record_key': 'k/b'},
+        {'measurement_id': b, 'source_record_key': 'k/c'},
+        {'measurement_id': c, 'source_record_key': 'k/a'},
+    ], format='json')
+
+    assert resp.status_code == 200, resp.content
+    assert _keys(api.person) == {a: 'k/b', b: 'k/c', c: 'k/a'}
+
+
+@pytest.mark.parametrize('destination_first', [True, False])
+def test_a_bulk_update_may_move_a_key_to_an_unkeyed_row(api, client, destination_first):
+    """The destination holds no key, so only the old holder is released; the
+    transfer still lands in either group order (#2720 review)."""
+    holder, = api.post([api.row(key='k/a')]).json()['ids']
+    unkeyed, = api.post([api.row(key=None)], query='&upsert=false').json()['ids']
+    rows = [
+        {'measurement_id': unkeyed, 'source_record_key': 'k/a', 'value_as_number': '37.9'},
+        {'measurement_id': holder, 'source_record_key': None},
+    ]
+    if not destination_first:
+        rows.reverse()
+
+    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true',
+                        rows, format='json')
+
+    assert resp.status_code == 200, resp.content
+    assert _keys(api.person) == {holder: None, unkeyed: 'k/a'}
+
+
+def test_a_first_stamp_is_not_released_before_its_write(api, client):
+    """A row with no key has nothing to release: stamping a batch must not
+    first write NULL over NULL on every row (#2720 review)."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    ids = [api.post([api.row(key=None)], query='&upsert=false').json()['ids'][0]
+           for _ in range(2)]
+
+    with CaptureQueriesContext(connection) as queries:
+        resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true', [
+            {'measurement_id': pk, 'source_record_key': f'k/{pk}'} for pk in ids
+        ], format='json')
+
+    assert resp.status_code == 200, resp.content
+    assert _keys(api.person) == {pk: f'k/{pk}' for pk in ids}
+    releases = [q['sql'] for q in queries.captured_queries
+                if q['sql'].startswith('UPDATE') and '"source_record_key" = NULL' in q['sql']]
+    assert releases == []
+
+
+def test_a_409_after_the_release_leaves_every_row_as_it_was(api, client):
+    """The release runs before the groups, so a collision in a later group must
+    roll it back too: every key and every value is restored (#2720 review)."""
+    moving, released, held = api.post(
+        [api.row(key='k/move'), api.row(key='k/free'), api.row(key='k/held')]).json()['ids']
+    before = {row.pk: (row.source_record_key, row.value_as_number)
+              for row in _rows(api.person)}
+
+    resp = client.patch('/api/v1/measurements/bulk_update/?skip_refresh=true', [
+        # Its own group: a new key and a value, both written before the clash.
+        {'measurement_id': moving, 'source_record_key': 'k/new', 'value_as_number': '38.5'},
+        # Released up front, then takes a key a row outside the batch still holds.
+        {'measurement_id': released, 'source_record_key': 'k/held'},
+    ], format='json')
+
+    assert resp.status_code == 409, resp.content
+    after = {row.pk: (row.source_record_key, row.value_as_number)
+             for row in _rows(api.person)}
+    assert after == before
+    assert after[held][0] == 'k/held'
+
+
+def test_an_observation_bulk_update_may_move_a_key_to_an_unkeyed_row(api, client):
+    """The release is shared by the observation endpoint (#2720 review)."""
+    from tests.factories import ObservationFactory
+
+    holder = ObservationFactory(person=api.person, source_record_key='k/o')
+    unkeyed = ObservationFactory(person=api.person, source_record_key=None)
+
+    resp = client.patch('/api/v1/observations/bulk_update/?skip_refresh=true', [
+        {'observation_id': unkeyed.pk, 'source_record_key': 'k/o',
+         'value_as_string': 'moved'},
+        {'observation_id': holder.pk, 'source_record_key': None},
+    ], format='json')
+
+    assert resp.status_code == 200, resp.content
+    assert _keys(api.person, Observation) == {holder.pk: None, unkeyed.pk: 'k/o'}
