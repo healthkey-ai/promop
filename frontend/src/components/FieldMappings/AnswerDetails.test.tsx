@@ -70,7 +70,7 @@ describe("AnswerDetailsPanel", () => {
 
   it("sends only what changed, and tells the curator the old label is kept", async () => {
     panel();
-    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings of In remission/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of In remission/ }));
     expect(screen.getByText(/keeps the old one as another spelling/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "  In   full remission " } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -80,7 +80,7 @@ describe("AnswerDetailsPanel", () => {
 
   it("sends the spellings one per line, without blanks or repeats", async () => {
     panel();
-    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
     fireEvent.change(screen.getByLabelText("Other spellings"), {
       target: { value: "Remission\n\n  CR \nCR\nComplete  response" },
     });
@@ -91,7 +91,7 @@ describe("AnswerDetailsPanel", () => {
 
   it("does not write back a spelling list the curator never edited", async () => {
     const { rerender } = panel();
-    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
     // Another curator adds a spelling while this form is open.
     rerender(<AnswerDetailsPanel choiceId={4} label="In remission" code="in_remission"
       aliases={["Remission", "CR"]} onChanged={onChanged} />);
@@ -102,7 +102,7 @@ describe("AnswerDetailsPanel", () => {
 
   it("names its toggle for what it does, and cannot retire under an open form", () => {
     panel();
-    const edit = screen.getByRole("button", { name: /Edit label and spellings/ });
+    const edit = screen.getByRole("button", { name: /Edit details of/ });
     expect(edit).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(edit);
     const cancel = screen.getByRole("button", { name: /Cancel editing In remission/ });
@@ -110,9 +110,78 @@ describe("AnswerDetailsPanel", () => {
     expect(screen.getByRole("button", { name: "Retire In remission" })).toBeDisabled();
   });
 
+  describe("scope", () => {
+    const options = [{ value: "MM", label: "Multiple Myeloma" }, { value: "FL", label: "Follicular Lymphoma" }];
+
+    it("says who is offered the answer, and its context", () => {
+      panel({ diseases: ["FL"], contextKey: "stage_ann_arbor" });
+      expect(screen.getByText("Offered to: FL")).toBeInTheDocument();
+      expect(screen.getByText("stage_ann_arbor")).toBeInTheDocument();
+      expect(screen.queryByText("Offered to every patient")).not.toBeInTheDocument();
+    });
+
+    it("names the answer on its scope control", () => {
+      panel({ diseaseOptions: options });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      expect(screen.getByText(/which patients are offered "In remission"/)).toBeInTheDocument();
+    });
+
+    it("offers no scope control without the categories", () => {
+      panel();
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      expect(screen.queryByRole("group", { name: "Disease Categories" })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Every patient$/)).not.toBeInTheDocument();
+    });
+
+    it("narrows an answer to the ticked categories, and only then", async () => {
+      panel({ diseaseOptions: options });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      fireEvent.click(screen.getByLabelText("Only some Disease Categories"));
+      fireEvent.click(screen.getByLabelText(/^MM/));
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/field-choices/4/", { diseases: ["MM"] }));
+    });
+
+    it("will not save a narrowing that names no category", () => {
+      panel({ diseaseOptions: options });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      fireEvent.click(screen.getByLabelText("Only some Disease Categories"));
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(screen.getByRole("alert")).toHaveTextContent("Tick at least one Disease Category");
+      expect(mockPatch).not.toHaveBeenCalled();
+    });
+
+    it("offers it to every patient again by sending no categories", async () => {
+      panel({ diseaseOptions: options, diseases: ["FL", "MM"] });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      fireEvent.click(screen.getByLabelText("Every patient"));
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/field-choices/4/", { diseases: [] }));
+    });
+
+    it("sends no scope when it was not changed, and keeps a category the list lacks", async () => {
+      panel({ diseaseOptions: options, diseases: ["GONE"] });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      expect(screen.getByLabelText(/^GONE/)).toBeChecked();
+      fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Remission" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/field-choices/4/", { display: "Remission" }));
+    });
+
+    it("shows the server's refusal of a category", async () => {
+      mockPatch.mockRejectedValue(refused({ diseases: ["Unknown Disease Category 'XX'."] }));
+      panel({ diseaseOptions: options });
+      fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+      fireEvent.click(screen.getByLabelText("Only some Disease Categories"));
+      fireEvent.click(screen.getByLabelText(/^MM/));
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(await screen.findByText(/Unknown Disease Category/)).toBeInTheDocument();
+    });
+  });
+
   it("saves nothing when nothing changed", () => {
     panel();
-    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(mockPatch).not.toHaveBeenCalled();
     expect(screen.queryByLabelText("Label")).not.toBeInTheDocument();
@@ -120,7 +189,7 @@ describe("AnswerDetailsPanel", () => {
 
   it("refuses an empty label without asking the server", () => {
     panel();
-    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "   " } });
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(mockPatch).not.toHaveBeenCalled();
@@ -129,7 +198,7 @@ describe("AnswerDetailsPanel", () => {
   it("shows the server's refusal and stays open", async () => {
     mockPatch.mockRejectedValue(refused({ display: ["'Complete' is already a choice of disease_activity in this context."] }));
     panel();
-    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
     fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Complete" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("already a choice");
@@ -254,11 +323,20 @@ describe("FieldChoiceEditor with answer details", () => {
     mockGet.mockResolvedValue({ data: choices() });
     const onClose = vi.fn();
     render(<FieldChoiceEditor fieldName="disease_activity" onClose={onClose} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Edit details of/ }));
     fireEvent.keyDown(screen.getByLabelText("Other spellings"), { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("passes the categories on, so an answer's scope can be edited from the field's page", async () => {
+    mockGet.mockResolvedValue({ data: choices({ diseases: ["MM"], context_key: "" }) });
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}}
+      diseaseOptions={[{ value: "MM", label: "Multiple Myeloma" }]} />);
+    expect(await screen.findByText("Offered to: MM")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+    expect(screen.getByLabelText(/^MM/)).toBeChecked();
   });
 
   it("offers no history to someone who cannot read mappings", async () => {

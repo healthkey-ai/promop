@@ -144,10 +144,11 @@ def test_all_source_labels_and_namespace_reach_ranker(entrypoint, monkeypatch, l
             source_code_description='Original local description', source_concept=source,
             omop_table='measurement', domain_id='Measurement', occurrence_count=12,
         )
-        suggest.suggest_mappings('measurement', strategies=['lexical'])
+        suggest.suggest_mappings('measurement', strategies=['lexical'], ranking_model='anthropic')
     elif entrypoint == 'dialog':
         suggest.suggest_one_mapping('123-4', 'LOINC', 'measurement',
-                                    source_description='Original local description', strategies=['lexical'])
+                                    source_description='Original local description', strategies=['lexical'],
+                                    ranking_model='anthropic')
     else:
         suggest.suggest_source_code(source_code='123-4', source_vocabulary_id='LOINC',
                                     source_text='Original local description', omop_table='measurement')

@@ -4,6 +4,7 @@ import api from "@/api/axios";
 import { AnswerConceptPanel } from "./AnswerConceptPanel";
 import { AnswerDetailsPanel } from "./AnswerDetailsPanel";
 import { AnswerHistory } from "./AnswerHistory";
+import type { DiseaseCategoryOption } from "@/types/fieldScope";
 import { refusalText, type ValueMapping } from "./answerConcept";
 
 interface ChoiceCode {
@@ -24,6 +25,8 @@ interface Choice {
   code?: string;
   aliases?: string[];
   retired?: boolean;
+  context_key?: string;
+  diseases?: string[];
   /** Only for a reader of the mapping pages. */
   value_mappings?: ValueMapping[];
 }
@@ -33,9 +36,15 @@ interface Props {
   onClose: () => void;
   /** Org admins and staff approve or reject a proposed concept. */
   canApprove?: boolean;
+  /** The Disease Categories an answer can be offered to; without them scope is read only. */
+  diseaseOptions?: DiseaseCategoryOption[];
+  /** The categories could not be loaded, so `diseaseOptions` is only what is already in use. */
+  diseaseOptionsIncomplete?: boolean;
 }
 
-export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Props) {
+export function FieldChoiceEditor({
+  fieldName, onClose, canApprove = false, diseaseOptions, diseaseOptionsIncomplete = false,
+}: Props) {
   const [choices, setChoices] = useState<Choice[]>([]);
   const [loading, setLoading] = useState(true);
   const [newDisplay, setNewDisplay] = useState("");
@@ -212,6 +221,10 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                         code={choice.code}
                         aliases={choice.aliases}
                         retired={choice.retired}
+                        diseases={choice.diseases}
+                        contextKey={choice.context_key}
+                        diseaseOptions={diseaseOptions}
+                        optionsIncomplete={diseaseOptionsIncomplete}
                         onChanged={() => fetchChoices(true)}
                       />
                     )}
