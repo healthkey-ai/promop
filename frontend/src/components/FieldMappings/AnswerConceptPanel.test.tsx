@@ -39,7 +39,7 @@ describe("answerState", () => {
     expect(s.kind).toBe("proposed");
     expect(s.summary).toContain("waiting for approval");
     const missing = answerState([mapping({ target: null })]);
-    expect(missing.warning).toContain("not loaded in this instance");
+    expect(missing.warning).toContain("not loaded here");
   });
 
   it("tells an approved concept, a reviewed no-equivalent and an unusable concept apart", () => {
