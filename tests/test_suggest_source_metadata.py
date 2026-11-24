@@ -228,7 +228,7 @@ def test_dialog_metadata_reaches_the_ranker_and_retrieval_is_unchanged(loinc, mo
     _no_text_retrieval(monkeypatch, searched)
     _ranker(monkeypatch, contexts)
     result = suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs',
-                                 row_metadata=RESPIRATIONS)
+                                 ranking_model='anthropic', row_metadata=RESPIRATIONS)
 
     # Retrieval searches the description only, once per strategy (#1786).
     assert searched == [('lexical', 'Vital signs'), ('vectors', 'Vital signs')]
@@ -242,7 +242,7 @@ def test_no_metadata_no_context_key(loinc, monkeypatch):
     contexts = []
     _no_text_retrieval(monkeypatch, [])
     _ranker(monkeypatch, contexts)
-    suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs')
+    suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs', ranking_model='anthropic')
     assert 'source_metadata' not in contexts[0]
 
 
@@ -258,7 +258,7 @@ def test_other_patients_are_never_read(loinc, monkeypatch, django_assert_max_num
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
     with CaptureQueriesContext(connection) as queries:
-        suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs')
+        suggest_one_mapping('9', EPIC, 'measurement', source_description='Vital signs', ranking_model='anthropic')
     assert not any('patient_source_code' in q['sql'] for q in queries.captured_queries)
     assert 'source_metadata' not in contexts[0]
 
@@ -272,7 +272,7 @@ def test_batch_uses_the_rows_own_metadata(loinc, monkeypatch):
     contexts = []
     _no_text_retrieval(monkeypatch, [])
     _ranker(monkeypatch, contexts)
-    suggest_mappings('measurement', min_occurrences=1)
+    suggest_mappings('measurement', min_occurrences=1, ranking_model='anthropic')
     assert _code_text(contexts[0]['source_metadata']) == 'Respirations'
     assert contexts[0]['source_metadata']['value_types'] == {'quantity': 100.0}
     assert not any(secret in json.dumps(contexts[0]) for secret in SECRETS)
@@ -294,7 +294,7 @@ class TestSuggestOneEndpoint:
     def _post(self, **extra):
         return self.client.post('/api/v1/code-mappings/suggest-one/', {
             'source_code': '9', 'source_vocabulary_id': EPIC, 'omop_table': 'measurement',
-            'source_code_description': 'Vital signs', **extra,
+            'source_code_description': 'Vital signs', 'ranking_model': 'anthropic', **extra,
         }, format='json')
 
     def test_the_dialogs_metadata_is_used(self):

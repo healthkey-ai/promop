@@ -17,7 +17,12 @@ from omop_core.models import (
     LoincClass, LoincCodeClass, PatientSourceCode, SourceCodeAxisVariant,
     SourceCodeConceptMapping,
 )
-from omop_core.services.mapping_suggestions import suggest_one_mapping
+from functools import partial
+
+from omop_core.services.mapping_suggestions import suggest_one_mapping as _suggest_one_mapping
+
+# These tests stub the Anthropic ranker; Jev is the production default.
+suggest_one_mapping = partial(_suggest_one_mapping, ranking_model='anthropic')
 from tests.factories import (
     ConceptClassFactory, ConceptFactory, DomainFactory, MeasurementFactory, PersonFactory,
     VocabularyFactory,
@@ -625,6 +630,7 @@ class TestApi:
         response = self.client.post('/api/v1/code-mappings/suggest-one/', {
             'source_code': 'GLU', 'source_vocabulary_id': LAB, 'omop_table': 'measurement',
             'source_code_description': 'Glucose', 'axis_key': 'property=SCnc|scale_type=Qn',
+            'ranking_model': 'anthropic',
         }, format='json')
         assert response.status_code == 200, response.data
         assert response.data['suggested']['concept_code'] == '14749-6'
@@ -895,7 +901,7 @@ def _suggest_variant(mapping, axis_key):
     return client.post('/api/v1/code-mappings/suggest-one/', {
         'source_code': mapping.source_code, 'source_vocabulary_id': mapping.source_vocabulary_id,
         'omop_table': 'measurement', 'source_code_description': mapping.source_code_description,
-        'axis_key': axis_key, 'mapping_id': mapping.pk,
+        'axis_key': axis_key, 'mapping_id': mapping.pk, 'ranking_model': 'anthropic',
     }, format='json')
 
 
@@ -1044,7 +1050,7 @@ def test_suggest_one_never_borrows_another_hospitals_axes(pipeline, glucose):
         source_vocabulary_id=LAB, source_code='GLU', omop_table='measurement',
         organization=OrganizationFactory(slug='org-b'), loinc_axes={'property': 'SCnc'})
     body = {'source_code': 'GLU', 'source_vocabulary_id': LAB, 'omop_table': 'measurement',
-            'source_code_description': 'Glucose'}
+            'source_code_description': 'Glucose', 'ranking_model': 'anthropic'}
 
     assert client.post('/api/v1/code-mappings/suggest-one/', body, format='json').status_code == 200
     assert 'property' not in pipeline['context'].get('loinc_axes', {})

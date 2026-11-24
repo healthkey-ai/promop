@@ -211,7 +211,7 @@ def use_dispatcher(dispatcher: SuggestDispatcher) -> Iterator[SuggestDispatcher]
 def execute_preview(run_id: str, params: dict) -> None:
     """Retrieve a dialog's candidates without changing any mapping."""
     from copy import deepcopy
-    from omop_core.mapping.suggestions import suggest_one_mapping
+    from omop_core.mapping.suggestions import DEFAULT_RANKING_MODEL, suggest_one_mapping
 
     runs = SuggestRun.objects.filter(pk=run_id)
     if not runs.exists():
@@ -225,7 +225,7 @@ def execute_preview(run_id: str, params: dict) -> None:
 
     try:
         preview_params = dict(params['preview'])
-        preview_params['ranking_model'] = params.get('ranking_model', 'anthropic')
+        preview_params['ranking_model'] = params.get('ranking_model', DEFAULT_RANKING_MODEL)
         result = suggest_one_mapping(**preview_params, activity=activity)
         preview = {k: v for k, v in params['preview'].items() if k != 'row_metadata'}
         activity({'stage': 'result', **preview, **result, 'dry_run': True, 'updated': False})
@@ -372,7 +372,7 @@ def execute_run(run_id: str, params: dict) -> None:
             resuggest=params['resuggest'],
             progress=progress,
             activity=activity,
-            ranking_model=params.get('ranking_model', 'anthropic'),
+            ranking_model=params.get('ranking_model', DEFAULT_RANKING_MODEL),
             auto_approve_threshold=threshold,
             approve_as=approver,
             on_auto_approve=on_auto_approve,

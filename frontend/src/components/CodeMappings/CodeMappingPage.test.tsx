@@ -331,6 +331,10 @@ describe("CodeMappingPage", () => {
     it("says so when the ranker chosen cannot reach the threshold, so nothing will be approved", async () => {
       await prefilled();
       const warning = screen.getByTestId("auto-approve-warning");
+      // Jev is the default ranker and can reach the threshold.
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above");
+
+      fireEvent.change(screen.getByLabelText("Ranker"), { target: { value: "anthropic" } });
       expect(warning).toHaveTextContent("the Anthropic ranker scores at most 85%, so this run will approve nothing");
 
       useJev();
