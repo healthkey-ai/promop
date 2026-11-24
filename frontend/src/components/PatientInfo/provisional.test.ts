@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   addedMark, addedMarks, attestationBlockers, createdFieldShown, diseaseTypeOf, diseaseTypeOfCategory, marksOf,
-  rejectedProposals, withoutMarks,
+  rejectedProposals, settledAddedMarks, withoutMarks,
 } from './provisional';
 import createdFieldCases from './createdFieldAttestationCases.json';
 import patientVisibleFields from './patientVisibleFields.json';
@@ -235,11 +235,43 @@ describe('created fields in the marks (#2857)', () => {
     it('agrees with the server rule', () => {
       const definition = field('frailty_note', { tab: c.tab, mode: c.mode ?? 'editable', diseases: c.diseases });
       const approved = c.approved !== false && (c.mode ?? 'editable') === 'editable';
-      const info = { disease: c.disease, provisional_fields: { 'custom_fields.frailty_note': 82 } };
+      // The page lists approved fields only, so a further unapproved one is not among them.
+      const others = ((c as { others?: { tab: string; diseases: string[]; approved: boolean }[] }).others ?? [])
+        .filter((o) => o.approved)
+        .map((o, i) => field(`other_${i}`, { tab: o.tab, diseases: o.diseases }));
+      const marked = (c as { marked?: boolean }).marked !== false;
+      const info = {
+        disease: c.disease,
+        provisional_fields: marked ? { 'custom_fields.frailty_note': 82 } : {},
+      };
 
-      const blockers = attestationBlockers(info, { frailty_note: { writable: approved } }, c.category, [definition]);
+      const blockers = attestationBlockers(
+        info, { frailty_note: { writable: approved } }, c.category, [definition, ...others]);
 
       expect(blockers).toEqual(c.blocks ? ['custom_fields.frailty_note'] : []);
     });
+  });
+});
+
+describe('rejecting a proposal on a created field (#2857)', () => {
+  const proposed = { 'custom_fields.frailty_note': 82, hemoglobin_g_dl: 70 };
+
+  it('names the mark of a created field the page showed a proposal on and the patient cleared', () => {
+    expect(rejectedProposals({ custom_fields: { frailty_note: null } }, proposed))
+      .toEqual(['custom_fields.frailty_note']);
+    expect(rejectedProposals({ custom_fields: { frailty_note: '' }, hemoglobin_g_dl: null }, proposed))
+      .toEqual(['custom_fields.frailty_note', 'hemoglobin_g_dl']);
+  });
+
+  it('names nothing for a value, false, zero, or a key that showed no proposal', () => {
+    expect(rejectedProposals({ custom_fields: { frailty_note: 'Frail' } }, proposed)).toEqual([]);
+    expect(rejectedProposals({ custom_fields: { frailty_note: false } }, proposed)).toEqual([]);
+    expect(rejectedProposals({ custom_fields: { frailty_note: 0 } }, proposed)).toEqual([]);
+    expect(rejectedProposals({ custom_fields: { other_note: null } }, proposed)).toEqual([]);
+  });
+
+  it('settles a mark by a value and keeps it for a blank, which the save rejects', () => {
+    expect(settledAddedMarks({ a: 'x', b: null, c: '', d: false }, ['a', 'b', 'c', 'd']))
+      .toEqual(['custom_fields.a', 'custom_fields.d']);
   });
 });

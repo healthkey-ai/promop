@@ -20,7 +20,8 @@ from rest_framework.test import APIClient
 
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID, resolve_person_source_codes
 from omop_core.models import (
-    CustomPatientField, FieldConceptMapping, FieldDiseaseMembership, GroupAccess, Observation,
+    CustomPatientField, DiseaseCategoryChoice, DiseaseCategoryMapping, FieldConceptMapping,
+    FieldDiseaseMembership, GroupAccess, Observation,
     Organization, Person, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
     ProposalRejection, SourceCodeConceptMapping,
 )
@@ -483,23 +484,224 @@ def test_an_edit_of_another_field_leaves_a_created_proposal_in_place(world):
     assert picture(person).custom_fields == {'frailty_note': 'guess'}
 
 
-def test_rejecting_a_created_proposal_is_not_supported_and_changes_nothing(world):
+# --- rejecting a created proposal (#2857) -----------------------------------------------
+
+MARK = 'custom_fields.frailty_note'
+
+
+def reject(client, blank=None, declared=(MARK,), name='frailty_note'):
+    return client.patch(
+        ME, {'custom_fields': {name: blank}, 'rejected_proposals': list(declared)}, format='json')
+
+
+def make_row(person, created, kind, source='LOCAL-X', confidence=82, when='2024-03-01'):
+    concept = created.mapping.concept
+    if kind == 'number':
+        return MeasurementFactory(person=person, measurement_concept=concept, measurement_date=when,
+                                  measurement_source_value=source, value_as_number=4.5, confidence=confidence)
+    if kind == 'boolean':
+        return ConditionOccurrenceFactory(person=person, condition_concept=concept, condition_start_date=when,
+                                          condition_source_value=source, confidence=confidence)
+    return observed(person, created, 'stable', confidence, when=when, source=source)
+
+
+@pytest.mark.parametrize('kind, table, blank', [
+    ('text', 'Observation', ''), ('text', 'Observation', None), ('number', 'Measurement', None),
+    ('date', 'Observation', None), ('boolean', 'Condition', None),
+])
+def test_clearing_a_proposed_created_field_rejects_it_and_it_stays_rejected(world, kind, table, blank):
+    person, record = world
+    created = field('frailty_note', kind, table)
+    with suppress_patient_record_refresh():
+        make_row(person, created, kind)
+    derive(person)
+    client = signed_in(person, record.organization)
+    assert client.get(ME).json()['patient_info']['provisional_fields'] == {MARK: 82}
+
+    response = reject(client, blank)
+
+    assert response.status_code == 200, response.content
+    # Not an edit, not an approval: the record stores nothing for the key.
+    stored = PatientRecord.objects.get(person=person)
+    assert stored.custom_fields == {} and not custom_field_values.pending_names(stored.user_edited_fields)
+    rejection = ProposalRejection.objects.get(person=person, field_name=MARK)
+    assert len(rejection.origins) == 1 and rejection.rejected_by
+    # The mark and the shown value are gone in the same request.
+    assert marks(person).custom_fields is None
+    assert (picture(person).custom_fields or {}).get('frailty_note') is None
+    read = client.get(ME).json()['patient_info']
+    assert read['provisional_fields'] == {} and 'frailty_note' not in read['custom_fields']
+    # A new reading of the same code stays rejected through a derivation.
+    with suppress_patient_record_refresh():
+        make_row(person, created, kind, when='2024-05-01')
+    derive(person)
+    assert marks(person).custom_fields is None
+    assert client.get(ME).json()['patient_info']['provisional_fields'] == {}
+
+
+def test_a_different_code_answering_the_field_is_a_new_proposal_and_shows_again(world):
     person, record = world
     created = field()
     with suppress_patient_record_refresh():
-        observed(person, created, 'guess', 82)
+        observed(person, created, 'stable', 82, source='LOCAL-A')
+    derive(person)
+    client = signed_in(person, record.organization)
+    reject(client, '')
+
+    with suppress_patient_record_refresh():
+        observed(person, created, 'other code', 75, when='2024-09-01', source='LOCAL-B')
+    derive(person)
+
+    assert marks(person).custom_fields == {'frailty_note': 75}
+    assert client.get(ME).json()['patient_info']['provisional_fields'] == {MARK: 75}
+
+
+def test_typing_a_value_after_a_rejection_approves_it_and_the_rejection_is_ignored(world):
+    person, record = world
+    created = field()
+    with suppress_patient_record_refresh():
+        observed(person, created, 'stable', 82)
+    derive(person)
+    client = signed_in(person, record.organization)
+    reject(client, '')
+
+    client.patch(ME, {'custom_fields': {'frailty_note': 'mine'}}, format='json')
+
+    assert PatientRecord.objects.get(person=person).custom_fields == {'frailty_note': 'mine'}
+    assert ProposalRejection.objects.filter(person=person, field_name=MARK).exists()   # kept, ignored
+    read = client.get(ME).json()['patient_info']
+    assert read['custom_fields'] == {'frailty_note': 'mine'} and read['provisional_fields'] == {}
+
+
+def test_flipping_a_boolean_is_an_edit_and_only_null_rejects(world):
+    person, record = world
+    created = field('frailty_note', 'boolean', 'Condition')
+    with suppress_patient_record_refresh():
+        make_row(person, created, 'boolean')
     derive(person)
     client = signed_in(person, record.organization)
 
-    for declared in (['custom_fields.frailty_note'], ['frailty_note']):
-        response = client.patch(
-            ME, {'custom_fields': {'frailty_note': None}, 'rejected_proposals': declared}, format='json')
-        assert response.status_code == 200, response.content
+    response = reject(client, False)            # a false answer: the patient's own
+
+    assert response.status_code == 200, response.content
+    assert PatientRecord.objects.get(person=person).custom_fields == {'frailty_note': False}
+    assert not ProposalRejection.objects.exists()
+    assert marks(person).custom_fields is None
+
+
+def test_a_blank_the_client_did_not_declare_is_not_a_rejection(world):
+    person, record = world
+    created = field()
+    with suppress_patient_record_refresh():
+        observed(person, created, 'stable', 82)
+    derive(person)
+    client = signed_in(person, record.organization)
+
+    for declared in ([], ['frailty_note'], ['custom_fields']):
+        assert reject(client, None, declared).status_code == 200
 
     assert not ProposalRejection.objects.exists()
-    assert PatientRecord.objects.get(person=person).custom_fields == {}
     assert marks(person).custom_fields == {'frailty_note': 82}
-    assert client.get(ME).json()['patient_info']['provisional_fields'] == {'custom_fields.frailty_note': 82}
+
+
+def test_a_declared_name_that_is_no_proposal_is_ignored(world):
+    person, record = world
+    created = field()
+    other = field('other_note')
+    computed = field('derived_note', mode='computed')
+    with suppress_patient_record_refresh():
+        observed(person, created, 'stable', 82)
+        observed(person, computed, 'guess', 90)
+        observed(person, other, 'real', None)
+    derive(person)
+    client = signed_in(person, record.organization)
+
+    for name in ('other_note', 'derived_note', 'no_such_field'):
+        response = reject(client, None, [f'custom_fields.{name}'], name)
+        assert response.status_code == 200, response.content
+    # The one proposal there is, the declared name of an unapproved field, is ignored.
+    FieldConceptMapping.objects.filter(pk=created.mapping_id).update(status='proposed')
+    assert reject(client, None).status_code == 200
+
+    assert not ProposalRejection.objects.exists()
+
+
+def test_a_malformed_rejected_proposals_is_refused(world):
+    person, record = world
+    client = signed_in(person, record.organization)
+
+    for bad in ('custom_fields.frailty_note', [1], {'a': 1}):
+        response = client.patch(ME, {'custom_fields': {}, 'rejected_proposals': bad}, format='json')
+        assert response.status_code == 400, bad
+
+
+def test_a_survey_a_machine_credential_and_a_staff_save_without_the_declaration_do_not_reject(world, settings):
+    from patient_portal.api.permissions import SERVICE_TOKEN
+    from patient_portal.api.views import apply_patient_record_patch
+    person, record = world
+    created = field()
+    with suppress_patient_record_refresh():
+        observed(person, created, 'stable', 82)
+    derive(person)
+    identity = Identity.objects.create_user(email='survey@custom-prov.test')
+
+    # The survey mapping writes through the same function with no allow_reject.
+    apply_patient_record_patch(
+        person, PatientRecord.objects.get(person=person),
+        {'custom_fields': {'frailty_note': None}, 'rejected_proposals': [MARK]}, actor=identity)
+    # An ETL's service token.
+    settings.SERVICE_AUTH_SCOPES = 'patient/*.read patient/*.write'
+    machine = APIClient()
+    machine.force_authenticate(Identity.objects.create_user(email='etl@custom-prov.test', is_staff=True),
+                               token=SERVICE_TOKEN)
+    response = machine.patch(f'/api/v1/patient-records/{person.person_id}/',
+                             {'custom_fields': {'frailty_note': None}, 'rejected_proposals': [MARK]},
+                             format='json')
+    assert response.status_code == 200, response.content
+
+    assert not ProposalRejection.objects.exists()
+    assert marks(person).custom_fields == {'frailty_note': 82}
+
+
+def test_the_confirmation_is_offered_again_once_the_proposal_is_rejected(world):
+    person, record = world
+    created = field('frailty_note', tab='general')
+    with suppress_patient_record_refresh():
+        observed(person, created, 'stable', 82)
+    derive(person)
+    client = signed_in(person, record.organization)
+    assert client.post(CONFIRM).status_code == 409
+
+    reject(client, '')
+
+    assert provisional_record.attestation_blockers(PatientRecord.objects.get(person=person)) == []
+    assert client.post(CONFIRM).status_code == 200
+
+
+def test_a_rejection_of_a_created_field_is_erased_with_the_record_and_fits_the_longest_name(world):
+    from patient_portal.erasure import erase_record
+    person, record = world
+    long_name = 'x' * 100
+    ProposalRejection.objects.create(person=person, field_name=f'custom_fields.{long_name}', origins=[])
+    assert ProposalRejection.objects.get(person=person).field_name == f'custom_fields.{long_name}'
+
+    erase_record(person)
+
+    assert not ProposalRejection.objects.filter(person=person).exists()
+
+
+def test_a_rejection_is_not_exported(world):
+    person, record = world
+    created = field()
+    with suppress_patient_record_refresh():
+        observed(person, created, 'proposed-secret', 82)
+    derive(person)
+    client = signed_in(person, record.organization)
+    reject(client, '')
+
+    assert 'proposed-secret' not in str(build_fhir_bundle(person))
+    exported = client.get('/api/v1/phr/record/export/?format=fhir')
+    assert exported.status_code == 200 and 'proposed-secret' not in exported.content.decode()
 
 
 def test_an_echo_of_the_shown_object_is_an_edit_so_a_client_sends_only_what_changed(world):
@@ -662,11 +864,58 @@ def test_the_shared_attestation_cases_hold_on_the_server(world, case):
         FieldConceptMapping.objects.filter(pk=created.mapping_id).update(status='proposed')
     for code in case['diseases']:
         FieldDiseaseMembership.objects.create(field_name='frailty_note', disease=code)
+    if case.get('extra_category'):
+        # A Disease Category with no hand-authored section, and the disease text that maps to it.
+        DiseaseCategoryChoice.objects.create(code=case['extra_category'], label='Extra category')
+        DiseaseCategoryMapping.objects.create(disease_name=case['disease'], category=case['extra_category'])
+    for index, other in enumerate(case.get('others', [])):
+        extra = field(f'other_{index}', tab=other['tab'])
+        if not other['approved']:
+            FieldConceptMapping.objects.filter(pk=extra.mapping_id).update(status='proposed')
+        for code in other['diseases']:
+            FieldDiseaseMembership.objects.create(field_name=extra.field_name, disease=code)
     PatientRecord.objects.filter(pk=record.pk).update(disease=case['disease'])
-    store_pair(person, {'frailty_note': 'guess'}, {'frailty_note': 82})
+    if case.get('marked', True):
+        store_pair(person, {'frailty_note': 'guess'}, {'frailty_note': 82})
+    else:
+        store_pair(person, {}, None)
     client = signed_in(person, record.organization)
 
     blockers = provisional_record.attestation_blockers(PatientRecord.objects.get(person=person))
 
     assert blockers == (['custom_fields.frailty_note'] if case['blocks'] else [])
     assert client.post(CONFIRM).status_code == (409 if case['blocks'] else 200)
+
+
+def test_a_solid_tumours_primary_cancer_is_not_marked_for_a_spread_it_does_not_show(world):
+    person, record = world
+    PatientRecord.objects.filter(pk=record.pk).update(
+        disease='Breast cancer', disease_slug='breast-cancer', metastasis_status='Regional')
+    PatientRecordProvisional.objects.create(
+        person=person, disease='Breast cancer', disease_slug='breast-cancer', metastasis_status='Regional',
+        custom_fields={'hematologic_spread': 'Bone marrow'})
+    PatientRecordConfidence.objects.create(person=person, custom_fields={'hematologic_spread': 76})
+    client = signed_in(person, record.organization)
+
+    cancer = client.get('/api/v1/phr/diagnoses/').json()['cancer'][0]
+
+    assert cancer['spread'] == 'Regional' and 'confidence' not in cancer
+
+
+def test_a_disease_tab_count_ignores_a_field_the_page_never_lists(world):
+    # custom_patient_field_list shows approved fields only, so an unapproved scoped field
+    # must not make the server think a disease tab exists that the page never renders.
+    person, record = world
+    DiseaseCategoryChoice.objects.create(code='DLBCL', label='DLBCL')
+    DiseaseCategoryMapping.objects.create(disease_name='Diffuse large B-cell lymphoma', category='DLBCL')
+    PatientRecord.objects.filter(pk=record.pk).update(disease='Diffuse large B-cell lymphoma')
+    shown = field('shown_note', tab='disease')
+    hidden = field('hidden_note', tab='disease')
+    FieldDiseaseMembership.objects.create(field_name='hidden_note', disease='DLBCL')
+    FieldConceptMapping.objects.filter(pk=hidden.mapping_id).update(status='proposed')
+
+    assert custom_field_values.shown_to_patient(['shown_note'], 'Diffuse large B-cell lymphoma') == []
+
+    FieldConceptMapping.objects.filter(pk=hidden.mapping_id).update(status='approved')
+    assert custom_field_values.shown_to_patient(['shown_note'], 'Diffuse large B-cell lymphoma') == ['shown_note']
+    assert shown.pk

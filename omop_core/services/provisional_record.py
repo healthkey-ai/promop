@@ -46,7 +46,7 @@ the added items (see ``list_proposals`` and ``overlay``).
 The created fields (``custom_fields``, one value per ``CustomPatientField``) follow the
 scalar rule key by key (#2857): a provisional row answers a created field the approved
 record leaves empty and nobody typed, and ``patient_record_confidence.custom_fields`` is
-``{field_name: percent}``. See ``custom_proposals`` and ``CUSTOM_PREFIX``.
+``{field_name: percent}``. See ``custom_proposals`` and ``custom_field_values.PENDING_PREFIX``.
 
 A user can reject a proposal on a scalar field by clearing it (#2671): the pass
 then leaves the field empty while every row that decides it is one that was
@@ -64,6 +64,7 @@ from django.conf import settings
 from django.db import transaction
 
 from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS
+from omop_core.services import custom_field_values
 from omop_core.models import (
     Measurement, Observation, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
     ProposalRejection,
@@ -722,14 +723,10 @@ def list_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[d
 # is its formula's result, and a field whose mapping is not approved has no reader,
 # so neither is proposed. The record read reports a created field's mark in
 # ``provisional_fields`` as ``custom_fields.<name>``, the name a pending edit has in
-# ``user_edited_fields``. Rejecting such a proposal is not supported.
-CUSTOM_CONTAINER = 'custom_fields'
-CUSTOM_PREFIX = CUSTOM_CONTAINER + '.'
-
-
-def custom_mark_name(name) -> str:
-    """The key a created field's proposal has in ``provisional_fields``."""
-    return CUSTOM_PREFIX + name
+# ``user_edited_fields``. A user rejects such a proposal as they reject a column's
+# (#2671): the rejection is kept under the same name (``ProposalRejection.field_name``
+# ``custom_fields.<name>``), with the origin of the row that answered, and held by
+# ``custom_proposals`` until a different code or concept answers.
 
 
 def _object_marks(value) -> dict:
@@ -737,7 +734,21 @@ def _object_marks(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def custom_proposals(person, record, snapshot, blocked=(), measurements=None, observations=None):
+def _row_origin(row) -> tuple:
+    """``_origin`` of any provisional clinical row: its table, source code and concept."""
+    for table, source, concept in (
+            ('measurement', 'measurement_source_value', 'measurement_concept_id'),
+            ('observation', 'observation_source_value', 'observation_concept_id'),
+            ('condition_occurrence', 'condition_source_value', 'condition_concept_id'),
+            ('drug_exposure', 'drug_source_value', 'drug_concept_id'),
+            ('procedure_occurrence', 'procedure_source_value', 'procedure_concept_id')):
+        if hasattr(row, concept):
+            return _origin(table, getattr(row, source, None), getattr(row, concept))
+    return _origin('', None, None)
+
+
+def custom_proposals(person, record, snapshot, blocked=(), measurements=None, observations=None,
+                     rejections=None, origins=None):
     """(values, confidences) of the created fields the provisional rows answer.
 
     ``values`` is ``{'custom_fields': {name: value}}`` and ``confidences`` is
@@ -746,8 +757,12 @@ def custom_proposals(person, record, snapshot, blocked=(), measurements=None, ob
     proposed only when the approved record has no value for it, nobody has typed one
     or cleared it (*blocked* holds the pending edits, ``custom_fields.<name>``), and
     a provisional row answers it; its confidence is that row's.
+
+    *rejections* maps ``custom_fields.<name>`` to the ``_origin`` triples a user
+    rejected it against (``ProposalRejection``): a name is left out while the row that
+    answers it now is one of them. *origins*, when a dict, is filled with the answering
+    row's origin per ``custom_fields.<name>``, which is what a rejection is made against.
     """
-    from omop_core.services import custom_field_values
     from omop_core.services.patient_record_service import custom_field_answers
     if measurements is None:
         measurements = _after_clears(snapshot, snapshot.provisional_measurements, 'measurement')
@@ -761,10 +776,17 @@ def custom_proposals(person, record, snapshot, blocked=(), measurements=None, ob
                 or not custom_field_values.is_empty(approved.get(name))
                 or custom_field_values.is_empty(value) or row.confidence is None):
             continue
+        mark = custom_field_values.pending_key(name)
+        origin = _row_origin(row)
+        if origins is not None:
+            origins[mark] = {origin}
+        if rejections and mark in rejections and origin in rejections[mark]:
+            continue
         values[name], confidences[name] = value, row.confidence
     if not values:
         return {}, {}
-    return {CUSTOM_CONTAINER: values}, {CUSTOM_CONTAINER: confidences}
+    container = custom_field_values.CONTAINER
+    return {container: values}, {container: confidences}
 
 
 def provisional_values(person, record, snapshot, user_edited=(), origins=None,
@@ -910,7 +932,8 @@ def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
     try:
         with transaction.atomic():
             created, created_marks = custom_proposals(
-                person, record, snapshot, blocked, measurements, observations)
+                person, record, snapshot, blocked, measurements, observations,
+                rejections=rejections, origins=origins)
     except Exception:  # noqa: BLE001 -- the created fields must not cost the person's other proposals
         logger.exception('Provisional created-field reader failed for person_id=%s.', person.person_id)
         created, created_marks = {}, {}
@@ -1034,7 +1057,8 @@ def _mirror_created_fields(record, provisional, confidence, name, edited) -> boo
     loses its mark. Returns whether the confidence object changed.
     """
     from omop_core.services import custom_field_values
-    live = record.custom_fields if isinstance(record.custom_fields, dict) else {}
+    live = getattr(record, name, None)
+    live = live if isinstance(live, dict) else {}
     marks = _object_marks(getattr(confidence, name, None)) if confidence is not None else {}
     stored = getattr(provisional, name, None)
     stored = stored if isinstance(stored, dict) else {}
@@ -1107,6 +1131,34 @@ def proposal_clears(record, patch_data, declared) -> list[str]:
         if field in marks and field not in COMPUTED_INPUTS and field not in PROVISIONAL_JSON_FIELDS
         and not field.endswith('_units') and _is_empty(getattr(record, field, None))
     )
+
+
+def created_proposal_clears(record, custom_payload, declared) -> list[str]:
+    """The created fields a PATCH explicitly rejects the proposal of (#2857): ``custom_fields.<name>``.
+
+    The rule of ``proposal_clears``, for the keys of ``custom_fields``: the client
+    *declared* the name in ``rejected_proposals``, sent a blank for that key (null, or
+    text with nothing in it; ``false`` and ``0`` are values, so flipping a boolean is an
+    edit), and the record read shows a proposal there (the overlay marks it, so the
+    approved record has no value and no pending edit). The field must also be defined,
+    approved and editable, as a field a patient can write. A name that is none of these is
+    ignored, as an undeclared or unmarked column is.
+    """
+    prefix = custom_field_values.PENDING_PREFIX
+    if not isinstance(custom_payload, dict):
+        return []
+    candidates = [name for name in declared if name.startswith(prefix)
+                  and name[len(prefix):] in custom_payload
+                  and _is_blank(custom_payload[name[len(prefix):]])]
+    if not candidates:
+        return []
+    marks = overlay(record, lists=False)[1]
+    candidates = [name for name in set(candidates) if name in marks]
+    if not candidates:
+        return []
+    editable = custom_field_values.definitions([name[len(prefix):] for name in candidates])
+    return sorted(name for name in candidates
+                  if name[len(prefix):] in editable and custom_field_values.is_editable(editable[name[len(prefix):]]))
 
 
 def reject_proposals(person, record, fields, actor=None) -> set[str]:
@@ -1228,7 +1280,7 @@ def overlay(record, lists=True, custom=True):
             continue
         if field.name in PROVISIONAL_OBJECT_FIELDS:
             if custom:
-                _overlay_created_fields(view, record, provisional, mark, marks)
+                _overlay_created_fields(view, record, provisional, mark, marks, field.name)
             continue
         live = getattr(record, field.attname, None)
         if field.name in PROVISIONAL_JSON_FIELDS:
@@ -1255,16 +1307,17 @@ def overlay(record, lists=True, custom=True):
     return view, marks
 
 
-def _overlay_created_fields(view, record, provisional, stored_marks, marks) -> None:
+def _overlay_created_fields(view, record, provisional, stored_marks, marks,
+                            container=custom_field_values.CONTAINER) -> None:
     """Lay the proposed created-field values on *view*, marking each in *marks*.
 
     A key is shown from a proposal only while the live record has no value for it
     and no pending edit (a clear included) on it, so a stale mark never overrides
     approved data or a user's answer.
     """
-    from omop_core.services import custom_field_values
-    live = record.custom_fields if isinstance(record.custom_fields, dict) else {}
-    stored = getattr(provisional, 'custom_fields', None)
+    live = getattr(record, container, None)
+    live = live if isinstance(live, dict) else {}
+    stored = getattr(provisional, container, None)
     stored = stored if isinstance(stored, dict) else {}
     pending = set(record.user_edited_fields or [])
     shown = dict(live)
@@ -1274,9 +1327,9 @@ def _overlay_created_fields(view, record, provisional, stored_marks, marks) -> N
                 or custom_field_values.pending_key(name) in pending):
             continue
         shown[name] = stored[name]
-        marks[custom_mark_name(name)] = percent
+        marks[custom_field_values.pending_key(name)] = percent
     if shown != live:
-        view.custom_fields = shown
+        setattr(view, container, shown)
 
 
 def _custom_blockers(shown_record, marks) -> list[str]:
@@ -1292,12 +1345,12 @@ def _custom_blockers(shown_record, marks) -> list[str]:
     no tab (``UNPLACED_TAB``) or one the patient cannot edit never blocks: it could
     not be lifted.
     """
-    from omop_core.services import custom_field_values
-    names = [key[len(CUSTOM_PREFIX):] for key in marks if key.startswith(CUSTOM_PREFIX)]
+    prefix = custom_field_values.PENDING_PREFIX
+    names = [key[len(prefix):] for key in marks if key.startswith(prefix)]
     if not names:
         return []
     return sorted(
-        custom_mark_name(name) for name in custom_field_values.shown_to_patient(
+        custom_field_values.pending_key(name) for name in custom_field_values.shown_to_patient(
             names, getattr(shown_record, 'disease', None))
     )
 

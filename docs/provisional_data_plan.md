@@ -776,10 +776,29 @@ not null) answers it, marked with the row's confidence.
 - **Writes.** A PATCH of `custom_fields: {name: value}` is an approval of that key exactly
   as for a column: the value lands on the record, and `mirror_user_edit` (told
   `custom_fields.<name>` for each edited key) drops that key's mark and keeps the others.
-  The editor sends only the keys the user changed, so an untouched proposal is never saved
-  as an answer. **Rejecting a created proposal is not supported** (a gap): a blank sent for
-  a proposed created field is no change (the stored value is already empty), a name in
-  `rejected_proposals` that is not a column is ignored, and the proposal returns on the next read.
+  **A client must send only the keys the user changed.** The in-repo editors do (the
+  page and the federated view keep the real record as the baseline and send the dirty keys
+  of `custom_fields`). A client that PATCHes the whole `custom_fields` object it read
+  approves every proposal in it, as a client that echoes a whole record approves its
+  scalar proposals; no server guard is added.
+- **Rejecting a created proposal (#2857).** A patient clears a marked created field (text,
+  number, date, or a boolean's null) and the page declares it, as for a column
+  ([Rejecting a proposal](#approval-rejection-and-a-moved-proposal) below, #2671): the
+  body names `custom_fields.<name>` in `rejected_proposals` and sends a blank for that key
+  (`created_proposal_clears`). The rejection is kept in `ProposalRejection` under the same
+  name (`field_name` is 120 characters, `custom_fields.` plus a 100-character name) with
+  the origin triple (table, source code, concept) of the row that answered the field, by
+  the same rules: only a signed-in person's session (`allow_reject`), not a machine
+  credential or the survey mapping; nothing is written to the record and no row or mapping
+  changes; `custom_proposals` leaves the field out while the row that answers it is one it
+  was made against, so a new reading of the same code stays rejected and a different code
+  shows again; typing a value approves it and the rejection is then ignored; the mark and
+  shown value go in the same request (`mirror_user_edit`). A name that is not a marked,
+  defined, approved, editable created field is ignored (as an unmarked column is), a
+  malformed `rejected_proposals` is a 400, and `false` or `0` is an answer, not a
+  blank. The page declares the mark of a key it showed a proposal on and the patient
+  cleared (`rejectedProposals` in `provisional.ts`); the federated view also keeps a
+  blank key's mark until the save sends it.
 - **Confirm my record.** Created fields are runtime data, so no generated file can list
   the ones a patient tab shows. A mark blocks when the field's definition says the patient
   sees and can edit it (`custom_field_values.shown_to_patient` on the server,
@@ -794,7 +813,7 @@ not null) answers it, marked with the row's confidence.
   button; the server's 409 decides.
 - **Instances.** Both tables stay derived (`instance_data`): not copied, rebuilt after
   `copy_patient`. `backfill_patient_records --all` fills the new column; there is no data
-  migration (`0372` adds the column only; its reverse drops the marks and nothing else).
+  migration (`0372` adds the column and widens `ProposalRejection.field_name` to 120 characters; its reverse drops the marks, and would fail on a rejection whose name is longer than 100).
 
 ### Computed fields
 
@@ -1079,7 +1098,7 @@ What follows from it:
 - **What is not a rejection.** A value (including the echo of the displayed one); a blank
   for a field that shows no proposal; clearing a real value (the ordinary clear); a
   calculated field (it goes when its inputs do), a list field (their proposed items are not
-  the user's to write) and a unit (it goes with its value). A created field (`custom_fields.<name>`, #2857) is not rejectable either: its blank is no change and it is not a column. With `PROVISIONAL_DATA_ENABLED`
+  the user's to write) and a unit (it goes with its value). A created field is rejected the same way, as `custom_fields.<name>` (see [Created fields as built](#created-fields-as-built-2857)). With `PROVISIONAL_DATA_ENABLED`
   off nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
   (`RECORDED_EMPTY_FIELDS`) are the exception to "`''` is blank": their `''` is a recorded
   answer ("Record no GELF criteria" is Not Met, "Record no risk factors" a FLIPI of 0), so
@@ -1228,7 +1247,7 @@ lookup contract below remains for a caller that does want to write rows itself.
 
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
-- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table (done, #2857: [Created fields as built](#created-fields-as-built-2857); computed created fields and rejecting a created proposal are left).
+- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table (done, #2857: [Created fields as built](#created-fields-as-built-2857), rejection included; computed created fields are left).
 - ~~FHIR sync opt-in per organization~~ dropped (2026-11-20): a patient decides
   whether to import their FHIR data, and an export never carries provisional data
   (see "Provisional data is never exported").
@@ -1270,7 +1289,7 @@ without a click:
 | A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0364`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
 | The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display, the disease tab's section for the record's disease and the GELF checklist included; a patient lifts a block by entering a value or by rejecting the proposal (#2671); see "Confirming a record that shows proposals" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
-| Created fields (`custom_fields`) in the confidence table | [#2857](https://github.com/healthkey-ai/promop/issues/2857) | done: `patient_record_confidence.custom_fields` is `{name: percent}`; marked `custom_fields.<name>`; computed created fields and rejecting a created proposal are left; see "Created fields as built" |
+| Created fields (`custom_fields`) in the confidence table | [#2857](https://github.com/healthkey-ai/promop/issues/2857) | done: `patient_record_confidence.custom_fields` is `{name: percent}`; marked `custom_fields.<name>`, rejectable like a column; computed created fields are left; see "Created fields as built" |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |
 
 The rule for all of them: with the switch off, no provisional data is computed,

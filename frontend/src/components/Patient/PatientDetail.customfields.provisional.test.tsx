@@ -141,6 +141,35 @@ describe('PatientDetail with a proposed added field', () => {
   });
 });
 
+describe('Rejecting the proposal on an added field (#2857)', () => {
+  it('sends a cleared proposal as an empty answer declared in rejected_proposals', async () => {
+    await renderPage();
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      record = { ...record, custom_fields: { other_note: 'Approved text' }, provisional_fields: {} };
+      return { data: {} };
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('Stable'), { target: { value: '' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBodies().at(-1)).toEqual({
+      custom_fields: { frailty_note: null },
+      rejected_proposals: ['custom_fields.frailty_note'],
+    });
+  });
+
+  it('declares nothing when a key that showed no proposal is cleared', async () => {
+    await renderPage();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('Approved text'), { target: { value: '' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBodies().at(-1)).toEqual({ custom_fields: { other_note: null } });
+  });
+});
+
 describe('Confirm my record with a proposed added field', () => {
   it('counts a marked added field the patient sees', async () => {
     await renderPage(true);

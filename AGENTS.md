@@ -67,9 +67,11 @@ document for interactive edits, and the rules below assume it.
   approved record has no value and nobody typed one, the confidence goes in
   `patient_record_confidence.custom_fields` as `{name: percent}`, the record read marks
   it `provisional_fields["custom_fields.<name>"]`, and a PATCH of the key approves it. A
-  computed created field is never proposed, rejecting a created proposal is not
-  supported, and "Confirm my record" is blocked by a marked one only when its definition
-  puts it on a patient tab the patient can edit
+  computed created field is never proposed, a patient rejects a proposal by clearing it
+  with `rejected_proposals: ["custom_fields.<name>"]` (the `ProposalRejection` rule of #2671,
+  kept under that name), a client must send only the `custom_fields` keys the user changed (a
+  whole echoed object approves every proposal in it), and "Confirm my record" is blocked by
+  a marked one only when its definition puts it on a patient tab the patient can edit
   ([created fields as built](docs/provisional_data_plan.md#created-fields-as-built-2857)).
 - **Ingest goes the other way.** The ETL, FHIR sync and bulk OMOP endpoints
   write OMOP facts and derive the record from them. See

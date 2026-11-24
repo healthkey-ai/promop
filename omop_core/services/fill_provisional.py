@@ -422,6 +422,15 @@ def rederive(person):
             'provisional': PatientRecordProvisional.objects.filter(person=person).first()}
 
 
+def _shown_value(provisional, name):
+    """The provisional value of a mark, a created field's (``custom_fields.<key>``) included."""
+    container, _, key = name.partition('.')
+    if key:
+        values = getattr(provisional, container, None)
+        return values.get(key, '') if isinstance(values, dict) else ''
+    return getattr(provisional, name, '')
+
+
 def person_state(person) -> dict:
     """The person's rows as they stand now, one grouped query per clinical table.
 
@@ -667,6 +676,6 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
         + (f': {", ".join(changed[:25])}{" ..." if len(changed) > 25 else ""}' if changed else '') + '.')
     log(f'  patient_record_provisional: {len(fields)} provisional field(s) on the record.')
     for name, percent in sorted(fields.items(), key=lambda item: -item[1])[:12]:
-        value = f' = {str(getattr(provisional, name, ""))[:40]}' if show_values and provisional else ''
+        value = f' = {str(_shown_value(provisional, name))[:40]}' if show_values and provisional else ''
         log(f'    {name}: {percent}%{value}')
     return summary

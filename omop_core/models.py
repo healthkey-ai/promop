@@ -4929,7 +4929,8 @@ class ProposalRejection(models.Model):
     (``copy_patient`` clears ``rejected_by``).
     """
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='proposal_rejections')
-    field_name = models.CharField(max_length=100)
+    # A column's name, or ``custom_fields.<name>`` for a created field (a name is up to 100).
+    field_name = models.CharField(max_length=120)
     origins = models.JSONField(default=list)
     rejected_by = models.CharField(max_length=120, blank=True, default='')
     rejected_at = models.DateTimeField(default=timezone.now)

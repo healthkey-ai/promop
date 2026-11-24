@@ -485,7 +485,7 @@ def shown_to_patient(names, disease) -> list[str]:
                 disease_tab = bool(category) and (
                     category in visible.DISEASE_TYPE_CATEGORY.values()
                     or CustomPatientField.objects.filter(
-                        tab='disease',
+                        tab='disease', mapping__status='approved',
                         field_name__in=[n for n, codes in scopes.items() if category in codes],
                     ).exists())
             if not disease_tab:

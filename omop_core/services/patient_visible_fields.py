@@ -117,7 +117,7 @@ def scalar_confidence_columns() -> frozenset[str]:
 
     ``custom_fields`` is not one: it is an object of created fields, which are
     runtime data, so the tabs cannot name them in a file. They are judged by their
-    definitions instead (``provisional_record.custom_attestation_blockers``).
+    definitions instead (``provisional_record._custom_blockers``).
     """
     from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS
     from omop_core.models import PatientRecordConfidence

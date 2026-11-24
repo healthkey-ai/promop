@@ -7,7 +7,7 @@ import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, useWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
 import {
-  addedMark, addedMarks, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks,
+  addedMarks, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, settledAddedMarks, withoutMarks,
 } from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
@@ -143,7 +143,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
         // Only the keys still being edited go back over the server's object.
         rebased[field] = mergeAddedFields(
           initialInfo[field], pickAddedFields(pending[field], dirtyAddedFieldsRef.current));
-        kept.push(...addedMarks(dirtyAddedFieldsRef.current));
+        kept.push(...settledAddedMarks(pending[field], dirtyAddedFieldsRef.current));
         continue;
       }
       // A touched proposal is kept even on the proposed value: that is confirming it.
@@ -336,8 +336,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
     dirtyAddedFieldsRef.current.add(fieldName);
-    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }),
-      [addedMark(fieldName)]);
+    const merged = mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value });
+    // A blank keeps its mark until the save sends it as the rejection it is (#2857).
+    handleFieldChange(ADDED_FIELDS, merged, settledAddedMarks(merged, [fieldName]));
   }, [handleFieldChange, readOnly]);
 
   const handleNameChange = useCallback((name: string) => {

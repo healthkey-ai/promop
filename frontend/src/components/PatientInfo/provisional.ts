@@ -165,8 +165,28 @@ export function rejectedProposals(
   patch: Record<string, unknown>,
   proposed: Record<string, number>,
 ): string[] {
-  return Object.entries(patch)
-    .filter(([field, value]) => field in proposed && (value === null || value === ''))
-    .map(([field]) => field)
-    .sort();
+  const blank = (value: unknown) => value === null || value === '';
+  const columns = Object.entries(patch)
+    .filter(([field, value]) => field in proposed && blank(value))
+    .map(([field]) => field);
+  // A created field (#2857) travels as a key of `custom_fields`, and its proposal is marked
+  // `custom_fields.<name>`: a blank for a key the page showed a proposal on is the rejection,
+  // named by that mark. A boolean's `false` is an answer, so only null counts for it.
+  const added = patch.custom_fields;
+  const created = added && typeof added === 'object' && !Array.isArray(added)
+    ? Object.entries(added as Record<string, unknown>)
+      .filter(([name, value]) => addedMark(name) in proposed && blank(value))
+      .map(([name]) => addedMark(name))
+    : [];
+  return [...columns, ...created].sort();
+}
+
+/** The marks an edit of the created fields `names` settles at once. A blank is not among them:
+ *  clearing a proposed value is a rejection the save sends (`rejectedProposals`), and its mark
+ *  goes with the save, not with the keystroke. */
+export function settledAddedMarks(values: unknown, names: Iterable<string>): string[] {
+  const held = values && typeof values === 'object' && !Array.isArray(values)
+    ? values as Record<string, unknown> : {};
+  return [...names].filter((name) => held[name] !== null && held[name] !== undefined && held[name] !== '')
+    .map(addedMark);
 }
