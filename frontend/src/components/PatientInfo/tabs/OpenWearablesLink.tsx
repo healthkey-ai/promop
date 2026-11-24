@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 interface Connection {
@@ -173,9 +173,13 @@ function errorText(err: unknown, fallback: string, limited: string): string {
  * Disconnecting signs every phone out. Values already stored stay; they are
  * removed from the upload history like any other upload.
  */
-export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }: {
+export default function OpenWearablesLink({ disabled = false, pollMs = 10_000, onShownChange, children }: {
   /** True while another write to the record is running. */
   disabled?: boolean;
+  /** Told whether this panel is on the page: it draws nothing where connecting a phone is not set up. */
+  onShownChange?: (shown: boolean) => void;
+  /** Rendered at the bottom of the panel (the phone's uploads, #2861). */
+  children?: ReactNode;
   /** How often to ask whether the code on screen has been used. */
   pollMs?: number;
 }) {
@@ -228,7 +232,13 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }:
 
   // Nothing to offer where connecting a phone is not set up, unless a phone
   // is already connected: that one can still be disconnected.
-  if (!connection || (!connection.enabled && !connection.connected)) return null;
+  const shown = !!connection && (connection.enabled || connection.connected);
+  const loaded = connection !== null;
+  useEffect(() => {
+    // Not before the panel has asked: until then it can say neither.
+    if (loaded) onShownChange?.(shown);
+  }, [loaded, shown, onShownChange]);
+  if (!connection || !shown) return null;
 
   const idle = busy !== null || disabled;
   const phones = connection.connected ? Math.max(connection.devices, 1) : 0;
@@ -351,6 +361,7 @@ export default function OpenWearablesLink({ disabled = false, pollMs = 10_000 }:
         )}
       </div>
       {error && <p role="alert" className="mt-2 text-sm text-red-600">{error}</p>}
+      {children}
     </section>
   );
 }

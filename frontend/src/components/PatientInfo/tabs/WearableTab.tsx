@@ -6,6 +6,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import UploadsList, { type UploadRecord } from './UploadsList';
 import { pendingClause } from './wearableResult';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
@@ -54,16 +55,6 @@ const METRIC_LABELS: Record<string, string> = {
   basal_energy: 'Basal Energy',
   body_mass: 'Body Mass',
 };
-
-interface UploadRecord {
-  id: number;
-  device_type: string;
-  filename: string;
-  samples_created: number;
-  duplicates_skipped: number;
-  sample_summary: { metric: string; date: string; value: number }[];
-  uploaded_at: string;
-}
 
 /** What the upload history calls the device an upload came from. */
 const DEVICE_LABELS: Record<string, string> = {
@@ -139,6 +130,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const [uploadsLoading, setUploadsLoading] = useState(ownRecord);
   const [expandedUpload, setExpandedUpload] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  // Whether the phone-app panel is on the page: it offers nothing, and draws
+  // nothing, where connecting a phone is not set up. Null until it has asked.
+  const [phonePanelShown, setPhonePanelShown] = useState<boolean | null>(null);
 
   const fetchUploads = useCallback(async () => {
     try {
@@ -343,6 +337,32 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     await uploadFiles(files, deviceType);
   }, [ownRecord, uploading, syncing, uploadFiles]);
 
+  // Each upload sits in the section of its device (#2861): Garmin's in the
+  // Garmin section, Apple Health's and Android's in the phone-app section.
+  // One that has no such section on this page is not lost: it goes to a
+  // collapsed block of its own.
+  const PHONE_DEVICES = ['apple', 'android'];
+  const garminUploads = canSyncOwnDevice ? uploads.filter(u => u.device_type === 'garmin') : [];
+  const phoneUploads = canSyncOwnDevice && phonePanelShown
+    ? uploads.filter(u => PHONE_DEVICES.includes(u.device_type))
+    : [];
+  const placed = new Set([...garminUploads, ...phoneUploads].map(u => u.id));
+  // The phone uploads wait while the panel has not said whether it is there,
+  // rather than show here for a moment and then move.
+  const waiting = canSyncOwnDevice && phonePanelShown === null;
+  const leftoverUploads = uploads.filter(
+    u => !placed.has(u.id) && !(waiting && PHONE_DEVICES.includes(u.device_type)));
+  const uploadsProps = {
+    deviceLabel,
+    metricLabel: (metric: string) => METRIC_LABELS[metric] || metric,
+    formatValue: formatMetricValue,
+    expandedUpload,
+    onToggleUpload: (id: number) => setExpandedUpload(expandedUpload === id ? null : id),
+    onDelete: handleDelete,
+    deletingId,
+    busy: syncing,
+  };
+
   return (
     <div
       onDragEnter={handleDragEnter}
@@ -437,91 +457,29 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
                 if (changed && onRefresh) onRefresh();
               }}
             />
+            {!uploadsLoading && <UploadsList {...uploadsProps} uploads={garminUploads} name="garmin" />}
           </div>
         </section>
       )}
 
       {/* A phone app built on Open Wearables, connected with a one-time code:
           it then sends what it reads from Apple Health or Health Connect. */}
-      {canSyncOwnDevice && <OpenWearablesLink disabled={uploading || syncing || deletingId !== null} />}
+      {canSyncOwnDevice && (
+        <OpenWearablesLink
+          disabled={uploading || syncing || deletingId !== null}
+          onShownChange={setPhonePanelShown}
+        >
+          {!uploadsLoading && <UploadsList {...uploadsProps} uploads={phoneUploads} name="phone" />}
+        </OpenWearablesLink>
+      )}
 
-      {/* Upload history */}
-      {ownRecord && !uploadsLoading && uploads.length > 0 && (
-        <Section title="Upload History">
-          <div className="divide-y divide-gray-100">
-            {uploads.map(upload => (
-              <div key={upload.id}>
-                <button
-                  type="button"
-                  onClick={() => setExpandedUpload(expandedUpload === upload.id ? null : upload.id)}
-                  className="flex w-full items-center gap-3 px-2 py-2.5 text-left text-sm hover:bg-gray-50 rounded"
-                >
-                  <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">
-                    {deviceLabel(upload.device_type)}
-                  </span>
-                  <span className="flex-1 truncate text-gray-700">{upload.filename}</span>
-                  <span className="text-xs text-gray-500">
-                    {upload.samples_created} sample{upload.samples_created !== 1 ? 's' : ''}
-                  </span>
-                  <span className="text-xs text-gray-400">
-                    {new Date(upload.uploaded_at).toLocaleDateString()}
-                  </span>
-                  <svg
-                    className={`h-4 w-4 text-gray-400 transition-transform ${expandedUpload === upload.id ? 'rotate-180' : ''}`}
-                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); handleDelete(upload.id); }}
-                  disabled={deletingId === upload.id || syncing}
-                  className="ml-1 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
-                  title="Delete upload"
-                >
-                  {deletingId === upload.id ? (
-                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                  ) : (
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  )}
-                </button>
-
-                {expandedUpload === upload.id && upload.sample_summary.length > 0 && (
-                  <div className="mb-2 ml-2 rounded border border-gray-100 bg-gray-50">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
-                          <th className="px-3 py-1.5 font-medium">Metric</th>
-                          <th className="px-3 py-1.5 font-medium">Date</th>
-                          <th className="px-3 py-1.5 font-medium text-right">Value</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {upload.sample_summary.map((sample, idx) => (
-                          <tr key={idx} className="border-b border-gray-100 last:border-0">
-                            <td className="px-3 py-1.5 text-gray-700">
-                              {METRIC_LABELS[sample.metric] || sample.metric}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-500">{sample.date}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-700">
-                              {formatMetricValue(sample.metric, sample.value)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </Section>
+      {/* Uploads with no section above to sit in (#2861): a device whose panel
+          is not offered on this page, as on the embedded page. Collapsed, and
+          still reachable, so no upload is hidden. */}
+      {ownRecord && !uploadsLoading && leftoverUploads.length > 0 && (
+        <div className="mb-4 rounded-md border border-gray-200 px-4">
+          <UploadsList {...uploadsProps} uploads={leftoverUploads} name="other" />
+        </div>
       )}
 
       {noData && !uploadsLoading && uploads.length === 0 && (
