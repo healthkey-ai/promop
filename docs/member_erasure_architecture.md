@@ -81,10 +81,60 @@ them and nothing of what was held:
 {"erasure": "record", "person_id": 1234, "purpose": "my_record"}
 ```
 
+## After a restore from a backup
+
+A database restored from a backup has every member who was erased since the
+backup was taken, and has lost the log rows that said so (#2852). Two
+commands close that gap (`patient_portal/erasure_replay.py`):
+
+```bash
+# On a schedule, to somewhere outside the database:
+python manage.py export_erasures --output erasures.jsonl
+
+# After a restore, before the application is opened again:
+python manage.py replay_erasures erasures.jsonl --since 2026-11-20T03:00:00Z --dry-run
+python manage.py replay_erasures erasures.jsonl --since 2026-11-20T03:00:00Z
+```
+
+- **The export** is the deletion log as JSON lines: each `ERASE` row with
+  what its signature covers, and the signature. Ids and who asked, nothing of
+  what was held. `--since` limits it. Nothing in the project schedules it,
+  and an erasure made after the last export is in no file: export as often
+  as the gap you can accept.
+- **Every line must verify** under this deployment's `AUDIT_HMAC_KEY` (or
+  `SECRET_KEY`, where it stands in), or the file is refused whole and
+  nothing is replayed: a file cannot be written to erase somebody. After a
+  key rotation, run the replay with the key the entries were written under.
+- **An entry the restored database already holds is left alone.** It was
+  applied before the backup, and what the member entered afterwards is
+  theirs. `--since`, the time the backup was taken, also keeps the replay
+  off old entries the audit retention (`prune_audit_events`) has removed
+  from the database.
+- **A closed account is closed again** with `close_account`: the person,
+  the record, every row about them, and the sign-in when the entry names it.
+- **A withdrawal is put back** as well as its erasure: when the restored
+  permission reads granted, a `withdrawn` answer is recorded at the entry's
+  own time (source `system`), which ends the grant and what depends on it
+  and erases the record; otherwise `erase_record` runs alone.
+- **Never against a newer row.** A restore sets the id sequences back, so
+  an erased person's id can be given to a new sign-up. A person whose
+  sign-in link was made after the entry is skipped and listed. A person with
+  no sign-in (loaded by an ETL, deleted by staff) cannot be told from a
+  reused id and is skipped unless `--include-unlinked` says nothing has been
+  written since the restore. A member who has answered the permission since
+  the entry keeps their record.
+- **Safe to run twice.** Each replayed entry leaves a row in the deletion
+  log (`{"erasure": "replay", "replay_of": "<signature>"}`) beside the row
+  the erasure itself writes; a second run finds it and does nothing.
+- One transaction per entry. The output names person ids only.
+
+What a restore loses besides (permission answers and ledger entries written
+after the backup, other than the withdrawals above) is not rebuilt here.
+
 ## Not here
 
-- **Backups.** Database backups keep a deleted member until they expire; how
-  long is the deployment's backup retention.
+- **Backups themselves.** A backup keeps a deleted member until it expires;
+  how long is the deployment's backup retention.
 - **Add-on apps** with their own tables keyed by a bare person id remove their
   rows themselves, on `post_delete` of `Person`.
 - **Ledger purge** six years after the account closes.

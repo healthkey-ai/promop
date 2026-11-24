@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Erasures survive a backup restore** — `manage.py export_erasures` writes
+  the deletion log (the audit trail's signed `ERASE` rows) as JSON lines to
+  keep outside the database, and `manage.py replay_erasures <file>` erases
+  again, after a restore, whoever the export says was erased and the
+  restored database does not know about: accounts are closed again,
+  withdrawals are put back and their records erased. Every line must carry
+  this deployment's signature or nothing is replayed; a row made after the
+  entry (a reused id) is never touched; a second run does nothing (#2852).
+  See [member erasure](docs/member_erasure_architecture.md#after-a-restore-from-a-backup).
+
 - **Wearables: readings come in as source codes, provisional or accepted by
   their mapping** — a device import (Garmin, Apple Health, a phone's sync)
   now files each row under the device's own code (`steps` under `Garmin`)
