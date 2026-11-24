@@ -317,6 +317,13 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Wearables: one Garmin section** — the linked Garmin account and the sync
+  by Personal API key sat apart on the Wearables tab, with the phone app's
+  panel between them and nothing to say how they differ. They are now one
+  "Garmin" section: "Automatic updates" (connect the account once and Garmin
+  sends each new day by itself, from the day you connect) and under it "Sync
+  past days" (up to 90 past days, read when you ask, with a key that is not
+  stored). The phone health app follows the section (#2832).
 - **PROlog 0.8.0** (from 0.7.0) — `PROLOG_STATS_MIN_COUNT` (RUN-24): small
   numbers are not shown in PROlog's survey report and admin; promop reads
   `PROLOG_STATS_MIN_COUNT` from the environment (0 shows every count; a value

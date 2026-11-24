@@ -60,6 +60,9 @@ function errorText(err: unknown, fallback: string): string {
  * deployment has a Garmin app registered, and only to a patient on their own
  * record: the server attaches the account to the signed-in person.
  *
+ * A part of the tab's Garmin section, above the sync by key (#2832): this is
+ * the feed from the day it is connected, that one reads past days.
+ *
  * Disconnecting stops it here at once and tells Garmin to stop sending.
  */
 export default function GarminAccountLink({ disabled = false, leave = (url) => window.location.assign(url) }: {
@@ -152,8 +155,8 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
   const button = `rounded-md px-4 py-2 text-sm font-medium shadow-sm ${idle ? 'cursor-not-allowed opacity-50' : ''}`;
 
   return (
-    <div className="mb-4 rounded-md border border-gray-200 px-4 py-3">
-      <h3 className="text-sm font-medium text-portal-text-primary">Garmin account</h3>
+    <div className="py-3 last:pb-1">
+      <h4 className="text-sm font-medium text-portal-text-primary">Automatic updates</h4>
       {connection.connected ? (
         <>
           <p className="mt-1 text-xs text-gray-500">
@@ -174,8 +177,9 @@ export default function GarminAccountLink({ disabled = false, leave = (url) => w
       ) : (
         <>
           <p className="mt-1 text-xs text-gray-500">
-            Connect once and Garmin sends your steps, heart rate, sleep and other daily data here by itself.
-            You approve it on Garmin&rsquo;s own page and can disconnect at any time.
+            Connect your Garmin account once and Garmin sends your steps, heart rate, sleep and other daily
+            data here by itself, from the day you connect. You approve it on Garmin&rsquo;s own page and can
+            disconnect at any time.
           </p>
           <button type="button" onClick={() => void connect()} aria-disabled={idle}
             className={`mt-3 bg-portal-brand text-white ${idle ? '' : 'hover:bg-portal-brand/90'} ${button}`}>

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import WearableTab from './WearableTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -526,7 +526,52 @@ describe('WearableTab — Garmin Connect sync', () => {
     renderOwn();
     expect(await screen.findByRole('button', { name: 'Connect Garmin' })).toBeInTheDocument();
     // Beside it, not in place of, the sync by Personal API key.
-    expect(screen.getByText('Sync from Garmin Connect')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Sync past days' })).toBeInTheDocument();
+  });
+
+  it('keeps both Garmin ways in under one Garmin heading, the account first (#2832)', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (String(url).includes('/v1/garmin/connection/')) {
+        return Promise.resolve({
+          data: { configured: true, connected: false, connected_at: null, last_push_at: null, permissions: [] },
+        });
+      }
+      if (String(url).includes('/v1/open-wearables/connection/')) {
+        return Promise.resolve({
+          data: {
+            enabled: true, connected: false, devices: 0, code_pending: false, last_sync_at: null, providers: [],
+            host: 'https://records.example.org',
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    renderOwn();
+    const garmin = screen.getByRole('region', { name: 'Garmin' });
+    const connect = await within(garmin).findByRole('button', { name: 'Connect Garmin' });
+    const account = within(garmin).getByRole('heading', { name: 'Automatic updates' });
+    const sync = within(garmin).getByRole('heading', { name: 'Sync past days' });
+    // Each part says what it is for.
+    expect(garmin).toHaveTextContent('from the day you connect');
+    expect(garmin).toHaveTextContent('up to 90 past days');
+    expect(within(garmin).getByLabelText('Garmin Connect Personal API key')).toBeInTheDocument();
+    // The account first, the sync by key under it.
+    expect(account.compareDocumentPosition(sync) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(connect.compareDocumentPosition(sync) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The phone app is a panel of its own, after Garmin and not inside it.
+    const phone = await screen.findByRole('heading', { name: 'Phone health app' });
+    expect(garmin).not.toContainElement(phone);
+    expect(garmin.compareDocumentPosition(phone) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('shows the Garmin section with the sync by key alone where no Garmin app is set up (#2832)', async () => {
+    renderOwn();
+    const garmin = screen.getByRole('region', { name: 'Garmin' });
+    await waitFor(() => expect(
+      mockGet.mock.calls.some(([url]) => String(url).includes('/v1/garmin/connection/'))).toBe(true));
+    expect(within(garmin).getByRole('heading', { name: 'Sync past days' })).toBeInTheDocument();
+    expect(within(garmin).queryByRole('heading', { name: 'Automatic updates' })).not.toBeInTheDocument();
+    expect(within(garmin).queryByRole('button', { name: 'Connect Garmin' })).not.toBeInTheDocument();
   });
 
   it('offers the phone health app panel to a patient on their own record, where it is set up (#2810)', async () => {
@@ -556,14 +601,15 @@ describe('WearableTab — Garmin Connect sync', () => {
     expect(await screen.findByRole('button', { name: 'Get a connection code' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Phone health app' })).toBeInTheDocument();
     // Beside the Garmin ways in, not in place of them.
-    expect(screen.getByText('Sync from Garmin Connect')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Sync past days' })).toBeInTheDocument();
   });
 
   it('is offered only to a patient on their own record', () => {
     // The server files a sync under whoever is signed in. A clinician on a
     // patient's page must not be asked for a key, nor offered an upload (#2819).
     const clinician = renderTab({ ownRecord: false });
-    expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Garmin' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Sync past days' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /upload/i })).not.toBeInTheDocument();
     clinician.unmount();
@@ -571,7 +617,8 @@ describe('WearableTab — Garmin Connect sync', () => {
     // The federated page is the patient's own record without this site's
     // session: no key sync, and the file upload as before.
     renderTab();
-    expect(screen.queryByText('Sync from Garmin Connect')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Garmin' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Sync past days' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Garmin Connect Personal API key')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument();
   });

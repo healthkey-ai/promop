@@ -488,7 +488,8 @@ deletable like a file.
   refused, and so is an OAuth token the patient delegated to an application, which could
   otherwise write to their record with a key of its own. `GarminSyncThrottle` allows 20
   attempts an hour per user.
-- **Whose record.** The rows go to the caller's own record. The tab therefore shows the panel
+- **Whose record.** The rows go to the caller's own record. The tab therefore shows its Garmin
+  section (this sync under "Sync past days", beneath the linked account's "Automatic updates", #2832)
   only to a person on their own record (`canSyncOwnDevice`: patient mode, or a provider-console
   page whose person is the one the account's patient link names, `roles.isOwnRecord`, #2816, so
   an org admin who is also a patient gets it on their own page; a read-only embed and a
@@ -626,7 +627,8 @@ In the developer portal, register the redirect URL `<APP_BASE_URL>/api/v1/garmin
 and, for each push type (Dailies, Sleeps, HRV, Pulse Ox, Respiration, User Metrics,
 Deregistrations, User Permissions), the URL
 `<APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/`, with delivery set to push. The
-Wearables tab shows "Garmin account" only when all four variables are set. A webhook secret shorter
+Wearables tab's Garmin section shows "Automatic updates" (Connect Garmin) only when all four
+variables are set; without them it holds the key sync, "Sync past days", alone (#2832). A webhook secret shorter
 than 32 characters counts as unset: the URL is the webhook's only credential.
 
 ### What a push becomes

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
@@ -120,6 +120,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors } = useWritableFields(personId);
   const noData = !formData?.wearable_last_sync_at;
+  const garminHeadingId = useId();
   const [uploading, setUploading] = useState(false);
   // A Garmin Connect sync in flight: uploads and deletes wait for it, as it
   // waits for them.
@@ -403,27 +404,32 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         </p>
       )}
 
-      {/* A Garmin account linked once, where this deployment has a Garmin app:
-          Garmin then sends the data by itself (#2802). */}
-      {canSyncOwnDevice && <GarminAccountLink disabled={uploading || syncing || deletingId !== null} />}
+      {/* Garmin, in one place (#2832): the account linked once, where this
+          deployment has a Garmin app, after which Garmin sends each day by
+          itself (#2802); and under it the sync by Personal API key, which
+          reads past days through Garmin's API when asked (#2794). */}
+      {canSyncOwnDevice && (
+        <section aria-labelledby={garminHeadingId} className="mb-4 rounded-md border border-gray-200 px-4 pt-3 pb-2">
+          <h3 id={garminHeadingId} className="text-sm font-semibold text-portal-text-primary">Garmin</h3>
+          <div className="divide-y divide-gray-200">
+            <GarminAccountLink disabled={uploading || syncing || deletingId !== null} />
+            <GarminConnectSync
+              personId={personId}
+              disabled={uploading || deletingId !== null}
+              metricLabels={METRIC_LABELS}
+              onBusyChange={setSyncing}
+              onSynced={(changed) => {
+                fetchUploads();
+                if (changed && onRefresh) onRefresh();
+              }}
+            />
+          </div>
+        </section>
+      )}
 
       {/* A phone app built on Open Wearables, connected with a one-time code:
           it then sends what it reads from Apple Health or Health Connect. */}
       {canSyncOwnDevice && <OpenWearablesLink disabled={uploading || syncing || deletingId !== null} />}
-
-      {/* Garmin Connect: the same rows as a .fit upload, read through Garmin's API */}
-      {canSyncOwnDevice && (
-        <GarminConnectSync
-          personId={personId}
-          disabled={uploading || deletingId !== null}
-          metricLabels={METRIC_LABELS}
-          onBusyChange={setSyncing}
-          onSynced={(changed) => {
-            fetchUploads();
-            if (changed && onRefresh) onRefresh();
-          }}
-        />
-      )}
 
       {/* Upload history */}
       {ownRecord && !uploadsLoading && uploads.length > 0 && (
