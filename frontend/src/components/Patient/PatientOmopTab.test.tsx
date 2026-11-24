@@ -111,9 +111,9 @@ describe("PatientOmopTab", () => {
       expect(header(label)).toHaveAttribute("aria-expanded", "false");
     }
     // The counts stay on a closed header.
-    expect(header("Condition Occurrences")).toHaveTextContent("1 row");
-    expect(header("Drug Exposures")).toHaveTextContent("0 rows");
-    expect(header("Measurements")).toHaveTextContent("5 rows");
+    expect(section("condition_occurrences")).toHaveTextContent("1 row");
+    expect(section("drug_exposures")).toHaveTextContent("0 rows");
+    expect(section("measurements")).toHaveTextContent("5 rows");
   });
 
   it("does not render the rows of a closed section, and renders them once it is opened", async () => {

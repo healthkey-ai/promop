@@ -194,21 +194,23 @@ function OmopTableView({ table, personId }: { table: OmopTable; personId: string
 
   return (
     <section className="border-t border-border py-4 first:border-t-0 first:pt-0" data-testid={`omop-table-${table.key}`}>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={bodyId}
-        onClick={() => setOpen((current) => !current)}
-        className="flex w-full items-center justify-between gap-3 rounded-md py-1 text-left hover:bg-muted/40"
-      >
-        <span className="flex items-center gap-2">
-          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-          <h3 className="text-sm font-semibold text-foreground">{table.label}</h3>
-        </span>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="min-w-0 flex-1 text-sm font-semibold text-foreground">
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={bodyId}
+            onClick={() => setOpen((current) => !current)}
+            className="flex w-full items-center gap-2 rounded-md py-1 text-left hover:bg-muted/40"
+          >
+            {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+            {table.label}
+          </button>
+        </h3>
         <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
           {table.count} {table.count === 1 ? "row" : "rows"}
         </span>
-      </button>
+      </div>
 
       {open && (
         <div id={bodyId} className="mt-3">

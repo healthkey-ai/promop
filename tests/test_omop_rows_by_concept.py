@@ -231,6 +231,13 @@ def test_a_device_and_a_hospital_using_one_spelling_are_two_unresolved_groups(wo
     assert rows_of(w, concept=0, source_value='spo2', wearable='maybe').status_code == 400
 
 
+def test_with_no_device_codes_held_no_row_is_a_devices(world):
+    w = world
+    measurement(w, 0, date(2024, 1, 2), source='spo2', type_id=WEARABLE_TYPE_CONCEPT_ID)
+    assert rows_of(w, concept=0, source_value='spo2', wearable='true').data['rows'] == []
+    assert len(rows_of(w, concept=0, source_value='spo2', wearable='false').data['rows']) == 1
+
+
 def test_observation_groups_are_marked_too(world):
     w = world
     hold(w, 'steps', 'Garmin', 'observation')
