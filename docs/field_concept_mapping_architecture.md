@@ -186,8 +186,20 @@ and never the model.
   the mapping pages: one request for the decisions and one per decision for its
   revisions, made only when History is opened. Deleting an answer a non-approver
   cannot delete shows the server's reason, and the confirmation points to
-  retiring. Still not here: disease scope and the typed `value` in the editor,
-  and lookup-backed (therapy catalog) choices.
+  retiring.
+  **Disease scope** is edited in the same form (#1225, #2332): the line above it
+  says "Offered to every patient" or "Offered to: MM, FL" and names the answer's
+  context when it has one, and the form reuses `FieldScopeControl` with its own
+  wording ("Every patient" / "Only some Disease Categories"). `diseases` is sent
+  only when the ticked set changed from what the form opened on; offering the
+  answer to every patient sends `[]`; narrowing to no category is refused before
+  asking the server; the categories come from the page (Other has no extension,
+  so it is not offered) and without them the scope is shown, not edited. A
+  category the list lacks but the answer already names stays ticked. Scope
+  changes which answers a record of that category is offered; a value already
+  saved is neither changed nor hidden. Still not here: the typed `value` in the
+  editor (what a patient's save stores for an answer, label or value, is its own
+  decision), and lookup-backed (therapy catalog) choices.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
   loaded, or that is not a valid target here, cannot be approved here: the
