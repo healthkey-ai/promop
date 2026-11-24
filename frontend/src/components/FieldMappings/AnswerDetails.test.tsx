@@ -32,6 +32,7 @@ describe("helpers", () => {
     expect(refusalText(refused({ display: ["Already a choice."] }), "x")).toBe("Already a choice.");
     expect(refusalText(refused({ detail: "No." }), "x")).toBe("No.");
     expect(refusalText(refused({ display: ["A."], aliases: ["B."] }), "x")).toBe("A. B.");
+    expect(refusalText(refused({ aliases: { "0": ["Too long."] } }), "x")).toBe("Too long.");
     expect(refusalText(refused("<html>boom</html>"), "fallback")).toBe("fallback");
     expect(refusalText(new Error("network"), "fallback")).toBe("fallback");
   });
@@ -86,6 +87,27 @@ describe("AnswerDetailsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(mockPatch).toHaveBeenCalledWith(
       "/v1/field-choices/4/", { aliases: ["Remission", "CR", "Complete response"] }));
+  });
+
+  it("does not write back a spelling list the curator never edited", async () => {
+    const { rerender } = panel();
+    fireEvent.click(screen.getByRole("button", { name: /Edit label and spellings/ }));
+    // Another curator adds a spelling while this form is open.
+    rerender(<AnswerDetailsPanel choiceId={4} label="In remission" code="in_remission"
+      aliases={["Remission", "CR"]} onChanged={onChanged} />);
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "In full remission" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/field-choices/4/", { display: "In full remission" }));
+  });
+
+  it("names its toggle for what it does, and cannot retire under an open form", () => {
+    panel();
+    const edit = screen.getByRole("button", { name: /Edit label and spellings/ });
+    expect(edit).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(edit);
+    const cancel = screen.getByRole("button", { name: /Cancel editing In remission/ });
+    expect(cancel).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Retire In remission" })).toBeDisabled();
   });
 
   it("saves nothing when nothing changed", () => {
@@ -174,6 +196,20 @@ describe("AnswerHistory", () => {
     expect(rows[2]).toContain("Proposed SNOMED 103338009 by ada");
   });
 
+  it("reads again when the answer's decisions change while it is open", async () => {
+    const { rerender } = render(<AnswerHistory choiceId={4} choiceLabel="In remission" signature="7:proposed" />);
+    fireEvent.click(screen.getByRole("button", { name: /Show the history/ }));
+    await screen.findByRole("region");
+    const before = mockGet.mock.calls.length;
+    rerender(<AnswerHistory choiceId={4} choiceLabel="In remission" signature="7:approved" />);
+    await waitFor(() => expect(mockGet.mock.calls.length).toBeGreaterThan(before));
+    // Closed, a change costs nothing.
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    const closed = mockGet.mock.calls.length;
+    rerender(<AnswerHistory choiceId={4} choiceLabel="In remission" signature="7:rejected" />);
+    expect(mockGet.mock.calls.length).toBe(closed);
+  });
+
   it("hides again, and says when nothing was ever proposed", async () => {
     mockGet.mockImplementation(async () => ({ data: [] }));
     render(<AnswerHistory choiceId={4} choiceLabel="In remission" />);
@@ -212,6 +248,17 @@ describe("FieldChoiceEditor with answer details", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     fireEvent.click(screen.getByRole("button", { name: "Retire In remission" }));
     expect(await screen.findByText("Retired")).toBeInTheDocument();
+  });
+
+  it("keeps the editor open when Escape is pressed in the spellings box", async () => {
+    mockGet.mockResolvedValue({ data: choices() });
+    const onClose = vi.fn();
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Edit label and spellings/ }));
+    fireEvent.keyDown(screen.getByLabelText("Other spellings"), { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
   });
 
   it("offers no history to someone who cannot read mappings", async () => {

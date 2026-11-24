@@ -32,6 +32,9 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(label);
   const [spellings, setSpellings] = useState(aliases.join("\n"));
+  // What the form was opened on: only what the curator changed from it is
+  // sent, so an unedited box never writes back a stale copy of the other one.
+  const [baseline, setBaseline] = useState({ label, aliases });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -54,6 +57,7 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
   const open = () => {
     setName(label);
     setSpellings(aliases.join("\n"));
+    setBaseline({ label, aliases });
     setError("");
     setEditing(true);
   };
@@ -65,9 +69,9 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
       setError("The label cannot be empty.");
       return;
     }
-    if (trimmed !== label) body.display = trimmed;
+    if (trimmed !== baseline.label) body.display = trimmed;
     const next = clean(spellings);
-    if (next.join("\n") !== [...aliases].join("\n")) body.aliases = next;
+    if (next.join("\n") !== baseline.aliases.join("\n")) body.aliases = next;
     if (Object.keys(body).length === 0) {
       setEditing(false);
       return;
@@ -90,11 +94,12 @@ export function AnswerDetailsPanel({ choiceId, label, code, aliases = [], retire
         {code && <span>Code <span className="font-mono">{code}</span></span>}
         {aliases.length > 0 && <span>Also written: {aliases.join(", ")}</span>}
         <button type="button" disabled={busy} onClick={editing ? () => setEditing(false) : open}
-          aria-label={`Edit label and spellings of ${label}`}
+          aria-expanded={editing}
+          aria-label={editing ? `Cancel editing ${label}` : `Edit label and spellings of ${label}`}
           className="rounded px-1 py-0.5 text-gray-500 underline hover:text-gray-700 disabled:opacity-50">
           {editing ? "Cancel" : "Edit label"}
         </button>
-        <button type="button" disabled={busy} onClick={toggleRetired}
+        <button type="button" disabled={busy || editing} onClick={toggleRetired}
           aria-label={`${retired ? "Restore" : "Retire"} ${label}`}
           className="rounded px-1 py-0.5 text-gray-500 underline hover:text-gray-700 disabled:opacity-50">
           {retired ? "Restore" : "Retire"}

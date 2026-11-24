@@ -150,7 +150,7 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // Escape in a text box is for the box, not for the whole editor.
-      if (e.key === "Escape" && !(e.target instanceof HTMLInputElement)) onClose();
+      if (e.key === "Escape" && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) onClose();
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
@@ -257,7 +257,8 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                       />
                     )}
                     {choice.id !== undefined && choice.value_mappings !== undefined && (
-                      <AnswerHistory choiceId={choice.id} choiceLabel={choice.display} />
+                      <AnswerHistory choiceId={choice.id} choiceLabel={choice.display}
+                        signature={(choice.value_mappings ?? []).map((m) => `${m.id}:${m.status}`).join(",")} />
                     )}
                   </div>
                   <button

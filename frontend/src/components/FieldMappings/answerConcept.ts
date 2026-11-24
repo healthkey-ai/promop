@@ -112,12 +112,16 @@ export function errorText(error: unknown, fallback: string): string {
  *  Anything else is the fixed fallback, never the raw error. */
 export function refusalText(error: unknown, fallback: string): string {
   const data = (error as { response?: { data?: unknown } })?.response?.data;
-  if (typeof data === "string" || !data || typeof data !== "object") return fallback;
   const parts: string[] = [];
-  for (const value of Object.values(data as Record<string, unknown>)) {
+  // A list field's errors are keyed by position: `{aliases: {"0": ["Too long."]}}`.
+  const collect = (value: unknown, depth: number) => {
     if (typeof value === "string") parts.push(value);
-    else if (Array.isArray(value)) parts.push(...value.filter((v): v is string => typeof v === "string"));
-  }
+    else if (Array.isArray(value)) value.forEach((v) => collect(v, depth + 1));
+    else if (value && typeof value === "object" && depth < 3) {
+      Object.values(value as Record<string, unknown>).forEach((v) => collect(v, depth + 1));
+    }
+  };
+  if (data && typeof data === "object") collect(data, 0);
   return parts.length ? parts.join(" ") : fallback;
 }
 

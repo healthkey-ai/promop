@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api from "@/api/axios";
 import {
   actionText, errorText, newestFirst, revisionConcept,
@@ -8,6 +8,8 @@ import {
 interface Props {
   choiceId: number;
   choiceLabel: string;
+  /** Changes when the answer's decisions do, so an open history is read again. */
+  signature?: string;
 }
 
 const BASE = (choiceId: number) => `/v1/field-choices/${choiceId}/value-mappings/`;
@@ -17,13 +19,13 @@ const BASE = (choiceId: number) => `/v1/field-choices/${choiceId}/value-mappings
  *  Read only and loaded when asked for: the list carries the decision in force,
  *  and the trail is a request per decision, so it is not fetched for every
  *  answer of a field. */
-export function AnswerHistory({ choiceId, choiceLabel }: Props) {
+export function AnswerHistory({ choiceId, choiceLabel, signature = "" }: Props) {
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const load = async () => {
-    if (busy) return;
+  const load = async (force = false) => {
+    if (busy && !force) return;
     setBusy(true);
     setError("");
     try {
@@ -41,10 +43,22 @@ export function AnswerHistory({ choiceId, choiceLabel }: Props) {
     }
   };
 
+  // A proposal, approval or rejection made while the history is open adds a row.
+  const seen = useRef(signature);
+  useEffect(() => {
+    if (seen.current === signature) return;
+    seen.current = signature;
+    if (entries === null) return;
+    (async () => {
+      await load(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
+
   if (entries === null) {
     return (
       <div className="mt-1">
-        <button type="button" disabled={busy} onClick={load}
+        <button type="button" disabled={busy} onClick={() => load()}
           aria-label={`Show the history of ${choiceLabel}'s concept`}
           className="rounded px-1 py-0.5 text-gray-500 underline hover:text-gray-700 disabled:opacity-50">
           {busy ? "Loading..." : "History"}
