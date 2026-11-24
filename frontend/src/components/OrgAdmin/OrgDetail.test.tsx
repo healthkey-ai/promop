@@ -477,6 +477,12 @@ describe("the Patient role on the Access Grants tab (#2838)", () => {
     // A patient grant is not a role to swap: only the doctor row has the select.
     expect(hidden.querySelector("select")).toBeNull();
     expect(link.closest("tr")!.querySelector("select")).toBeNull();
+    // Nor one to mark Premium: the server refuses any change to a patient grant.
+    expect(hidden.querySelector("input[type=checkbox]")).toBeNull();
+    expect(link.closest("tr")!.querySelector("input[type=checkbox]")).toBeNull();
+    // The invite form's role select also reads "Doctor"; the grant row's is in the table.
+    const doctorRow = screen.getAllByDisplayValue("Doctor").find((el) => el.closest("table"))!.closest("tr")!;
+    expect(doctorRow.querySelector("input[type=checkbox]")).not.toBeNull();
     expect(screen.getAllByRole("link", { name: /^Open the patient record of/ })).toHaveLength(1);
   });
 });

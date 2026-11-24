@@ -86,6 +86,8 @@ def people(home, elsewhere):
           expires_at=timezone.now() - timedelta(days=1))
     unlinked = patient(home, 'unlinked@example.test', roles=['doctor'])
     PatientUser.objects.filter(person=unlinked.person).update(is_active=False)
+    disabled = patient(home, 'disabled@example.test', roles=['doctor'])
+    Identity.objects.filter(email='disabled@example.test').update(is_active=False)
     return {
         'admin': patient(home, 'admin-patient@example.test', roles=['org_admin']),
         'doctor': patient(home, 'doctor-patient@example.test', roles=['doctor']),
@@ -97,6 +99,7 @@ def people(home, elsewhere):
         'no_account': patient(home),
         'expired': expired,
         'unlinked': unlinked,
+        'disabled': disabled,
     }
 
 
@@ -134,12 +137,14 @@ def test_an_org_admin_sees_the_roles_granted_at_their_organization_only(home, pe
     assert not ids(people, 'staff', 'away') & set(found)
 
 
-def test_only_the_patient_role_no_account_an_expired_grant_or_a_dead_link_is_unmarked(people):
-    viewer = account('staff@example.test', is_staff=True)
-    found = marked(signed_in(viewer).get(LIST))
-    assert not ids(people, 'plain', 'no_account', 'expired', 'unlinked') & set(found)
-    listed = rows(signed_in(viewer).get(LIST))
-    assert ids(people, 'plain', 'no_account', 'expired', 'unlinked') <= set(listed)
+def test_only_the_patient_role_no_account_an_expired_grant_or_a_dead_link_is_unmarked(home, people):
+    unmarked = ids(people, 'plain', 'no_account', 'expired', 'unlinked', 'disabled')
+    admin = account('org-admin@example.test')
+    grant(admin, home, 'org_admin')
+    for viewer in (account('staff@example.test', is_staff=True), admin):
+        response = signed_in(viewer).get(LIST)
+        assert unmarked <= set(rows(response))
+        assert not unmarked & set(marked(response))
 
 
 def test_a_grant_at_an_inactive_organization_is_not_a_role(home, elsewhere, people):
@@ -147,6 +152,26 @@ def test_a_grant_at_an_inactive_organization_is_not_a_role(home, elsewhere, peop
     elsewhere.save(update_fields=['is_active'])
     viewer = account('staff@example.test', is_staff=True)
     assert people['away'].person_id not in marked(signed_in(viewer).get(LIST))
+
+
+def test_a_public_demo_orgs_signup_grant_is_not_a_role():
+    """Every self-signup at a demo org gets a record and a ``doctor`` grant
+    to browse the samples: a sandbox credential, not somebody who works there."""
+    demo = OrganizationFactory(name='Demo', slug='demo', allows_patient_signup=True)
+    signup = patient(demo, 'signup@example.test', roles=['doctor', 'analyst'])
+    group = PatientGroup.objects.create(name='Demo group', organization=demo)
+    GroupAccess.objects.create(
+        identity=signup.person.portal_user.identity, group=group, role='doctor')
+    admin = account('demo-admin@example.test')
+    grant(admin, demo, 'org_admin')
+    for viewer in (account('staff@example.test', is_staff=True), admin):
+        response = signed_in(viewer).get(LIST)
+        assert not rows(response)[signup.person_id].get('demographics_redacted')
+        assert marked(response) == {}
+    # A role held at a real organization still marks the record.
+    grant(signup.person.portal_user.identity, OrganizationFactory(), 'analyst')
+    staff = Identity.objects.get(email='staff@example.test')
+    assert marked(signed_in(staff).get(LIST)) == {signup.person_id: ['analyst']}
 
 
 def test_a_group_grant_is_shown_to_staff_and_not_to_an_org_admin(home, people):
@@ -254,8 +279,11 @@ def test_the_legacy_list_and_the_csv_export_carry_no_roles(people):
     export = client.get(f'{LIST}export-csv/')
     assert export.status_code == 200
     assert b'other_roles' not in export.content
+    # The detail gains no key. (Its ``user`` block has always carried the
+    # linked account as ``UserSerializer`` gives it; that is not this rule's.)
     detail = client.get(f"{LIST}{people['doctor'].person_id}/")
     assert 'other_roles' not in detail.data['patient_info']
+    assert 'other_roles' not in detail.data['user']
 
 
 def test_the_paginated_list_is_marked_too(people):
@@ -423,6 +451,24 @@ def test_an_admin_who_is_a_patient_gets_the_link_to_their_own_record(home):
     found = links(access(signed_in(viewer)))
     assert found[('self-admin@example.test', 'patient')] == own.person_id
     assert found[('self-admin@example.test', 'org_admin')] is None
+
+
+def test_a_record_whose_demographics_are_withheld_is_not_linked_except_to_its_owner(home, people):
+    """The grant's row names the account; the list shows that record withheld."""
+    own = patient(home, 'self-admin@example.test', roles=['org_admin'])
+    for record in (people['plain'], own):
+        record.suppress_demographics_for_others = True
+        record.save(update_fields=['suppress_demographics_for_others'])
+    viewers = {
+        'staff': account('staff@example.test', is_staff=True),
+        'owner': own.person.portal_user.identity,
+    }
+    for name, viewer in viewers.items():
+        found = links(access(signed_in(viewer)))
+        assert found[('plain-patient@example.test', 'patient')] is None, name
+        assert found[('doctor-patient@example.test', 'patient')] == people['doctor'].person_id, name
+    assert links(access(signed_in(viewers['staff'])))[('self-admin@example.test', 'patient')] is None
+    assert links(access(signed_in(viewers['owner'])))[('self-admin@example.test', 'patient')] == own.person_id
 
 
 def test_the_link_is_for_a_signed_in_admin_on_v1_only(home, people):

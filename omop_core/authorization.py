@@ -93,7 +93,8 @@ def accessible_person_ids(actor_identity, person_ids) -> set:
     ``can_access_patient`` for many patients at once, in a fixed number of
     queries: a list that offers a link to each record it names must not ask
     once per row (#2838). The paths are the same three, and
-    ``AccessiblePersonIdsParityTest`` holds the two to one answer.
+    ``tests/test_account_roles.py`` holds the two to one answer: change one
+    and change the other.
     """
     from patient_portal.models import PatientUser
 

@@ -779,9 +779,13 @@ already read those grants: staff (every role, and staff status), or a direct
 org admin of the organization a role is granted at (`get_access_admin_orgs`,
 the rule behind `IsStaffOrAccessAdmin`), never to a trust-derived admin, a
 doctor, an analyst, a patient, a machine credential or the de-identified
-reader, and never on a row whose demographics are withheld. `person_id` is
-set only for a record the reader can open (`accessible_person_ids`, the
-batched `can_access_patient`). Neither adds a query per row.
+reader, and never on a row whose demographics are withheld. A grant at a
+public demo org is not counted: every self-signup there has one. `person_id`
+is set only for a record the reader can open (`accessible_person_ids`, the
+batched `can_access_patient`) and whose demographics they are shown. Neither
+adds a query per row. The rule covers these two fields only: the record
+detail's `user` block has long returned the linked account's `UserSerializer`
+data, roles included, to any reader of the record.
 
 Adding a field to PatientRecord is an approval, not a mapping write: `POST
 /api/v1/custom-patient-fields/` creates the field with an approved mapping, so

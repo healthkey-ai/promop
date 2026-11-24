@@ -6568,13 +6568,14 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
     def _mark_other_roles(self, request, rows):
         # A person at the page, never a credential that can be presented
-        # without them; and never the de-identified reader (#2460).
-        if (not is_interactive_session(request) or is_machine_request(request)
-                or self._withholds_identifiers(request)):
+        # without them.
+        if not is_interactive_session(request) or is_machine_request(request):
             return
         from omop_core.services.account_roles import other_roles_by_person
         # A record whose demographics this reader is not shown is not marked:
-        # "also a doctor here" can name the one person it could be.
+        # "also a doctor here" can name the one person it could be. That is
+        # every row but their own for the de-identified reader (#2460), who
+        # administers nothing and so is told nothing by the service either.
         shown = [row for row in rows if not row.get('demographics_redacted')]
         roles = other_roles_by_person(request.user, [row['person_id'] for row in shown])
         for row in shown:

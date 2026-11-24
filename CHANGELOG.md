@@ -29,11 +29,13 @@ All notable changes to PRomop are documented here.
   grant) now shows "Staff", "Also org admin", "Also doctor" or "Also analyst"
   under the name on the Patients list. Staff see every such role; an org
   admin sees the roles granted at the organizations they administer by a
-  direct grant; nobody else is told, and a record whose demographics are
-  withheld is never marked. On My Profile the Patient role links to the
+  direct grant; nobody else is told, a record whose demographics are
+  withheld is never marked, and the grant every sign-up at a public demo
+  organization receives is not counted. On My Profile the Patient role links to the
   account's own record, and on an organization's Access Grants a patient
   grant links to its record when the reader can open it (it is shown as
-  "Patient" there, no longer as a Doctor/Analyst choice). The new fields are
+  "Patient" there, no longer as a Doctor/Analyst choice with a Premium box
+  the server refuses). The new fields are
   on `/api/v1/` only (#2838).
 - **Garmin Connect sync: the Personal API key is saved for next time** — the
   sync by key used the key once and kept it nowhere, so a patient pasted it

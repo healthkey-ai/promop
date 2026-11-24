@@ -852,7 +852,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        {g.role === 'org_admin' ? (
+                        {g.role === 'org_admin' || g.role === 'patient' ? (
                           <span className="text-xs text-gray-400">N/A</span>
                         ) : (
                           <label className="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">

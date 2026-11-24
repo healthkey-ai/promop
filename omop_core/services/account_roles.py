@@ -33,7 +33,8 @@ def other_roles_by_person(viewer, person_ids) -> dict:
 
     - a staff viewer is told ``staff`` for a staff account, and every active
       professional grant (``org_admin``, ``doctor``, ``analyst``) at an active
-      organization, organization-level or group-level;
+      organization that is not a public demo org, organization-level or
+      group-level;
     - any other viewer is told the organization-level professional grants at
       the organizations whose access it administers by a direct grant, and
       nothing else: not a grant at another organization, not staff status.
@@ -68,11 +69,17 @@ def other_roles_by_person(viewer, person_ids) -> dict:
     grants = GroupAccess.objects.filter(
         identity_id__in=person_by_identity, role__in=PROFESSIONAL_ROLES,
     ).filter(Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()))
+    # A grant at a public demo org is not a role somebody was given: every
+    # self-signup there gets ``doctor`` (or, before #2416, ``analyst``) to
+    # browse the sample patients, with a record of its own, so counting it
+    # would mark every such record.
     if is_staff:
         grants = grants.filter(
-            Q(org__is_active=True) | Q(group__organization__is_active=True))
+            Q(org__is_active=True, org__allows_patient_signup=False)
+            | Q(group__organization__is_active=True,
+                group__organization__allows_patient_signup=False))
     else:
-        grants = grants.filter(org_id__in=admin_org_ids)
+        grants = grants.filter(org_id__in=admin_org_ids, org__allows_patient_signup=False)
     for identity_id, role in grants.values_list('identity_id', 'role'):
         found.setdefault(person_by_identity[identity_id], set()).add(role)
 
@@ -89,7 +96,10 @@ def patient_record_links(viewer, grants) -> dict:
     record is the person the account's active sign-in link names. The link is
     offered only for a record that exists and that the viewer may read
     (``accessible_person_ids``, which is ``can_access_patient``): a grant
-    whose record is somewhere the viewer cannot reach stays plain text.
+    whose record is somewhere the viewer cannot reach stays plain text. So
+    does one whose patient withholds their demographics from others, unless
+    the record is the viewer's own: the grant's row names the account, and
+    the link would name the record the patient list shows as withheld.
     """
     from omop_core.authorization import accessible_person_ids
     from patient_portal.models import PatientUser
@@ -103,9 +113,12 @@ def patient_record_links(viewer, grants) -> dict:
     readable = accessible_person_ids(viewer, person_by_identity.values())
     if not readable:
         return {}
-    openable = set(PatientRecord.objects.filter(
-        person_id__in=readable,
-    ).values_list('person_id', flat=True))
+    records = PatientRecord.objects.filter(person_id__in=readable)
+    own = person_by_identity.get(viewer.pk)
+    shown = Q(suppress_demographics_for_others=False)
+    if own is not None:
+        shown |= Q(person_id=own)
+    openable = set(records.filter(shown).values_list('person_id', flat=True))
     return {
         grant.id: person_by_identity[grant.identity_id]
         for grant in grants
