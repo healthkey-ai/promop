@@ -1230,7 +1230,11 @@ queue approves nothing. The approval is the curator's own path
 (`_upsert_source_code_mapping`), so approval clears the confidence on provisional rows
 exactly as a hand approval does. The Code Mapping list can be filtered to the rows
 Suggest approved by itself, and `AGENTS.md` ("Auto-approving a Suggest result") says
-how to undo one.
+how to undo one and how the accuracy analytics count them (#2856): the
+`suggestion_auto_approved` column, set by the approval and reported as an
+`auto_approved` block beside, not inside, the model's precision and recall, so a
+curator's later accept, override or reject says whether approving at 90 to 100 was
+right.
 
 Because the minimum is 90 and the floor is 70, the provisional band (floor up to, not
 including, the threshold) is never empty: a proposal of 70 to 89 can only ever be

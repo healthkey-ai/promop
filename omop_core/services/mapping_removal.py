@@ -52,15 +52,23 @@ def clear_destination(mapping, user):
     """Send *mapping* back to the unmapped queue; return the destination it had.
 
     The source side, the curator's note, the axis variants and what Suggest
-    once proposed (``suggested_target_concept``, ``suggestion_outcome``) are
-    kept: they describe the code and its history, not the destination. The old
-    destination joins ``pending_repoint_concept_ids``, so the next approval
-    moves any stored row the background move did not reach.
+    once proposed (``suggested_target_concept``, ``suggestion_outcome``,
+    ``suggestion_auto_approved``, ``auto_approved_confidence``) are kept: they
+    describe the code and its history, not the destination. The one thing it
+    records is a first disposition for an approved, flagged row nobody has
+    reviewed: removing the destination is a person overriding it. The old destination joins
+    ``pending_repoint_concept_ids``, so the next approval moves any stored
+    row the background move did not reach.
     """
     previous = mapping.target_concept_id
     pending = list(mapping.pending_repoint_concept_ids or [])
     if previous is not None and previous not in pending:
         pending.append(previous)
+    # A person is removing the destination of an auto-approval nobody has reviewed:
+    # that is their first disposition of it, an override (#2856).
+    if (mapping.suggestion_auto_approved and not mapping.suggestion_outcome
+            and mapping.status == 'approved'):
+        mapping.suggestion_outcome = 'overridden'
     cleared = {
         'target_concept': None, 'destination_vocabulary_id': '', 'destination_unit_concept': None,
         'status': 'proposed', 'reviewer': None, 'reviewed_at': None,
@@ -70,6 +78,7 @@ def clear_destination(mapping, user):
         'pending_repoint_concept_ids': pending,
         'locked_by': None, 'locked_at': None,
         'updated_by': user, 'updated_at': timezone.now(),
+        'suggestion_outcome': mapping.suggestion_outcome,
     }
     for field, value in cleared.items():
         setattr(mapping, field, value)

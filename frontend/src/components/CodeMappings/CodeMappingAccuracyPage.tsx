@@ -3,6 +3,16 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import api from "@/api/axios";
 
+/** Suggest's own approvals and what curators made of the ones they reviewed (#2856). */
+interface AutoApproved {
+  total: number;
+  reviewed: number;
+  accepted: number;
+  overridden: number;
+  rejected: number;
+  unreviewed: number;
+  precision_of_reviewed: number | null;
+}
 interface ModelAccuracy {
   model_version: string;
   suggestions: number;
@@ -13,6 +23,7 @@ interface ModelAccuracy {
   precision: number | null;
   recall: number | null;
   f1: number | null;
+  auto_approved?: AutoApproved;
 }
 const metric = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
 
@@ -40,6 +51,11 @@ export default function CodeMappingAccuracyPage() {
     {fallbacks.suggestions > 0 && <p className="mt-2 text-sm text-slate-600">
       Not counted here: {fallbacks.suggestions.toLocaleString()} fallback {fallbacks.suggestions === 1 ? "destination" : "destinations"} written
       while the ranking model was unavailable ({fallbacks.reviewed.toLocaleString()} reviewed). The model never proposed them.
+    </p>}
+    {overall?.auto_approved && overall.auto_approved.total > 0 && <p className="mt-2 text-sm text-slate-600">
+      Auto-approved by Suggest: {overall.auto_approved.total.toLocaleString()}, of which a curator has since reviewed {overall.auto_approved.reviewed.toLocaleString()} ({overall.auto_approved.accepted.toLocaleString()} accepted,
+      {" "}{overall.auto_approved.overridden.toLocaleString()} given another destination, {overall.auto_approved.rejected.toLocaleString()} rejected; precision of those reviewed {metric(overall.auto_approved.precision_of_reviewed)}).
+      They are counted in the rows below like any suggestion. The precision here covers only the ones reviewed, so it is a sample.
     </p>}
     {error && <p className="mt-4 text-sm text-red-700">{error}</p>}
     <div className="mt-5 overflow-hidden rounded-md border border-slate-200 bg-white"><table className="w-full text-left text-sm">
