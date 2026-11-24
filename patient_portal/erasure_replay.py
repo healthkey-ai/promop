@@ -108,20 +108,30 @@ class Report:
     accounts: list[int] = field(default_factory=list)   # person ids closed again
     records: list[int] = field(default_factory=list)    # person ids whose record was erased again
     skipped: list[tuple[int, str]] = field(default_factory=list)  # (person id, why)
+    older: int = 0        # entries from before ``since``, not looked at
+    newest_older: datetime | None = None
+    # Person ids whose record was erased again but whose withdrawal could not
+    # be recorded: the permission still reads granted and needs staff.
+    unrestored: list[int] = field(default_factory=list)
+    failed: list[tuple[int, str]] = field(default_factory=list)  # (person id, exception class)
 
 
 # Why an entry was left alone.
 REUSED = 'the id belongs to an account made after the erasure'
 UNLINKED = 'a person with no sign-in cannot be told from a reused id (--include-unlinked)'
 ANSWERED = 'the member has answered this permission since'
+NO_PURPOSE = 'the permission the entry names is not defined here'
 
 
-def replay(entries: Iterable[AuditEvent], *, since: datetime | None = None, dry_run: bool = False,
+def replay(entries: Iterable[AuditEvent], *, since: datetime, dry_run: bool = False,
            include_unlinked: bool = False) -> Report:
     """Erase again what ``entries`` say was erased and this database does not
     know about. Each entry is its own transaction, and leaves a row in the
     deletion log saying it was replayed, so a second run does nothing.
-    ``since`` is when the backup was taken: older entries are not looked at."""
+    ``since`` is when the backup was taken: older entries are counted and
+    not looked at (the audit retention may have pruned them from the
+    database, which would make them look lost). An entry that fails is rolled
+    back, listed in ``failed`` and can be replayed again."""
     report = Report()
     known = set(_log_rows().values_list('signature', flat=True))
     known.update(
@@ -130,23 +140,39 @@ def replay(entries: Iterable[AuditEvent], *, since: datetime | None = None, dry_
         kind = entry.detail.get('erasure')
         if kind not in _KINDS:
             continue  # a replay's own marker, exported from an earlier restore
-        if since is not None and entry.timestamp < since:
+        if entry.timestamp < since:
+            report.older += 1
+            report.newest_older = max(report.newest_older or entry.timestamp, entry.timestamp)
             continue
         report.entries += 1
         if entry.signature in known:
             report.known += 1
             continue
         known.add(entry.signature)
-        with transaction.atomic():
-            done = _replay_one(entry, kind, report, dry_run=dry_run, include_unlinked=include_unlinked)
-            if done and not dry_run:
-                AuditEvent.objects.create(
-                    event_type=AuditEvent.EVENT_DELETE, method='ERASE', path=f'{_PATH}replay',
-                    user_id='system', resource_id=str(entry.detail.get('person_id')),
-                    detail={'erasure': 'replay', 'person_id': entry.detail.get('person_id'),
-                            'replay_of': entry.signature},
-                )
+        mark = _Mark(len(report.accounts), len(report.records), len(report.unrestored))
+        try:
+            with transaction.atomic():
+                done = _replay_one(entry, kind, report, dry_run=dry_run, include_unlinked=include_unlinked)
+                if done and not dry_run:
+                    AuditEvent.objects.create(
+                        event_type=AuditEvent.EVENT_DELETE, method='ERASE', path=f'{_PATH}replay',
+                        user_id='system', resource_id=str(entry.detail.get('person_id')),
+                        detail={'erasure': 'replay', 'person_id': entry.detail.get('person_id'),
+                                'replay_of': entry.signature},
+                    )
+        except Exception as error:  # noqa: BLE001 — one member's failure must not stop the others' erasure
+            # Rolled back: take it out of what the report says was done. The
+            # class only; a message can quote a row.
+            del report.accounts[mark.accounts:], report.records[mark.records:], report.unrestored[mark.unrestored:]
+            report.failed.append((entry.detail.get('person_id'), type(error).__name__))
     return report
+
+
+@dataclass
+class _Mark:
+    accounts: int
+    records: int
+    unrestored: int
 
 
 def _replay_one(entry: AuditEvent, kind: str, report: Report, *, dry_run: bool, include_unlinked: bool) -> bool:
@@ -170,9 +196,10 @@ def _replay_one(entry: AuditEvent, kind: str, report: Report, *, dry_run: bool, 
 def _close_again(entry: AuditEvent, person: Person, report: Report, dry_run: bool) -> bool:
     from patient_portal.erasure import close_account
 
-    # The sign-in went with the account only when the entry names it.
+    # The sign-in went with the account only when the entry names it; and it
+    # goes again only while it is still this person's.
     identity = Identity.objects.filter(
-        pk=entry.detail.get('identity_id'), created_at__lte=entry.timestamp,
+        pk=entry.detail.get('identity_id'), created_at__lte=entry.timestamp, patient_user__person=person,
     ).first() if entry.detail.get('identity_id') else None
     report.accounts.append(person.person_id)
     if not dry_run:
@@ -186,6 +213,10 @@ def _erase_again(entry: AuditEvent, person: Person, report: Report, dry_run: boo
 
     key = entry.detail.get('purpose') or ''
     purpose = ConsentPurpose.objects.filter(key=key).first() if key else None
+    if key and purpose is None:
+        # Without it nobody can say whether the member has answered since.
+        report.skipped.append((person.person_id, NO_PURPOSE))
+        return False
     latest = (
         ConsentEvent.objects.filter(person=person, purpose=purpose).order_by('-recorded_at', '-id').first()
         if purpose else None
@@ -194,19 +225,23 @@ def _erase_again(entry: AuditEvent, person: Person, report: Report, dry_run: boo
         report.skipped.append((person.person_id, ANSWERED))
         return False
     report.records.append(person.person_id)
+    granted = latest is not None and latest.decision == ConsentEvent.GRANTED
     if dry_run:
         return True
     erased = False
-    if latest is not None and latest.decision == ConsentEvent.GRANTED:
+    if granted:
         # The withdrawal was lost with the restore as well: put it back at
         # its own time. It ends the grant and what depends on it, and erases
         # the record when the purpose still says a withdrawal does.
         try:
-            consent.record_consent(
-                person, purpose, ConsentEvent.WITHDRAWN, source=ConsentEvent.SYSTEM, recorded_at=entry.timestamp)
+            with transaction.atomic():
+                consent.record_consent(
+                    person, purpose, ConsentEvent.WITHDRAWN, source=ConsentEvent.SYSTEM, recorded_at=entry.timestamp)
             erased = purpose.erases_record_on_withdrawal
         except ValidationError:
-            pass  # the purpose has no published text any more
+            # No published text, or no address for the ledger: the record is
+            # erased all the same, and the standing grant is reported.
+            report.unrestored.append(person.person_id)
     if not erased:
         erase_record(person, purpose=key)
     return True

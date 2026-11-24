@@ -6,8 +6,9 @@ signature this deployment's audit key gives it, or nothing is replayed
 (exit 1): run it with ``AUDIT_HMAC_KEY`` set to the key the entries were
 written under. An entry the restored database already holds is left alone,
 and so is a row made after the entry (a reused id). Run it straight after
-the restore, before the application is opened again, and give ``--since``
-the time the backup was taken. ``--dry-run`` only reports. Prints ids, never data.
+the restore, before the application is opened again. ``--since`` is the
+time the backup was taken; an entry that fails is listed and the command
+exits 1. ``--dry-run`` only reports. Prints ids, never data.
 """
 from django.core.management.base import BaseCommand, CommandError
 
@@ -20,7 +21,9 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument('export', help='The file export_erasures wrote.')
         parser.add_argument(
-            '--since', help='When the backup was taken (ISO 8601): entries older than this are not looked at.')
+            '--since', required=True,
+            help='When the backup was taken (ISO 8601, with its offset): entries older than this are not '
+                 'looked at. When unsure, give an earlier time.')
         parser.add_argument('--dry-run', action='store_true', help='Report what would be erased; erase nothing.')
         parser.add_argument(
             '--include-unlinked', action='store_true',
@@ -28,12 +31,10 @@ class Command(BaseCommand):
                  'restored database yet: such a person cannot be told from a new one given the same id.')
 
     def handle(self, *args, **options):
-        since = None
-        if options['since']:
-            try:
-                since = erasure_replay.parse_time(options['since'])
-            except ValueError:
-                raise CommandError('--since is not an ISO 8601 date or time.')
+        try:
+            since = erasure_replay.parse_time(options['since'])
+        except ValueError:
+            raise CommandError('--since is not an ISO 8601 date or time.')
         try:
             with open(options['export'], encoding='utf-8') as source:
                 entries = erasure_replay.read(source)
@@ -59,3 +60,14 @@ class Command(BaseCommand):
             self.stdout.write(f'  person {person_id}')
         for person_id, why in report.skipped:
             self.stdout.write(self.style.WARNING(f'  skipped person {person_id}: {why}'))
+        if report.older:
+            self.stdout.write(
+                f'{report.older} older than --since not looked at (the newest at {report.newest_older.isoformat()}).')
+        for person_id in report.unrestored:
+            self.stdout.write(self.style.WARNING(
+                f'  person {person_id}: record erased, but the withdrawal could not be recorded; '
+                'the permission still reads granted'))
+        for person_id, error in report.failed:
+            self.stdout.write(self.style.ERROR(f'  FAILED person {person_id}: {error}; nothing of theirs was erased'))
+        if report.failed:
+            raise CommandError(f'{len(report.failed)} erasure(s) failed and can be replayed again.')

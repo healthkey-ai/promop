@@ -5,6 +5,8 @@ Keep the output outside the database: after a restore from a backup,
 backup was taken (docs/member_erasure_architecture.md). It names person and
 sign-in ids and who asked, and nothing of what was held.
 """
+import os
+
 from django.core.management.base import BaseCommand, CommandError
 
 from patient_portal import erasure_replay
@@ -15,6 +17,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--output', help='File to write (default: standard output).')
+        parser.add_argument('--overwrite', action='store_true', help='Replace --output when it exists.')
         parser.add_argument('--since', help='Only entries at or after this ISO 8601 time.')
 
     def handle(self, *args, **options):
@@ -29,9 +32,16 @@ class Command(BaseCommand):
             for line in lines:
                 self.stdout.write(line)
             return
+        target = options['output']
+        if os.path.exists(target) and not options['overwrite']:
+            # After a restore the database's log is shorter than the last
+            # export: writing over that file would lose what is to be replayed.
+            raise CommandError(f'{target} exists. Write each export to a new file, or pass --overwrite.')
         count = 0
-        with open(options['output'], 'w', encoding='utf-8') as out:
+        partial = f'{target}.partial'
+        with open(partial, 'w', encoding='utf-8') as out:
             for line in lines:
                 out.write(line + '\n')
                 count += 1
+        os.replace(partial, target)
         self.stderr.write(f'{count} entr{"y" if count == 1 else "ies"} written.')

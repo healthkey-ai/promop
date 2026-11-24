@@ -29,8 +29,11 @@ def lost(kind, person, **extra):
     return lines
 
 
-def replay(lines, **options):
-    return erasure_replay.replay(erasure_replay.read(lines), **options)
+LONG_AGO = timezone.now() - timedelta(days=30)
+
+
+def replay(lines, since=LONG_AGO, **options):
+    return erasure_replay.replay(erasure_replay.read(lines), since=since, **options)
 
 
 def log():
@@ -163,13 +166,13 @@ def test_a_dry_run_reports_and_erases_nothing(member, tmp_path, capsys):
     export = tmp_path / 'erasures.jsonl'
     export.write_text('\n'.join(lost('account', person, identity_id=member['identity'].pk)) + '\n')
 
-    call_command('replay_erasures', str(export), '--dry-run')
+    call_command('replay_erasures', str(export), '--since', '2020-01-01', '--dry-run')
 
     out = capsys.readouterr().out
     assert '1 account(s) would be closed again' in out and f'person {person.person_id}' in out
     assert Person.objects.filter(pk=person.pk).exists() and log() == []
 
-    call_command('replay_erasures', str(export))
+    call_command('replay_erasures', str(export), '--since', '2020-01-01')
     assert not Person.objects.filter(pk=person.pk).exists()
 
 
@@ -190,7 +193,7 @@ def test_an_export_that_does_not_verify_replays_nothing(member, tmp_path, change
     export.write_text(good + '\n' + json.dumps(bad) + '\nnot json\n')
 
     with pytest.raises(CommandError, match='Nothing was replayed'):
-        call_command('replay_erasures', str(export))
+        call_command('replay_erasures', str(export), '--since', '2020-01-01')
 
     assert Person.objects.filter(pk=person.pk).exists() and log() == []
 
@@ -214,7 +217,77 @@ def test_export_erasures_writes_the_file(member, tmp_path):
         call_command('export_erasures', '--since', 'yesterday')
 
 
-def test_entries_from_before_the_backup_time_are_not_looked_at(member, tmp_path):
+def test_an_export_is_not_written_over_the_one_before(member, tmp_path):
+    """After a restore the log is shorter than the last export; the export
+    that is to be replayed must not be lost to the next scheduled run."""
+    out = tmp_path / 'erasures.jsonl'
+    out.write_text('\n'.join(lost('account', member['person'])) + '\n')
+    before = out.read_text()
+
+    with pytest.raises(CommandError, match='exists'):
+        call_command('export_erasures', '--output', str(out))
+    assert out.read_text() == before
+
+    call_command('export_erasures', '--output', str(out), '--overwrite')
+    assert out.read_text() == ''
+
+
+def test_a_withdrawal_that_cannot_be_recorded_still_erases_and_is_reported(member):
+    """No address for the ledger (the sign-in link is off): the record goes,
+    and the report says the permission still reads granted."""
+    person = member['person']
+    lines = lost('record', person, purpose='my_record')
+    PatientUser.objects.filter(person=person).update(is_active=False)
+
+    report = replay(lines)
+
+    assert report.records == [person.person_id] and report.unrestored == [person.person_id]
+    assert PatientRecord.objects.get(person=person).stage in (None, '')
+    assert [d['erasure'] for d in log()] == ['record', 'replay']
+
+
+def test_an_entry_naming_a_permission_that_is_not_defined_here_is_left(member):
+    person = member['person']
+    lines = lost('record', person, purpose='renamed_since')
+
+    assert replay(lines).skipped == [(person.person_id, erasure_replay.NO_PURPOSE)]
+    assert PatientRecord.objects.get(person=person).stage == 'III'
+
+
+def test_the_sign_in_goes_only_while_it_is_still_this_persons(member):
+    from patient_portal.models import Identity as I
+
+    other = I.objects.create_user(email='other@example.test', password='x')
+    I.objects.filter(pk=other.pk).update(created_at=LONG_AGO)
+    lines = lost('account', member['person'], identity_id=other.pk)
+
+    replay(lines)
+
+    assert not Person.objects.filter(pk=member['person'].pk).exists()
+    assert I.objects.filter(pk=other.pk).exists()
+
+
+def test_one_failed_erasure_is_rolled_back_and_the_others_go_on(member, tmp_path, monkeypatch):
+    person = member['person']
+    erasure._log('record', person.person_id, 'system', purpose='my_record')
+    erasure._log('account', person.person_id, 'system', identity_id=member['identity'].pk)
+    export = tmp_path / 'erasures.jsonl'
+    export.write_text('\n'.join(erasure_replay.export()) + '\n')
+    AuditEvent.objects.filter(method='ERASE').delete()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError('a value that must not be printed')
+    monkeypatch.setattr(svc, 'record_consent', broken)
+
+    with pytest.raises(CommandError, match='1 erasure'):
+        call_command('replay_erasures', str(export), '--since', '2020-01-01')
+
+    # The record entry failed whole; the account entry after it still ran.
+    assert not Person.objects.filter(pk=person.pk).exists()
+    assert [d['erasure'] for d in log()] == ['account', 'replay']
+
+
+def test_entries_from_before_the_backup_time_are_not_looked_at(member, tmp_path, capsys):
     """An old entry the audit retention has since pruned is not in the
     restored database either; --since keeps the replay off it."""
     person = member['person']
@@ -224,6 +297,7 @@ def test_entries_from_before_the_backup_time_are_not_looked_at(member, tmp_path)
 
     call_command('replay_erasures', str(export), '--since', after)
 
+    assert '1 older than --since not looked at' in capsys.readouterr().out
     assert PatientRecord.objects.get(person=person).stage == 'III' and log() == []
     with pytest.raises(CommandError):
         call_command('replay_erasures', str(export), '--since', 'last week')

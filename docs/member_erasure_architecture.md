@@ -89,7 +89,7 @@ commands close that gap (`patient_portal/erasure_replay.py`):
 
 ```bash
 # On a schedule, to somewhere outside the database:
-python manage.py export_erasures --output erasures.jsonl
+python manage.py export_erasures --output erasures-$(date +%F).jsonl
 
 # After a restore, before the application is opened again:
 python manage.py replay_erasures erasures.jsonl --since 2026-11-20T03:00:00Z --dry-run
@@ -100,33 +100,50 @@ python manage.py replay_erasures erasures.jsonl --since 2026-11-20T03:00:00Z
   what its signature covers, and the signature. Ids and who asked, nothing of
   what was held. `--since` limits it. Nothing in the project schedules it,
   and an erasure made after the last export is in no file: export as often
-  as the gap you can accept.
+  as the gap you can accept. It does not write over an existing file without
+  `--overwrite`, and writes a new one whole or not at all: after a restore
+  the database's log is shorter than the last export, and a scheduled run
+  must not replace the file that is about to be replayed. **Stop the export
+  job before restoring.**
 - **Every line must verify** under this deployment's `AUDIT_HMAC_KEY` (or
   `SECRET_KEY`, where it stands in), or the file is refused whole and
   nothing is replayed: a file cannot be written to erase somebody. After a
   key rotation, run the replay with the key the entries were written under.
 - **An entry the restored database already holds is left alone.** It was
   applied before the backup, and what the member entered afterwards is
-  theirs. `--since`, the time the backup was taken, also keeps the replay
-  off old entries the audit retention (`prune_audit_events`) has removed
-  from the database.
+  theirs.
+- **`--since` is required**: the time the backup was taken, with its
+  offset. It keeps the replay off old entries the audit retention
+  (`prune_audit_events`) has removed from the database, which would
+  otherwise look lost. Entries older than it are counted in the output, with
+  the newest one's time, and not looked at. When unsure, give an earlier
+  time: an entry the database holds is never replayed, so early costs
+  nothing and late leaves erasures undone.
 - **A closed account is closed again** with `close_account`: the person,
   the record, every row about them, and the sign-in when the entry names it.
 - **A withdrawal is put back** as well as its erasure: when the restored
   permission reads granted, a `withdrawn` answer is recorded at the entry's
   own time (source `system`), which ends the grant and what depends on it
-  and erases the record; otherwise `erase_record` runs alone.
+  and erases the record; otherwise `erase_record` runs alone. When the
+  withdrawal cannot be recorded (the purpose has no published text, or the
+  member has no address for the ledger) the record is erased all the same
+  and the output names the person: their permission still reads granted
+  and staff must record the withdrawal. An entry naming a permission that
+  is not defined here is skipped.
 - **Never against a newer row.** A restore sets the id sequences back, so
   an erased person's id can be given to a new sign-up. A person whose
   sign-in link was made after the entry is skipped and listed. A person with
   no sign-in (loaded by an ETL, deleted by staff) cannot be told from a
   reused id and is skipped unless `--include-unlinked` says nothing has been
   written since the restore. A member who has answered the permission since
-  the entry keeps their record.
+  the entry keeps their record. The sign-in an entry names goes only while
+  it is still that person's.
 - **Safe to run twice.** Each replayed entry leaves a row in the deletion
   log (`{"erasure": "replay", "replay_of": "<signature>"}`) beside the row
   the erasure itself writes; a second run finds it and does nothing.
-- One transaction per entry. The output names person ids only.
+- One transaction per entry. An entry that fails is rolled back and listed
+  with the kind of error, the rest go on, and the command exits 1; run it
+  again once the cause is fixed. The output names person ids only.
 
 What a restore loses besides (permission answers and ledger entries written
 after the backup, other than the withdrawals above) is not rebuilt here.
