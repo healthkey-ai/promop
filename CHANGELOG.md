@@ -8,6 +8,15 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Garmin Connect sync: the Personal API key is saved for next time** — the
+  sync by key used the key once and kept it nowhere, so a patient pasted it
+  for every sync. A key Garmin has accepted is now saved, encrypted under
+  `GARMIN_TOKEN_KEY`, and the next sync needs no key in the field. "Save this
+  key for next time" starts ticked and can be unticked for a one-off sync;
+  "Remove saved key" deletes it. Nothing returns the key, it is removed when
+  Garmin refuses it, and it is erased with the record. A deployment without
+  `GARMIN_TOKEN_KEY` saves nothing. Syncing still happens only when the
+  patient presses Sync (#2834).
 - **Wearables: sync Apple Health and Health Connect from a phone app, with
   no extra server** — PRomop now answers the paths the Open Wearables mobile
   SDK calls (`/api/v1/sdk/users/{id}/sync`, `/api/v1/token/refresh` and the

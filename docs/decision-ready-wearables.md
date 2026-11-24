@@ -229,8 +229,8 @@ schedule.
 
 Garmin now has a second way in as well. Since October 2026 any Garmin Connect user can create a
 Personal API key for their own account, and a patient can sync a range of days with it from the
-Wearables tab instead of downloading files. The key is used for that one sync and never stored,
-so there is no token to keep or refresh; the day totals it returns are the same
+Wearables tab instead of downloading files. The key is saved encrypted for the patient's next
+sync unless they decline (#2834), and there is no token to refresh; the day totals it returns are the same
 `WearableSample`s. The detail is in
 [wearable-omop-mapping.md](wearable-omop-mapping.md#garmin-connect-sync).
 

@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 /** How far back one sync may read. The server allows 1 to 90 days. */
@@ -23,7 +23,18 @@ interface SyncResult {
   end_date: string;
   datasets_failed: string[];
   unmapped_metrics?: string[];
+  /** Whether a key is saved for this patient once the sync has run (#2834). */
+  key_saved?: boolean;
 }
+
+/** What the server says about a saved key: that there is one, never the key. */
+interface KeyStatus {
+  /** Whether this site can keep a key at all: it needs a key to encrypt under. */
+  can_save: boolean;
+  saved: boolean;
+}
+
+const KEY_URL = '/v1/patient-records/garmin-key/';
 
 interface Props {
   /** The record on the page. The server refuses a sync unless it is the caller's own. */
@@ -63,8 +74,16 @@ function describe(result: SyncResult): string {
 
 /**
  * Sync daily metrics from Garmin Connect with the patient's own Personal API
- * key (#2794). The key is sent with this one request and kept nowhere, here or
- * on the server: it is cleared from the field as soon as a sync succeeds.
+ * key (#2794). The key is never kept in the browser: it is cleared from the
+ * field as soon as a sync succeeds.
+ *
+ * Where the site can encrypt it, the server saves a key Garmin accepted for
+ * the patient's next sync (#2834), unless "Save this key for next time" is
+ * unticked. A later sync then needs no key in the field, and "Remove saved
+ * key" deletes it. The server never sends a saved key back, so this only
+ * ever knows that there is one. Until it has heard that the site can save,
+ * it asks for a one-off sync, so the page never says "not stored" of a key
+ * that is.
  *
  * The server files the rows under the signed-in person's own record, so the
  * tab renders this only for a patient on their own record.
@@ -79,13 +98,38 @@ export default function GarminConnectSync({
   const keyId = useId();
   const rangeId = useId();
   const helpId = useId();
+  const rememberId = useId();
   const [apiKey, setApiKey] = useState('');
   const [days, setDays] = useState(30);
   const [syncing, setSyncing] = useState(false);
   const [result, setResult] = useState<SyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [keyStatus, setKeyStatus] = useState<KeyStatus>({ can_save: false, saved: false });
+  const [remember, setRemember] = useState(true);
+  const [removing, setRemoving] = useState(false);
+  // Said once a saved key has been removed.
+  const [keyNotice, setKeyNotice] = useState<string | null>(null);
 
-  const canSync = apiKey.trim() !== '' && !syncing && !disabled;
+  useEffect(() => {
+    let current = true;
+    (async () => {
+      try {
+        const res = await clinicalClient().get<KeyStatus>(clinicalUrl(KEY_URL));
+        const data = res?.data;
+        if (current && data && typeof data === 'object' && !Array.isArray(data)) {
+          setKeyStatus({ can_save: data.can_save === true, saved: data.saved === true });
+        }
+      } catch {
+        // Not known: the sync then works as a one-off, with a key in the field.
+      }
+    })();
+    return () => { current = false; };
+  }, []);
+
+  const typed = apiKey.trim() !== '';
+  const { can_save: canSave, saved } = keyStatus;
+  const busy = syncing || removing;
+  const canSync = (typed || saved) && !busy && !disabled;
 
   const sync = async () => {
     if (!canSync) return;
@@ -93,24 +137,53 @@ export default function GarminConnectSync({
     onBusyChange?.(true);
     setResult(null);
     setError(null);
+    setKeyNotice(null);
+    // A key in the field is the one to use, and to save only where the page
+    // could say so. No key in the field: the server uses the saved one.
+    const keep = canSave && remember;
     try {
       const res = await clinicalClient().post<SyncResult>(clinicalUrl('/v1/patient-records/sync-garmin/'), {
-        api_key: apiKey.trim(),
+        ...(typed ? { api_key: apiKey.trim(), remember: keep } : {}),
         days,
         end_date: localYesterday(),
         ...(personId != null ? { person_id: personId } : {}),
       });
       setResult(res.data);
       setApiKey('');
+      if (typeof res.data.key_saved === 'boolean') {
+        setKeyStatus(status => ({ ...status, saved: res.data.key_saved === true }));
+      }
       onSynced(res.data.samples_created > 0 || res.data.replaced > 0);
     } catch (err: unknown) {
-      const data = (err as { response?: { data?: { error?: string; detail?: string } } })?.response?.data;
+      const data = (err as { response?: { data?: { error?: string; detail?: string; key_saved?: boolean } } })
+        ?.response?.data;
       setError(data?.error || data?.detail || 'Sync failed. Please try again.');
+      // Garmin refused the saved key and the server removed it.
+      if (data?.key_saved === false) setKeyStatus(status => ({ ...status, saved: false }));
       // Back to the field that has to be corrected.
       keyRef.current?.focus();
     } finally {
       setSyncing(false);
       onBusyChange?.(false);
+    }
+  };
+
+  const removeKey = async () => {
+    if (busy || disabled) return;
+    if (!window.confirm('Remove your saved Garmin key? You can enter it again for a later sync.')) return;
+    setRemoving(true);
+    setError(null);
+    setKeyNotice(null);
+    try {
+      const res = await clinicalClient().delete<KeyStatus>(clinicalUrl(KEY_URL));
+      setKeyStatus(status => ({ ...status, saved: res?.data?.saved === true }));
+      setKeyNotice('Your saved key has been removed.');
+      // The button that held focus is gone; the field is what comes next.
+      keyRef.current?.focus();
+    } catch {
+      setError('Could not remove your saved key. Please try again.');
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -122,13 +195,30 @@ export default function GarminConnectSync({
       <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Sync past days</h4>
       <p id={helpId} className="mt-1 text-xs text-gray-500">
         Bring in up to 90 past days from Garmin Connect when you ask. Create a Personal API key in
-        Garmin Connect on the web (Settings, Account, Personal API Token) and paste it here. The key
-        is used for this sync only and is not stored.
+        Garmin Connect on the web (Settings, Account, Personal API Token) and paste it here.{' '}
+        {canSave
+          ? 'If you choose to save it, it is kept on this site, encrypted, for your next sync. It is never shown again and you can remove it at any time.'
+          : 'The key is used for this sync only and is not stored.'}
       </p>
+      {saved && (
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <p className="text-sm text-gray-700">
+            Your key is saved. Sync uses it; paste a key only to replace it.
+          </p>
+          <button
+            type="button"
+            onClick={() => void removeKey()}
+            aria-disabled={busy || disabled}
+            className={`rounded-md border border-gray-300 bg-white px-3 py-1 text-xs font-medium text-gray-700 shadow-sm ${busy || disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-gray-50'}`}
+          >
+            {removing ? 'Removing...' : 'Remove saved key'}
+          </button>
+        </div>
+      )}
       <div className="mt-3 flex flex-wrap items-end gap-3">
         <div className="w-full sm:w-auto sm:min-w-[16rem] sm:flex-1">
           <label htmlFor={keyId} className="block text-xs font-medium text-gray-700">
-            Garmin Connect Personal API key
+            Garmin Connect Personal API key{saved ? ' (optional)' : ''}
           </label>
           <input
             ref={keyRef}
@@ -153,7 +243,7 @@ export default function GarminConnectSync({
             onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void sync(); } }}
             // Read-only, not disabled, while it runs: a disabled field drops
             // the keyboard focus it holds.
-            readOnly={syncing}
+            readOnly={busy}
             className="mt-1 w-full rounded-md border border-gray-300 px-3 py-2 text-sm [-webkit-text-security:disc] focus:outline-none focus:ring-2 focus:ring-portal-brand read-only:opacity-50"
           />
         </div>
@@ -184,7 +274,23 @@ export default function GarminConnectSync({
           {syncing ? 'Syncing...' : 'Sync'}
         </button>
       </div>
+      {canSave && (typed || !saved) && (
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            id={rememberId}
+            type="checkbox"
+            checked={remember}
+            onChange={e => setRemember(e.target.checked)}
+            disabled={busy}
+            className="h-4 w-4 rounded border-gray-300 text-portal-brand focus:ring-portal-brand"
+          />
+          <label htmlFor={rememberId} className="text-xs text-gray-700">
+            Save this key for next time
+          </label>
+        </div>
+      )}
       <div aria-live="polite">
+        {keyNotice && <p className="mt-2 text-sm text-gray-700">{keyNotice}</p>}
         {syncing && (
           <p className="mt-2 text-sm text-gray-600">Syncing with Garmin Connect. This can take a few seconds.</p>
         )}
