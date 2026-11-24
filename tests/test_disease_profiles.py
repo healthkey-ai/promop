@@ -322,12 +322,29 @@ def test_rows_left_by_a_removed_field_can_be_cleared_and_do_not_block_a_category
 
 
 @pytest.mark.parametrize('role,read,write', (
-    ('org_admin', 200, 200), ('analyst', 200, 200), ('doctor', 200, 403), ('patient', 403, 403)))
-def test_scope_by_name_follows_the_mapping_page_roles(role, read, write):
+    ('org_admin', 200, 200), ('analyst', 200, 403), ('doctor', 200, 403), ('patient', 403, 403)))
+def test_scope_by_name_is_read_by_the_mapping_page_roles_and_written_by_approvers(role, read, write):
     client = as_role(role)
     assert client.get(scope_url('stage')).status_code == read
     assert client.put(scope_url('stage'), {'diseases': ['MM']}, format='json').status_code == write
     assert diseases_of('stage') == (['MM'] if write == 200 else ['FL', 'MCL', 'MM'])
+
+
+def test_an_analyst_cannot_set_a_scope_through_a_mapping_either():
+    """Scope has no proposal stage, so it is not reachable around the approvers-only endpoint."""
+    analyst = as_role('analyst')
+    row = FieldConceptMapping.objects.create(field_name='hemoglobin_g_dl', provenance='curator')
+    response = analyst.patch(f'{MAPPINGS}{row.pk}/', {'diseases': ['MM'], 'notes': 'x'}, format='json')
+    assert response.status_code == 403
+    assert diseases_of('hemoglobin_g_dl') == []
+    row.refresh_from_db()
+    assert row.notes != 'x'
+    # A mapping edit that names no scope is still the analyst's to make.
+    assert analyst.patch(f'{MAPPINGS}{row.pk}/', {'notes': 'x'}, format='json').status_code == 200
+    assert diseases_of('hemoglobin_g_dl') == []
+    created = analyst.post(MAPPINGS, {'field_name': 'hematocrit_percent', 'diseases': ['CLL']}, format='json')
+    assert created.status_code == 403
+    assert diseases_of('hematocrit_percent') == []
 
 
 # ── The mapping API ───────────────────────────────────────────────────────
@@ -392,8 +409,8 @@ def test_a_new_mapping_may_carry_its_scope(staff):
 
 
 # A scope edit follows mapping write access: the analyst's, not the doctor's (#2416).
-@pytest.mark.parametrize('role,status', (('org_admin', 200), ('analyst', 200), ('doctor', 403)))
-def test_setting_a_scope_follows_mapping_write_access(role, status):
+@pytest.mark.parametrize('role,status', (('org_admin', 200), ('analyst', 403), ('doctor', 403)))
+def test_setting_a_scope_with_a_mapping_is_for_approvers(role, status):
     row = FieldConceptMapping.objects.create(field_name='hemoglobin_g_dl')
     response = as_role(role).patch(f'{MAPPINGS}{row.pk}/', {'diseases': ['MM']}, format='json')
     assert response.status_code == status

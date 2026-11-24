@@ -1144,6 +1144,8 @@ export default function FieldMappingPage() {
             diseases: fieldDiseases(selectedField),
             options: diseaseOptions,
             optionsIncomplete: categoriesState === "failed",
+            // Scope takes effect at once and has no proposal stage: approvers only.
+            readOnly: !canApprove,
           } : undefined}
           commonUnits={selectedField.unit_options}
           choices={selectedField.choices}

@@ -35009,8 +35009,9 @@ class AnalystRoleScopeTest(TestCase):
             'field_name': 'disease', 'display': 'Analyst choice', 'sort_order': 0,
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # Deleting an answer takes what an analyst may not change with it: approvers only.
         self.assertEqual(self.client.delete(f"/api/v1/field-choices/{resp.data['id']}/").status_code,
-                         status.HTTP_204_NO_CONTENT)
+                         status.HTTP_403_FORBIDDEN)
         # The upload is a write the analyst may make; an empty one is a 400, not a 403.
         resp = self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)

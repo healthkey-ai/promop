@@ -715,7 +715,7 @@ row removes that role. The helpers in `omop_core/services/access.py` and
 |---|---|
 | `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: writes and approves mappings, administers access, uploads |
 | `doctor` | patients, read and write (`can_access_patient`, `can_write_patient`, `get_visible_orgs`, `has_curation_access`), and **every mapping page read-only** (`has_mapping_read_access`, `_can_view_mappings`): the hub, Code Mapping, field mappings, therapy and disease-category reference, relevance signals, source systems |
-| `analyst` | every mapping page, **and writing them** (`has_mapping_write_access`, `_can_manage_mappings`): creating, editing, proposing and uploading code and field mappings, synonyms and choices, Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting, source-system facility review, rejecting relevance signals -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). The one exception is a public demo org (`allows_patient_signup`) the grant sits at: its sample patients are listed and CSV-exported to every grant there, whatever the role, a patient's included (#1392), but de-identified for a reader without curation access -- names, age and location withheld on the server as if each patient had opted in (`withhold_identifiers`, #2460) -- and the detail stays 404 as it does for a patient there; the UI shows such a reader no Name column and no row link. |
+| `analyst` | every mapping page, **and writing them** (`has_mapping_write_access`, `_can_manage_mappings`): creating, editing, proposing and uploading code and field mappings and synonyms, adding and reordering a field's answers and proposing their concepts, Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting, source-system facility review, rejecting relevance signals -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). The one exception is a public demo org (`allows_patient_signup`) the grant sits at: its sample patients are listed and CSV-exported to every grant there, whatever the role, a patient's included (#1392), but de-identified for a reader without curation access -- names, age and location withheld on the server as if each patient had opted in (`withhold_identifiers`, #2460) -- and the detail stays 404 as it does for a patient there; the UI shows such a reader no Name column and no row link. |
 | `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
 
 So a doctor sees every mapping but creates or changes one only when also
@@ -786,6 +786,16 @@ batched `can_access_patient`) and whose demographics they are shown. Neither
 adds a query per row. The rule covers these two fields only: the record
 detail's `user` block has long returned the linked account's `UserSerializer`
 data, roles included, to any reader of the record.
+
+A change that takes effect at once with no proposal to approve is an approval
+too, so it is org admins' and staff's (`_can_approve_mappings`, 403 for an
+analyst, #1225): a field's scope (`PUT field-mappings/<name>/diseases/`, and
+`diseases` sent with a field mapping), and an existing answer's label,
+spellings, scope, retired flag and codes, and deleting it (`PATCH`/`DELETE`/
+`codes` of `field-choices/<id>`). An analyst may still add an answer (without scope,
+spellings, codes or retirement), reorder answers and propose their concepts;
+the editors show the rest read-only to them. `tests/test_choice_approver_only.py`
+holds it.
 
 Adding a field to PatientRecord is an approval, not a mapping write: `POST
 /api/v1/custom-patient-fields/` creates the field with an approved mapping, so

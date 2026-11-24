@@ -1660,6 +1660,14 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
     )
 
     def validate_diseases(self, value):
+        # A scope takes effect at once and has no proposal stage, so it is
+        # for approvers, as ``PUT field-mappings/<name>/diseases/`` is.
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if request is not None and not (getattr(user, 'is_staff', False) or has_org_admin_access(user)):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied(
+                'Only org admins and staff can change which Disease Categories a field belongs to.')
         return _clean_field_diseases(value)
 
     def to_representation(self, instance):

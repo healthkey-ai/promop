@@ -26,6 +26,7 @@ export const ROLE_DESCRIPTIONS: RoleDescription[] = [
     can: [
       'Read and edit every patient of the organization, and upload patient data.',
       'Open every mapping page, create and change mappings, and approve them.',
+      'Add fields, and decide which Disease Categories a field or an answer belongs to; rename, retire, restore or delete answers and change their spellings and codes.',
       'Administer access: invite users, grant and revoke roles, manage trusts and organization settings.',
       'Hold admin authority at organizations that trust this one or its email domain (a grant at a public demo organization does not carry).',
     ],
@@ -53,13 +54,14 @@ export const ROLE_DESCRIPTIONS: RoleDescription[] = [
     label: 'Analyst',
     summary: 'Works on code and field mappings and proposes them; sees no individual patient data.',
     can: [
-      'Open every mapping page and write there: create, edit, propose and upload code and field mappings, synonyms, choices and custom fields; run Suggest; Lock, Done and priority; axis variants and LOINC axes.',
+      'Open every mapping page and write there: create, edit, propose and upload code and field mappings and synonyms; add and reorder a field\'s answers and propose their concepts; run Suggest; Lock, Done and priority; axis variants and LOINC axes.',
       'Use PRism analytics.',
       'Browse a public demo organization\'s sample patients, de-identified: no names, no demographics, no detail page.',
     ],
     cannot: [
       'See any patient\'s data: outside a public demo organization the patient list is empty, a record is not found, and clinical rows and source codes are out of reach.',
       'Approve a mapping; that stays with org admins and staff.',
+      'Add a field, or change which Disease Categories a field or an answer belongs to, or rename, retire, restore or delete an answer or change its spellings or codes: these take effect at once, so they stay with org admins and staff.',
       'Gain anything from an organization trust.',
     ],
   },

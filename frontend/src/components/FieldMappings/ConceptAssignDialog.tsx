@@ -72,6 +72,8 @@ interface Props {
     options: DiseaseCategoryOption[];
     /** The categories could not be loaded; `options` are those already in use. */
     optionsIncomplete?: boolean;
+    /** Shown, not editable: a scope takes effect at once, so it is for approvers. */
+    readOnly?: boolean;
   };
   /**
    * Create a field instead of mapping one (#721): the dialog also asks for
@@ -153,7 +155,7 @@ export function ConceptAssignDialog({
   storedUnit, storedOmopTable, fieldScope, create,
 }: Props) {
   const creating = create !== undefined;
-  const canEditScope = fieldScope !== undefined;
+  const canEditScope = fieldScope !== undefined && !fieldScope.readOnly;
   const initialDiseases = fieldScope?.diseases ?? NO_DISEASES;
   const initialScope: FieldScope = initialDiseases.length ? "disease" : "base";
   const isEditing = !!existingMappingId;
@@ -768,7 +770,7 @@ export function ConceptAssignDialog({
               options={fieldScope.options}
               optionsIncomplete={fieldScope.optionsIncomplete}
               error={scopeError}
-              disabled={saving}
+              disabled={saving || fieldScope.readOnly}
               onChange={(nextScope, nextDiseases) => {
                 setScope(nextScope);
                 setDiseases(nextDiseases);

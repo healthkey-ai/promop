@@ -27,6 +27,8 @@ interface Props {
   /** The categories a scope can name; without them the scope is shown but not edited. */
   diseaseOptions?: DiseaseCategoryOption[];
   optionsIncomplete?: boolean;
+  /** Org admins and staff change what is offered at once; a curator sees it. */
+  canEdit?: boolean;
   /** Called after any change, so the list is read again. */
   onChanged: () => Promise<void> | void;
 }
@@ -50,7 +52,7 @@ const sameSet = (a: string[], b: string[]) => [...a].sort().join("\n") === [...b
 
 export function AnswerDetailsPanel({
   choiceId, label, code, aliases = [], retired = false, diseases = [], contextKey = "",
-  diseaseOptions, optionsIncomplete = false, onChanged,
+  diseaseOptions, optionsIncomplete = false, canEdit = true, onChanged,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(label);
@@ -128,6 +130,8 @@ export function AnswerDetailsPanel({
         {aliases.length > 0 && <span>Also written: {aliases.join(", ")}</span>}
         {contextKey && <span>Context <span className="font-mono">{contextKey}</span></span>}
         <span>{diseases.length ? `Offered to: ${diseases.join(", ")}` : "Offered to every patient"}</span>
+        {canEdit && (
+          <>
         <button type="button" disabled={busy} onClick={editing ? () => setEditing(false) : open}
           aria-expanded={editing}
           aria-label={editing ? `Cancel editing ${label}` : `Edit details of ${label}`}
@@ -139,9 +143,11 @@ export function AnswerDetailsPanel({
           className="rounded px-1 py-0.5 text-gray-500 underline hover:text-gray-700 disabled:opacity-50">
           {retired ? "Restore" : "Retire"}
         </button>
+          </>
+        )}
       </div>
       {error && <div role="alert" className="mt-1 text-red-600">{error}</div>}
-      {editing && (
+      {canEdit && editing && (
         <div className="mt-1 space-y-1 rounded border border-gray-200 bg-white p-2">
           <label className="block">
             <span className="text-gray-500">Label</span>
