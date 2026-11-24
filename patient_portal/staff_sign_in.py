@@ -10,8 +10,9 @@ provider applies its own two-step verification; a provider marked
 Two kinds of staff account, kept apart on purpose:
 
 - **Role staff**: in a group named in ``STAFF_ROLES`` and *not* ``is_staff``.
-  They reach the admin through their role (``has_admin_access``) and see only
-  what its permissions open there. Everywhere else, the API included, they are
+  They reach the admin through their role, and only in a session a provider
+  signed in (``admin_site_access``), never by a password; there they see only
+  what the role's permissions open. Everywhere else, the API included, they are
   ordinary accounts with no patient data: across promop, ``is_staff`` means
   full access.
 - **Full staff**: ``is_staff`` (or superuser), as promop has always had them.
@@ -55,9 +56,11 @@ from django.views.decorators.http import require_GET
 logger = logging.getLogger(__name__)
 
 SESSION_KEY = 'staff_sign_in'
-# Set on the session of a provider sign-in: which provider. A staff session
-# without it began with a password (StaffPasswordSessionMiddleware).
+# Set on the session of a provider sign-in: which provider, and when it ends
+# (a timestamp; StaffSessionMiddleware signs the session out after it). A staff
+# session without them began with a password.
 PROVIDER_SESSION_KEY = 'staff_sign_in_provider'
+STAFF_UNTIL_KEY = 'staff_sign_in_until'
 TIMEOUT = 10  # seconds, for every call to the provider
 LEEWAY = 60  # seconds of clock difference allowed on the ID token
 ATTEMPT_SECONDS = 600  # from start to callback
@@ -97,6 +100,8 @@ class SignInRefused(Exception):
 def providers() -> dict[str, Provider]:
     found = {}
     for entry in getattr(settings, 'STAFF_SIGN_IN_PROVIDERS', []) or []:
+        if not isinstance(entry, dict):
+            continue  # the system check reports it
         provider = Provider(
             key=entry['key'], label=entry['label'], issuer=entry['issuer'].rstrip('/'),
             client_id=entry['client_id'], client_secret_env=entry['client_secret_env'],
@@ -119,8 +124,21 @@ def is_role_staff(user) -> bool:
 
 
 def has_admin_access(user) -> bool:
-    """The admin's own test (AdminSite.has_permission), widened to role staff."""
+    """Whether the account may use the admin at all: full staff, or role staff."""
     return bool(getattr(user, 'is_active', False) and (user.is_staff or is_role_staff(user)))
+
+
+def admin_site_access(request) -> bool:
+    """The admin's own test (AdminSite.has_permission), widened to role staff
+    in a session a provider signed in. A role account that also holds a
+    password (a superuser can add a role to a local account) gets no admin
+    from a password sign-in, where no provider asked for two-step."""
+    user = request.user
+    if not getattr(user, 'is_active', False):
+        return False
+    if user.is_staff:
+        return True
+    return bool(request.session.get(PROVIDER_SESSION_KEY)) and is_role_staff(user)
 
 
 def discovery(provider: Provider) -> dict:
@@ -133,6 +151,9 @@ def discovery(provider: Provider) -> dict:
         config = response.json()
         if config.get('issuer', '').rstrip('/') != provider.issuer:
             raise SignInRefused('The sign-in provider is not set up correctly.', 'issuer_mismatch')
+        for endpoint in ('authorization_endpoint', 'token_endpoint', 'jwks_uri'):
+            if not str(config.get(endpoint, '')).startswith('https://'):
+                raise SignInRefused('The sign-in provider is not set up correctly.', 'insecure_endpoint')
         cache.set(key, config, 3600)
     return config
 
@@ -214,6 +235,12 @@ def verified_claims(provider: Provider, code: str, *, verifier: str, nonce: str)
         raise SignInRefused(_COULD_NOT, 'invalid_token') from exc
     if not _same(str(claims.get('nonce', '')), nonce):
         raise SignInRefused(_COULD_NOT, 'nonce')
+    # OpenID Connect Core 3.1.3.7: with several audiences the token names who
+    # it was issued to, and that must be us; one that names anyone else is not.
+    azp = claims.get('azp')
+    if (isinstance(claims.get('aud'), list) and len(claims['aud']) > 1 and azp is None) or \
+            (azp is not None and azp != provider.client_id):
+        raise SignInRefused(_COULD_NOT, 'azp')
     for name, expected in provider.claims.items():
         if str(claims.get(name, '')) != str(expected):
             raise SignInRefused(
@@ -289,6 +316,9 @@ def identity_for(provider: Provider, claims: dict, invitation_id: int | None):
                 identity.save()
             elif not identity.is_active:
                 raise SignInRefused('This account has been switched off. Ask a superuser.', 'inactive')
+            elif invitation.invited_by_id == identity.pk:
+                # Nobody changes their own access by inviting themselves.
+                raise SignInRefused('An invitation you sent yourself cannot change your own access.', 'self_invitation')
             _give_access(identity, invitation)
             invitation.accepted_at = timezone.now()
             invitation.accepted_identity = identity
@@ -316,13 +346,17 @@ def _refused(request, message: str, status: int = 403):
     return render(request, 'admin/staff_sign_in_refused.html', {'message': message}, status=status)
 
 
-def _on_own_host(request):
+def _on_own_host(request, path: str):
     """A sign-in starts on the host the provider returns to, or its session
-    would be on another host's cookie: send it there first."""
+    would be on another host's cookie: send it to ``path`` there first. The
+    target is checked to be on APP_BASE_URL's own host before redirecting."""
     base = urlsplit(settings.APP_BASE_URL)
-    if base.netloc and request.get_host() != base.netloc:
-        return redirect(f'{settings.APP_BASE_URL}{request.get_full_path()}')
-    return None
+    if not base.netloc or request.get_host() == base.netloc:
+        return None
+    target = f'{settings.APP_BASE_URL}{path}'
+    if not url_has_allowed_host_and_scheme(target, allowed_hosts={base.netloc}, require_https=base.scheme == 'https'):
+        return _refused(request, 'This sign-in is not available.', status=400)
+    return redirect(target)
 
 
 def _start(request, provider: Provider, **kwargs):
@@ -339,7 +373,9 @@ def start(request, key: str):
     provider = providers().get(key)
     if provider is None:
         return _refused(request, 'This sign-in is not available.', status=404)
-    return _on_own_host(request) or _start(request, provider, next_url=request.GET.get('next', ''))
+    next_url = request.GET.get('next', '')
+    here = reverse('staff-sign-in', args=[provider.key]) + (f'?{urlencode({"next": next_url})}' if next_url else '')
+    return _on_own_host(request, here) or _start(request, provider, next_url=next_url)
 
 
 @require_GET
@@ -347,10 +383,11 @@ def accept_invitation(request, token: str):
     """GET /admin/sign-in/invitation/<token>/: a staff invitation's link."""
     from .models import StaffInvitation
 
-    elsewhere = _on_own_host(request)
-    if elsewhere:
-        return elsewhere
     invitation = StaffInvitation.objects.filter(token_hash=hash_token(token)).first()
+    if invitation is not None:
+        elsewhere = _on_own_host(request, reverse('staff-sign-in-invitation', args=[token]))
+        if elsewhere:
+            return elsewhere
     provider = providers().get(invitation.provider) if invitation else None
     if invitation is None or not invitation.is_open or provider is None:
         return _refused(request, 'This invitation has expired or has been used. Ask for a new one.', status=404)
@@ -382,10 +419,13 @@ def callback(request):
         logger.exception('staff sign-in: %s could not be completed', provider.key)
         return _refused(request, f'{provider.label} could not be reached. Please try again.', status=502)
     login(request, identity, backend='patient_portal.backends.EmailBackend')
-    # A working day, not Django's two weeks: someone whose provider account is
-    # switched off is out by the end of it.
-    request.session.set_expiry(int(settings.STAFF_SESSION_HOURS * 3600))
+    # A working day from now, not Django's two weeks: someone whose provider
+    # account is switched off is out by the end of it. The deadline is kept
+    # in the session too, because the cookie's expiry moves with every write.
+    seconds = int(settings.STAFF_SESSION_HOURS * 3600)
+    request.session.set_expiry(seconds)
     request.session[PROVIDER_SESSION_KEY] = provider.key
+    request.session[STAFF_UNTIL_KEY] = timezone.now().timestamp() + seconds
     _audit(request, identity, provider, 'signed_in', mfa='mfa' in (claims.get('amr') or []))
     next_url = attempt.get('next') or reverse('admin:index')
     if not url_has_allowed_host_and_scheme(next_url, allowed_hosts={request.get_host()},

@@ -1,6 +1,7 @@
 from django import forms
 from django.contrib import admin
-from django.contrib.auth.admin import UserAdmin
+from django.contrib.auth.admin import GroupAdmin, UserAdmin
+from django.contrib.auth.models import Group
 from .models import (
     Identity, PatientMessage, PatientConsent, PatientInvitation, StaffInvitation, AuditEvent, BreakGlassGrant,
     ConsentPurpose, ConsentText, LegalDocument, LegalDocumentVersion, ConsentEvent,
@@ -48,11 +49,23 @@ class IdentityAdmin(UserAdmin):
     def has_superuser_permission(self, request):
         return _is_superuser(request)
 
+    # UserAdmin would let a role holding add_identity or delete_identity make
+    # accounts or delete every superuser: accounts come from invitations and
+    # sign-ups, and go by closing or erasure.
+    def has_add_permission(self, request):
+        return _is_superuser(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return _is_superuser(request)
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related('groups')
+
     @admin.display(description='Staff role')
     def staff_role(self, obj):
         from django.conf import settings
 
-        return ', '.join(obj.groups.filter(name__in=settings.STAFF_ROLES).values_list('name', flat=True))
+        return ', '.join(g.name for g in obj.groups.all() if g.name in settings.STAFF_ROLES)
 
     def get_readonly_fields(self, request, obj=None):
         if _is_superuser(request):
@@ -125,6 +138,7 @@ class IdentityAdmin(UserAdmin):
         for identity in self._members_only(request, queryset):
             try:
                 send_password_reset_email(identity, by_administrator=True)
+                self.log_change(request, identity, 'Emailed a password reset link')
                 sent += 1
             except PasswordResetEmailError:
                 failed.append(identity.email or str(identity))
@@ -137,7 +151,12 @@ class IdentityAdmin(UserAdmin):
         """Force a password change (PHR-S FM TI.1.1#09): set the force-change flag so
         the account is refused every /api/ request except change-password until it sets
         a new password. Enforced by ForcePasswordChangeMiddleware."""
-        updated = self._members_only(request, queryset).update(must_change_password=True)
+        updated = 0
+        for identity in self._members_only(request, queryset):
+            identity.must_change_password = True
+            identity.save(update_fields=['must_change_password'])
+            self.log_change(request, identity, 'Required a password change at next login')
+            updated += 1
         self.message_user(request, f'Flagged {updated} account(s) to change password at next login.')
 
     @admin.action(description="Withdraw a permission on the member's behalf", permissions=['support'])
@@ -172,6 +191,7 @@ class IdentityAdmin(UserAdmin):
                 return None
             record_consent(account.person, purpose, ConsentEvent.WITHDRAWN,
                            source=ConsentEvent.STAFF, recorded_by=request.user)
+            self.log_change(request, identity, f'Withdrew {purpose.key} on the member\'s behalf')
             self.message_user(request, f'Withdrew "{purpose.key}" for {identity.email}.')
             return None
         for purpose in granted:  # named as the member saw it
@@ -185,17 +205,19 @@ class IdentityAdmin(UserAdmin):
 
     @admin.action(description='Remove staff access', permissions=['manage_staff'])
     def remove_staff_access(self, request, queryset):
-        """No longer staff: no role, no permissions, no admin. A staff manager
-        removes role staff; full staff only a superuser. Never a superuser, and
-        never the person doing it."""
+        """No longer staff: no staff role and no admin. A staff manager removes
+        role staff; full staff only a superuser. Never a superuser, and never
+        the person doing it. Groups and permissions a superuser gave outside
+        the staff roles stay, as a role change keeps them."""
+        from django.conf import settings
+
         from .staff_sign_in import is_role_staff
 
         removed = 0
         for identity in queryset.filter(is_superuser=False).exclude(pk=request.user.pk):
             if not (is_role_staff(identity) or (identity.is_staff and _is_superuser(request))):
                 continue
-            identity.groups.clear()
-            identity.user_permissions.clear()
+            identity.groups.remove(*identity.groups.filter(name__in=settings.STAFF_ROLES))
             if identity.is_staff:
                 identity.is_staff = False
                 identity.save(update_fields=['is_staff'])
@@ -236,12 +258,20 @@ class PatientInvitationAdmin(admin.ModelAdmin):
     readonly_fields = ['token', 'created_at', 'accepted_at']
     actions = ['resend']
 
-    def get_exclude(self, request, obj=None):
-        # The token is the whole credential for claiming the member's account.
-        return None if _is_superuser(request) else ['token']
+    # The token is the whole credential for claiming the member's account:
+    # a superuser's only, in the form and in the read-only view alike.
+    def get_fields(self, request, obj=None):
+        fields = super().get_fields(request, obj)
+        return fields if _is_superuser(request) else [f for f in fields if f != 'token']
 
     def get_readonly_fields(self, request, obj=None):
-        return self.readonly_fields if _is_superuser(request) else ['created_at', 'accepted_at']
+        fields = super().get_readonly_fields(request, obj)
+        return fields if _is_superuser(request) else [f for f in fields if f != 'token']
+
+    def has_change_permission(self, request, obj=None):
+        # Support sees invitations and sends them again; changing one (its
+        # address, its person) would let them point it anywhere.
+        return _is_superuser(request)
 
     def has_support_permission(self, request):
         return request.user.has_perm('patient_portal.support_member_accounts')
@@ -257,6 +287,12 @@ class PatientInvitationAdmin(admin.ModelAdmin):
 
         from .api.patient_invitations import _invitation_refusal, _issue_invitation
 
+        if queryset.count() != 1:
+            # One at a time: each re-derives the patient's record, which can
+            # take many seconds, and a timeout mid-way would leave links
+            # replaced without their emails.
+            self.message_user(request, 'Choose one invitation.', level=messages.WARNING)
+            return
         sent, refused, failed = 0, [], []
         for invitation in queryset.filter(accepted_at__isnull=True, cancelled_at__isnull=True).select_related('person'):
             person = invitation.person
@@ -293,13 +329,14 @@ class StaffInvitationForm(forms.ModelForm):
         model = StaffInvitation
         fields = ['email', 'provider', 'role']
 
-    def __init__(self, *args, inviter_is_superuser=False, **kwargs):
+    def __init__(self, *args, inviter_is_superuser=False, inviter_email='', **kwargs):
         from django.conf import settings
         from django.contrib.auth.models import Group
 
         from .staff_sign_in import providers
 
         super().__init__(*args, **kwargs)
+        self.inviter_is_superuser, self.inviter_email = inviter_is_superuser, (inviter_email or '').lower()
         self.fields['provider'] = forms.ChoiceField(
             choices=[(p.key, p.label) for p in providers().values()], label='Signs in with')
         existing = set(Group.objects.filter(name__in=settings.STAFF_ROLES).values_list('name', flat=True))
@@ -309,7 +346,10 @@ class StaffInvitationForm(forms.ModelForm):
         self.fields['role'] = forms.ChoiceField(choices=choices)
 
     def clean_email(self):
-        return self.cleaned_data['email'].strip().lower()
+        email = self.cleaned_data['email'].strip().lower()
+        if email == self.inviter_email and not self.inviter_is_superuser:
+            raise forms.ValidationError('You cannot invite yourself: ask another platform administrator.')
+        return email
 
     def save(self, commit=True):
         invitation = super().save(commit=False)
@@ -373,7 +413,8 @@ class StaffInvitationAdmin(admin.ModelAdmin):
 
         class InviterForm(form):
             def __init__(self, *args, **inner):
-                super().__init__(*args, inviter_is_superuser=_is_superuser(request), **inner)
+                super().__init__(*args, inviter_is_superuser=_is_superuser(request),
+                                 inviter_email=request.user.email, **inner)
 
         return InviterForm
 
@@ -648,12 +689,37 @@ admin.site.login_template = 'admin/staff_login.html'
 
 
 def _admin_has_permission(request):
-    """AdminSite.has_permission, widened to role staff (staff_sign_in): they
-    reach the admin through their role without being ``is_staff``, which
-    across promop's API means full access."""
-    from .staff_sign_in import has_admin_access
+    """AdminSite.has_permission, widened to role staff signed in by a provider
+    (staff_sign_in.admin_site_access): they reach the admin through their role
+    without being ``is_staff``, which across promop's API means full access."""
+    from .staff_sign_in import admin_site_access
 
-    return has_admin_access(request.user)
+    return admin_site_access(request)
 
 
 admin.site.has_permission = _admin_has_permission
+
+
+class _SuperuserGroupAdmin(GroupAdmin):
+    """Groups are the staff roles: only a superuser changes what one holds, so
+    no role given ``auth.change_group`` can add permissions to itself."""
+
+    def has_module_permission(self, request):
+        return _is_superuser(request)
+
+    def has_view_permission(self, request, obj=None):
+        return _is_superuser(request)
+
+    def has_add_permission(self, request):
+        return _is_superuser(request)
+
+    def has_change_permission(self, request, obj=None):
+        return _is_superuser(request)
+
+    def has_delete_permission(self, request, obj=None):
+        return _is_superuser(request)
+
+
+if admin.site.is_registered(Group):
+    admin.site.unregister(Group)
+admin.site.register(Group, _SuperuserGroupAdmin)

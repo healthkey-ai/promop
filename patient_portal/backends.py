@@ -14,7 +14,9 @@ class EmailBackend(ModelBackend):
             return None
         try:
             identity = Identity.objects.get(email__iexact=username, issuer="urn:local")
-        except Identity.DoesNotExist:
+        except (Identity.DoesNotExist, Identity.MultipleObjectsReturned):
+            # Two local accounts on one address cannot be told apart by it:
+            # nobody signs in by password there (as password_reset does).
             # Equalize timing / resist account enumeration for unknown emails.
             Identity().set_password(password)
             return None

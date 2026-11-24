@@ -23,6 +23,8 @@ from patient_portal.models import ConsentEvent, ConsentPurpose, ConsentText, Ide
 
 pytestmark = pytest.mark.django_db
 
+REAL_DISCOVERY = staff_sign_in.discovery  # the fixture below replaces it
+
 ISSUER = 'https://login.example.test/tenant-1/v2.0'
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 CONFIG = {
@@ -215,6 +217,14 @@ def test_the_sign_in_page_offers_the_provider_and_hides_passwords_when_they_are_
     assert b'Sign in with Work account' in page and b'id_password' not in page
 
 
+def provider_session(client, provider='work'):
+    """Mark a test client's session as a provider sign-in, as the callback does."""
+    session = client.session
+    session[staff_sign_in.PROVIDER_SESSION_KEY] = provider
+    session[staff_sign_in.STAFF_UNTIL_KEY] = time.time() + 3600
+    session.save()
+
+
 def staff_client(*roles, email='staffer@example.test', full=False):
     identity = Identity.objects.create_user(email=email, password=None)
     identity.is_staff = full
@@ -222,6 +232,7 @@ def staff_client(*roles, email='staffer@example.test', full=False):
     identity.groups.add(*Group.objects.filter(name__in=roles))
     client = Client()
     client.force_login(identity, backend='patient_portal.backends.EmailBackend')
+    provider_session(client)
     return client, identity
 
 
@@ -250,8 +261,8 @@ def test_a_staff_manager_sets_another_staff_members_role_from_the_staff_roles_on
     assert set(other.groups.values_list('name', flat=True)) == {'Staff manager', 'Not a staff role'}
 
     client.post('/admin/patient_portal/identity/', {'action': 'remove_staff_access', '_selected_action': [other.pk]})
-    assert not other.groups.exists()
-    assert Client().get('/admin/').status_code == 302
+    # the staff role goes; the group a superuser gave stays
+    assert list(other.groups.values_list('name', flat=True)) == ['Not a staff role']
 
 
 def test_a_staff_manager_cannot_remove_full_staff_or_change_their_role():
@@ -391,7 +402,11 @@ def test_password_sessions_of_staff_end_when_staff_passwords_are_switched_off(se
     _, token = invite()
     by_provider = Client()
     sign_in(by_provider, fake, f'/admin/sign-in/invitation/{token}/')
-    by_password, _ = staff_client(email='old@example.test', full=True)
+    old = Identity.objects.create_user(email='old@example.test', password=None)
+    old.is_staff = True
+    old.save()
+    by_password = Client()
+    by_password.force_login(old, backend='patient_portal.backends.EmailBackend')  # no provider marker
     member = Identity.objects.create_user(email='member@example.test', password='Member-passw0rd-long')
     member_client = Client()
     member_client.force_login(member, backend='patient_portal.backends.EmailBackend')
@@ -463,7 +478,7 @@ def test_unreachable_provider_keys_or_an_odd_state_are_refusals_not_errors(fake,
 def test_a_sign_in_starts_on_the_host_the_provider_returns_to(settings):
     settings.ALLOWED_HOSTS = ['*']
     response = Client(HTTP_HOST='another-name.example').get('/admin/sign-in/work/?next=/admin/')
-    assert response.status_code == 302 and response['Location'] == 'http://testserver/admin/sign-in/work/?next=/admin/'
+    assert response.status_code == 302 and response['Location'] == 'http://testserver/admin/sign-in/work/?next=%2Fadmin%2F'
 
 
 def test_invitation_links_are_redacted_from_logs_and_the_audit_trail():
@@ -492,3 +507,248 @@ def test_the_settings_are_checked(settings):
     settings.STAFF_SIGN_IN_PROVIDERS = []
     settings.STAFF_PASSWORD_SIGN_IN = False
     assert {e.id for e in staff_sign_in_check(None)} == {'patient_portal.E013'}
+
+
+def superuser_client():
+    root = Identity.objects.create_superuser(email='root@example.test', password='Root-passw0rd-long')
+    client = Client()
+    client.force_login(root, backend='patient_portal.backends.EmailBackend')
+    return client, root
+
+
+def test_a_local_staff_account_invited_as_a_member_is_refused_as_before():
+    from omop_core.models import Person
+    from patient_portal.models import PatientInvitation
+
+    staff = Identity.objects.create_user(email='both@example.test', password='Staff-passw0rd-long')
+    staff.is_staff = True
+    staff.save()
+    person = Person.objects.create(person_id=990010, year_of_birth=1970, gender_source_value='female',
+                                   race_source_value='unknown', ethnicity_source_value='unknown')
+    invitation = PatientInvitation.objects.create(person=person, email='both@example.test', token='d' * 64,
+                                                  expires_at=timezone.now() + timezone.timedelta(days=1))
+
+    response = Client().post('/api/v1/patient-invitations/accept/',
+                             {'token': invitation.token, 'password': 'Member-passw0rd-long'},
+                             content_type='application/json')
+
+    assert response.status_code == 400 and 'already exists' in response.json()['error']
+    assert Identity.objects.filter(email__iexact='both@example.test', issuer='urn:local').count() == 1
+
+
+def test_two_local_accounts_on_one_address_sign_neither_in_rather_than_fail():
+    for _ in range(2):
+        Identity.objects.create_user(email='twice@example.test', password='Twice-passw0rd-long')
+
+    assert EmailBackend().authenticate(None, username='twice@example.test', password='Twice-passw0rd-long') is None
+
+
+def test_no_role_reaches_groups_or_adds_or_deletes_accounts():
+    manager = Group.objects.get(name='Staff manager')
+    manager.permissions.add(*Permission.objects.filter(
+        codename__in=['change_group', 'view_group', 'add_identity', 'delete_identity']))
+    client, _ = staff_client('Staff manager')
+    _, root = superuser_client()
+
+    assert client.get('/admin/auth/group/').status_code == 403
+    assert client.get(f'/admin/auth/group/{manager.pk}/change/').status_code == 403
+    assert client.get('/admin/patient_portal/identity/add/').status_code == 403
+    assert client.get(f'/admin/patient_portal/identity/{root.pk}/delete/').status_code == 403
+    client.post('/admin/patient_portal/identity/', {'action': 'delete_selected', '_selected_action': [root.pk],
+                                                    'post': 'yes'})
+    assert Identity.objects.filter(pk=root.pk).exists()
+
+
+def test_nobody_changes_their_own_role_by_inviting_themselves(fake):
+    _, token = invite(role='Staff manager')
+    sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+    me = Identity.objects.get(sub='sub-1')
+    client = Client()
+    client.force_login(me, backend='patient_portal.backends.EmailBackend')
+    provider_session(client)
+
+    client.post('/admin/patient_portal/staffinvitation/add/', {
+        'email': 'alex@flf.example', 'provider': 'work', 'role': 'Member support'})
+    assert not StaffInvitation.objects.filter(invited_by=me).exists()  # refused at the form
+
+    sneaked, token = invite(role='Member support')
+    sneaked.invited_by = me
+    sneaked.save()
+    response, _ = sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+    assert response.status_code == 403
+    assert list(me.groups.values_list('name', flat=True)) == ['Staff manager']
+
+
+def test_role_staff_get_no_admin_from_a_password_sign_in():
+    identity = Identity.objects.create_user(email='role@example.test', password='Role-passw0rd-long')
+    identity.groups.add(Group.objects.get(name='Member support'))
+    client = Client()
+    client.force_login(identity, backend='patient_portal.backends.EmailBackend')
+
+    assert client.get('/admin/').status_code == 302
+    provider_session(client)
+    assert client.get('/admin/').status_code == 200
+
+
+def test_a_provider_sign_in_ends_at_its_deadline():
+    client, _ = staff_client('Member support')
+    assert client.get('/admin/').status_code == 200
+
+    session = client.session
+    session[staff_sign_in.STAFF_UNTIL_KEY] = time.time() - 1
+    session.save()
+
+    assert client.get('/admin/').status_code == 302
+    assert '_auth_user_id' not in client.session
+
+
+def test_member_support_only_views_patient_invitations_and_resends_one_at_a_time():
+    from omop_core.models import Person
+    from patient_portal.models import PatientInvitation
+
+    person = Person.objects.create(person_id=990011, year_of_birth=1970, gender_source_value='female',
+                                   race_source_value='unknown', ethnicity_source_value='unknown',
+                                   email='m@example.test')
+    soon = timezone.now() + timezone.timedelta(days=1)
+    other = Person.objects.create(person_id=990012, year_of_birth=1970, gender_source_value='female',
+                                  race_source_value='unknown', ethnicity_source_value='unknown', email='n@example.test')
+    first = PatientInvitation.objects.create(person=person, email='m@example.test', token='e' * 64, expires_at=soon)
+    second = PatientInvitation.objects.create(person=other, email='n@example.test', token='f' * 64, expires_at=soon)
+    client, me = staff_client('Member support')
+
+    client.post(f'/admin/patient_portal/patientinvitation/{first.pk}/change/', {'email': me.email})
+    first.refresh_from_db()
+    assert first.email == 'm@example.test'
+
+    client.post('/admin/patient_portal/patientinvitation/', {
+        'action': 'resend', '_selected_action': [first.pk, second.pk]})
+    assert len(mail.outbox) == 0
+
+
+def test_support_actions_are_in_the_admin_history():
+    from django.contrib.admin.models import LogEntry
+
+    client, me = staff_client('Member support')
+    member = Identity.objects.create_user(email='member@example.test', password='Member-passw0rd-long')
+
+    client.post('/admin/patient_portal/identity/', {
+        'action': 'require_password_change', '_selected_action': [member.pk]})
+    client.post('/admin/patient_portal/identity/', {'action': 'reset_password', '_selected_action': [member.pk]})
+
+    messages = set(LogEntry.objects.filter(user=me, object_id=str(member.pk)).values_list('change_message', flat=True))
+    assert messages == {'Required a password change at next login', 'Emailed a password reset link'}
+
+
+def test_a_superuser_removes_full_staff_and_cancels_an_invitation():
+    client, _ = superuser_client()
+    _, full = staff_client(email='full@example.test', full=True)
+    invitation, _ = invite()
+
+    client.post('/admin/patient_portal/identity/', {'action': 'remove_staff_access', '_selected_action': [full.pk]})
+    client.post('/admin/patient_portal/staffinvitation/', {'action': 'cancel', '_selected_action': [invitation.pk]})
+
+    full.refresh_from_db()
+    invitation.refresh_from_db()
+    assert not full.is_staff and invitation.cancelled_at is not None and not invitation.is_open
+
+
+def test_a_cancelled_sign_in_and_an_unreachable_provider_are_refusals(fake, monkeypatch):
+    from patient_portal.models import AuditEvent
+
+    client = Client()
+    started = client.get('/admin/sign-in/work/')
+    state = parse_qs(urlparse(started['Location']).query)['state'][0]
+    response = client.get('/admin/sign-in/callback/', {'state': state, 'error': 'access_denied'})
+    assert response.status_code == 400
+    assert AuditEvent.objects.filter(detail__staff_sign_in='cancelled').exists()
+
+    def unreachable(provider):
+        raise staff_sign_in.requests.ConnectionError('down')
+
+    monkeypatch.setattr(staff_sign_in, 'discovery', unreachable)
+    assert Client().get('/admin/sign-in/work/').status_code == 502
+
+
+def test_discovery_must_name_its_issuer_and_https_endpoints(monkeypatch):
+    from django.core.cache import cache
+
+    provider = staff_sign_in.providers()['work']
+
+    def answer(config, status=200):
+        def get(url, timeout):
+            return SimpleNamespace(status_code=status, json=lambda: config,
+                                   raise_for_status=lambda: None if status == 200 else (_ for _ in ()).throw(
+                                       staff_sign_in.requests.HTTPError(str(status))))
+        monkeypatch.setattr(staff_sign_in.requests, 'get', get)
+        cache.clear()
+
+    answer(CONFIG)
+    assert REAL_DISCOVERY(provider)['token_endpoint'] == CONFIG['token_endpoint']
+    for bad in ({**CONFIG, 'issuer': 'https://elsewhere.example.test'}, {**CONFIG, 'jwks_uri': 'http://keys.example.test'}):
+        answer(bad)
+        with pytest.raises(staff_sign_in.SignInRefused):
+            REAL_DISCOVERY(provider)
+    answer(CONFIG, status=500)
+    with pytest.raises(staff_sign_in.requests.HTTPError):
+        REAL_DISCOVERY(provider)
+
+
+@pytest.mark.parametrize('claims', [
+    {'aud': ['client-1', 'another-client']},  # several audiences and no azp
+    {'azp': 'another-client'},
+])
+def test_a_token_for_another_party_is_refused(fake, claims):
+    _, token = invite()
+    fake.claims = claims
+
+    response, _ = sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+
+    assert response.status_code == 403 and not Identity.objects.filter(sub='sub-1').exists()
+
+
+def test_a_verified_email_matches_an_invitation(settings, fake):
+    settings.STAFF_SIGN_IN_PROVIDERS[0]['address_claim'] = 'email'
+    _, token = invite()
+    fake.claims = {'email': 'Alex@FLF.example', 'email_verified': True, 'preferred_username': None}
+
+    response, _ = sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+
+    assert response.status_code == 302 and Identity.objects.filter(sub='sub-1').exists()
+
+
+def test_a_switched_off_account_and_a_concurrent_first_sign_in_are_refusals(fake, monkeypatch):
+    _, token = invite()
+    sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+    identity = Identity.objects.get(sub='sub-1')
+    identity.is_active = False
+    identity.save()
+    _, token = invite(role='Staff manager')
+    response, _ = sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+    assert response.status_code == 403 and b'switched off' in response.content
+
+    from django.db import IntegrityError
+
+    _, token = invite(email='new@flf.example')
+    fake.claims = {'sub': 'sub-2', 'preferred_username': 'new@flf.example'}
+    real_save = Identity.save
+
+    def save(self, *args, **kwargs):
+        if self.sub == 'sub-2' and self.pk is None:
+            raise IntegrityError('uq_identity_issuer_sub')
+        return real_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(Identity, 'save', save)
+    response, _ = sign_in(Client(), fake, f'/admin/sign-in/invitation/{token}/')
+    assert response.status_code == 403 and b'could not be completed' in response.content
+
+
+def test_settings_that_could_not_work_are_stopped(settings, monkeypatch):
+    from patient_portal.checks import staff_sign_in_check
+
+    monkeypatch.delenv('TEST_STAFF_SECRET')
+    settings.APP_BASE_URL = 'http://movement.example'
+    ids = {e.id for e in staff_sign_in_check(None)}
+    assert {'patient_portal.E014', 'patient_portal.E015'} <= ids
+
+    settings.STAFF_SIGN_IN_PROVIDERS = ['not an object']
+    assert 'patient_portal.E016' in {e.id for e in staff_sign_in_check(None)}

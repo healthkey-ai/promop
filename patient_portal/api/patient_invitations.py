@@ -318,12 +318,17 @@ def _find_local_or_any_identity(email):
     """
     from django.conf import settings
 
-    # Never a staff account: a staff member invited as a member gets a member
-    # account of their own (their staff account has no usable password, and
-    # must not gain one or a patient record).
+    # A provider-made staff account is never claimed: it has no usable
+    # password and must not gain one or a patient record, so its holder gets a
+    # member account of their own. A local staff account still counts here, so
+    # the "an account already exists" refusal applies to it as before: a second
+    # local account on the same address would break password sign-in for both.
+    from django.db.models import Q
+
+    staff = Q(is_staff=True) | Q(is_superuser=True) | Q(groups__name__in=settings.STAFF_ROLES)
     identities = list(
-        Identity.objects.filter(email__iexact=email, is_staff=False, is_superuser=False)
-        .exclude(groups__name__in=settings.STAFF_ROLES).distinct().order_by('id')
+        Identity.objects.filter(email__iexact=email).exclude(staff & ~Q(issuer='urn:local'))
+        .distinct().order_by('id')
     )
     return (
         next((i for i in identities if i.issuer == 'urn:local' and i.has_usable_password()), None)

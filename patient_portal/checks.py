@@ -267,9 +267,15 @@ def record_mappings_check(app_configs, **kwargs):
 @register(Tags.security)
 def staff_sign_in_check(app_configs, **kwargs):
     """STAFF_SIGN_IN_PROVIDERS must be complete and safe (docs/staff-sign-in.md)."""
+    import os
+    from urllib.parse import urlsplit
+
     errors = []
     keys = set()
     for i, entry in enumerate(getattr(settings, 'STAFF_SIGN_IN_PROVIDERS', []) or []):
+        if not isinstance(entry, dict):
+            errors.append(Error(f'STAFF_SIGN_IN_PROVIDERS[{i}] must be an object.', id='patient_portal.E016'))
+            continue
         missing = [f for f in ('key', 'label', 'issuer', 'client_id', 'client_secret_env') if not entry.get(f)]
         if missing:
             errors.append(Error(f'STAFF_SIGN_IN_PROVIDERS[{i}] needs {", ".join(missing)}.',
@@ -281,11 +287,20 @@ def staff_sign_in_check(app_configs, **kwargs):
         if not entry['issuer'].startswith('https://'):
             errors.append(Error(f'STAFF_SIGN_IN_PROVIDERS "{entry["key"]}": the issuer must be https.',
                                 id='patient_portal.E012'))
+        if not os.environ.get(entry['client_secret_env']):
+            # The token endpoint would answer 401 and every staff sign-in fail.
+            errors.append(Error(
+                f'STAFF_SIGN_IN_PROVIDERS "{entry["key"]}": {entry["client_secret_env"]} (its client secret) is not set.',
+                id='patient_portal.E014'))
         if not entry.get('claims'):
             errors.append(Warning(
                 f'STAFF_SIGN_IN_PROVIDERS "{entry["key"]}" pins no organisation ("claims"): any account '
                 'of the provider can try to sign in, and only an invitation stops it.',
                 id='patient_portal.W010'))
+    base = urlsplit(getattr(settings, 'APP_BASE_URL', ''))
+    if keys and base.scheme != 'https' and base.hostname not in ('localhost', '127.0.0.1'):
+        errors.append(Error('APP_BASE_URL must be https where staff sign in through a provider: it is the '
+                            'address the provider returns them to.', id='patient_portal.E015'))
     if not getattr(settings, 'STAFF_PASSWORD_SIGN_IN', True) and not keys:
         errors.append(Error('STAFF_PASSWORD_SIGN_IN is off and no STAFF_SIGN_IN_PROVIDERS are set: '
                             'no staff member could sign in.', id='patient_portal.E013'))

@@ -182,9 +182,9 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
     'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
-    # Signs out a staff session that began with a password, once staff
-    # passwords are off (STAFF_PASSWORD_SIGN_IN; docs/staff-sign-in.md).
-    'patient_portal.api.middleware.StaffPasswordSessionMiddleware',
+    # Ends a provider sign-in at its deadline, and a staff session that began
+    # with a password once staff passwords are off (docs/staff-sign-in.md).
+    'patient_portal.api.middleware.StaffSessionMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
 
@@ -314,24 +314,6 @@ SUGGEST_SEMANTIC_TIMEOUT_MS = max(1, int(os.environ.get('SUGGEST_SEMANTIC_TIMEOU
 
 # How long a curator's edit lock on a code mapping stays active (minutes).
 MAPPING_LOCK_TIMEOUT_MINUTES = max(1, int(os.environ.get('MAPPING_LOCK_TIMEOUT_MINUTES', '15')))
-
-# Staff sign-in through OpenID Connect providers (docs/staff-sign-in.md), as
-# JSON: a list of {"key", "label", "issuer", "client_id", "client_secret_env",
-# "claims", "require_mfa"}. "claims" are values the ID token must carry, which
-# pin the organisation (Microsoft: {"tid": "<tenant id>"}; Google: {"hd":
-# "<domain>"}); "require_mfa" refuses a sign-in whose token does not say the
-# provider did two-step verification. Empty: no provider sign-in.
-STAFF_SIGN_IN_PROVIDERS = json.loads(os.environ.get('STAFF_SIGN_IN_PROVIDERS', '') or '[]')
-# False: staff and superuser accounts cannot sign in with a password at all,
-# only through a provider above. Members are not affected.
-STAFF_PASSWORD_SIGN_IN = _env_bool('STAFF_PASSWORD_SIGN_IN', True)
-# The groups a staff invitation may give, and a staff manager may set: the
-# deployment's staff roles. Comma-separated names of existing groups.
-STAFF_ROLES = [r.strip() for r in os.environ.get('STAFF_ROLES', '').split(',') if r.strip()]
-STAFF_INVITATION_DAYS = max(1, int(os.environ.get('STAFF_INVITATION_DAYS', '7')))
-# How long a provider sign-in lasts, in hours: a working day by default, so
-# someone whose provider account is switched off is out by the end of it.
-STAFF_SESSION_HOURS = max(1, float(os.environ.get('STAFF_SESSION_HOURS', '8')))
 
 AUTHENTICATION_BACKENDS = [
     "patient_portal.backends.EmailBackend",
@@ -580,6 +562,28 @@ def _json_env(name, default, expected, example):
 
 PHR_SIGNUP_COUNTRIES = _json_env("PHR_SIGNUP_COUNTRIES", None, list, '["GB","IE","US"]')
 PHR_SIGNUP_MINIMUM_AGES = _json_env("PHR_SIGNUP_MINIMUM_AGES", {}, dict, '{"CA": 19}')
+
+# Staff sign-in through OpenID Connect providers (docs/staff-sign-in.md), as
+# JSON: a list of {"key", "label", "issuer", "client_id", "client_secret_env",
+# "claims", "require_mfa"}. "claims" are values the ID token must carry, which
+# pin the organisation (Microsoft: {"tid": "<tenant id>"}; Google: {"hd":
+# "<domain>"}); "require_mfa" refuses a sign-in whose token does not say the
+# provider did two-step verification. Empty: no provider sign-in.
+STAFF_SIGN_IN_PROVIDERS = _json_env(
+    'STAFF_SIGN_IN_PROVIDERS', [], list,
+    '[{"key": "google", "label": "Google", "issuer": "https://accounts.google.com", ...}]',
+)
+# False: staff and superuser accounts cannot sign in with a password at all,
+# only through a provider above. Members are not affected.
+STAFF_PASSWORD_SIGN_IN = _env_bool('STAFF_PASSWORD_SIGN_IN', True)
+# The groups a staff invitation may give, and a staff manager may set: the
+# deployment's staff roles. Comma-separated names of existing groups.
+STAFF_ROLES = [r.strip() for r in os.environ.get('STAFF_ROLES', '').split(',') if r.strip()]
+STAFF_INVITATION_DAYS = max(1, int(os.environ.get('STAFF_INVITATION_DAYS', '7')))
+# How long a provider sign-in lasts, in hours, from the sign-in (not from the
+# last request): a working day by default, so someone whose provider account
+# is switched off is out by the end of it.
+STAFF_SESSION_HOURS = max(1, float(os.environ.get('STAFF_SESSION_HOURS', '8')))
 
 # ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
 # PROMOP issues the HealthKey family's RS256 tokens for its own identities, so
