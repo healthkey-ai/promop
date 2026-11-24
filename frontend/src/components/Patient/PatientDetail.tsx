@@ -4,7 +4,11 @@ import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
+import { ProvisionalContext, type ProvisionalValue } from "@/components/PatientInfo/ProvisionalContext";
+import ConfirmProvisionalBanner from "@/components/PatientInfo/ConfirmProvisionalBanner";
+import {
+  ACTIONABLE_SKIPS, confirmableFields, confirmProvisional, skipText, type ConfirmResult,
+} from "@/components/PatientInfo/provisionalConfirm";
 import {
   addedMark, addedMarks, attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals,
   withoutMarks,
@@ -751,6 +755,68 @@ export default function PatientDetail({
 
   reloadRef.current = reloadPatientInfo;
 
+  // A professional confirming the proposals the record shows (#2870). The server lists what it
+  // will confirm on the record read (`provisional_confirm`) and saves each field's own current
+  // proposal; the page sends what it showed so a stale page confirms nothing it did not see, then
+  // reads the record again, which is how the marks the server cleared (a disease group, a
+  // calculated field) go.
+  const [confirmBusy, setConfirmBusy] = useState<string | null>(null);
+  const [confirmErrors, setConfirmErrors] = useState<Record<string, string>>({});
+  const [confirmNote, setConfirmNote] = useState<{ text: string; failed: boolean } | null>(null);
+  const runConfirm = useCallback(async (field: string | null) => {
+    if (!personId) return;
+    const info = editedInfoRef.current;
+    const names = field ? [field] : confirmableFields(info);
+    if (names.length === 0) return;
+    const expected = Object.fromEntries(names.map((name) => [name, info[name] ?? null]));
+    setConfirmBusy(field ?? '*');
+    setConfirmErrors({});
+    setConfirmNote(null);
+    const refused = (items: { field: string; reason: string; detail?: string }[]) => {
+      const errors: Record<string, string> = {};
+      for (const item of items) if (ACTIONABLE_SKIPS.has(item.reason)) errors[item.field] = skipText(item);
+      setConfirmErrors(errors);
+      return errors;
+    };
+    try {
+      const result: ConfirmResult = await confirmProvisional(personId, field ? { fields: [field] } : { all: true }, expected);
+      const errors = refused(result.skipped);
+      if (field) {
+        if (!result.confirmed.includes(field) && !errors[field]) {
+          setConfirmErrors({ [field]: result.skipped.find((item) => item.field === field)
+            ? skipText(result.skipped.find((item) => item.field === field)!) : 'The value was not confirmed.' });
+        }
+      } else {
+        const count = result.confirmed.length;
+        const missed = Object.keys(errors).length;
+        setConfirmNote({
+          text: `${count} provisional ${count === 1 ? 'value' : 'values'} confirmed as approved data`
+            + (missed ? `; ${missed} could not be confirmed (see the marked ${missed === 1 ? 'field' : 'fields'}).` : '.'),
+          failed: count === 0 && missed > 0,
+        });
+      }
+      saveRevisionRef.current += 1;     // a read that began before this write is stale, whenever it lands
+      await reloadPatientInfo();
+    } catch (err) {
+      const res = (err as { response?: { status?: number; data?: { detail?: string; skipped?: { field: string; reason: string; detail?: string }[] } } })?.response;
+      if (res?.status === 409 && res.data?.skipped) {
+        // Nothing was confirmed: what the page showed is not what the server holds now.
+        const errors = refused(res.data.skipped);
+        if (!field) setConfirmNote({ text: 'The proposals changed since this page was loaded, so nothing was confirmed. Review them and try again.', failed: true });
+        else if (!errors[field]) setConfirmErrors({ [field]: skipText({ field, reason: 'changed' }) });
+        await reloadPatientInfo();
+      } else {
+        const text = res?.status === 403
+          ? (res.data?.detail ?? 'You do not have permission to confirm values for this patient.')
+          : (res?.data?.detail ?? 'The values could not be confirmed. Please try again.');
+        if (field) setConfirmErrors({ [field]: text });
+        else setConfirmNote({ text, failed: true });
+      }
+    } finally {
+      setConfirmBusy(null);
+    }
+  }, [personId, reloadPatientInfo]);
+
   const handleFieldChange = useCallback((field: string, value: unknown, alsoApproved: string[] = []) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     // Touching a proposed field makes it the user's answer, so its indicator goes
@@ -876,9 +942,26 @@ export default function PatientDetail({
     ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()]
     ?? categoryLabel;
 
-  const provisionalValue = useMemo(
-    () => ({ marks: marksOf(editedInfo), patientMode }),
-    [editedInfo, patientMode],
+  // The fields a professional may confirm, as the server listed them on the record read. Not the
+  // patient's own page (a patient confirms by entering a value) and nothing the page decides.
+  const confirmable = useMemo(
+    () => (patientMode ? [] : confirmableFields(editedInfo)),
+    [patientMode, editedInfo],
+  );
+  const provisionalValue = useMemo<ProvisionalValue>(
+    () => ({
+      marks: marksOf(editedInfo),
+      patientMode,
+      ...(confirmable.length > 0 ? {
+        confirm: {
+          confirmable: new Set(confirmable),
+          busy: confirmBusy,
+          errors: confirmErrors,
+          onConfirm: (name: string) => { void runConfirm(name); },
+        },
+      } : {}),
+    }),
+    [editedInfo, patientMode, confirmable, confirmBusy, confirmErrors, runConfirm],
   );
   // The proposals still on the page that stop the patient confirming (#2761).
   const attestationBlockerCount = useMemo(
@@ -1135,6 +1218,14 @@ export default function PatientDetail({
                 {addFieldLink}
               </div>
 
+              {!patientMode && (
+                <ConfirmProvisionalBanner
+                  count={confirmable.length}
+                  busy={confirmBusy !== null}
+                  note={confirmNote}
+                  onConfirmAll={() => { void runConfirm(null); }}
+                />
+              )}
               <ProvisionalContext.Provider value={provisionalValue}>
               <div key={activeTab} hidden={activeTab === sourceCodesIdx} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (

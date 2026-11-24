@@ -92,6 +92,8 @@ export const LIFECYCLE: ReadonlySet<string> = new Set([
   'provisional_fields',
   // Which items of a list field are proposals (#2534): read, never written.
   'provisional_items',
+  // What a professional may confirm on the record (#2870): read, never written.
+  'provisional_confirm',
 ]);
 
 /** Cached per patient, because the answer is per patient.

@@ -1164,6 +1164,89 @@ What follows from it:
   withdrawn is refused on `/me/` by the record-off rule, which counts a declared rejection
   as the change it is, and through the id route by `can_write_patient`.
 
+**Staff confirm provisional values (#2870).** A patient makes a shown proposal real by
+entering it (and attests the record with "Confirm my record", #2761). Staff, an org admin or
+a doctor who reads the same record can do the first in one step, without retyping. "Confirm"
+here means exactly what a patient's entry means: the proposal becomes an approved value on
+`patient_record`, tracked in `user_edited_fields`, projected into OMOP through the field's
+descriptor, its mark dropped. It is **not** a mapping approval and not the record attestation.
+
+- **The endpoint.** `POST /api/v1/patient-records/<person_id>/confirm-provisional/`
+  (`PatientRecordV1ViewSet.confirm_provisional`; v1 only) with `{"fields": ["name", ...]}` or
+  `{"all": true}` (not both), and optionally `{"expected": {field: shown value}}`. 200 with
+  `{person_id, confirmed: [fields], skipped: [{field, reason, detail?}], remaining: n}`; 409
+  with the same body when nothing was confirmed and a field was skipped as `changed`; 400 for a
+  malformed body. `remaining` is how many marks the record still shows (lists included).
+- **One write.** `provisional_confirm.confirm` locks the record first (as derivation and the
+  attestation do), reads the overlay under that lock, takes each value from the **server's**
+  proposal (through the serializer the editor reads with; a value in the body is never read),
+  and saves all of them in **one** `apply_patient_record_patch` call in one transaction: one write,
+  one recalculation, one mirror into the provisional pair. It is the PATCH path, so the result is
+  what the same values typed in the editor would give (a test holds the two equal). It passes no
+  `allow_reject`: a confirmation never rejects anything. Anything unexpected rolls the whole
+  request back (500, nothing stored); a value the record's own validation refuses is skipped as
+  `invalid`, found by one serializer pass so the queries do not grow with it. What the request costs
+  beyond the editor's own write (one OMOP fact projected per field, as a PATCH does) is constant.
+- **Stale pages.** `expected` carries what the page showed. A field whose current proposal
+  differs is skipped as `changed`; with `all`, and an `expected` map, a confirmable proposal the map
+  does not list is skipped as `not_seen`, so "Confirm all N" confirms the N the person saw, not a
+  proposal that arrived since.
+- **What is confirmed.** The scalar fields the overlay marks that the write descriptor says the
+  editor can write (`provisional_confirm.classify`, the same answer the record read gives). A field that
+  goes with another is confirmed with it: confirming a disease takes its group (`DISEASE_FIELDS`), a
+  date takes its `<date>_precision` (`REJECTION_FOLLOWERS`), and a weight's unit, a lab's aliases and a
+  calculation made from the inputs clear through the write's own mirror, as for a typed edit.
+- **Skip reasons.** `list_field` (**a gap**: the proposed items of `provisional_items` lists are not the
+  user's to write, the same reason a clear does not reject them; no list is confirmable in this
+  change), `calculated` (clears with its inputs), `mirrored` (an alias), `unit`, `follows_field` (a
+  precision named alone), `attestation` (`validated`, `validated_by`, `validation_date` are the
+  patient's own act), `no_write_path`; for a named field that is not marked: `rejected` (a held
+  rejection, #2671, shows no proposal), `already_approved`, `not_provisional`; and per request
+  `changed`, `not_seen`, `invalid` (with `detail`), `not_saved`, `disabled` (with
+  `PROVISIONAL_DATA_ENABLED` off nothing is read or written).
+- **Who.** Staff, an org admin (a grant, or the trust-derived admin `can_write_patient` counts) or a doctor
+  who may write that patient (`provisional_confirm.may_confirm`), and only as **a person at the
+  page**: a session or partner (Firebase/PHR) sign-in, never a service credential, a
+  client-credentials application or a delegated OAuth2 token (`InteractiveSessionPermission`; 403).
+  Not an analyst (no access to the patient: 404), not a patient or representative, on their own
+  record (403) or another's (404), and a doctor who is also this record's patient is the patient
+  here (403): they confirm by entering a value. A caller who cannot read the patient gets 404, as
+  every record route.
+- **The read.** `GET /api/v1/patient-records/<id>/` (v1 only; the legacy `patient-info` read is frozen)
+  adds `provisional_confirm: {confirmable: [fields], skipped: {field: reason}}` to `patient_info`
+  for a reader who `may_confirm` and only while a mark is shown. The page offers a control only for a
+  listed, still-marked field and never decides confirmability itself; a patient, an analyst, a
+  credential and an unmarked record get no key.
+- **The page** (provider editor, not patient mode, not the federated view). Beside the Provisional
+  badge of every listed field, in `Field` and in `MarkedControl` (GELF), an explicit button
+  "Confirm <field label>" (`useConfirmControl`); a banner over the tab with "Confirm all N provisional
+  values" that asks once, inline, before doing it. Both send `expected`, then read the record again,
+  which is how the marks the server cleared (the disease group, a calculated field) go. A 409, a 403
+  and a field's own skip show inline, beside the field or in the banner. A device-reading summary
+  (`fromDevice`) gets no button: its mapping settles it. `attestationBlockers` and the patient's
+  own page are unchanged.
+- **Who did it.** No new column. The editor's own history already names the author: each field
+  written leaves a `RecordRevision` (`changed_by` is the confirming Identity's id, `old_value` null,
+  `new_value` the value), which is not the patient's id and is how a staff confirmation is told
+  from the patient's own entry; the projected fact is typed as the recipe says for anyone who is not
+  the patient (a patient's own entry is also typed self-report and carries PATIENT_SELF provenance);
+  and the request is one `AuditEvent` (`POST .../confirm-provisional/`, the caller, the person as
+  `resource_id`, and `detail.provisional_confirm`: the count and up to 25 field names, never a
+  value). Not recorded: a flag on the revision that says "confirmed from a proposal, not typed". If
+  that must be queryable without joining the audit trail, a nullable `source` column on
+  `RecordRevision` is the small change, left out here.
+- **Never.** It never approves, edits or rejects a code mapping (a test holds `SourceCodeConceptMapping`
+  and `FieldConceptMapping` unchanged), never changes or deletes a provisional clinical row (the
+  rows stay proposals until their mapping is approved; the approved fact the write projects is the
+  only row added), never touches another person, never sets `validated`, `validated_by` or
+  `validation_date`, and exports nothing: provisional rows stay out of every export
+  ("Provisional data is never exported").
+- **Gaps.** List fields (listed as `list_field`; confirming a proposed item would be a different
+  design). Created fields (`custom_fields`) are not in the provisional picture on `dev` yet (#2857
+  adds them to the confidence table), so they have nothing to confirm; once they are marked they write
+  through this same PATCH, and `classify` will need a `custom_fields.<name>` branch beside the column
+  rule. The federated patient view offers no control (it reads the frozen legacy path).
+
 **PHR APIs and lists.** The same audiences see the same proposals on the PHR
 labs and other APIs and on the patient list, with `confidence` on each, never a
 different answer on another screen ([#2660](https://github.com/healthkey-ai/promop/issues/2660)).
@@ -1288,6 +1371,7 @@ without a click:
 | Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
 | A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0364`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
 | The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display, the disease tab's section for the record's disease and the GELF checklist included; a patient lifts a block by entering a value or by rejecting the proposal (#2671); see "Confirming a record that shows proposals" |
+| Staff, org admins and doctors can only approve a shown proposal by retyping it | [#2870](https://github.com/healthkey-ai/promop/issues/2870) | done: `POST /api/v1/patient-records/<id>/confirm-provisional/` saves the server's current proposal through the PATCH path in one transaction, with a per-field "Confirm" control and "Confirm all N" in the editor; scalar fields only, **list fields are a gap**; see "Staff confirm provisional values" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
 | Created fields (`custom_fields`) in the confidence table | [#2857](https://github.com/healthkey-ai/promop/issues/2857) | done: `patient_record_confidence.custom_fields` is `{name: percent}`; marked `custom_fields.<name>`, rejectable like a column; computed created fields are left; see "Created fields as built" |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |

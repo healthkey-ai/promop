@@ -2639,6 +2639,25 @@ page holds: change one and change the other. With `PROVISIONAL_DATA_ENABLED` off
 blocks. See [the plan](docs/provisional_data_plan.md), "Confirming a record that shows
 proposals".
 
+### Staff confirm a patient's provisional values (#2870)
+
+Staff, an org admin or a doctor who may write the patient confirm what the record shows
+as Provisional in one step: `POST /api/v1/patient-records/<person_id>/confirm-provisional/`
+with `{"fields": [...]}` or `{"all": true}` and an optional `expected` map of what the page
+showed (`omop_core/services/provisional_confirm.py`). It is the patient's own entry done for
+them, not a mapping approval and not the record attestation: the record is locked, each value
+is the **server's current proposal** (never one from the body), and all of them are saved in
+one `apply_patient_record_patch` call, so the result is an approved edit by the caller
+(`user_edited_fields`, OMOP projection, mark dropped, a `RecordRevision` whose `changed_by` is
+the caller). The response lists `confirmed` and `skipped` (`list_field`, `calculated`, `unit`,
+`changed`, ...; the plan has the table) and a 409 means nothing was confirmed because the
+proposals changed. Only a person at the page may use it (`InteractiveSessionPermission`), not a
+credential, an analyst, a patient or representative (their path is entering a value and "Confirm
+my record"), and never `validated`. List fields are not confirmable. The v1 record read carries
+`provisional_confirm: {confirmable, skipped}` for a reader who may confirm, and the editor offers
+"Confirm <field>" and "Confirm all N provisional values" only from it. See
+[the plan](docs/provisional_data_plan.md), "Staff confirm provisional values".
+
 ### One patient's full provisional view: `fill_provisional_record`
 
 `manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much

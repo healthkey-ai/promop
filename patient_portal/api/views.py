@@ -155,7 +155,7 @@ from .permissions import (
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
-    is_interactive_session,
+    is_interactive_session, InteractiveSessionPermission,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
@@ -1581,9 +1581,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({
             # legacy wire format — preserved for frontend/federation host compatibility
-            'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
+            'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields,
+                             **self._provisional_confirm_block(request, patient_info, provisional_fields)},
             'user': user_data
         })
+
+    def _provisional_confirm_block(self, request, patient_info, provisional_fields):
+        """What the record read adds about confirming its proposals: nothing here.
+
+        The legacy ``/api/patient-info/`` wire format is frozen; ``PatientRecordV1ViewSet``
+        overrides this for the professional who may confirm (#2870).
+        """
+        return {}
 
     def _linked_account_block(self, request, person, patient_info):
         """The ``user`` block of the record read: the account linked to the record.
@@ -6556,6 +6565,66 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if suppressed:
             data['name'] = data['email'] = None
         return data
+
+    def _provisional_confirm_block(self, request, patient_info, provisional_fields):
+        """``provisional_confirm`` on the read, for a professional who may confirm (#2870).
+
+        ``{confirmable: [fields], skipped: {field: reason}}``: which marked fields
+        the confirm endpoint would act on, so the page offers a control only there
+        and never decides confirmability itself. A person at the page, not a
+        credential, and only one ``may_confirm``; nobody else gets the key.
+        """
+        if not provisional_fields or not is_interactive_session(request) or is_machine_request(request):
+            return {}
+        from omop_core.services.provisional_confirm import read_block
+        return read_block(request.user, patient_info, provisional_fields)
+
+    @action(detail=True, methods=['post'], url_path='confirm-provisional',
+            permission_classes=[InteractiveSessionPermission])
+    def confirm_provisional(self, request: Request, pk: str | None = None) -> Response:
+        """Confirm the provisional values the record shows, as the person at the page (#2870).
+
+        Body: ``{"fields": ["name", ...]}`` or ``{"all": true}``, and optionally
+        ``{"expected": {field: shown value}}``. Staff, an org admin or a doctor who
+        may write the patient; no one else (not a patient on their own record, an
+        analyst, or a credential). Each value is the server's current proposal, saved
+        through the editor's own write path in one transaction, so it is exactly an
+        approved edit by the caller. 200 with ``confirmed`` and ``skipped``
+        (``field``, ``reason``); 409, same body, when nothing was confirmed and a
+        field was skipped as ``changed``. See ``omop_core/services/provisional_confirm.py``.
+        """
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+        from omop_core.services import provisional_confirm
+        if not provisional_confirm.may_confirm(request.user, person.person_id):
+            return Response(
+                {'detail': 'Only staff, an organization admin or a doctor with access to this '
+                           'patient can confirm provisional values. A patient confirms by '
+                           'entering their own answer.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        body = request.data if isinstance(request.data, dict) else {}
+        fields, expected = body.get('fields'), body.get('expected')
+        everything = body.get('all')
+        if everything is not None and not isinstance(everything, bool):
+            raise ValidationError({'all': "'all' must be true or false."})
+        if fields is not None and (not isinstance(fields, list) or len(fields) > 500
+                                   or not all(isinstance(f, str) and f for f in fields)):
+            raise ValidationError({'fields': "'fields' must be a list of field names."})
+        if expected is not None and not isinstance(expected, dict):
+            raise ValidationError({'expected': "'expected' must map field names to the values shown."})
+        if everything and fields:
+            raise ValidationError({'detail': "Send either 'fields' or 'all', not both."})
+        if not everything and not fields:
+            raise ValidationError({'detail': "Name the 'fields' to confirm, or send 'all': true."})
+        result = provisional_confirm.confirm(
+            person, patient_info, request.user, fields, all_fields=bool(everything), expected=expected)
+        if result['confirmed']:
+            request._request.audit_detail = provisional_confirm.audit_note(result['confirmed'])
+        refused = not result['confirmed'] and any(s['reason'] == provisional_confirm.CHANGED for s in result['skipped'])
+        return Response({'person_id': person.person_id, **result},
+                        status=status.HTTP_409_CONFLICT if refused else status.HTTP_200_OK)
 
     def list(self, request):
         """The patient list, with ``other_roles`` on the rows that have any (#2838).

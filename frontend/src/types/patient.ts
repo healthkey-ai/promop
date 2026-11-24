@@ -18,6 +18,9 @@ export interface PatientInfo {
   provisional_fields?: Record<string, number>;
   /** Of a list field holding approved and proposed items, the proposed ones. */
   provisional_items?: Record<string, unknown[]>;
+  /** For a professional who may confirm the proposals (#2870), from the v1 record read only:
+   *  the marked fields the server will confirm, and why it will not confirm the others. */
+  provisional_confirm?: { confirmable: string[]; skipped: Record<string, string> };
   email?: string;
   
   // General
