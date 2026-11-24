@@ -36,7 +36,7 @@ import api from '@/api/axios';
 
 const STAFF = { id: 1, sub: 's', email: 's@example.org', name: 'Staff', is_staff: true } as User;
 const recordReads = () => vi.mocked(api.get).mock.calls
-  .filter(([url]) => String(url).includes('/patient-info/101/')).length;
+  .filter(([url]) => String(url).includes('/v1/patient-records/101/')).length;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -46,7 +46,7 @@ beforeEach(() => {
   tab.refreshed = null;
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: {} });
-    if (url.includes('/patient-info/101/')) {
+    if (url.includes('/v1/patient-records/101/')) {
       return Promise.resolve({ data: { patient_info: { person_id: 101, patient_name: 'Ada Lovelace' }, user: null } });
     }
     return Promise.resolve({ data: [] });

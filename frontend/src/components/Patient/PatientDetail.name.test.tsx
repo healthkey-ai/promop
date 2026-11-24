@@ -39,7 +39,7 @@ const PATIENT = {
 beforeEach(() => {
   vi.clearAllMocks();
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
-    if (url.includes("/patient-info/")) {
+    if (/\/v1\/patient-records\/\d+\//.test(url)) {
       return Promise.resolve({
         data: { patient_info: PATIENT, user: null, patient_name: PATIENT.patient_name },
       });

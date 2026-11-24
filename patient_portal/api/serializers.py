@@ -167,6 +167,21 @@ class UserSerializer(serializers.ModelSerializer):
         return sorted(accesses, key=lambda access: access['org_name'].lower())
 
 
+class ReaderAccountSerializer(serializers.ModelSerializer):
+    """What a reader of a patient's record learns of the account linked to it.
+
+    Identity only: no staff flag, role, grant, delegation or password state.
+    ``PatientRecordViewSet`` returns the full ``UserSerializer`` to anyone who
+    can read the record; ``PatientRecordV1ViewSet`` uses this unless the reader
+    is that account or administers its organization (#2845).
+    """
+
+    class Meta:
+        model = Identity
+        fields = ['id', 'name', 'email']
+        read_only_fields = fields
+
+
 class OrganizationSerializer(serializers.ModelSerializer):
     can_manage_access = serializers.SerializerMethodField()
 

@@ -74,7 +74,7 @@ function serve(
 ) {
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
-    if (url.includes('/patient-info/')) {
+    if (/\/v1\/patient-records\/\d+\//.test(url)) {
       const body = typeof record === 'function' ? record() : record;
       return Promise.resolve({ data: { patient_info: { ...body }, user: null, patient_name: BASE.patient_name } });
     }
@@ -84,7 +84,7 @@ function serve(
 
 const recordReads = () =>
   (api.get as ReturnType<typeof vi.fn>).mock.calls
-    .filter((c) => String(c[0]).includes('/patient-info/') && !String(c[0]).includes('writable')).length;
+    .filter((c) => /\/v1\/patient-records\/\d+\//.test(String(c[0]))).length;
 
 async function renderAsPatient() {
   render(<PatientDetail patientMode />);
@@ -275,7 +275,7 @@ describe('Confirm my record with proposals on the page', () => {
     let reads = 0;
     (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
       if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
-      if (!url.includes('/patient-info/')) return Promise.resolve({ data: [] });
+      if (!/\/v1\/patient-records\/\d+\//.test(url)) return Promise.resolve({ data: [] });
       const first = reads++ === 0;
       const body = first
         ? { ...BASE, hemoglobin_g_dl: '11.5', provisional_fields: { hemoglobin_g_dl: 82 } }
@@ -320,7 +320,7 @@ describe('Confirm my record with proposals on the page', () => {
   it('still offers the button when the write descriptor cannot be fetched, and the server decides', async () => {
     (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
       if (url.includes('writable-fields')) return Promise.reject(new Error('network'));
-      if (url.includes('/patient-info/')) {
+      if (/\/v1\/patient-records\/\d+\//.test(url)) {
         return Promise.resolve({ data: {
           patient_info: { ...BASE, hemoglobin_g_dl: '11.5', provisional_fields: { hemoglobin_g_dl: 82 } },
           user: null, patient_name: BASE.patient_name,
@@ -389,7 +389,7 @@ describe('Confirm my record while the write descriptor loads', () => {
       if (url.includes('writable-fields')) {
         return new Promise((resolve) => { release = () => resolve({ data: DESCRIPTORS }); });
       }
-      if (url.includes('/patient-info/')) {
+      if (/\/v1\/patient-records\/\d+\//.test(url)) {
         return Promise.resolve({ data: {
           patient_info: { ...BASE, bmi: 24, hemoglobin_g_dl: '11.5', provisional_fields: { bmi: 80, hemoglobin_g_dl: 82 } },
           user: null, patient_name: BASE.patient_name,

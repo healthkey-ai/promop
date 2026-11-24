@@ -129,7 +129,8 @@ from omop_core.mapping.therapy import (
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import (
     MAPPING_WRITE_ROLES, PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
-    has_org_admin_access, has_mapping_read_access, has_mapping_write_access, has_curation_access,
+    has_org_admin_access, has_explicit_org_admin_access, has_mapping_read_access,
+    has_mapping_write_access, has_curation_access,
 )
 from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate, make_aware, is_naive
@@ -166,7 +167,7 @@ from .condition_serializers import V1MeasurementSerializer, V1ObservationSeriali
 from .serializers import (
     may_write_confidence,
     PrologSurveySerializer, PrologSurveyResponseSerializer,
-    UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
+    UserSerializer, ReaderAccountSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, ConditionContextSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
@@ -1559,14 +1560,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if err:
             return err
 
-        # Get the Identity associated with this person (not the logged-in user)
-        from patient_portal.models import PatientUser
-        try:
-            patient_user = PatientUser.objects.get(person=person)
-            user_serializer = UserSerializer(patient_user.identity)
-            user_data = user_serializer.data
-        except PatientUser.DoesNotExist:
-            user_data = None
+        user_data = self._linked_account_block(request, person, patient_info)
 
         # Pass request in context so PH.1.2#05 demographic redaction can
         # identify whether the reader is the account holder.
@@ -1579,6 +1573,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields},
             'user': user_data
         })
+
+    def _linked_account_block(self, request, person, patient_info):
+        """The ``user`` block of the record read: the account linked to the record.
+
+        The legacy ``/api/patient-info/`` path returns the full ``UserSerializer``
+        to every reader, as it always has (its wire format is frozen for the
+        federation host). ``PatientRecordV1ViewSet`` narrows it.
+        """
+        from patient_portal.models import PatientUser
+        try:
+            patient_user = PatientUser.objects.select_related('identity').get(person=person)
+        except PatientUser.DoesNotExist:
+            return None
+        return UserSerializer(patient_user.identity).data
 
     def partial_update(self, request, pk=None):
         """Patch the PatientRecord.
@@ -6500,6 +6508,48 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     The legacy /api/patient-info/ prefix registers PatientRecordViewSet itself,
     so anything added there widens a frozen API. New actions belong here.
     """
+
+    def _linked_account_block(self, request, person, patient_info):
+        """The ``user`` block, by what the reader is to the linked account (#2845).
+
+        * the account itself: the full ``UserSerializer``;
+        * staff, or a direct ``org_admin`` grant at the record's organization
+          (``has_explicit_org_admin_access``, the helper that guards access
+          administration; a trust gives data, not authority over grants): the
+          same block, with ``name`` and ``email`` withheld while the record's
+          demographics are suppressed;
+        * every other reader, and any machine credential whatever identity it
+          carries: ``{id, name, email}``, the two with the same rule. No role,
+          grant, delegation or staff data of someone else's account.
+        """
+        from patient_portal.models import PatientUser
+        try:
+            patient_user = PatientUser.objects.select_related('identity').get(person=person)
+        except PatientUser.DoesNotExist:
+            return None
+        account = patient_user.identity
+        user = request.user
+        machine = is_machine_request(request)
+        if not machine and getattr(user, 'pk', None) == account.pk:
+            return UserSerializer(account).data
+
+        suppressed = bool(patient_info.suppress_demographics_for_others)
+        org = patient_info.organization
+        administrator = (
+            not machine
+            and getattr(user, 'is_authenticated', False)
+            and (getattr(user, 'is_staff', False)
+                 or (org is not None and has_explicit_org_admin_access(user, org.slug)))
+        )
+        if administrator:
+            data = UserSerializer(account).data
+            if suppressed:
+                data['name'] = data['email'] = None
+            return data
+        data = ReaderAccountSerializer(account).data
+        if suppressed:
+            data['name'] = data['email'] = None
+        return data
 
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
