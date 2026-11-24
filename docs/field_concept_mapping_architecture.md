@@ -162,6 +162,18 @@ and never the model.
   `excluded_domains`, `excluded_vocabularies`) so the editor can say why a
   concept it knows is missing. Unlike the general search it never lists
   non-standard concepts authored on this instance: those are not valid targets.
+- **In the choice editor** (#1225, `AnswerConceptPanel.tsx`): each answer shows
+  where its concept stands, as one of five states (`answerState`): no concept
+  decided, proposed (and when the proposed concept is not loaded here), approved,
+  approved as "no standard equivalent", or approved but unusable (retired,
+  non-standard or no longer fitting the field, which the panel says writes the
+  value without a concept). A mapping curator searches (the target search
+  above) and proposes, or records no equivalent with a reason; an org admin or
+  staff approves, rejects or withdraws. Only `value_as_concept` is offered, since
+  nothing projects the other roles. The panel shows the server's own refusal
+  text, and the editor passes `canApprove` from the page. Still not here: label
+  or alias editing, retiring an answer, revision history and the stable
+  code/typed value in the editor, and lookup-backed (therapy catalog) choices.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
   loaded, or that is not a valid target here, cannot be approved here: the

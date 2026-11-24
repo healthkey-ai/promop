@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { X, Plus, Trash2, ChevronUp, ChevronDown } from "lucide-react";
 import api from "@/api/axios";
+import { AnswerConceptPanel } from "./AnswerConceptPanel";
+import type { ValueMapping } from "./answerConcept";
 
 interface ChoiceCode {
   id?: number;
@@ -16,14 +18,18 @@ interface Choice {
   display: string;
   sort_order: number;
   codes: ChoiceCode[];
+  /** Only for a reader of the mapping pages. */
+  value_mappings?: ValueMapping[];
 }
 
 interface Props {
   fieldName: string;
   onClose: () => void;
+  /** Org admins and staff approve or reject a proposed concept. */
+  canApprove?: boolean;
 }
 
-export function FieldChoiceEditor({ fieldName, onClose }: Props) {
+export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Props) {
   const [choices, setChoices] = useState<Choice[]>([]);
   const [loading, setLoading] = useState(true);
   const [newDisplay, setNewDisplay] = useState("");
@@ -144,7 +150,7 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
     >
-      <div className="relative w-full max-w-lg rounded-lg border bg-white p-6 shadow-xl max-h-[80vh] overflow-y-auto">
+      <div className="relative w-full max-w-2xl rounded-lg border bg-white p-6 shadow-xl max-h-[80vh] overflow-y-auto">
         <button
           onClick={onClose}
           className="absolute right-3 top-3 rounded p-1 text-gray-400 hover:text-gray-600"
@@ -220,6 +226,15 @@ export function FieldChoiceEditor({ fieldName, onClose }: Props) {
                         <Plus size={10} className="inline" /> code
                       </button>
                     </div>
+                    {choice.id !== undefined && (
+                      <AnswerConceptPanel
+                        choiceId={choice.id}
+                        choiceLabel={choice.display}
+                        mappings={choice.value_mappings}
+                        canApprove={canApprove}
+                        onChanged={fetchChoices}
+                      />
+                    )}
                   </div>
                   <button
                     onClick={() => handleDeleteChoice(choice)}
