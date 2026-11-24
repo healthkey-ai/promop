@@ -10,10 +10,12 @@ import { ProvisionalContext } from '../ProvisionalContext';
 
 const mockPost = vi.fn();
 const mockGet = vi.fn();
+const mockDelete = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: {
     post: (...args: unknown[]) => mockPost(...args),
     get: (...args: unknown[]) => mockGet(...args),
+    delete: (...args: unknown[]) => mockDelete(...args),
   },
 }));
 
@@ -121,6 +123,12 @@ describe('WearableTab', () => {
   });
 });
 
+/** Open the collapsed "Uploads" row of the section a test is looking at (#2861). */
+async function openUploads(nth = 0) {
+  const toggles = await screen.findAllByRole('button', { name: /^Uploads \(\d+\)$/ });
+  fireEvent.click(toggles[nth]);
+}
+
 describe('WearableTab — upload history', () => {
   it('fetches upload history on mount', async () => {
     renderTab();
@@ -148,9 +156,13 @@ describe('WearableTab — upload history', () => {
     });
     renderTab();
 
-    await waitFor(() => {
-      expect(screen.getByText('M87E3429.FIT')).toBeInTheDocument();
-    });
+    // Collapsed until opened, with the count on the closed row.
+    const toggle = await screen.findByRole('button', { name: 'Uploads (1)' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText('M87E3429.FIT')).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(await screen.findByText('M87E3429.FIT')).toBeInTheDocument();
     expect(screen.getByText('3 samples')).toBeInTheDocument();
     expect(screen.getByText('Garmin')).toBeInTheDocument();
   });
@@ -171,6 +183,7 @@ describe('WearableTab — upload history', () => {
       }],
     }));
     renderTab();
+    await openUploads();
     const row = (await screen.findByText('Phone health app 2026-11')).closest('button')!;
     expect(row.firstElementChild).toHaveTextContent(new RegExp(`^${label}$`));
   });
@@ -193,6 +206,7 @@ describe('WearableTab — upload history', () => {
       ],
     });
     renderTab();
+    await openUploads();
 
     await waitFor(() => {
       expect(screen.getByText('test.FIT')).toBeInTheDocument();
@@ -367,7 +381,7 @@ describe("WearableTab — somebody else's record (#2819)", () => {
     expect(mockGet).not.toHaveBeenCalledWith('/v1/patient-records/wearable-uploads/');
     expect(screen.queryByText('MINE.FIT')).not.toBeInTheDocument();
     expect(screen.queryByTitle('Delete upload')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('section-Upload History')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Uploads/ })).not.toBeInTheDocument();
   });
 
   it('ignores a dropped file: nothing is sent and no drop zone opens', async () => {
@@ -813,6 +827,7 @@ describe('WearableTab — Garmin Connect sync', () => {
     mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
     renderOwn();
     const upload = screen.getByRole('button', { name: /upload/i });
+    await openUploads();
     const remove = await screen.findByTitle('Delete upload');
     expect(upload).toBeEnabled();
 
@@ -1052,5 +1067,116 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
       'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored.')).toBeInTheDocument();
     expect(screen.queryByText(/provisional: stored/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/waiting to be matched/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('WearableTab — uploads sit in the section of their device (#2861)', () => {
+  const upload = (id: number, device_type: string, filename: string) => ({
+    id, device_type, filename, samples_created: 2, duplicates_skipped: 0,
+    sample_summary: [{ metric: 'steps', date: '2026-11-20', value: 9000 }],
+    uploaded_at: '2026-11-20T10:00:00Z',
+  });
+  const HISTORY = [
+    upload(1, 'garmin', 'garmin-a.fit'), upload(2, 'garmin', 'garmin-b.fit'),
+    upload(3, 'apple', 'export.zip'), upload(4, 'android', 'Phone health app 2026-11'),
+    upload(5, 'oura', 'ring.csv'),
+  ];
+  const connection = (enabled: boolean) => ({
+    enabled, connected: false, devices: 0, code_pending: false, code_expires_at: null,
+    last_connected_at: null, last_sync_at: null, providers: [], host: 'https://example.test',
+  });
+  function load(phoneEnabled: boolean) {
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (url.includes('wearable-uploads')) return Promise.resolve({ data: HISTORY });
+      if (url.includes('open-wearables')) return Promise.resolve({ data: connection(phoneEnabled) });
+      return Promise.resolve({ data: {} });
+    });
+  }
+  const within_ = (testId: string) => within(screen.getByTestId(testId));
+
+  it("puts Garmin's uploads at the bottom of the Garmin section, closed", async () => {
+    load(true);
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+
+    const garmin = await screen.findByTestId('uploads-garmin');
+    const section = garmin.closest('section')!;
+    expect(within(section).getByRole('heading', { name: 'Garmin' })).toBeInTheDocument();
+    // Last in the section, after the account link and the key sync.
+    expect(section.lastElementChild!.lastElementChild).toBe(garmin);
+    expect(within(garmin).getByRole('button', { name: 'Uploads (2)' })).toHaveAttribute('aria-expanded', 'false');
+    expect(within(garmin).queryByText('garmin-a.fit')).not.toBeInTheDocument();
+
+    fireEvent.click(within(garmin).getByRole('button', { name: 'Uploads (2)' }));
+    expect(within(garmin).getByText('garmin-a.fit')).toBeInTheDocument();
+    expect(within(garmin).getByText('garmin-b.fit')).toBeInTheDocument();
+    expect(within(garmin).queryByText('export.zip')).not.toBeInTheDocument();
+  });
+
+  it("puts Apple Health's and Android's in the phone-app section", async () => {
+    load(true);
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+
+    const phone = await screen.findByTestId('uploads-phone');
+    expect(within(phone.closest('section')!).getByRole('heading', { name: 'Phone health app' })).toBeInTheDocument();
+    fireEvent.click(within(phone).getByRole('button', { name: 'Uploads (2)' }));
+    expect(within(phone).getByText('export.zip')).toBeInTheDocument();
+    expect(within(phone).getByText('Phone health app 2026-11')).toBeInTheDocument();
+    expect(within(phone).queryByText('garmin-a.fit')).not.toBeInTheDocument();
+  });
+
+  it('keeps an upload nothing above has a section for, in a closed block of its own', async () => {
+    load(true);
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+
+    const other = await screen.findByTestId('uploads-other');
+    expect(other.closest('section')).toBeNull();
+    fireEvent.click(within(other).getByRole('button', { name: 'Uploads (1)' }));
+    expect(within(other).getByText('ring.csv')).toBeInTheDocument();
+  });
+
+  it('leaves the phone uploads reachable where connecting a phone is not set up', async () => {
+    load(false);
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+
+    await screen.findByTestId('uploads-garmin');
+    await waitFor(() => expect(screen.queryByTestId('uploads-phone')).not.toBeInTheDocument());
+    const other = await screen.findByTestId('uploads-other');
+    expect(within(other).getByRole('button', { name: 'Uploads (3)' })).toBeInTheDocument();
+  });
+
+  it('gathers every upload in the closed block where no device section is offered at all', async () => {
+    load(true);
+    renderTab({ formData: { person_id: 101 } });      // the embedded page: no Garmin, no phone panel
+
+    const other = await screen.findByTestId('uploads-other');
+    expect(within(other).getByRole('button', { name: 'Uploads (5)' })).toBeInTheDocument();
+    expect(screen.queryByTestId('uploads-garmin')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('uploads-phone')).not.toBeInTheDocument();
+  });
+
+  it('opens an upload to its samples and deletes it from inside its section', async () => {
+    load(true);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockDelete.mockResolvedValue({ data: {} });
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+
+    const garmin = await screen.findByTestId('uploads-garmin');
+    fireEvent.click(within(garmin).getByRole('button', { name: 'Uploads (2)' }));
+    fireEvent.click(within(garmin).getByText('garmin-a.fit'));
+    expect(await within(garmin).findByText('9,000')).toBeInTheDocument();
+
+    fireEvent.click(within(garmin).getByRole('button', { name: 'Delete upload garmin-a.fit' }));
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledWith('/v1/patient-records/wearable-uploads/1/'));
+    await waitFor(() => expect(within_('uploads-garmin').getByRole('button', { name: 'Uploads (1)' })).toBeInTheDocument());
+  });
+
+  it('shows nothing for a section with no uploads', async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: url.includes('writable-fields') ? DESCRIPTORS : url.includes('open-wearables') ? connection(true) : [],
+    }));
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.queryByRole('button', { name: /^Uploads/ })).not.toBeInTheDocument();
   });
 });

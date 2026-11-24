@@ -8,6 +8,14 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: each device's uploads sit in its own section, collapsed** — the
+  Wearables tab's one "Upload History" block is gone. Garmin's uploads are an
+  "Uploads (N)" row at the bottom of the Garmin section, Apple Health's and
+  Android's at the bottom of the Phone health app section, each closed until
+  opened and each upload still opening to its samples and deleting as before.
+  An upload with no section on the page stays reachable in a closed block of
+  its own (#2861).
+
 - **A closed account's partner token no longer opens a new account** — a
   Firebase or PHR-host token stays valid after the account it opened is
   closed, and the next request carrying it used to provision a new, empty
