@@ -13,8 +13,9 @@ All notable changes to PRomop are documented here.
   for every sync. A key Garmin has accepted is now saved, encrypted under
   `GARMIN_TOKEN_KEY`, and the next sync needs no key in the field. "Save this
   key for next time" starts ticked and can be unticked for a one-off sync;
-  "Remove saved key" deletes it. Nothing returns the key, it is removed when
-  Garmin refuses it, and it is erased with the record. A deployment without
+  "Remove saved key" deletes it. Nothing returns the key, only the account
+  that saved it can sync with it, it is removed when Garmin says it is no
+  longer valid, and it is erased with the record. A deployment without
   `GARMIN_TOKEN_KEY` saves nothing. Syncing still happens only when the
   patient presses Sync (#2834).
 - **Wearables: sync Apple Health and Health Connect from a phone app, with

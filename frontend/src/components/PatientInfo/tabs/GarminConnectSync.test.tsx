@@ -111,7 +111,7 @@ describe('GarminConnectSync: a key saved for later syncs', () => {
     expect(screen.queryByDisplayValue(KEY)).not.toBeInTheDocument();
     expect(removeButton()).toBeInTheDocument();
     // With a key saved and none typed, the box has nothing to decide.
-    expect(remember()).not.toBeInTheDocument();
+    expect(remember()).toBeDisabled();
   });
 
   it('syncs once, without saving, when the box is unticked', async () => {
@@ -148,12 +148,55 @@ describe('GarminConnectSync: a key saved for later syncs', () => {
     mockPost.mockResolvedValue(synced({ key_saved: true }));
     renderSync();
     await screen.findByText(/Your key is saved/);
-    expect(remember()).not.toBeInTheDocument();
+    expect(remember()).toBeDisabled();
     await userEvent.type(keyField(), KEY);
+    expect(remember()).toBeEnabled();
     expect(remember()).toBeChecked();
     await userEvent.click(syncButton());
     await screen.findByText(/^Synced/);
     expect(sent()).toMatchObject({ api_key: KEY, remember: true });
+  });
+
+  it('uses a typed key once, leaving the saved one, when the box is unticked', async () => {
+    mockGet.mockResolvedValue(keyStatus({ saved: true }));
+    mockPost.mockResolvedValue(synced({ key_saved: true }));
+    renderSync();
+    await screen.findByText(/Your key is saved/);
+    await userEvent.type(keyField(), KEY);
+    await userEvent.click(remember()!);
+    await userEvent.click(syncButton());
+    await screen.findByText(/^Synced/);
+    expect(sent()).toMatchObject({ api_key: KEY, remember: false });
+    expect(screen.getByText(/Your key is saved/)).toBeInTheDocument();
+  });
+
+  it('puts the choice before Sync, so nobody reaches Sync without meeting it', async () => {
+    mockGet.mockResolvedValue(keyStatus());
+    renderSync();
+    const box = await screen.findByLabelText('Save this key for next time');
+    expect(box.compareDocumentPosition(keyField()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(box.compareDocumentPosition(syncButton()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('syncs once, saving nothing, when Sync is pressed before the site has answered', async () => {
+    mockGet.mockReturnValue(new Promise(() => {}));
+    mockPost.mockResolvedValue(synced({ key_saved: false }));
+    renderSync();
+    await userEvent.type(keyField(), KEY);
+    await userEvent.click(syncButton());
+    await screen.findByText(/^Synced/);
+    expect(sent()).toMatchObject({ api_key: KEY, remember: false });
+    expect(screen.getByText(/is not stored/)).toBeInTheDocument();
+  });
+
+  it('syncs with the saved key on Enter in the empty field', async () => {
+    mockGet.mockResolvedValue(keyStatus({ saved: true }));
+    mockPost.mockResolvedValue(synced({ key_saved: true }));
+    renderSync();
+    await screen.findByText(/Your key is saved/);
+    await userEvent.type(keyField(), '{Enter}');
+    await screen.findByText(/^Synced/);
+    expect(sent()).not.toHaveProperty('api_key');
   });
 
   it('asks for a key again when Garmin refused the saved one and the server removed it', async () => {
@@ -173,13 +216,73 @@ describe('GarminConnectSync: a key saved for later syncs', () => {
 
   it('keeps the saved key shown when a sync fails for another reason', async () => {
     mockGet.mockResolvedValue(keyStatus({ saved: true }));
-    mockPost.mockRejectedValue({ response: { data: { error: 'Could not reach Garmin Connect. Try again later.' } } });
+    mockPost.mockRejectedValue({ response: { data: {
+      error: 'Could not reach Garmin Connect. Try again later.', key_saved: true,
+    } } });
     renderSync();
     await screen.findByText(/Your key is saved/);
     await userEvent.click(syncButton());
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not reach Garmin Connect');
     expect(screen.getByText(/Your key is saved/)).toBeInTheDocument();
     expect(canSync()).toBe(true);
+    // Nothing in the field needs changing, so the reader is not sent to it.
+    expect(keyField()).not.toHaveFocus();
+    expect(mockGet).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops offering a saved key the server no longer has', async () => {
+    // Removed in another tab, or no longer readable: the sync asks for a key.
+    mockGet.mockResolvedValue(keyStatus({ saved: true }));
+    mockPost.mockRejectedValue({ response: { data: {
+      error: 'Enter your Garmin Connect Personal API key.', key_saved: false,
+    } } });
+    renderSync();
+    await screen.findByText(/Your key is saved/);
+    await userEvent.click(syncButton());
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter your Garmin Connect Personal API key');
+    expect(screen.queryByText(/Your key is saved/)).not.toBeInTheDocument();
+    expect(canSync()).toBe(false);
+    expect(keyField()).toHaveFocus();
+  });
+
+  it('shows a key that was saved even though the sync then failed', async () => {
+    // Garmin accepted the key and it was saved; the rows could not be written.
+    mockGet.mockResolvedValue(keyStatus());
+    mockPost.mockRejectedValue({ response: { data: { error: 'Your record is switched off.', key_saved: true } } });
+    renderSync();
+    await screen.findByLabelText('Save this key for next time');
+    await userEvent.type(keyField(), KEY);
+    await userEvent.click(syncButton());
+    expect(await screen.findByRole('alert')).toHaveTextContent('switched off');
+    expect(screen.getByText(/Your key is saved/)).toBeInTheDocument();
+    expect(removeButton()).toBeInTheDocument();
+  });
+
+  it('asks again where the key stands when a failed sync does not say', async () => {
+    mockGet.mockResolvedValueOnce(keyStatus()).mockResolvedValueOnce(keyStatus({ saved: true }));
+    mockPost.mockRejectedValue({ response: { status: 500, data: 'Server Error' } });
+    renderSync();
+    await screen.findByLabelText('Save this key for next time');
+    await userEvent.type(keyField(), KEY);
+    await userEvent.click(syncButton());
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sync failed');
+    expect(await screen.findByText(/Your key is saved/)).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the status after a sync when it could not be read before', async () => {
+    mockGet.mockRejectedValueOnce(new Error('offline')).mockResolvedValue(keyStatus({ saved: false }));
+    mockPost.mockResolvedValue(synced({ key_saved: false }));
+    renderSync();
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(1));
+    expect(remember()).not.toBeInTheDocument();
+    await userEvent.type(keyField(), KEY);
+    await userEvent.click(syncButton());
+    await screen.findByText(/^Synced/);
+    expect(sent()).toMatchObject({ remember: false });
+    // Now the site has said it can save, and the choice is offered.
+    expect(await screen.findByLabelText('Save this key for next time')).toBeChecked();
+    expect(screen.queryByText(/is not stored/)).not.toBeInTheDocument();
   });
 
   it('removes the saved key after asking, and then needs a key again', async () => {
@@ -198,6 +301,7 @@ describe('GarminConnectSync: a key saved for later syncs', () => {
     expect(mockDelete).toHaveBeenCalledWith(KEY_URL);
     expect(removeButton()).not.toBeInTheDocument();
     expect(canSync()).toBe(false);
+    expect(remember()).toBeEnabled();
     expect(remember()).toBeChecked();
     expect(keyField()).toHaveFocus();
   });

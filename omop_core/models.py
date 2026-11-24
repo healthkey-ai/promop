@@ -3589,9 +3589,11 @@ class GarminPersonalKey(models.Model):
     (``garmin_oauth.encrypt``), a key that is in no database, so a dump holds
     nothing Garmin would accept. A deployment without that key saves nothing.
 
-    The key is read for one thing, a sync its patient starts, and is returned
-    by no endpoint. The patient removes it from the tab; it is also removed
-    when Garmin refuses it, and it goes with the person or their record.
+    The key is read for one thing, a sync started by the account that saved
+    it (``saved_by``), and is returned by no endpoint. The patient removes it
+    from the tab; it is also removed when Garmin says it is no key of its,
+    and it goes with the person or their record. The rules are in
+    ``omop_core/services/garmin_saved_key.py``.
 
     System data: a credential, never copied between instances.
     """

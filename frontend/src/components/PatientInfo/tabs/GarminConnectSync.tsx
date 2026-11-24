@@ -36,6 +36,18 @@ interface KeyStatus {
 
 const KEY_URL = '/v1/patient-records/garmin-key/';
 
+/** The saved key's status as the server gives it, or null when it cannot be read. */
+async function readKeyStatus(): Promise<KeyStatus | null> {
+  try {
+    const res = await clinicalClient().get<KeyStatus>(clinicalUrl(KEY_URL));
+    const data = res?.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    return { can_save: data.can_save === true, saved: data.saved === true };
+  } catch {
+    return null;
+  }
+}
+
 interface Props {
   /** The record on the page. The server refuses a sync unless it is the caller's own. */
   personId?: number;
@@ -78,12 +90,15 @@ function describe(result: SyncResult): string {
  * field as soon as a sync succeeds.
  *
  * Where the site can encrypt it, the server saves a key Garmin accepted for
- * the patient's next sync (#2834), unless "Save this key for next time" is
- * unticked. A later sync then needs no key in the field, and "Remove saved
+ * the patient's next sync (#2834) when "Save this key for next time" is left
+ * ticked. A later sync then needs no key in the field, and "Remove saved
  * key" deletes it. The server never sends a saved key back, so this only
  * ever knows that there is one. Until it has heard that the site can save,
  * it asks for a one-off sync, so the page never says "not stored" of a key
- * that is.
+ * that is. Every answer to a sync says where the saved key stands
+ * (`key_saved`), failures included; when one does not, the status is read
+ * again, so the page does not go on offering a key that is gone or hide one
+ * that was saved.
  *
  * The server files the rows under the signed-in person's own record, so the
  * tab renders this only for a patient on their own record.
@@ -105,26 +120,35 @@ export default function GarminConnectSync({
   const [result, setResult] = useState<SyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [keyStatus, setKeyStatus] = useState<KeyStatus>({ can_save: false, saved: false });
+  // Whether the server has said what it can do: false until its status is read.
+  const [statusKnown, setStatusKnown] = useState(false);
   const [remember, setRemember] = useState(true);
   const [removing, setRemoving] = useState(false);
   // Said once a saved key has been removed.
   const [keyNotice, setKeyNotice] = useState<string | null>(null);
 
+  const mounted = useRef(true);
   useEffect(() => {
-    let current = true;
+    mounted.current = true;
     (async () => {
-      try {
-        const res = await clinicalClient().get<KeyStatus>(clinicalUrl(KEY_URL));
-        const data = res?.data;
-        if (current && data && typeof data === 'object' && !Array.isArray(data)) {
-          setKeyStatus({ can_save: data.can_save === true, saved: data.saved === true });
-        }
-      } catch {
-        // Not known: the sync then works as a one-off, with a key in the field.
+      // Not known when this fails: the sync then works as a one-off, with a key in the field.
+      const status = await readKeyStatus();
+      if (mounted.current && status) {
+        setKeyStatus(status);
+        setStatusKnown(true);
       }
     })();
-    return () => { current = false; };
+    return () => { mounted.current = false; };
   }, []);
+
+  /** After a sync that did not say where the key stands, or before the status was ever read. */
+  const refreshStatus = async () => {
+    const status = await readKeyStatus();
+    if (mounted.current && status) {
+      setKeyStatus(status);
+      setStatusKnown(true);
+    }
+  };
 
   const typed = apiKey.trim() !== '';
   const { can_save: canSave, saved } = keyStatus;
@@ -150,18 +174,22 @@ export default function GarminConnectSync({
       });
       setResult(res.data);
       setApiKey('');
-      if (typeof res.data.key_saved === 'boolean') {
-        setKeyStatus(status => ({ ...status, saved: res.data.key_saved === true }));
-      }
+      const told = typeof res.data.key_saved === 'boolean';
+      if (told) setKeyStatus(status => ({ ...status, saved: res.data.key_saved === true }));
+      if (!told || !statusKnown) void refreshStatus();
       onSynced(res.data.samples_created > 0 || res.data.replaced > 0);
     } catch (err: unknown) {
       const data = (err as { response?: { data?: { error?: string; detail?: string; key_saved?: boolean } } })
         ?.response?.data;
       setError(data?.error || data?.detail || 'Sync failed. Please try again.');
-      // Garmin refused the saved key and the server removed it.
-      if (data?.key_saved === false) setKeyStatus(status => ({ ...status, saved: false }));
-      // Back to the field that has to be corrected.
-      keyRef.current?.focus();
+      // A failed sync still says where the key stands: one Garmin refused is
+      // gone, and one saved before the rows could not be written is there.
+      const told = typeof data?.key_saved === 'boolean';
+      if (told) setKeyStatus(status => ({ ...status, saved: data?.key_saved === true }));
+      if (!told || !statusKnown) void refreshStatus();
+      // Back to the field when it is the field that has to change: a key was
+      // typed, or the saved one is gone. Not for Garmin being busy.
+      if (typed || data?.key_saved === false) keyRef.current?.focus();
     } finally {
       setSyncing(false);
       onBusyChange?.(false);
@@ -203,7 +231,7 @@ export default function GarminConnectSync({
       {saved && (
         <div className="mt-2 flex flex-wrap items-center gap-3">
           <p className="text-sm text-gray-700">
-            Your key is saved. Sync uses it; paste a key only to replace it.
+            Your key is saved. Sync uses it{canSave ? '; paste a key only to replace it' : ''}.
           </p>
           <button
             type="button"
@@ -213,6 +241,24 @@ export default function GarminConnectSync({
           >
             {removing ? 'Removing...' : 'Remove saved key'}
           </button>
+        </div>
+      )}
+      {/* Before the fields: met on the way to Sync, by keyboard and by screen reader alike. */}
+      {canSave && (
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            id={rememberId}
+            type="checkbox"
+            checked={remember}
+            onChange={e => setRemember(e.target.checked)}
+            // With a key saved and none typed there is nothing to decide. Drawn
+            // all the same, so the field below does not move at the first keystroke.
+            disabled={busy || (saved && !typed)}
+            className="h-4 w-4 rounded border-gray-300 text-portal-brand focus:ring-portal-brand"
+          />
+          <label htmlFor={rememberId} className={`text-xs ${saved && !typed ? 'text-gray-400' : 'text-gray-700'}`}>
+            Save this key for next time
+          </label>
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-end gap-3">
@@ -274,21 +320,6 @@ export default function GarminConnectSync({
           {syncing ? 'Syncing...' : 'Sync'}
         </button>
       </div>
-      {canSave && (typed || !saved) && (
-        <div className="mt-2 flex items-center gap-2">
-          <input
-            id={rememberId}
-            type="checkbox"
-            checked={remember}
-            onChange={e => setRemember(e.target.checked)}
-            disabled={busy}
-            className="h-4 w-4 rounded border-gray-300 text-portal-brand focus:ring-portal-brand"
-          />
-          <label htmlFor={rememberId} className="text-xs text-gray-700">
-            Save this key for next time
-          </label>
-        </div>
-      )}
       <div aria-live="polite">
         {keyNotice && <p className="mt-2 text-sm text-gray-700">{keyNotice}</p>}
         {syncing && (
