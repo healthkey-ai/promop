@@ -295,6 +295,20 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **The patient report prints an explicit Unknown for the tri-state answers
+  (#2830)** — the report dropped a field whose value formatted to `null`, so a
+  stored `NULL` (the third state of a tri-state answer: "no known answer",
+  whether the patient picked Unknown or never answered — migration 0347 keeps
+  both as `NULL`) read exactly like a question that was never asked. Every
+  tri-state answer the tabs render now prints "Unknown": the pulmonary, bone
+  imaging and pregnancy test-done answers and the six myeloma-related
+  disorders (`mgus`, `smoldering_multiple_myeloma`,
+  `waldenstrom_macroglobulinemia`, `igm_multiple_myeloma`, `al_amyloidosis`,
+  `poems_syndrome`). Every other empty field is still omitted, and the
+  medication answer is deliberately left out because no tab collects it (its
+  legacy column default would otherwise print as a patient answer). A backend
+  test keeps the report's list equal to the descriptor's `tri_state` set minus
+  that one field.
 - **A `bulk_update` batch releases the keys it changes before writing any
   group (#2709)** — the endpoint applies one `UPDATE` per patched column set,
   so a key transfer between two rows (clear on one, set on another) failed with

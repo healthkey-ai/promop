@@ -42,6 +42,7 @@ describe('buildPatientReport', () => {
     expect(report.tabs.map((t) => t.title)).toEqual(['General', 'Treatment', 'Labs', 'Genomics', 'Behavior', 'Wearables']);
     expect(section(report, 'General', 'Physical Measurements')?.fields).toEqual([{ label: 'Weight (kg)', value: '61.5' }]);
     expect(section(report, 'Labs', 'Blood Counts')?.fields).toEqual([{ label: 'Hemoglobin (g/dL)', value: '12.1' }]);
+    // An omitted key is out of scope: no tri-state row appears for this record.
     expect(tab(report, 'Behavior')?.sections).toEqual([]);
     expect(section(report, 'General', 'Patient Details')?.fields).toEqual([
       { label: 'Patient Name', value: 'Ada Lovelace' },
@@ -195,5 +196,53 @@ describe('renderReportPdf', () => {
     expect(pdf).toContain(`(Page ${pages} of ${pages}) Tj`);
     // The table header repeats on the page the table continues onto.
     expect(pdf.split('(REGIMEN) Tj').length - 1).toBeGreaterThan(1);
+  });
+});
+
+
+describe('tri-state answers (#2830)', () => {
+  const rowsOf = (report: ReturnType<typeof build>) =>
+    report.tabs.flatMap((t) => t.sections).flatMap((s) => s.fields ?? []);
+
+  it('prints an explicit Unknown instead of dropping the row', () => {
+    const report = build({
+      pulmonary_function_test_result: null,
+      bone_imaging_result: null,
+      pregnancy_test_result: null,
+    });
+    const rows = rowsOf(report);
+
+    for (const label of ['Pulmonary Function Test Normal', 'Bone Imaging Normal',
+      'Negative Pregnancy Test Result']) {
+      expect(rows.find((row) => row.label === label)?.value, label).toBe('Unknown');
+    }
+  });
+
+  it('still prints Yes and No', () => {
+    const report = build({ pulmonary_function_test_result: true, bone_imaging_result: false });
+    const rows = rowsOf(report);
+
+    expect(rows.find((r) => r.label === 'Pulmonary Function Test Normal')?.value).toBe('Yes');
+    expect(rows.find((r) => r.label === 'Bone Imaging Normal')?.value).toBe('No');
+  });
+
+  it('prints Unknown for a myeloma-related tri-state answer', () => {
+    const report = build({ disease: 'Multiple Myeloma', mgus: null },
+      { diseaseType: 'myeloma' });
+    const section = tab(report, 'Disease')!.sections
+      .find((s) => s.title === 'Myeloma Related Disorders')!;
+
+    expect(section.fields).toEqual([{ label: 'MGUS', value: 'Unknown' }]);
+  });
+
+  it('omits a tri-state answer the record does not carry at all', () => {
+    expect(rowsOf(build({})).some((r) => r.label === 'MGUS')).toBe(false);
+  });
+
+  it('never turns another empty field into Unknown', () => {
+    const report = build({ smoking_status: null, pack_years: null });
+    const rows = rowsOf(report);
+
+    expect(rows.some((r) => r.label === 'Smoking Status' || r.label === 'Pack Years (if applicable)')).toBe(false);
   });
 });

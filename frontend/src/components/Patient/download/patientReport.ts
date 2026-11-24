@@ -121,6 +121,23 @@ export function ageFrom(dateOfBirth: unknown, today = new Date()): number | null
   return age;
 }
 
+/**
+ * Answer fields whose third state ("Unknown") is stored as NULL (#2759). The
+ * descriptor marks them with `tri_state: true`; this module cannot query it, so
+ * the list is pinned here and a backend test fails when it drifts.
+ */
+const TRI_STATE_FIELDS = new Set([
+  'pulmonary_function_test_result',
+  'bone_imaging_result',
+  'pregnancy_test_result',
+  'mgus',
+  'smoldering_multiple_myeloma',
+  'waldenstrom_macroglobulinemia',
+  'igm_multiple_myeloma',
+  'al_amyloidosis',
+  'poems_syndrome',
+]);
+
 /** Fields a tab renders outside a ClinicalField, placed where the tab puts them. */
 interface ExtraFields {
   /** Before the section's first field. */
@@ -140,7 +157,14 @@ function layoutSections(
       const extra = opts.extra?.[s.title];
       const fields = [...(extra?.first ?? [])];
       for (const [label, name] of s.fields) {
-        const value = formatValue(record[name]);
+        const raw = record[name];
+        const value = raw === null && TRI_STATE_FIELDS.has(name)
+          // A stored NULL is the third state of a tri-state answer: "no known
+          // answer", whether the patient picked Unknown or never answered. A
+          // report that omitted it would read as if the question were out of
+          // scope (#2830). An absent key (undefined) still omits the row.
+          ? 'Unknown'
+          : formatValue(raw);
         if (value !== null) fields.push({ label: relabel(record, name, label), value });
         fields.push(...(extra?.after?.[name] ?? []));
       }
