@@ -7,7 +7,7 @@ import { AnswerHistory } from "./AnswerHistory";
 import type { DiseaseCategoryOption } from "@/types/fieldScope";
 import { AnswerCoverage } from "./AnswerCoverage";
 import {
-  answerCoverage, coverageBucket, refusalText, type CoverageFilter, type ValueMapping,
+  answerCoverage, inCoverageView, refusalText, type CoverageFilter, type ValueMapping,
 } from "./answerConcept";
 
 interface ChoiceCode {
@@ -56,6 +56,9 @@ export function FieldChoiceEditor({
   const [removingCodeId, setRemovingCodeId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<CoverageFilter>("all");
+  // The answers a filter listed when it was chosen stay listed, so a decision
+  // made on one does not take its row (and what is open in it) away.
+  const [pinned, setPinned] = useState<Set<number>>(new Set());
 
   // ``silent`` reads the list again without replacing it with "Loading...", so
   // an open answer panel keeps what was typed and the scroll position.
@@ -88,6 +91,9 @@ export function FieldChoiceEditor({
         sort_order: choices.length,
       });
       setNewDisplay("");
+      // A new answer has no decision; show it wherever the list is looking.
+      setFilter("all");
+      setPinned(new Set());
       await fetchChoices();
     } catch {
       setError("Failed to add choice.");
@@ -163,9 +169,13 @@ export function FieldChoiceEditor({
   const reviewing = choices.some((c) => c.value_mappings !== undefined);
   const coverage = answerCoverage(choices);
   // An answer keeps its place in the whole list; a filtered view cannot reorder.
+  const chooseFilter = (next: CoverageFilter) => {
+    setFilter(next);
+    setPinned(new Set(choices.filter((c) => inCoverageView(c, next)).map((c) => c.id!)));
+  };
   const shown = choices
     .map((choice, index) => ({ choice, index }))
-    .filter(({ choice }) => filter === "all" || coverageBucket(choice) === filter);
+    .filter(({ choice }) => inCoverageView(choice, filter) || pinned.has(choice.id!));
 
   // Close on Escape
   useEffect(() => {
@@ -203,7 +213,7 @@ export function FieldChoiceEditor({
           <>
             {/* Existing choices */}
             {reviewing && choices.length > 0 && (
-              <AnswerCoverage coverage={coverage} filter={filter} onFilter={setFilter} />
+              <AnswerCoverage coverage={coverage} filter={filter} onFilter={chooseFilter} />
             )}
             <div className="mb-4 space-y-2">
               {shown.map(({ choice, index }) => (
