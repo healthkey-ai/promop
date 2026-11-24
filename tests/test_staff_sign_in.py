@@ -141,10 +141,19 @@ def test_an_invitation_works_once_and_only_for_its_address(fake):
     assert Client().get(f'/admin/sign-in/invitation/{token}/').status_code == 404
 
 
-def test_no_account_without_an_invitation(fake):
-    response, _ = sign_in(Client(), fake, '/admin/sign-in/work/')
+def test_no_account_without_an_invitation(settings, fake):
+    from django.contrib import admin
+
+    settings.ALLOWED_HOSTS = ['testserver']
+    header = admin.site.site_header
+    admin.site.site_header = 'Example back office'
+    try:
+        response, _ = sign_in(Client(), fake, '/admin/sign-in/work/')
+    finally:
+        admin.site.site_header = header
 
     assert response.status_code == 403 and b'invitation' in response.content
+    assert b'Example back office' in response.content  # the deployment's header, not Django's
     assert not Identity.objects.filter(sub='sub-1').exists()
 
 

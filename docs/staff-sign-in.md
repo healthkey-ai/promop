@@ -34,12 +34,17 @@ Each provider:
   with none gets a check warning: any account of the provider could then try,
   and only an invitation stops it.
 - `require_mfa`: refuse a sign-in whose ID token does not list `mfa` in `amr`.
-  For Microsoft Entra ID, also require two-step verification for the app in a
-  Conditional Access policy, so the provider asks every time. **Confirm on a
-  real tenant that its ID tokens carry `amr`** before relying on it (the audit
-  row of each sign-in records `mfa`): reports differ on whether v2.0 ID tokens
-  always do. Without it every sign-in is refused, so do not switch staff
-  passwords off until one has succeeded.
+  For Microsoft Entra ID:
+  - **add `amr` as an optional claim of the app registration's ID token**
+    (Token configuration → Add optional claim → ID → `amr`). Entra's v2.0 ID
+    token carries `amr` only then: without it every sign-in is refused, even
+    when Entra did ask for two-step verification (confirmed on a Microsoft 365
+    Business Premium tenant);
+  - require two-step verification for the app in a Conditional Access policy,
+    so the provider asks every time.
+
+  Each sign-in's audit row records whether `mfa` was in `amr`: check that one
+  succeeded before switching staff passwords off.
 - `address_claim`: the claim an invitation's address is matched on. `email`
   (the default) counts only when the token says `email_verified` is true, with
   no fallback. For Microsoft use `preferred_username`, the sign-in name the
