@@ -267,7 +267,8 @@ def ranker(monkeypatch, snomed):
 
 
 def test_suggest_offers_the_mapped_concept_first_and_reports_what_it_held_back(ranker, snomed):
-    result = suggest_one_mapping('C82.00', 'ICD10CM', 'condition', source_description='FL grade I')
+    result = suggest_one_mapping('C82.00', 'ICD10CM', 'condition', source_description='FL grade I',
+                               ranking_model='anthropic')
 
     names = [c['concept_name'] for c in ranker['candidates']]
     assert names[0] == "Follicular non-Hodgkin's lymphoma, small cleaved cell"

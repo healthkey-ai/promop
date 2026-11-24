@@ -701,10 +701,10 @@ class TestSuggestAPIStrategies:
             self._post(min_occurrences=99999)
         assert fake.calls[0][1]['strategies'] == ['umls', 'lexical', 'vectors']
 
-    def test_ranking_model_defaults_to_anthropic(self):
+    def test_ranking_model_defaults_to_jev(self):
         with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
             self._post(min_occurrences=99999)
-        assert fake.calls[0][1]['ranking_model'] == 'anthropic'
+        assert fake.calls[0][1]['ranking_model'] == 'jev'
 
     def test_ranking_model_jev_is_accepted(self):
         with use_suggest_dispatcher(FakeSuggestDispatcher()) as fake:
@@ -784,7 +784,7 @@ class TestSuggestRunLifecycle:
 
         monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates', rank)
         with use_suggest_dispatcher(InlineSuggestDispatcher()):
-            response = self._post(limit=1)
+            response = self._post(limit=1, ranking_model='anthropic')
         assert response.data['state'] == 'success'
         run_id = response.data['run_id']
         path = f'/api/v1/code-mappings/suggest-runs/{run_id}/?include_activity=1'

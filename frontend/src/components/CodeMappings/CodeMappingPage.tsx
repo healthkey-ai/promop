@@ -507,7 +507,7 @@ export default function CodeMappingPage() {
   const [strategies, setStrategies] = useState({
     umls: true, lexical: true, vectors: true,
   });
-  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("anthropic");
+  const [rankingModel, setRankingModel] = useState<"anthropic" | "jev" | "both">("jev");
   // The confidence at or above which a run approves what it writes (#1532). Offered
   // only to an account that may approve; the server prefills what that curator last
   // set (100 until they set one) and remembers whatever the next run sends.

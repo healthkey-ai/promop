@@ -1711,7 +1711,7 @@ because trigram similarity and embedding cosine are different signals.
 `vector_rerank()` exists in the code but is unused in the default pipeline.
 
 `rank_candidates_dispatch()` routes the merged pool to the configured ranking
-model: **Anthropic** (Claude, the default), **Jev** (Typesafe API), or
+model: **Jev** (Typesafe API, the default), **Anthropic** (Claude), or
 **both** (concurrent, highest confidence wins). The ranker scores each candidate
 with a qualitative confidence level (high / medium / low, mapped to numeric
 values) and either picks a winner or declines. A declined code stays in the

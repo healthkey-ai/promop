@@ -139,7 +139,7 @@ def test_umls_miss_runs_both_retrievers_and_ranks_once(monkeypatch, lexical_hits
     monkeypatch.setattr(suggest, 'rank_candidates', ranker)
     result = suggest.suggest_one_mapping('LOCAL-123', 'Local', 'condition',
                                         source_description='informal description',
-                                        strategies=['umls', 'lexical', 'vectors'])
+                                        strategies=['umls', 'lexical', 'vectors'], ranking_model='anthropic')
     lexical.assert_called_once()
     semantic.assert_called_once()
     ranker.assert_called_once()
@@ -210,7 +210,7 @@ def test_default_pipeline_sends_full_pool_to_llm_without_vector_reranking(monkey
     ranker = Mock(return_value=(semantic_hit, 'chosen'))
     monkeypatch.setattr(suggest, 'vector_rerank', reranker)
     monkeypatch.setattr(suggest, 'rank_candidates', ranker)
-    result = suggest.suggest_one_mapping('LOCAL-123', 'Local', 'condition')
+    result = suggest.suggest_one_mapping('LOCAL-123', 'Local', 'condition', ranking_model='anthropic')
     reranker.assert_not_called()
     assert [c['concept_id'] for c in ranker.call_args.args[1]] == [1, 2]
     assert result['strategy_used'] == 'vectors'
