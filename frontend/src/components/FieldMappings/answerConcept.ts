@@ -106,3 +106,61 @@ export function errorText(error: unknown, fallback: string): string {
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   return typeof detail === "string" && detail ? detail : fallback;
 }
+
+/** Why a save was refused. A serializer answers with `{field: [messages]}` and
+ *  the mapping endpoints with `{detail}`; both are the server's own wording.
+ *  Anything else is the fixed fallback, never the raw error. */
+export function refusalText(error: unknown, fallback: string): string {
+  const data = (error as { response?: { data?: unknown } })?.response?.data;
+  if (typeof data === "string" || !data || typeof data !== "object") return fallback;
+  const parts: string[] = [];
+  for (const value of Object.values(data as Record<string, unknown>)) {
+    if (typeof value === "string") parts.push(value);
+    else if (Array.isArray(value)) parts.push(...value.filter((v): v is string => typeof v === "string"));
+  }
+  return parts.length ? parts.join(" ") : fallback;
+}
+
+/** One transition of an answer's concept decision, as the revisions endpoint returns it. */
+export interface MappingRevision {
+  revision: number;
+  action: string;
+  status: string;
+  outcome: "mapped" | "no_equivalent";
+  role: string;
+  vocabulary_id: string;
+  concept_code: string;
+  rationale: string;
+  vocabulary_release: string;
+  changed_by: string;
+  created_at: string;
+}
+
+export interface HistoryEntry extends MappingRevision {
+  /** Which decision it belongs to; revisions of one decision share it. */
+  mapping_id: number;
+}
+
+const ACTION_TEXT: Record<string, string> = {
+  proposed: "Proposed",
+  approved: "Approved",
+  rejected: "Rejected",
+  resolved: "Resolved by the system",
+};
+
+export function actionText(action: string): string {
+  return ACTION_TEXT[action] ?? action;
+}
+
+export function revisionConcept(r: MappingRevision): string {
+  if (r.outcome === "no_equivalent") return "no standard concept";
+  return r.vocabulary_id && r.concept_code ? `${r.vocabulary_id} ${r.concept_code}` : "no concept";
+}
+
+/** Newest first; a stable order when two share a moment. */
+export function newestFirst(entries: HistoryEntry[]): HistoryEntry[] {
+  return [...entries].sort((a, b) =>
+    a.created_at === b.created_at
+      ? b.mapping_id - a.mapping_id || b.revision - a.revision
+      : a.created_at < b.created_at ? 1 : -1);
+}

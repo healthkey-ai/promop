@@ -173,9 +173,21 @@ and never the model.
   nothing projects the other roles. The panel shows the server's own refusal
   text (and reads the list again when a decision is refused, in case another
   curator decided first), keeps its place on a save rather than reloading the
-  list, and the editor passes `canApprove` from the page. Still not here: label
-  or alias editing, retiring an answer, revision history and the stable
-  code/typed value in the editor, and lookup-backed (therapy catalog) choices.
+  list, and the editor passes `canApprove` from the page.
+  Beside it, `AnswerDetailsPanel.tsx` shows the answer's stable code and other
+  spellings and lets a mapping curator change the label and the spellings (one
+  per line) or retire and restore it, all through `PATCH field-choices/<id>/`:
+  only what changed is sent, a new label keeps the old one as a spelling (the
+  server's `rename`), the code never changes, and the server's refusal is shown
+  as written (`refusalText` reads serializer field errors as well as `detail`).
+  Retiring asks first; a retired answer is dimmed with a "Retired" mark and is
+  still projected and read back. `AnswerHistory.tsx` lists every proposal,
+  approval and rejection of the answer's concept, newest first, for readers of
+  the mapping pages: one request for the decisions and one per decision for its
+  revisions, made only when History is opened. Deleting an answer a non-approver
+  cannot delete shows the server's reason, and the confirmation points to
+  retiring. Still not here: disease scope and the typed `value` in the editor,
+  and lookup-backed (therapy catalog) choices.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
   loaded, or that is not a valid target here, cannot be approved here: the

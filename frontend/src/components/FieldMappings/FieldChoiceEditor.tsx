@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { X, Plus, Trash2, ChevronUp, ChevronDown } from "lucide-react";
 import api from "@/api/axios";
 import { AnswerConceptPanel } from "./AnswerConceptPanel";
-import type { ValueMapping } from "./answerConcept";
+import { AnswerDetailsPanel } from "./AnswerDetailsPanel";
+import { AnswerHistory } from "./AnswerHistory";
+import { refusalText, type ValueMapping } from "./answerConcept";
 
 interface ChoiceCode {
   id?: number;
@@ -18,6 +20,10 @@ interface Choice {
   display: string;
   sort_order: number;
   codes: ChoiceCode[];
+  /** The stable identity, other spellings and standing (#1224). */
+  code?: string;
+  aliases?: string[];
+  retired?: boolean;
   /** Only for a reader of the mapping pages. */
   value_mappings?: ValueMapping[];
 }
@@ -78,13 +84,13 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
   };
 
   const handleDeleteChoice = async (choice: Choice) => {
-    if (!choice.id || !window.confirm(`Delete the entire choice "${choice.display}" and all of its codes?`)) return;
+    if (!choice.id || !window.confirm(`Delete the entire choice "${choice.display}" and all of its codes? To stop offering it and keep its history, retire it instead.`)) return;
     setError("");
     try {
       await api.delete(`/v1/field-choices/${choice.id}/`);
       await fetchChoices();
-    } catch {
-      setError("Failed to delete choice.");
+    } catch (e) {
+      setError(refusalText(e, "Failed to delete choice."));
     }
   };
 
@@ -179,7 +185,7 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
               {choices.map((choice, index) => (
                 <div
                   key={choice.id}
-                  className="flex items-start gap-2 rounded border border-gray-200 p-2"
+                  className={`flex items-start gap-2 rounded border border-gray-200 p-2 ${choice.retired ? "bg-gray-50" : ""}`}
                 >
                   <div className="flex flex-col gap-0.5">
                     <button
@@ -198,7 +204,17 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                     </button>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">{choice.display}</div>
+                    <div className={`text-sm font-medium ${choice.retired ? "text-gray-500" : ""}`}>{choice.display}</div>
+                    {choice.id !== undefined && (
+                      <AnswerDetailsPanel
+                        choiceId={choice.id}
+                        label={choice.display}
+                        code={choice.code}
+                        aliases={choice.aliases}
+                        retired={choice.retired}
+                        onChanged={() => fetchChoices(true)}
+                      />
+                    )}
                     <div className="mt-1 flex flex-wrap gap-1">
                       {choice.codes.map((c) => (
                         <span
@@ -239,6 +255,9 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                         canApprove={canApprove}
                         onChanged={() => fetchChoices(true)}
                       />
+                    )}
+                    {choice.id !== undefined && choice.value_mappings !== undefined && (
+                      <AnswerHistory choiceId={choice.id} choiceLabel={choice.display} />
                     )}
                   </div>
                   <button
