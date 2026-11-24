@@ -191,8 +191,10 @@ and never the model.
   (`answer_values_by_concept`, called from `curated_values_from_snapshot`). It
   is the inverse of the projection above and takes its decisions from the same
   function, so an approved answer reads back as what it writes and a retired
-  target, a no-equivalent decision or a withdrawn approval reads as nothing.
-  The value is the choice's stored value. A fact's own text or number always
+  target, a no-equivalent decision or a withdrawn approval reads as nothing,
+  and a choice nobody has decided keeps its primary code's concept, as in the
+  projection. The value is the choice's label, which the editor offers and the
+  projection stores. A fact's own text or number always
   wins; the concept is the fallback. A concept that two answers of one field
   share (or one live and one retired answer) is not guessed: the live answer
   speaks over a retired one, and two live ones read as nothing. The lookup is

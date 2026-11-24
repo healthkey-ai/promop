@@ -486,11 +486,15 @@ def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
     ``{field_name: {concept_id: stored_value}}``: the other direction of
     ``answer_concept_ids``, for the derivation of a record from facts that
     carry the answer as a concept and no text (an ETL's, #1224). It uses the
-    same decisions, so an approved answer reads back as what it writes. A
+    same decisions as the projection, so an approved answer reads back as what
+    it writes; a choice nobody has decided keeps the concept of its primary
+    code, here as there. A
     concept that two answers of one field share (a mapping the curators
     allowed to be many-to-one, or the same concept in two contexts) reads as
     nothing rather than as a guess, and a live answer speaks over a retired one.
-    The value is the choice's stored value, its ``value`` or else its label.
+    The value is the choice's label: what the editor offers for the field and
+    what the projection stores, so the record holds an answer its select can
+    show (the typed ``value`` follows when the editor offers it, #1225).
     """
     choices, meanings, _, NONE = _answer_meanings(field_names)
     live: dict[str, dict[int, set]] = {}
@@ -501,7 +505,7 @@ def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
             continue
         target = retired if choice['retired_at'] else live
         target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(
-            choice['value'] or choice['display'])
+            choice['display'])
     result: dict[str, dict[int, str]] = {}
     for field in {*live, *retired}:
         merged = {**retired.get(field, {}), **live.get(field, {})}

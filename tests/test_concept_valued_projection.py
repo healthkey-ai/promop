@@ -378,7 +378,7 @@ class TestConceptOnlyFactsRead:
         # the concept, so nothing is guessed.
         assert self._derived(person) in (None, '')
 
-    def test_an_approved_decision_moves_the_reading_with_it(
+    def test_a_newly_approved_concept_is_the_one_read(
         self, disease_activity_mapping, disease_activity_choices,
     ):
         from omop_core.services import field_value_mappings as fvm
@@ -417,6 +417,16 @@ class TestConceptOnlyFactsRead:
         PatientRecordFactory(person=person)
         self._fact(person, 1617595)        # the question concept itself
         assert self._derived(person) in (None, '')
+
+    def test_the_answer_read_is_the_label_the_editor_offers(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        FieldChoice.objects.filter(display='Finished treatment and in remission').update(
+            value='remission')
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046)
+        assert self._derived(person) == 'Finished treatment and in remission'
 
     def test_a_retired_answer_is_still_read(
         self, disease_activity_mapping, disease_activity_choices,
