@@ -32,6 +32,9 @@ BOOLEAN_ANSWERS = {
     # positive result as well as one that was not recorded.
     'pregnancy_test_result': ('Negative', 'Not negative'),
     'no_pregnancy_or_lactation_status': ('Not pregnant or lactating', 'Pregnant or lactating'),
+    # The column stores the negation; True means no concomitant medication.
+    'no_concomitant_medication_status': (
+        'No concomitant medication', 'Takes concomitant medication'),
     # The column records the disease, while a trial row may ask "No Plasma Cell
     # Leukemia"; the answer labels keep the fact's own polarity visible.
     'plasma_cell_leukemia': ('Present', 'Not present'),

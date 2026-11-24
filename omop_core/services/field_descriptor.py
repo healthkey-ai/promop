@@ -76,9 +76,9 @@ _EDITABLE_TREATMENT_FIELDS = frozenset({
     'supportive_therapies', 'supportive_therapy_start_date',
     'supportive_therapy_end_date', 'supportive_therapy_intent',
     'supportive_therapy_date',
-    # Concomitant medication (editable; no_concomitant_medication_status is computed)
+    # Concomitant medication, including the explicit tri-state answer.
     'concomitant_medication_date', 'concomitant_medications',
-    'concomitant_medication_details',
+    'concomitant_medication_details', 'no_concomitant_medication_status',
     # Other editable treatment fields
     'toxicity_grade', 'planned_therapies', 'concomitant_medication',
     'remission_duration',
@@ -96,8 +96,6 @@ _COMPUTED_THERAPY_FIELDS = frozenset({
     'treatment_refractory_status', 'relapse_count', 'refractory_status',
     'washout_period_duration', 'prior_therapy', 'line_of_therapy',
     'later_therapies', 'later_date',
-    # Negation field
-    'no_concomitant_medication_status',
 })
 
 # Every per-line projection is code-computed from the persisted Episode and
@@ -142,7 +140,6 @@ _COMPUTED_THERAPY_EXPLANATIONS = {
     'refractory_status': 'Computed from therapy line outcomes',
     'washout_period_duration': 'Computed from last therapy received',
     'line_of_therapy': 'Derived from therapy line Episode records',
-    'no_concomitant_medication_status': 'Computed negation of concomitant medication presence',
     'english_speak': 'Derived from PersonLanguageSkill rows for this language',
     'english_read': 'Derived from PersonLanguageSkill rows for this language',
     'english_write': 'Derived from PersonLanguageSkill rows for this language',

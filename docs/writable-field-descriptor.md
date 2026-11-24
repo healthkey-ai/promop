@@ -70,6 +70,19 @@ metadata describing where a value comes from. Those keys are provenance, not
 permission: only `writable` (and `answerable`, for an attestation) permits a
 write.
 
+### Answers — `value_kind`, `tri_state`, `answer_labels`
+
+- `value_kind: "boolean"` is a Yes / No answer. `tri_state: true` means
+  Unanswered is a real third state: offer Yes / No / Unknown explicitly.
+- Unknown is sent as JSON `null` and is an applied answer (it appears in the
+  PATCH response's `write.applied`), not a generic clear. Omitting the key
+  leaves the stored answer alone.
+- `answer_labels` (when present) replaces the generic Yes / No wording for a
+  question phrased in the negative or positively, for example a medication
+  flag whose `true` means "no concomitant medication".
+- A `tri_state` field never renders curator string choices: the boolean control
+  is the contract.
+
 ### Operation — `writable` vs `answerable`
 
 - `writable: true` permits a write and always names `target`. The route is

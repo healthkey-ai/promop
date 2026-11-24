@@ -114,6 +114,7 @@ def test_the_verdicts_are_not_writable_fields():
         ('pregnancy_test_result', 'Negative', 'Not negative'),
         ('no_pregnancy_or_lactation_status', 'Not pregnant or lactating', 'Pregnant or lactating'),
         ('plasma_cell_leukemia', 'Present', 'Not present'),
+        ('no_concomitant_medication_status', 'No concomitant medication', 'Takes concomitant medication'),
     ],
 )
 def test_the_answer_words_keep_the_question_polarity(name, true_label, false_label):

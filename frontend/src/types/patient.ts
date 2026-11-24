@@ -182,8 +182,8 @@ export interface PatientInfo {
   
   // Labs
   ldh_u_l?: number;
-  pulmonary_function_test_result?: boolean;
-  bone_imaging_result?: boolean;
+  pulmonary_function_test_result?: boolean | null;
+  bone_imaging_result?: boolean | null;
   hiv_status?: boolean;
   hepatitis_b_status?: boolean;
   hepatitis_c_status?: boolean;
@@ -209,7 +209,8 @@ export interface PatientInfo {
   has_caregiver?: boolean;
   using_contraceptive?: boolean;
   is_pregnant?: boolean;
-  pregnancy_test_result?: string;
+  pregnancy_test_result?: boolean | null;
+  no_concomitant_medication_status?: boolean | null;
   is_lactating?: boolean;
   tobacco_use_status?: string;
   recreational_drug_use?: string;
