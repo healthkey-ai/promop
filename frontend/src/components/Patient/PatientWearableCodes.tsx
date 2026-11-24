@@ -28,14 +28,22 @@ const MAPPING_NOTES: Record<string, string> = {
 const codeOf = (code: PatientSourceCode) => code.source_code || code.source_value;
 
 /**
- * Whether the code's rows are of more than one kind. The server calls rows
- * that are provisional and unresolved, with none accepted, "provisional";
- * the counts say both, so both are shown.
+ * Whether the code's rows are of more than one kind. The server says "mixed"
+ * then; the counts are read as well, so a status this page does not know
+ * still shows what is stored.
  */
 function isMixed({ wearable }: WearableSourceCode): boolean {
   const kinds = [wearable.accepted_rows, wearable.provisional_rows, wearable.unresolved_rows]
     .filter((count) => count > 0).length;
   return wearable.status === "mixed" || kinds > 1;
+}
+
+/** The one kind every row is, by the counts: what the status says, read from the rows. */
+function singleKind({ wearable }: WearableSourceCode): "accepted" | "provisional" | "unresolved" | "none" {
+  if (wearable.accepted_rows > 0) return "accepted";
+  if (wearable.provisional_rows > 0) return "provisional";
+  if (wearable.unresolved_rows > 0) return "unresolved";
+  return "none";
 }
 
 /**
@@ -82,7 +90,7 @@ function StatusBadges({ code }: { code: WearableSourceCode }) {
       </>
     );
   }
-  switch (wearable.status) {
+  switch (singleKind(code)) {
     case "accepted":
       return <span className={ACCEPTED} title={ACCEPTED_TITLE}>Accepted</span>;
     case "provisional":

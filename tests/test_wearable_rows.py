@@ -388,3 +388,42 @@ def test_the_migration_files_health_connect_under_the_approved_mappings_code():
 
     assert Observation.objects.get(pk=steps[1].pk).observation_source_value == 'StepsCadenceRecord'
     assert Measurement.objects.get(pk=resting[1].pk).measurement_source_value == 'RestingHeartRateRecord'
+
+
+# ── Review regressions: a prefix must never pick between two hospital codes ─
+
+
+def test_two_hospital_codes_sharing_their_first_fifty_characters_stay_two_codes(provisional_on):
+    from omop_core.mapping.code_resolution import resolve_person_source_codes
+    from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+    person = PatientRecordFactory().person
+    ConceptFactory(concept_id=0, concept_code='No matching concept')
+    prefix = 'SERUM FREE LIGHT CHAIN KAPPA LAMBDA RATIO PANEL XX'
+    assert len(prefix) == 50
+    one, other = ConceptFactory(domain=DomainFactory(domain_id='Measurement')), ConceptFactory(
+        domain=DomainFactory(domain_id='Measurement'))
+    for code, concept in ((prefix + ' ALPHA 1', one), (prefix + ' GAMMA', other)):
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.3', source_code=code, omop_table='measurement',
+            status='approved', target_concept=concept)
+    PatientSourceCode.objects.create(
+        person=person, source_value=prefix + ' GAMMA', source_vocabulary_id='urn:oid:1.2.3',
+        omop_table='measurement')
+    with suppress_patient_record_refresh():
+        row = MeasurementFactory(person=person, measurement_concept_id=0, value_as_number=1.2,
+                                 measurement_source_value=prefix)
+
+    with use_dispatcher(FakeDispatcher()):
+        resolve_person_source_codes(person, omop_tables=['measurement'], source_values=[prefix])
+
+    row.refresh_from_db()
+    assert row.measurement_concept_id == 0
+
+
+def test_the_sweeps_index_holds_a_long_device_code_as_a_row_holds_it(provisional_on):
+    from omop_core.services.provisional_sweep import build_qualifying_index
+    code = 'HKQuantityTypeIdentifierWalkingDoubleSupportPercentage'
+    mapping('Apple', code, 'walking_double_support_pct', status='proposed')
+    entries = build_qualifying_index()['entries']['measurement']
+    assert set(entries) == {code.upper(), code[:50].upper()}
+    assert entries[code[:50].upper()] == entries[code.upper()]

@@ -446,7 +446,8 @@ def _ingest(device, provider, device_type, batch):
     # falls outside the plausible range for its metric is counted and not
     # written, like any other wearable value.
     outcome['days_written'] = result.get('samples_created') or 0
-    changed = bool(result.get('samples_created') or result.get('replaced'))
+    # A batch that stored nothing new can still have settled earlier rows.
+    changed = bool(result.get('samples_created') or result.get('replaced') or result.get('settled_rows'))
     return (person if changed else None), outcome
 
 

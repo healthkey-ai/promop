@@ -915,6 +915,20 @@ describe('WearableTab — every 30-day value says Accepted or Provisional (#2835
     expect(screen.getAllByText('Accepted')).toHaveLength(1);
   });
 
+  it('does not call the absence of a trend Accepted', async () => {
+    await renderMarked({ activity_trend_30d: 'insufficient_data', median_daily_steps_30d: 9000 });
+    expect(screen.queryByTestId('accepted-activity_trend_30d')).not.toBeInTheDocument();
+    expect(screen.getByTestId('accepted-median_daily_steps_30d')).toBeInTheDocument();
+  });
+
+  it('marks the coverage figures when the readings behind them are provisional', async () => {
+    await renderMarked(
+      { wearable_last_sync_at: '2026-11-20T00:00:00Z', wearable_coverage_ratio_30d: 0.5 },
+      { wearable_last_sync_at: 70, wearable_coverage_ratio_30d: 70 });
+    expect(screen.getByTestId('provisional-wearable_last_sync_at')).toHaveTextContent('Provisional 70%');
+    expect(screen.getByTestId('provisional-wearable_coverage_ratio_30d')).toBeInTheDocument();
+  });
+
   it('counts zero as a value', async () => {
     await renderMarked({ flights_climbed_per_day_30d: 0 });
     expect(screen.getByTestId('accepted-flights_climbed_per_day_30d')).toBeInTheDocument();
@@ -924,7 +938,9 @@ describe('WearableTab — every 30-day value says Accepted or Provisional (#2835
     await renderMarked({});
     const note = screen.getByText(/a clinician does not enter a median/i);
     expect(note).toHaveTextContent(
-      /Each value is marked Accepted or Provisional by the mapping its readings came in under: provisional means the mapping of the device code is proposed and not yet approved\./);
+      /Each value is marked Accepted or Provisional\. Provisional means the readings behind it have been stored and are not yet confirmed\./);
+    // Shown to the patient on their own record: no curator's words.
+    expect(note).not.toHaveTextContent(/mapping/i);
   });
 });
 
@@ -937,7 +953,7 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
     fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
 
     expect(await screen.findByText(
-      'Uploaded 5 samples. 3 provisional until their mapping is approved.')).toBeInTheDocument();
+      'Uploaded 5 samples. 3 are provisional: stored, and not yet confirmed.')).toBeInTheDocument();
   });
 
   it('adds them up across the files of one upload, after the duplicates', async () => {
@@ -948,19 +964,19 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
     fireEvent.drop(dropZone(), createDropEvent([createFile('a.fit'), createFile('b.fit')]));
 
     expect(await screen.findByText(
-      'Uploaded 5 samples (1 duplicate skipped). 1 provisional until its mapping is approved.')).toBeInTheDocument();
+      'Uploaded 5 samples (1 duplicate skipped). 1 is provisional: stored, and not yet confirmed.')).toBeInTheDocument();
   });
 
-  it('says how many uploaded samples are stored and waiting for a mapping', async () => {
+  it('says how many uploaded samples are stored and still waiting', async () => {
     mockPost.mockResolvedValue({ data: { samples_created: 5, duplicates_skipped: 0, unresolved_samples: 2 } });
     renderTab();
     fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
 
     expect(await screen.findByText(
-      'Uploaded 5 samples. 2 stored and waiting for a mapping.')).toBeInTheDocument();
+      'Uploaded 5 samples. 2 are stored and waiting to be matched to a standard code.')).toBeInTheDocument();
   });
 
-  it('counts a sample a proposal made provisional once: provisional first, then the rest still waiting', async () => {
+  it('says both counts as the server gives them: separate readings, provisional first', async () => {
     mockPost.mockResolvedValue({
       data: { samples_created: 9, duplicates_skipped: 0, unresolved_samples: 5, provisional_samples: 3 },
     });
@@ -968,20 +984,18 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
     fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
 
     expect(await screen.findByText(
-      'Uploaded 9 samples. 3 provisional until their mapping is approved. 2 stored and waiting for a mapping.',
+      'Uploaded 9 samples. 3 are provisional: stored, and not yet confirmed. 5 are stored and waiting to be matched to a standard code.',
     )).toBeInTheDocument();
   });
 
-  it('says nothing is waiting when every unresolved sample became provisional', async () => {
-    mockPost.mockResolvedValue({
-      data: { samples_created: 4, duplicates_skipped: 0, unresolved_samples: 4, provisional_samples: 4 },
-    });
-    renderTab();
+  it('re-reads the record when an upload stored nothing new and settled earlier readings', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 0, duplicates_skipped: 5, settled_rows: 12 } });
+    const onRefresh = vi.fn();
+    renderTab({ onRefresh });
     fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
 
-    expect(await screen.findByText(
-      'Uploaded 4 samples. 4 provisional until their mapping is approved.')).toBeInTheDocument();
-    expect(screen.queryByText(/waiting for a mapping/i)).not.toBeInTheDocument();
+    await screen.findByText(/Uploaded 0 samples/);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
   });
 
   it('says nothing about provisional samples when the upload stored none', async () => {
@@ -990,8 +1004,8 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
     fireEvent.drop(dropZone(), createDropEvent([createFile('activity.fit')]));
 
     expect(await screen.findByText('Uploaded 5 samples')).toBeInTheDocument();
-    expect(screen.queryByText(/provisional until/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/waiting for a mapping/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/provisional: stored/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting to be matched/i)).not.toBeInTheDocument();
   });
 
   const SYNCED = {
@@ -1008,19 +1022,19 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
   }
 
   it('says how many synced values are provisional', async () => {
-    await sync({ ...SYNCED, provisional_samples: 40, provisional_metrics: ['vo2_max'] });
+    await sync({ ...SYNCED, provisional_samples: 40 });
 
     expect(await screen.findByText(
       'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored. '
-      + '40 provisional until their mapping is approved.')).toBeInTheDocument();
+      + '40 are provisional: stored, and not yet confirmed.')).toBeInTheDocument();
   });
 
-  it('says how many synced values are stored and waiting for a mapping, after the provisional ones', async () => {
-    await sync({ ...SYNCED, unresolved_samples: 70, unresolved_metrics: ['vo2_max', 'spo2'], provisional_samples: 40 });
+  it('says how many synced values are stored and still waiting, after the provisional ones', async () => {
+    await sync({ ...SYNCED, unresolved_samples: 30, unresolved_metrics: ['vo2_max', 'spo2'], provisional_samples: 40 });
 
     expect(await screen.findByText(
       'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored. '
-      + '40 provisional until their mapping is approved. 30 stored and waiting for a mapping.')).toBeInTheDocument();
+      + '40 are provisional: stored, and not yet confirmed. 30 are stored and waiting to be matched to a standard code.')).toBeInTheDocument();
   });
 
   it('says how many synced values wait when none is provisional', async () => {
@@ -1028,7 +1042,7 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
 
     expect(await screen.findByText(
       'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored. '
-      + '1 stored and waiting for a mapping.')).toBeInTheDocument();
+      + '1 is stored and waiting to be matched to a standard code.')).toBeInTheDocument();
   });
 
   it('says nothing about provisional values when the sync stored none', async () => {
@@ -1036,7 +1050,7 @@ describe('WearableTab — samples stored as provisional or still waiting (#2835)
 
     expect(await screen.findByText(
       'Synced 2026-10-24 to 2026-11-22: 210 new values, 12 replaced, 30 already stored.')).toBeInTheDocument();
-    expect(screen.queryByText(/provisional until/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/waiting for a mapping/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/provisional: stored/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/waiting to be matched/i)).not.toBeInTheDocument();
   });
 });

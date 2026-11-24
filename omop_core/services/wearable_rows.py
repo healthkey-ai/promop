@@ -183,7 +183,10 @@ def queue_unmapped(codes) -> int:
         _row, created = SourceCodeConceptMapping.objects.get_or_create(
             source_vocabulary_id=code.vocabulary, source_code=code.source_code, organization=None,
             defaults={
-                'omop_table': code.table, 'status': 'proposed', 'origin': 'import',
+                # Not ``origin='import'``: a re-point and a relocation take an
+                # import row's description for a second row key, and this one
+                # ("steps", "spo2") is another device's code and a hospital's.
+                'omop_table': code.table, 'status': 'proposed',
                 'origin_system': ORIGIN_SYSTEM, 'metric_key': code.metric_key,
                 'source_code_description': code.metric_key.replace('_', ' '),
                 'occurrence_count': 1,
@@ -195,19 +198,26 @@ def queue_unmapped(codes) -> int:
 def existing_rows(person, code, days):
     """The patient's stored rows for one device code within ``days``.
 
-    ``(row id, date, value, type concept id, concept id, confidence)``. Rows
-    filed under the code, and, where the code is resolved, rows at its concept:
-    what was written before rows carried their device code, and another
-    device's reading of the same metric, which was always read as "already
-    stored" when the value was the same.
+    Yields ``(table, row id, date, value, type concept id, filed under the
+    code)``. Rows filed under the code, and, where the code is resolved, rows
+    at its concept: what was written before rows carried their device code,
+    and another device's reading of the same metric, which was always read as
+    "already stored" when the value was the same.
+
+    Both tables are read. A code whose mapping moved from one to the other
+    has rows in the table it left until they are relocated, and a row that
+    was relocated has a new id its upload's history does not name; reading
+    only the mapping's table would store such a day a second time.
     """
-    model, pk, concept_col, type_col, source_col, date_field = TABLES[code.table]
-    match = Q(**{source_col: code.stored_code()})
-    if code.concept is not None:
-        match |= Q(**{concept_col: code.concept.pk})
-    return model.objects.filter(
-        match, person=person, is_erroneous=False, **{f'{date_field}__range': days},
-    ).values_list(pk, date_field, 'value_as_number', type_col, concept_col, 'confidence')
+    for table, (model, pk, concept_col, type_col, source_col, date_field) in TABLES.items():
+        stored = code.source_code[:model._meta.get_field(source_col).max_length or 50]
+        match = Q(**{source_col: stored})
+        if code.concept is not None:
+            match |= Q(**{concept_col: code.concept.pk})
+        for row_id, day, value, type_id, source in model.objects.filter(
+                match, person=person, is_erroneous=False, **{f'{date_field}__range': days},
+        ).values_list(pk, date_field, 'value_as_number', type_col, source_col):
+            yield table, row_id, day, value, type_id, source == stored
 
 
 def record_inventory(person, codes, units) -> None:
@@ -242,6 +252,37 @@ def record_inventory(person, codes, units) -> None:
                     'metric': code.metric_key,
                 },
             })
+
+
+def delete_moved(person, device_type, entries) -> int:
+    """Delete the rows of an upload's history entries that are no longer under their ids.
+
+    A row relocated with its code's mapping has a new id in the other table.
+    It is found by what it is: this device's code, a wearable row, that day,
+    that value. A row replaced by a later sync carries another value and is
+    another upload's; nothing matches it here.
+    """
+    from datetime import date as _date
+    codes = device_codes(device_type, [entry.get('metric') for entry in entries
+                                       if isinstance(entry.get('metric'), str)])
+    deleted = 0
+    for entry in entries:
+        code = codes.get(entry.get('metric'))
+        try:
+            day = _date.fromisoformat(str(entry.get('date')))
+            value = float(entry.get('value'))
+        except (TypeError, ValueError):
+            continue
+        if code is None:
+            continue
+        for _table, (model, _pk, _concept, type_col, source_col, date_field) in TABLES.items():
+            stored = code.source_code[:model._meta.get_field(source_col).max_length or 50]
+            count, _ = model.objects.filter(
+                person=person, value_as_number=value,
+                **{source_col: stored, type_col: WEARABLE_TYPE_CONCEPT_ID, date_field: day},
+            ).delete()
+            deleted += count
+    return deleted
 
 
 def prune_inventory(person) -> None:
@@ -294,8 +335,13 @@ def describe(person, entries) -> None:
     feeds. Counts and dates only. One grouped query per table, whatever the
     number of codes.
     """
+    # Only what the patient's inventory lists (``source_code_id``): an entry
+    # aggregated from the clinical tables has no vocabulary of its own, and
+    # takes a mapping's by code alone, so a hospital's "steps" would read as
+    # Garmin's.
     mine = [entry for entry in entries
-            if entry.get('source_vocabulary_id') in DEVICE_VOCABULARIES and entry.get('omop_table') in TABLES]
+            if entry.get('source_code_id') and entry.get('source_vocabulary_id') in DEVICE_VOCABULARIES
+            and entry.get('omop_table') in TABLES]
     if not mine:
         return
     from omop_core.services.wearable_parsers import _APPLE_SLEEP_TYPE, _APPLE_TYPE_MAP
@@ -316,7 +362,9 @@ def describe(person, entries) -> None:
             continue
         unresolved = Q(**{concept_col: NO_MATCHING_CONCEPT_ID}, confidence__isnull=True)
         for row in (model.objects
-                    .filter(person=person, is_erroneous=False, **{f'{source_col}__in': codes})
+                    # The importer's rows, not a hospital's of the same spelling.
+                    .filter(person=person, is_erroneous=False, **{f'{source_col}__in': codes,
+                                                                 type_col: WEARABLE_TYPE_CONCEPT_ID})
                     .values(source_col)
                     .annotate(rows=Count(pk),
                               provisional=Count(pk, filter=Q(confidence__isnull=False)),

@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
-import { useProvisionalMark } from './ProvisionalContext';
+import { useContext, type ReactNode } from 'react';
+import { ProvisionalContext, useProvisionalMark } from './ProvisionalContext';
 
 /** "Provisional 82%" after a field's label when its value is a proposal. `via` names
  *  what the reader edits instead when the value is not typed in directly (the FLIPI
@@ -46,11 +46,14 @@ export default function ProvisionalBadge(
  */
 export function AcceptedBadge({ name }: { name: string }) {
   const mark = useProvisionalMark(name);
+  const { patientMode } = useContext(ProvisionalContext);
   if (mark) return null;
   return (
     <span
       className="rounded bg-green-100 px-1.5 py-0.5 text-xs font-medium text-green-800"
-      title="From device readings whose code mapping is approved."
+      title={patientMode
+        ? 'From your device readings, checked and confirmed.'
+        : 'From device readings whose code mapping is approved.'}
       data-testid={`accepted-${name}`}
     >
       Accepted

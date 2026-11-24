@@ -1122,24 +1122,41 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
   (`queue_unmapped`, `origin_system` `wearable-import`), and the resolver is
   run for the patient's waiting codes in the same transaction
   (`resolve_person_source_codes`, `derive=False`): a qualifying proposal
-  makes the rows **provisional**. The response adds `unresolved_samples` /
-  `unresolved_metrics` and `provisional_samples` when there are some;
-  `unmapped_*` is now only a metric the device has no code for.
+  makes the rows **provisional**. The resolver runs in a savepoint: one that
+  fails costs the resolving, never the readings. The response adds, when
+  above zero, `provisional_samples` and `unresolved_samples` /
+  `unresolved_metrics` (of the rows **this upload** stored: those a proposal
+  gave a concept, and those still waiting; counted apart, never one inside
+  the other) and `settled_rows` (stored rows, this upload's or earlier ones',
+  that a mapping settled during it; a caller that derives only "when
+  something changed" counts it). `unmapped_*` is now only a metric the device
+  has no code for.
 - **The inventory is what makes it work.** `record_inventory` writes one
   `PatientSourceCode` per code (`source_vocabulary_id` the device's, the
   count of rows stored), as the ETL's source-code upload does. The resolver
   reads it to tell which code system a row's code came from; the Source
   Codes tab lists it. An entry with no row left is removed
-  (`prune_inventory`, after an upload is deleted).
+  (`prune_inventory`, after an upload is deleted). **Nothing else may delete
+  it**: the ETL's source-code upload prunes what its payload or its run did
+  not send (`replace`, `final`), and both prunes leave the device
+  vocabularies alone. A patient whose only inventory is a device's has no
+  ETL inventory: the Source Codes tab and the patient list's unmapped count
+  still read their other codes from the clinical tables.
 - **Three rules for a device's code, in `code_resolution`** (the block headed
   "a wearable device's codes"). They exist because a device's row can say
   which system it came from, and its code is not unique: `spo2` is Garmin's
   code and two hospitals' local one.
   1. A device's mapping answers only for a person who holds the code under
-     that device's vocabulary (`_answering`, `choose_proposal`,
-     `_device_holders` on re-point, promote and revert).
+     that device's vocabulary (`_answering`, `choose_proposal`), and its
+     sweeps move only that person's **wearable rows** (type concept 32865):
+     `_scope_to_holders`, on re-point, promote, revert and relocation.
   2. For a person who holds a code under device vocabularies only, no other
-     vocabulary's mapping answers.
+     vocabulary's mapping answers, and no other mapping's sweep moves their
+     wearable rows. Inventory is read in the row's own spelling first, so
+     Garmin's `spo2` and a hospital's `SPO2` held by one person are two
+     codes; held in the **same** spelling and table under a device and
+     another system, nothing answers (as no proposal does), and each
+     mapping's approval still moves its own kind of row.
   3. A device's proposal qualifies for provisional rows **unscored, at the
      floor** (`proposal_percent`): the wearable mappings are a curated
      proposal nobody put to a ranker. Its destination may be a local
@@ -1156,8 +1173,21 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
 - **Finding what is already stored.** `existing_rows` reads rows filed under
   the code, and rows at the code's concept: what was written before #2835,
   and another device's reading of the same metric, which was always read as
-  "already stored" at the same value. Replacement by day still goes by the
-  rows an upload's history names.
+  "already stored" at the same value. It reads **both** tables: a code whose
+  mapping moved table has rows in the one it left until they are relocated,
+  and a relocated row has a new id its upload's history does not name. A
+  row is this device's when it is filed under its code or an upload's
+  history names it. Deleting an upload looks for a relocated row again by
+  code, day and value (`delete_moved`).
+- **A match on a cut code is a device's only.** A clinical row keeps 50
+  characters of its code. `_code_match` lets a row at that width match a
+  mapping whose code begins with it only for the device vocabularies (one
+  HealthKit identifier is 54 long): two hospital codes that differ after the
+  fiftieth character stay two codes.
+- **Lock order.** The importer locks the patient, then the `PatientRecord`
+  row, before touching a clinical row: a re-point marks records stale and
+  then moves rows, and the importer resolves rows and then marks the record
+  stale.
 - **Rows from before #2835** carried their destination concept's code as the
   source value. Migration `0371` re-files the ones an upload's history names
   (`row_id`, since #2794) and writes their inventory; older ones are left,
@@ -1165,13 +1195,18 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
 - **30-day metrics.** `_get_wearable_data` is one of the provisional pass's
   readers, so a metric fed only by provisional rows is shown marked, one fed
   by accepted rows is approved data, and an unresolved reading feeds neither.
+  The activity trend's `insufficient_data` is no answer
+  (`provisional_record.PLACEHOLDERS`): it is not proposed, and an approved
+  one does not hide a proposed trend.
   `WEARABLE_METRIC_FIELDS` (`mappings.py`) names the 30-day fields of every
   metric an import can write; `tests/test_wearable_rows.py` holds every
   importer's metrics to it. The Wearables tab marks each value Accepted or
   Provisional. The fields are not writable, so a provisional one never
   blocks "Confirm my record".
 - **Source Codes tab.** `wearable_rows.describe` adds a `wearable` block to
-  each device code of `GET patient-records/<id>/source-codes/`: rows
+  each device code the patient's inventory lists (never to a code aggregated
+  from the clinical tables, which has no vocabulary of its own) of
+  `GET patient-records/<id>/source-codes/`: rows
   accepted, provisional and unresolved, their dates, the lowest provisional
   confidence, a status (`accepted`, `provisional`, `unresolved`, `mixed`,
   `none`) and the 30-day fields it feeds. Counts and dates only. The tab
@@ -1187,7 +1222,11 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
 
 Tests: `tests/test_wearable_rows.py`,
 `patient_portal.tests.WearableSourceCodesTest`,
-`PatientSourceCodesTab.wearables.test.tsx`, `PatientWearableCodes.test.tsx`.
+`patient_portal.tests.WearableCodesBesideOtherCodesTest` (the paths that
+touch a device's inventory or rows from outside: the ETL upload, the
+clinical-table fallback, a relocation, a hospital mapping of the same
+spelling), `PatientSourceCodesTab.wearables.test.tsx`,
+`PatientWearableCodes.test.tsx`.
 
 ---
 

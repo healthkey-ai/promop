@@ -129,3 +129,23 @@ describe('ProvisionalBadge for a summary of device readings (#2835)', () => {
     expect(badge.title).not.toMatch(/enter it yourself/);
   });
 });
+
+describe('AcceptedBadge wording (#2835)', () => {
+  it('speaks of the code mapping to a provider and never to a patient', () => {
+    const { unmount } = render(
+      <ProvisionalContext.Provider value={{ marks: {}, patientMode: false }}>
+        <AcceptedBadge name="median_daily_steps_30d" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByTestId('accepted-median_daily_steps_30d').title).toMatch(/code mapping is approved/);
+    unmount();
+    render(
+      <ProvisionalContext.Provider value={{ marks: {}, patientMode: true }}>
+        <AcceptedBadge name="median_daily_steps_30d" />
+      </ProvisionalContext.Provider>,
+    );
+    const title = screen.getByTestId('accepted-median_daily_steps_30d').title;
+    expect(title).toMatch(/your device readings/);
+    expect(title).not.toMatch(/mapping/i);
+  });
+});

@@ -178,12 +178,23 @@ describe("PatientWearableCodes status", () => {
     expect(status("garmin-steps").textContent).toBe("Accepted 12Unresolved 2mapping approved");
   });
 
-  it("shows both counts for provisional rows beside unresolved ones, which the server calls provisional", () => {
+  it("shows both counts for provisional rows beside unresolved ones", () => {
     render(<PatientWearableCodes codes={[code({
       mapping_status: "proposed",
-      wearable: { status: "provisional", rows: 9, accepted_rows: 0, provisional_rows: 5, unresolved_rows: 4, confidence: 80 },
+      wearable: { status: "mixed", rows: 9, accepted_rows: 0, provisional_rows: 5, unresolved_rows: 4, confidence: 80 },
     })]} />);
     expect(status("garmin-steps").textContent).toBe("Provisional 5Unresolved 4mapping proposed");
+  });
+
+  it("reads the counts when the status is one it does not know, and never says No rows over stored ones", () => {
+    render(<PatientWearableCodes codes={[code({
+      mapping_status: "approved",
+      // A status a later server might send.
+      wearable: { status: "superseded" as never, rows: 3, accepted_rows: 3, provisional_rows: 0, unresolved_rows: 0 },
+    })]} />);
+    const cell = status("garmin-steps");
+    expect(within(cell).getByText("Accepted")).toBeInTheDocument();
+    expect(within(cell).queryByText("No rows")).not.toBeInTheDocument();
   });
 
   it.each([

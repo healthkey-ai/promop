@@ -26,10 +26,12 @@ interface SyncResult {
   unmapped_metrics?: string[];
   /** Whether a key is saved for this patient once the sync has run (#2834). */
   key_saved?: boolean;
-  /** Rows a proposed mapping gave a concept; sent only when there are some (#2835). */
+  /** Of the readings this sync stored, those a proposed mapping gave a concept; sent only when there are some (#2835). */
   provisional_samples?: number;
-  /** Readings stored with no approved mapping yet, the provisional ones included; sent only when there are some. */
+  /** Of the readings this sync stored, those still waiting for a mapping; sent only when there are some. */
   unresolved_samples?: number;
+  /** Stored rows, this sync's or earlier ones', that a mapping settled during it; sent only when there are some. */
+  settled_rows?: number;
 }
 
 /** What the server says about a saved key: that there is one, never the key. */
@@ -183,7 +185,7 @@ export default function GarminConnectSync({
       const told = typeof res.data.key_saved === 'boolean';
       if (told) setKeyStatus(status => ({ ...status, saved: res.data.key_saved === true }));
       if (!told || !statusKnown) void refreshStatus();
-      onSynced(res.data.samples_created > 0 || res.data.replaced > 0);
+      onSynced(res.data.samples_created > 0 || res.data.replaced > 0 || (res.data.settled_rows ?? 0) > 0);
     } catch (err: unknown) {
       const data = (err as { response?: { data?: { error?: string; detail?: string; key_saved?: boolean } } })
         ?.response?.data;

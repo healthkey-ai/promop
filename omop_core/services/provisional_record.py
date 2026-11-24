@@ -293,6 +293,18 @@ def computed_proposals(record, proposals, marks, blocked=()) -> tuple[dict, dict
     return values, confidences
 
 
+# A value that says "no answer": the activity trend's "insufficient_data" is
+# what derivation writes when it has readings and no trend. It is not a
+# proposal worth showing, and an approved one is not an answer a proposed
+# trend has to stay behind (#2835).
+PLACEHOLDERS = {'activity_trend_30d': 'insufficient_data'}
+
+
+def _no_answer(field, value) -> bool:
+    from omop_core.services.patient_record_service import _is_empty
+    return _is_empty(value) or PLACEHOLDERS.get(field, object()) == value
+
+
 def _storable(name, value) -> bool:
     """Whether *value* fits column *name* (the real refresh drops what does not).
 
@@ -793,7 +805,7 @@ def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
         kept = {
             field: value for field, value in values.items()
             if field in confidence_names and field not in blocked
-            and not _is_empty(value) and _is_empty(getattr(record, field, None))
+            and not _no_answer(field, value) and _no_answer(field, getattr(record, field, None))
             and _storable(field, value)
         }
         # A proposed weight or height is dropped when the record's own unit for it
@@ -1110,7 +1122,7 @@ def overlay(record, lists=True):
                 setattr(view, field.attname, [*(live or []), *new])
                 marks[field.name] = mark
                 added[field.name] = new
-        elif _is_empty(live):
+        elif _no_answer(field.name, live):
             setattr(view, field.attname, getattr(provisional, field.attname))
             marks[field.name] = mark
     # A precision describes its date: a proposed one is shown only with the proposed date

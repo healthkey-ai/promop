@@ -164,6 +164,15 @@ def _release_pending(key):
 _INDEX_KEY = 'provisional-sweep:index'
 
 
+def _as_stored(table, code) -> str:
+    """A source code as a clinical row of *table* holds it: cut to the column."""
+    entry = CLINICAL_TABLES.get(table)
+    if entry is None:
+        return code
+    model, _concept_col, source_col = entry
+    return code[:model._meta.get_field(source_col).max_length or 50]
+
+
 def build_qualifying_index() -> dict:
     """The qualifying proposals, indexed for the resolver's own decision.
 
@@ -190,10 +199,13 @@ def build_qualifying_index() -> dict:
                    if table in CLINICAL_TABLES and mapping.source_code else None)
         if percent is None:
             continue
-        entries.setdefault(table, {}).setdefault(mapping.source_code.upper(), []).append(
-            (mapping.target_concept_id, percent,
-             canonical_source_vocabulary(mapping.source_vocabulary_id)))
-        codes.setdefault(table, set()).add(mapping.source_code)
+        entry = (mapping.target_concept_id, percent,
+                 canonical_source_vocabulary(mapping.source_vocabulary_id))
+        # Under the code, and under the code as a row holds it: cut to the
+        # column. A HealthKit identifier runs past it (#2835).
+        for key in {mapping.source_code, _as_stored(table, mapping.source_code)}:
+            entries.setdefault(table, {}).setdefault(key.upper(), []).append(entry)
+            codes.setdefault(table, set()).add(key)
     return {'entries': entries, 'codes': {t: sorted(c) for t, c in codes.items()},
             'quarantine': sorted(_quarantine_concept_ids())}
 
@@ -746,7 +758,8 @@ def person_needs_resolve(person_id) -> bool | None:
     vocabularies = defaultdict(set)
     for table, value, vocabulary in PatientSourceCode.objects.filter(person_id=person_id).values_list(
             'omop_table', 'source_value', 'source_vocabulary_id'):
-        vocabularies[(normalize_omop_table(table), (value or '').upper())].add(vocabulary)
+        table = normalize_omop_table(table)
+        vocabularies[(table, _as_stored(table, value or '').upper())].add(vocabulary)
     for table, (model, concept_col, source_col) in CLINICAL_TABLES.items():
         table_entries = entries.get(table, {})
         with_rows = set()

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
+import ProvisionalBadge from '../ProvisionalBadge';
 import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
@@ -197,6 +198,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     let totalDuplicates = 0;
     let totalProvisional = 0;
     let totalUnresolved = 0;
+    let totalSettled = 0;
 
     try {
       for (const file of files) {
@@ -215,6 +217,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         totalDuplicates += res.data.duplicates_skipped || 0;
         totalProvisional += res.data.provisional_samples || 0;
         totalUnresolved += res.data.unresolved_samples || 0;
+        totalSettled += res.data.settled_rows || 0;
       }
 
       const pending = pendingClause({
@@ -226,9 +229,11 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         (pending ? `. ${pending}` : '')
       );
 
-      // Refresh upload history and patient record
+      // Refresh upload history and patient record. The record is re-read when
+      // rows were stored, and also when the upload settled earlier readings
+      // whose mapping has been approved or proposed since (#2835).
       fetchUploads();
-      if (totalCreated > 0 && onRefresh) {
+      if ((totalCreated > 0 || totalSettled > 0) && onRefresh) {
         onRefresh();
       }
     } catch (err: unknown) {
@@ -530,15 +535,23 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       <Section title="Data Coverage">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-portal-text-primary">Last Sync</label>
+            <div className="flex items-center gap-1.5">
+              <label className="text-sm font-medium text-portal-text-primary">Last Sync</label>
+              {/* Both are read from the same readings as the values below, so
+                  they are provisional when all of those are (#2835). */}
+              <ProvisionalBadge name="wearable_last_sync_at" fromDevice />
+            </div>
             <p className="text-sm text-gray-700 py-1.5">
               {formatSyncDate(formData?.wearable_last_sync_at) || '\u2014'}
             </p>
           </div>
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-portal-text-primary">
-              Coverage Ratio (30 days)
-            </label>
+            <div className="flex items-center gap-1.5">
+              <label className="text-sm font-medium text-portal-text-primary">
+                Coverage Ratio (30 days)
+              </label>
+              <ProvisionalBadge name="wearable_coverage_ratio_30d" fromDevice />
+            </div>
             <p className="text-sm text-gray-700 py-1.5">
               {formData?.wearable_coverage_ratio_30d != null
                 ? `${(Number(formData.wearable_coverage_ratio_30d) * 100).toFixed(0)}%`
@@ -555,9 +568,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           {ownRecord
             ? 'Upload device data above and these follow.'
             : 'They follow from the device data the patient adds.'}
-          {' '}Each value is marked Accepted or Provisional by the mapping its readings
-          came in under: provisional means the mapping of the device code is proposed
-          and not yet approved.
+          {' '}Each value is marked Accepted or Provisional. Provisional means the
+          readings behind it have been stored and are not yet confirmed.
         </p>
       </div>
 
@@ -588,7 +600,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="activity_trend_30d"
             descriptor={descriptors.activity_trend_30d}
             showReason={false}
-            showAccepted
+            // "Insufficient data" is the absence of a trend, not a reading to accept.
+            showAccepted={formData?.activity_trend_30d !== 'insufficient_data'}
             type="select"
             value={formData?.activity_trend_30d}
             options={ACTIVITY_TREND_OPTIONS}

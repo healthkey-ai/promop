@@ -902,10 +902,12 @@ three rules that keep a device's code apart from a hospital's of the same
 spelling.
 
 The HTTP response carries `samples_created` and `duplicates_skipped`, plus,
-when there are some, `unresolved_samples` / `unresolved_metrics` (stored under
-a code no approved mapping answers for) and `provisional_samples` (rows a
-proposal gave a concept). `unmapped_samples` / `unmapped_metrics` now mean only
-a metric the device has no code for, which is not stored.
+when above zero: `provisional_samples` (of the rows this upload stored, those a
+proposal gave a concept), `unresolved_samples` / `unresolved_metrics` (those
+still waiting for a mapping; the two are counted apart) and `settled_rows`
+(stored rows, this upload's or earlier ones', that a mapping settled during
+it). `unmapped_samples` / `unmapped_metrics` now mean only a metric the device
+has no code for, which is not stored.
 
 Dedup is `(metric_key, date, round(value, 2))` against the rows already filed
 under the code, and against rows at the code's concept (those written before

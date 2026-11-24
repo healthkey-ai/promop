@@ -37079,8 +37079,9 @@ class WearableSourceCodesTest(RunsRepointJobsMixin, TestCase):
         resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
 
         self.assertEqual(resp.data['samples_created'], 2)
-        self.assertEqual(resp.data['unresolved_metrics'], ['resting_hr', 'steps'])
         self.assertEqual(resp.data['provisional_samples'], 2)
+        # Both found a proposal: nothing this upload stored is still waiting.
+        self.assertNotIn('unresolved_samples', resp.data)
         # Unscored stands at the floor; null would read as an accepted row.
         self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
         self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), 85)])
@@ -37390,14 +37391,15 @@ class WearableSourceCodesTest(RunsRepointJobsMixin, TestCase):
         from django.test.utils import CaptureQueriesContext
         from omop_core.services import wearable_rows
         self._sync([self._sample('resting_hr', 52.0)])
-        few = [{'source_value': 'resting_hr', 'source_code': 'resting_hr',
+        few = [{'source_value': 'resting_hr', 'source_code': 'resting_hr', 'source_code_id': 1,
                 'source_vocabulary_id': 'Garmin', 'omop_table': 'measurement'}]
         with CaptureQueriesContext(connection) as one:
             wearable_rows.describe(self.person, few)
         self._sync(self._month('resting_hr', 40.0) + self._month('spo2', 88.0)
                    + self._month('respiratory_rate', 12.0))
         many = [{'source_value': code, 'source_code': code, 'source_vocabulary_id': 'Garmin',
-                 'omop_table': 'measurement'} for code in ('resting_hr', 'spo2', 'respiratory_rate')]
+                 'source_code_id': 1, 'omop_table': 'measurement'}
+                for code in ('resting_hr', 'spo2', 'respiratory_rate')]
         with CaptureQueriesContext(connection) as three:
             wearable_rows.describe(self.person, many)
         self.assertEqual(len(one), len(three))
@@ -37414,3 +37416,282 @@ class WearableSourceCodesTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
         self.assertEqual(self._rows('steps'), [])
         self.assertFalse(PatientSourceCode.objects.filter(person=self.person).exists())
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True, PROVISIONAL_CONFIDENCE_FLOOR=70)
+class WearableCodesBesideOtherCodesTest(RunsRepointJobsMixin, TestCase):
+    """A device's code beside a hospital's: what other paths do to it, and it to them (#2835).
+
+    The device rules rest on the patient's source-code inventory and on a row
+    being a wearable row, and other writers touch both: the ETL's source-code
+    upload, the clinical-table fallback of the Source Codes tab, a relocation,
+    a hospital mapping of the same spelling. Each test here is one of those.
+    """
+
+    setUpTestData = classmethod(WearableSourceCodesTest.setUpTestData.__func__)
+    setUp = WearableSourceCodesTest.setUp
+    _client_as = GarminSyncEndpointTest._client_as
+    _sample = GarminSyncEndpointTest._sample
+    _sync = GarminSyncEndpointTest._sync
+    _mapping = WearableSourceCodesTest._mapping
+    _propose = WearableSourceCodesTest._propose
+    _decide = WearableSourceCodesTest._decide
+    _rows = WearableSourceCodesTest._rows
+    _cid = WearableSourceCodesTest._cid
+    _codes = WearableSourceCodesTest._codes
+    _record = WearableSourceCodesTest._record
+    URL, KEY = WearableSourceCodesTest.URL, WearableSourceCodesTest.KEY
+
+    def _generate_omop(self, person=None):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        with use_dispatcher(FakeDispatcher()):
+            return resolve_person_source_codes(person or self.person)
+
+    def _hospital_row(self, code, person=None, concept_id=0, value=91):
+        """A hospital's result under a local code: an EHR row, no wearable type."""
+        from omop_core.models import Measurement
+        from omop_core.services.pk import next_pk
+        return Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'), person=person or self.person,
+            measurement_concept_id=concept_id, measurement_date=self.day, value_as_number=value,
+            measurement_type_concept_id=32817, measurement_source_value=code)
+
+    def _hospital_mapping(self, code, target, **more):
+        from omop_core.models import SourceCodeConceptMapping
+        return SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.3.4.5', source_code=code, omop_table='measurement',
+            target_concept=target, status=more.pop('status', 'approved'), **more)
+
+    def _other_patient(self):
+        other = Person.objects.create(person_id=99003, family_name='Hospital', given_name='Hana')
+        PatientRecord.objects.create(person=other)
+        return other
+
+    # -- the ETL's source-code upload ----------------------------------------
+
+    def _post_codes(self, body):
+        resp = self._client_as(self.admin).post(
+            f'/api/v1/patient-records/{self.person.person_id}/source-codes/', body, format='json')
+        self.assertIn(resp.status_code, (200, 201), getattr(resp, 'data', None))
+        return resp
+
+    def test_an_etl_replace_leaves_the_devices_inventory_and_its_rows_resolvable(self):
+        from omop_core.models import PatientSourceCode
+        mapping = self._propose('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+        self._post_codes({'replace': True, 'source_codes': [
+            {'source_value': 'GLU', 'source_vocabulary_id': 'urn:oid:1.2.3.4.5',
+             'omop_table': 'measurement', 'occurrence_count': 1}]})
+
+        self.assertEqual(
+            sorted(PatientSourceCode.objects.filter(person=self.person).values_list(
+                'source_vocabulary_id', 'source_value')),
+            [('Garmin', 'steps'), ('urn:oid:1.2.3.4.5', 'GLU')])
+        # Still the device's: Generate OMOP leaves the provisional row, approval accepts it.
+        self._generate_omop()
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+        self._decide(mapping, status='approved')
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+    def test_a_chunked_etl_uploads_final_prune_leaves_the_devices_inventory(self):
+        from omop_core.models import PatientSourceCode
+        self._sync([self._sample('steps', 9200.0)])
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='OLD', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement', upload_id='run-1')
+
+        self._post_codes({'upload_id': 'run-2', 'final': True, 'source_codes': [
+            {'source_value': 'GLU', 'source_vocabulary_id': 'urn:oid:1.2.3.4.5',
+             'omop_table': 'measurement', 'occurrence_count': 1}]})
+
+        self.assertEqual(
+            sorted(PatientSourceCode.objects.filter(person=self.person).values_list('source_value', flat=True)),
+            ['GLU', 'steps'])
+
+    # -- a patient whose other codes come from the clinical tables ------------
+
+    def test_a_wearable_import_does_not_hide_the_codes_read_from_the_clinical_tables(self):
+        """No ETL inventory: the tab aggregates the clinical rows, and keeps doing so."""
+        self._hospital_row('GLU-LOCAL')
+        self._hospital_row('distance', value=3)             # a hospital's code that is also Garmin's
+        self.assertEqual(set(self._codes()), {'GLU-LOCAL', 'distance'})
+
+        self._sync([self._sample('steps', 9200.0)])
+
+        codes = self._codes()
+        self.assertEqual(set(codes), {'GLU-LOCAL', 'distance', 'steps'})
+        self.assertIn('wearable', codes['steps'])
+        self.assertEqual(codes['steps']['row_count'], 1)
+        # Read from the clinical tables, they are nobody's device code.
+        self.assertNotIn('wearable', codes['GLU-LOCAL'])
+        self.assertNotIn('wearable', codes['distance'])
+
+    def test_the_patient_lists_unmapped_count_still_reads_the_clinical_tables(self):
+        from omop_core.services.patient_list_context import annotate_context
+        self._hospital_row('GLU-LOCAL')
+        self._hospital_row('NA-LOCAL')
+
+        def count():
+            return annotate_context(PatientRecord.objects.filter(pk=self.patient_rec.pk)).get(
+            ).unmapped_source_code_count
+        self.assertEqual(count(), 2)
+
+        self._sync([self._sample('steps', 9200.0)])         # approved: nothing more is unmapped
+
+        self.assertEqual(count(), 2)
+
+    # -- codes that share a spelling ------------------------------------------
+
+    def test_a_holder_of_the_code_under_a_device_and_a_hospital_is_answered_by_neither(self):
+        from omop_core.models import PatientSourceCode
+        self._propose('spo2', confidence=0.2)
+        self._sync([self._sample('spo2', 97.0)])
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='spo2', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+        self._hospital_mapping('spo2', self.wearable_concepts['vo2_max'])
+
+        self._generate_omop()
+
+        self.assertEqual(self._rows('spo2'), [(97.0, 0, None)])
+
+    def test_a_hospitals_spelling_in_another_case_is_another_code(self):
+        from omop_core.models import PatientSourceCode
+        self._sync([self._sample('spo2', 97.0)])            # Garmin's, approved
+        self._hospital_row('SPO2')
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='SPO2', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+        hospital = self._hospital_mapping('SPO2', self.wearable_concepts['vo2_max'])
+
+        self._generate_omop()
+
+        # Each row by its own inventory entry: the hospital's to the hospital's mapping.
+        self.assertEqual(self._rows('SPO2'), [(91.0, hospital.target_concept_id, None)])
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), None)])
+
+    def test_a_hospital_mappings_repoint_leaves_a_device_holders_accepted_row(self):
+        self._sync([self._sample('spo2', 97.0)])
+        hospital = self._hospital_mapping('SPO2', self.wearable_concepts['spo2'])
+
+        self._decide(hospital, target_concept_id=self._cid('vo2_max'), status='approved')
+
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), None)])
+
+    def test_no_empty_row_is_made_at_a_devices_concept_for_a_hospitals_inventory_code(self):
+        from omop_core.models import Measurement, PatientSourceCode
+        other = self._other_patient()
+        PatientSourceCode.objects.create(
+            person=other, source_value='spo2', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+
+        self._generate_omop(other)                           # Garmin's spo2 mapping is approved
+
+        self.assertFalse(Measurement.objects.filter(person=other).exists())
+
+    def test_a_queued_device_code_is_not_an_import_row_whose_description_is_a_row_key(self):
+        from omop_core.models import SourceCodeConceptMapping
+        self._sync([self._sample('body_mass', 70.0)])
+        queued = SourceCodeConceptMapping.objects.get(source_vocabulary_id='Garmin', source_code='body_mass')
+        self.assertNotEqual(queued.origin, 'import')
+
+    # -- a mapping that moves table -------------------------------------------
+
+    def test_moving_a_devices_mapping_to_another_table_moves_only_its_holders_wearable_rows(self):
+        from omop_core.models import Measurement, Observation
+        other = self._other_patient()
+        hospital_row = self._hospital_row('SPO2', person=other, concept_id=self._cid('vo2_max'))
+        self._sync([self._sample('spo2', 97.0)])
+
+        self._decide(self._mapping('spo2'), domain_id='Observation', omop_table='observation')
+
+        self.assertTrue(Measurement.objects.filter(pk=hospital_row.pk).exists())
+        self.assertFalse(Observation.objects.filter(person=other).exists())
+        self.assertEqual(
+            [float(v) for v in Observation.objects.filter(
+                person=self.person, observation_source_value='spo2').values_list('value_as_number', flat=True)],
+            [97.0])
+
+    def test_a_resync_after_the_mapping_moved_table_replaces_the_day_once(self):
+        from omop_core.models import Measurement, Observation
+        self._sync([self._sample('steps', 5000.0)])
+        self._decide(self._mapping('steps'), domain_id='Measurement', omop_table='measurement')
+        self.assertEqual(Measurement.objects.filter(
+            person=self.person, measurement_source_value='steps').count(), 1)
+
+        resp, _ = self._sync([self._sample('steps', 8000.0)])
+
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._rows('steps'), [(8000.0, self._cid('steps'), None)])
+        self.assertFalse(Observation.objects.filter(person=self.person).exists())
+
+    def test_deleting_an_upload_whose_rows_were_relocated_still_removes_them(self):
+        from omop_core.models import WearableUpload
+        self._sync([self._sample('steps', 5000.0)])
+        self._decide(self._mapping('steps'), domain_id='Measurement', omop_table='measurement')
+        upload = WearableUpload.objects.get(person=self.person)
+
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._rows('steps'), [])
+
+    # -- what an import reports, and what it survives -------------------------
+
+    def test_an_upload_counts_its_own_provisional_and_waiting_rows_apart(self):
+        self._propose('steps')                               # qualifies: provisional
+        self._propose('resting_hr', confidence=0.2)          # below the floor: waits
+        # An earlier upload's waiting rows are not this upload's to count.
+        self._sync([self._sample('steps', 100.0 + i, self.day - timedelta(days=10 + i)) for i in range(4)])
+
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0),
+                              self._sample('spo2', 97.0)])
+
+        self.assertEqual(resp.data['samples_created'], 3)
+        self.assertEqual(resp.data['provisional_samples'], 1)
+        self.assertEqual((resp.data['unresolved_samples'], resp.data['unresolved_metrics']), (1, ['resting_hr']))
+
+    def test_an_upload_that_stores_nothing_new_says_it_settled_earlier_rows(self):
+        from omop_core.models import SourceCodeConceptMapping
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin', source_code='steps').update(status='approved')
+
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['settled_rows']), (0, 1))
+        self.assertNotIn('unresolved_samples', resp.data)
+
+    def test_a_resolver_that_fails_costs_the_resolving_and_never_the_readings(self):
+        from unittest import mock
+        self._propose('steps')
+        with mock.patch('omop_core.mapping.code_resolution.resolve_person_source_codes',
+                        side_effect=RuntimeError('resolver down')):
+            resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['unresolved_samples']), (1, 1))
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+        # The next import picks it up.
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+    # -- the trend's placeholder ----------------------------------------------
+
+    def test_an_accepted_no_trend_does_not_hide_a_provisional_trend(self):
+        self._propose('steps', confidence=0.85)
+        steps = [self._sample('steps', 6000.0 + 100 * i, self.day - timedelta(days=29 - i)) for i in range(30)]
+        resting = [self._sample('resting_hr', 50.0 + i, self.day - timedelta(days=i)) for i in range(10)]
+        self._sync(resting)
+        self.patient_rec.refresh_from_db()
+        self.assertEqual(self.patient_rec.activity_trend_30d, 'insufficient_data')
+
+        self._sync(steps)
+
+        record = self._record()
+        self.assertIn(record['activity_trend_30d'], ('improving', 'stable', 'declining'))
+        self.assertEqual(record['provisional_fields'].get('activity_trend_30d'), 85)
