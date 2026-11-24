@@ -1,4 +1,4 @@
-import { useContext, type ReactNode } from 'react';
+import { useContext, useEffect, type ReactNode } from 'react';
 import { ProvisionalContext, useConfirmControl, useProvisionalMark } from './ProvisionalContext';
 
 /** "Provisional 82%" after a field's label when its value is a proposal. `via` names
@@ -12,6 +12,10 @@ export default function ProvisionalBadge(
 ) {
   const mark = useProvisionalMark(name);
   const control = useConfirmControl(name);
+  const registerLabel = control?.registerLabel;
+  useEffect(() => {
+    if (registerLabel && label) registerLabel(name, label);
+  }, [registerLabel, name, label]);
   if (!mark) return null;
   const confidence = ` (${mark.confidence}% confidence)`;
   let title: string;

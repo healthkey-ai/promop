@@ -9,11 +9,14 @@ import { useState } from 'react';
  */
 export default function ConfirmProvisionalBanner({
   count,
+  labels,
   busy,
   note,
   onConfirmAll,
 }: {
   count: number;
+  /** The name of each of the `count` fields, shown in the question so the person sees what they confirm. */
+  labels: string[];
   /** A confirmation is running (a field's, or `'*'` for all). */
   busy: boolean;
   /** What the last confirmation did or why it did not, or null. */
@@ -47,7 +50,10 @@ export default function ConfirmProvisionalBanner({
       )}
       {count > 0 && asking && (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span>Save all {values} as approved data for this patient?</span>
+          <span>
+            Save {count === 1 ? 'this' : 'these'} {values} as approved data for this patient:{' '}
+            <strong className="font-medium">{labels.join(', ')}</strong>?
+          </span>
           <span className="flex gap-2">
             <button
               type="button"

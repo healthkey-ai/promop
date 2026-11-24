@@ -54,11 +54,20 @@ NOT_SEEN = 'not_seen'                # confirm-all: a proposal the client did no
 INVALID = 'invalid'                  # the value does not pass the field's own validation
 NOT_SAVED = 'not_saved'              # the write path left the field empty
 DISABLED = 'disabled'                # PROVISIONAL_DATA_ENABLED is off
+NOT_SHOWN = 'not_shown'              # no tab shows it for this record: nobody could see it to confirm
+NO_PROJECTION = 'no_projection'      # nothing would acknowledge it: it would stay pinned as an edit
+DROPPED_WITH_GROUP = 'dropped_with_group'  # discarded with the group it belongs to, as a typed edit does
 
 # Not scalar proposals a person approves by writing a value.
 STAFF_ONLY = frozenset({'validated', 'validated_by', 'validation_date'})
 
-MAX_AUDITED_FIELDS = 25   # the audit note is a small JSON object (middleware._AUDIT_DETAIL_MAX_LENGTH)
+def _own_or_represented(actor, person_id) -> bool:
+    """Whether *actor* is this person (their patient account) or a verified representative of them."""
+    from omop_core.models import PersonalRepresentative
+    from patient_portal.models import PatientUser
+    return (PatientUser.objects.filter(identity=actor, person_id=person_id).exists()
+            or PersonalRepresentative.objects.filter(
+                representative=actor, person_id=person_id, verification_status='VERIFIED').exists())
 
 
 def may_confirm(actor, person_id) -> bool:
@@ -67,78 +76,134 @@ def may_confirm(actor, person_id) -> bool:
     Whoever may write the patient *as a professional*: staff, an org admin (a
     grant, or the trust-derived admin ``can_write_patient`` already counts), or
     a doctor. Not an analyst (no patient access at all), and not the patient or a
-    representative: they confirm by entering a value and attest the record
-    themselves, so they get no second route, and an account that is both a doctor
-    and this patient is the patient here.
+    representative, **staff included**: they confirm by entering a value and attest
+    the record themselves, so they get no second route, and an account that is both a
+    doctor (or staff) and this patient is the patient here.
     """
     if actor is None or not getattr(actor, 'is_authenticated', False):
         return False
+    if _own_or_represented(actor, person_id):
+        return False
     if getattr(actor, 'is_staff', False):
         return True
-    from omop_core.authorization import can_write_patient, get_actor_role
-    return (can_write_patient(actor, person_id)
-            and get_actor_role(actor, person_id) in ('org_admin', 'doctor'))
+    # Not their own record or one they represent (checked above); then the professional path
+    # of ``can_write_patient``, on its own: a doctor or org_admin grant, or an admin of the
+    # patient's organization. A test holds this to ``can_write_patient``.
+    from omop_core.authorization import has_professional_write
+    return has_professional_write(actor, person_id)
 
 
-def _writable_in_serializer(field) -> bool:
-    from patient_portal.api.serializers import PatientRecordSerializer
-    serializer_field = PatientRecordSerializer().fields.get(field)
-    return serializer_field is not None and not serializer_field.read_only
+def _has_way_to_be_acknowledged(entry) -> bool:
+    """Whether a confirmed value on this field is carried by something besides ``user_edited_fields``.
+
+    An OMOP projection (the approved fact the write adds, which derivation then reads
+    back and the pin lapses), or a Person/Location column. A field with neither stays
+    pinned in ``user_edited_fields`` for as long as the derived value differs: a newer
+    approved fact would never replace it. A typed edit lives with that; a confirmation
+    does not offer it (``no_projection``).
+    """
+    from omop_core.services.omop_projection import projection_for_descriptor
+    return bool(projection_for_descriptor(entry)) or (entry or {}).get('projection_target') in ('person', 'location')
 
 
-def classify(marks, descriptor=None) -> tuple[list[str], dict[str, str]]:
+def classify(marks, disease=None, descriptor=None) -> tuple[list[str], dict[str, str]]:
     """``(confirmable, skipped)`` for the proposals a record shows.
 
-    *marks* is the overlay's field-to-confidence map (lists included); *descriptor*
-    is the write descriptor (built when not given). ``confirmable`` are the scalar
-    fields the editor can write, sorted; ``skipped`` maps every other marked field to
-    the reason it is not confirmed. A field that goes with another (a unit, an alias,
-    a calculation, a date's precision) is skipped as such: it clears when the field it
-    follows is confirmed, and is never written on its own.
+    *marks* is the overlay's field-to-confidence map (lists included), *disease* the
+    disease text the page shows (it picks the disease tab's section), *descriptor* the
+    write descriptor (built, only when a field still needs it, when not given).
+    ``confirmable`` are the scalar fields the person sees a Confirm control on and the
+    editor can write and OMOP can acknowledge, sorted; ``skipped`` maps every other
+    marked field to why. A field that goes with another (a unit, an alias, a calculation,
+    a date's precision) clears when the field it follows is confirmed and is never
+    written on its own. **Confirm all only ever covers what is on the screen**:
+    ``not_shown`` is a marked field no tab renders for this record (the on-screen rule
+    of ``attestation_blockers``), which a person could not see to confirm.
     """
     if not marks:
         return [], {}
-    if descriptor is None:
-        from omop_core.services.write_descriptor import build_writable_field_descriptor
-        descriptor = build_writable_field_descriptor()
-    from omop_core.services.write_descriptor import KIND_ALIAS, KIND_COMPUTED
-    confirmable, skipped = [], {}
+    from omop_core.services.patient_visible_fields import on_screen
+    shown = on_screen(disease)
+    confirmable, skipped, pending = [], {}, []
     for field in sorted(marks):
-        entry = descriptor.get(field)
         if field in STAFF_ONLY:
             skipped[field] = ATTESTATION
         elif field in PROVISIONAL_JSON_FIELDS:
             skipped[field] = LIST_FIELD
-        elif field in COMPUTED_INPUTS or (entry or {}).get('kind') == KIND_COMPUTED:
+        elif field in COMPUTED_INPUTS:
             skipped[field] = CALCULATED
-        elif (entry or {}).get('kind') == KIND_ALIAS:
-            skipped[field] = MIRRORED
         elif field.endswith('_units'):
             skipped[field] = UNIT
         elif _date_of(field) is not None and _date_of(field) in marks:
             skipped[field] = FOLLOWS_FIELD
-        elif entry is not None:
-            if entry.get('writable') and entry.get('target', 'patient_record') == 'patient_record':
-                confirmable.append(field)
-            else:
-                skipped[field] = NO_WRITE_PATH
-        elif _writable_in_serializer(field):
-            confirmable.append(field)       # unknown to the descriptor but writable, as the editor sends it
+        elif field not in shown:
+            skipped[field] = NOT_SHOWN
         else:
-            skipped[field] = NO_WRITE_PATH
+            pending.append(field)
+    if pending:
+        if descriptor is None:
+            from omop_core.services.write_descriptor import build_writable_field_descriptor
+            descriptor = build_writable_field_descriptor()
+        from omop_core.services.write_descriptor import KIND_ALIAS, KIND_COMPUTED
+        for field in pending:
+            entry = descriptor.get(field)
+            kind = (entry or {}).get('kind')
+            if kind == KIND_COMPUTED:
+                skipped[field] = CALCULATED
+            elif kind == KIND_ALIAS:
+                skipped[field] = MIRRORED
+            elif entry is None or not entry.get('writable') or entry.get('target', 'patient_record') != 'patient_record':
+                skipped[field] = NO_WRITE_PATH
+            elif not _has_way_to_be_acknowledged(entry):
+                skipped[field] = NO_PROJECTION
+            else:
+                confirmable.append(field)
     return confirmable, skipped
 
 
-def read_block(actor, record, marks) -> dict:
-    """What the record read tells a professional: ``{confirmable, skipped}``, or ``{}``.
+def groups(marks, confirmable, skipped) -> list[list[str]]:
+    """The fields confirmed together, each a sorted list of two or more (a lone field has no group).
 
-    Empty for anyone who may not confirm and when the record shows no proposal, so a
-    patient, an analyst and a read of an approved record carry nothing extra.
+    A field goes with those that are one answer with it (``REJECTION_FOLLOWERS``: a
+    date and its precision, a disease and its group), as the PATCH's mirror treats them.
+    A member is a confirmable field, or a precision (``follows_field``) that is marked.
+    Overlapping groups are merged, so deciding a group never splits another.
     """
-    if not marks or not may_confirm(actor, record.person_id):
+    members = set(confirmable) | {f for f, why in skipped.items() if why == FOLLOWS_FIELD}
+    parent = {f: f for f in members}
+
+    def find(f):
+        while parent[f] != f:
+            parent[f] = parent[parent[f]]
+            f = parent[f]
+        return f
+    for leader in confirmable:
+        for follower in REJECTION_FOLLOWERS.get(leader, ()):
+            if follower in members and follower in marks:
+                parent[find(follower)] = find(leader)
+    merged = {}
+    for f in members:
+        merged.setdefault(find(f), []).append(f)
+    return sorted(sorted(group) for group in merged.values() if len(group) > 1)
+
+
+def read_block(actor, record, shown, marks) -> dict:
+    """What the record read tells a professional: ``{confirmable, skipped, groups}``, or ``{}``.
+
+    *shown* is the overlaid record (its disease picks the on-screen section). Cheap
+    name rules run first and the write descriptor is built only when a field is left
+    that needs it; whether the reader may confirm at all is asked last, since it is the
+    part that costs queries per reader. Empty for anyone who may not confirm and when
+    the record shows no proposal, so a patient, an analyst and a read of an approved
+    record carry nothing extra.
+    """
+    if not marks:
         return {}
-    confirmable, skipped = classify(marks)
-    return {'provisional_confirm': {'confirmable': confirmable, 'skipped': skipped}}
+    confirmable, skipped = classify(marks, getattr(shown, 'disease', None))
+    if not may_confirm(actor, record.person_id):
+        return {}
+    return {'provisional_confirm': {
+        'confirmable': confirmable, 'skipped': skipped, 'groups': groups(marks, confirmable, skipped)}}
 
 
 def _same(shown, expected) -> bool:
@@ -153,60 +218,73 @@ def _same(shown, expected) -> bool:
         return str(shown) == str(expected)
 
 
-def _followers(field, confirmable, not_confirmable) -> list[str]:
-    """The proposed fields that are one answer with *field*: a disease's group, a date's precision.
-
-    A precision is skipped on its own (``FOLLOWS_FIELD``) and written with its date;
-    a unit or an alias is never written, it clears with the value.
-    """
-    return [name for name in REJECTION_FOLLOWERS.get(field, ())
-            if name in confirmable or not_confirmable.get(name) == FOLLOWS_FIELD]
+def audit_note(mode) -> dict:
+    """The audit row's note: that a confirmation was made and in which mode. No field names: the
+    revisions name the fields, and the audit trail stays free of anything about the record."""
+    return {'provisional_confirm': {'mode': mode}}
 
 
-def audit_note(confirmed) -> dict:
-    return {'provisional_confirm': {'count': len(confirmed), 'fields': sorted(confirmed)[:MAX_AUDITED_FIELDS]}}
+class _Unprojected(Exception):
+    """A confirmed field is still pinned as a pending edit after the write: nothing acknowledged it."""
+
+    def __init__(self, fields):
+        super().__init__(', '.join(sorted(fields)))
+        self.fields = set(fields)
 
 
 def confirm(person, record, actor, fields=None, *, all_fields=False, expected=None) -> dict:
     """Confirm proposals on *person*'s record as *actor*, in one transaction.
 
     ``fields`` names the fields to confirm, ``all_fields`` takes every confirmable
-    one. ``expected`` maps a field to the value the client saw: a field whose
-    current proposal differs is skipped as ``changed``, and with ``all_fields`` a
-    confirmable proposal the map does not list is skipped as ``not_seen`` (the
-    client asked to confirm what it showed, not what arrived since). The caller has
-    decided that *actor* may confirm (``may_confirm``).
+    one. ``expected`` maps a field to the value the client saw; the caller requires it
+    for ``all`` (the view answers 400 without it). The caller has decided that *actor*
+    may confirm (``may_confirm``).
+
+    Fields that are one answer (``groups``: a date and its precision) are decided
+    together **before** anything is written. With ``expected`` given, every member of a
+    group must be listed in it and equal the server's current proposal; otherwise the
+    whole group is skipped (``changed`` when a member differs, else ``not_seen``) and
+    nothing of it is written. The members come from the server's own groups, never from
+    the client. Each field is reported at most once.
 
     The record is locked first, as derivation and the attestation do, so a sweep
     cannot change a proposal between the check and the save. Values come from the
     overlay read under that lock, through the serializer the editor reads with, and
     are saved by ``apply_patient_record_patch`` in one call: one write, one
-    recalculation, one mirror into the provisional pair. A field the record's own
-    validation refuses is skipped as ``invalid``; anything unexpected rolls the
-    whole request back.
+    recalculation, one mirror into the provisional pair. The approved fact is dated
+    when the reading was taken (``provisional_record.proposal_dates``), not today.
+    A group the record's own validation refuses is skipped as ``invalid``; a group
+    whose value nothing acknowledged after the write (still a pending edit) is taken
+    back to a savepoint and skipped as ``no_projection``; anything unexpected rolls
+    the whole request back.
 
     Returns ``{'confirmed': [...], 'skipped': [{'field', 'reason', 'detail'?}],
     'remaining': n}``.
     """
     fields = list(dict.fromkeys(fields or []))
     expected = expected if isinstance(expected, dict) else None
-    skipped: list[dict] = []
+    skipped: dict[str, dict] = {}
 
     def skip(field, reason, detail=None):
-        skipped.append({'field': field, 'reason': reason, **({'detail': detail} if detail else {})})
+        skipped.setdefault(field, {'field': field, 'reason': reason, **({'detail': detail} if detail else {})})
 
     if not settings.PROVISIONAL_DATA_ENABLED:
         for field in fields:
             skip(field, DISABLED)
-        return {'confirmed': [], 'skipped': skipped, 'remaining': 0}
+        return {'confirmed': [], 'skipped': list(skipped.values()), 'remaining': 0}
 
     from patient_portal.api.serializers import PatientRecordSerializer
     from patient_portal.api.views import apply_patient_record_patch
+    from omop_core.services.provisional_record import proposal_dates
 
     with transaction.atomic():
         locked = PatientRecord.objects.select_for_update().get(pk=record.pk)
         shown, marks = overlay(locked)
-        confirmable, not_confirmable = classify(marks)
+        confirmable, not_confirmable = classify(marks, getattr(shown, 'disease', None))
+        group_of = {}
+        for group in groups(marks, confirmable, not_confirmable):
+            for member in group:
+                group_of[member] = group
         rejected = set(ProposalRejection.objects.filter(person=person, field_name__in=fields)
                        .values_list('field_name', flat=True)) if fields else set()
 
@@ -229,39 +307,86 @@ def confirm(person, record, actor, fields=None, *, all_fields=False, expected=No
                 else:
                     skip(field, NOT_PROVISIONAL)
 
+        # Decide each group whole, before any write.
         data = PatientRecordSerializer(shown).data if wanted else {}
-        chosen = []
+        chosen_groups, seen = [], set()
         for field in wanted:
-            if expected is not None and field in expected and not _same(data.get(field), expected[field]):
-                skip(field, CHANGED)
-            elif all_fields and expected is not None and field not in expected:
-                skip(field, NOT_SEEN)
-            else:
-                chosen.append(field)
-        # A field goes with its group (a disease's, a date's precision): one answer.
-        for field in list(chosen):
-            for follower in _followers(field, confirmable, not_confirmable):
-                if follower not in chosen:
-                    if expected is not None and follower in expected and not _same(data.get(follower), expected[follower]):
-                        skip(follower, CHANGED)
-                        continue
-                    chosen.append(follower)
+            group = group_of.get(field) or [field]
+            if group[0] in seen:
+                continue
+            seen.update(group)
+            if expected is not None:
+                if any(m in expected and not _same(data.get(m), expected[m]) for m in group):
+                    for m in group:
+                        skip(m, CHANGED)
+                    continue
+                if any(m not in expected for m in group):
+                    for m in group:
+                        skip(m, NOT_SEEN)
+                    continue
+            chosen_groups.append(group)
 
-        patch, refused = _validated(locked, {field: data.get(field) for field in chosen})
-        for field, detail in refused.items():
-            skip(field, INVALID, detail)
         confirmed = []
-        if patch:
-            apply_patient_record_patch(person, locked, patch, actor=actor)
-            locked.refresh_from_db()
-            for field in patch:
-                if _holds_value(locked, field):
-                    confirmed.append(field)
-                else:
-                    skip(field, NOT_SAVED)
-        remaining = len(overlay(locked)[1])
-    skipped = [item for item in skipped if item['field'] not in confirmed]   # a precision went with its date
-    return {'confirmed': sorted(confirmed), 'skipped': skipped, 'remaining': remaining}
+        if chosen_groups:
+            when = proposal_dates(person, locked, [m for g in chosen_groups for m in g if m in confirmable],
+                                  {m: data.get(m) for g in chosen_groups for m in g})
+            while chosen_groups:
+                patch, refused = _validated(locked, {m: data.get(m) for g in chosen_groups for m in g})
+                if refused:
+                    for field, detail in refused.items():
+                        skip(field, INVALID, detail)
+                    gone = [g for g in chosen_groups if any(m in refused for m in g)]
+                    for group in gone:
+                        for m in group:
+                            skip(m, INVALID, 'Not confirmed together with ' + ', '.join(sorted(refused)) + '.')
+                    chosen_groups = [g for g in chosen_groups if g not in gone]
+                    continue
+                try:
+                    with transaction.atomic():      # a savepoint: a group nothing acknowledged is taken back
+                        apply_patient_record_patch(person, locked, patch, actor=actor, as_of=when)
+                        locked.refresh_from_db()
+                        pinned = {m for m in patch if m in (locked.user_edited_fields or [])}
+                        if pinned:
+                            raise _Unprojected(pinned)
+                except _Unprojected as unprojected:
+                    locked.refresh_from_db()
+                    dropped = [g for g in chosen_groups if unprojected.fields & set(g)]
+                    for group in dropped:
+                        for m in group:
+                            skip(m, NO_PROJECTION)
+                    chosen_groups = [g for g in chosen_groups if g not in dropped]
+                    continue
+                for field in patch:
+                    if _holds_value(locked, field):
+                        confirmed.append(field)
+                    else:
+                        skip(field, NOT_SAVED)
+                break
+        after = overlay(locked)[1]
+        remaining = len(after)
+    result = [item for field, item in skipped.items() if field not in confirmed]
+    mark_dropped(result, after, confirmed)
+    return {'confirmed': sorted(confirmed), 'skipped': result, 'remaining': remaining}
+
+
+# A proposal the write's mirror throws away with the group it belongs to (a disease's slug and
+# dates, as when the disease is typed) is reported as dropped, not as the reason it was not written.
+DISCARDABLE = frozenset({NOT_SHOWN, LIST_FIELD, NO_PROJECTION})
+
+
+def mark_dropped(skipped, marks_after, confirmed) -> None:
+    """Relabel, in place, the skipped proposals the write took away with the group it confirmed.
+
+    The mirror of a confirmed field also discards the proposals of the fields that are one
+    answer with it (confirming a disease takes its slug, its dates and its ``disease_slugs``
+    list, exactly as typing the disease does). Such a field was not confirmed and is no longer
+    shown: ``dropped_with_group``, rather than the reason it was not written.
+    """
+    if not confirmed:
+        return
+    for item in skipped:
+        if item['reason'] in DISCARDABLE and item['field'] not in marks_after:
+            item['reason'] = DROPPED_WITH_GROUP
 
 
 def _holds_value(record, field) -> bool:

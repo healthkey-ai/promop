@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { ACTIONABLE_SKIPS, confirmableFields, skipText } from './provisionalConfirm';
+import { ACTIONABLE_SKIPS, confirmableFields, groupOf, humanize, shownValues, skipText } from './provisionalConfirm';
 
 describe('confirmableFields', () => {
   it('is the server list among the fields still marked, sorted', () => {
@@ -31,5 +31,27 @@ describe('skipText', () => {
     expect(ACTIONABLE_SKIPS.has('changed')).toBe(true);
     expect(ACTIONABLE_SKIPS.has('calculated')).toBe(false);
     expect(ACTIONABLE_SKIPS.has('list_field')).toBe(false);
+  });
+});
+
+describe('groups', () => {
+  const info = {
+    sct_date: '2020-05-12', sct_date_precision: 'year', weight: 70,
+    provisional_confirm: { confirmable: ['sct_date', 'weight'], skipped: {}, groups: [['sct_date', 'sct_date_precision']] },
+  };
+
+  it('finds the members of a field\'s group, or the field alone', () => {
+    expect(groupOf(info, 'sct_date')).toEqual(['sct_date', 'sct_date_precision']);
+    expect(groupOf(info, 'weight')).toEqual(['weight']);
+    expect(groupOf(null, 'weight')).toEqual(['weight']);
+  });
+
+  it('shows the values of every member, so the server can check each', () => {
+    expect(shownValues(info, ['sct_date', 'weight'])).toEqual({
+      sct_date: '2020-05-12', sct_date_precision: 'year', weight: 70 });
+  });
+
+  it('humanizes a field name for the question when no control named it', () => {
+    expect(humanize('hemoglobin_g_dl')).toBe('Hemoglobin g dl');
   });
 });

@@ -1188,6 +1188,61 @@ def reject_proposals(person, record, fields, actor=None) -> set[str]:
     return rejection_group(fields)
 
 
+def proposal_dates(person, record, fields, values=None) -> dict:
+    """``{field: (date, datetime or None)}``: when the reading behind each proposed field was taken.
+
+    A professional confirming a proposal (#2870) approves a reading, so the approved
+    fact is dated when it was measured, not the day it was confirmed (the typed edit's
+    "today's fact" would put a 2024 result on today's date and distort "latest wins"
+    and every trend). The rows are the ones that feed the field (``origins``); of them
+    the newest whose number is the proposed value (*values*, field to value) is the
+    reading the page shows, else the newest. A field no row explains is left out, and the
+    write falls back to today as a typed edit does. The search runs once for all the
+    fields and reads the rows again per code group, so its cost follows the number of
+    provisional codes the person has (bounded by ``MAX_ORIGIN_GROUPS``), not the fields.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    def number(value):
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    from omop_core.services.patient_record_service import _build_snapshot
+    snapshot = _build_snapshot(person)
+    origins = {}
+    provisional_values(person, record, snapshot, origins=origins, origin_fields=fields)
+    sources = (
+        ('measurement', snapshot.provisional_measurements, 'measurement_source_value',
+         'measurement_concept_id', 'measurement_date', 'measurement_datetime'),
+        ('observation', snapshot.provisional_observations, 'observation_source_value',
+         'observation_concept_id', 'observation_date', 'observation_datetime'),
+        ('condition_occurrence', snapshot.provisional_conditions, 'condition_source_value',
+         'condition_concept_id', 'condition_start_date', 'condition_start_datetime'),
+    )
+    found = {}
+    for field in fields:
+        wanted = origins.get(field)
+        if not wanted:
+            continue
+        target = number((values or {}).get(field))
+        newest = {True: None, False: None}     # keyed by "this row's number is the proposed value"
+        for table, rows, source_field, concept_field, date_field, datetime_field in sources:
+            for row in rows:
+                if _origin(table, getattr(row, source_field), getattr(row, concept_field)) not in wanted:
+                    continue
+                when = getattr(row, date_field, None)
+                if when is None:
+                    continue
+                exact = target is not None and number(getattr(row, 'value_as_number', None)) == target
+                if newest[exact] is None or when >= newest[exact][0]:
+                    newest[exact] = (when, getattr(row, datetime_field, None))
+        if newest[True] or newest[False]:
+            found[field] = newest[True] or newest[False]
+    return found
+
+
 def _settle_computed(record, provisional, confidence, edited) -> list[str]:
     """Recalculate the provisional calculated fields after an edit; names touched.
 

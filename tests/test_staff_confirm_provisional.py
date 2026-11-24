@@ -109,7 +109,23 @@ def confirm_url(person):
     return f'{url(person)}confirm-provisional/'
 
 
+def seen(client, person):
+    """What the page shows to confirm: the confirmable fields and the members of their groups."""
+    response = client.get(url(person))
+    if response.status_code != 200:
+        return {}
+    info = response.json()['patient_info']
+    block = info.get('provisional_confirm') or {}
+    names = set(block.get('confirmable', [])) | {m for group in block.get('groups', []) for m in group}
+    return {name: info.get(name) for name in names}
+
+
 def confirm(client, person, **body):
+    """POST a confirmation. ``all`` without ``expected`` is sent with what the page would show
+    (as the editor does); pass ``bare=True`` to send the body exactly as given."""
+    bare = body.pop('bare', False)
+    if body.get('all') is True and 'expected' not in body and not bare:
+        body['expected'] = seen(client, person)
     return client.post(confirm_url(person), body, format='json')
 
 
@@ -312,37 +328,169 @@ def _add_procedure(person):
     return add(person, 72)
 
 
-def test_a_disease_is_confirmed_with_its_group(snomed, org):
+def cancer_record(org):
     made = PatientRecordFactory(organization=org, disease=None)
     with suppress_patient_record_refresh():
         cancer(made.person, 82)
     refresh_patient_record(made.person)
-    client, _ = as_role('doctor', org)
-    shown = read(client, made.person)['provisional_fields']
-    assert {'disease', 'diagnosis_date'} <= set(shown)
+    return made.person
 
-    response = confirm(client, made.person, fields=['disease'])
+
+def test_a_field_no_tab_shows_is_never_confirmed_by_all_nor_by_name(snomed, org):
+    person = cancer_record(org)
+    client, _ = as_role('doctor', org)
+    shown = read(client, person)
+    assert {'diagnosis_date', 'disease_slug', 'disease'} <= set(shown['provisional_fields'])
+    assert not {'diagnosis_date', 'disease_slug'} & set(shown['provisional_confirm']['confirmable'])
+
+    everything = confirm(client, person, all=True)
+    named = confirm(client, person, fields=['diagnosis_date', 'disease_slug'])
+
+    assert everything.status_code == 200 and named.status_code == 200
+    assert everything.json()['confirmed'] == [] and named.json()['confirmed'] == []
+    assert reasons(named) == {'diagnosis_date': 'not_shown', 'disease_slug': 'not_shown'}
+    assert reasons(everything)['diagnosis_date'] == 'not_shown'
+    record = stored(person)
+    assert not record.disease_slug and record.diagnosis_date is None
+    assert not record.user_edited_fields                          # nothing pinned with nothing to acknowledge it
+
+
+def test_a_field_with_no_projection_is_not_confirmed_because_it_would_stay_pinned(snomed, org):
+    """The disease is on the General tab but no OMOP fact acknowledges a typed disease: a confirmed
+    one would stay in ``user_edited_fields``, and a newer approved fact would never replace it."""
+    person = cancer_record(org)
+    client, _ = as_role('doctor', org)
+    assert 'disease' in read(client, person)['provisional_fields']
+
+    response = confirm(client, person, fields=['disease'])
 
     assert response.status_code == 200, response.content
-    assert {'disease', 'diagnosis_date'} <= set(response.json()['confirmed'])
-    record = stored(made.person)
-    assert 'squamous' in record.disease.lower() and record.diagnosis_date is not None
-    assert not set(provisional_record.DISEASE_FIELDS) & set(read(client, made.person)['provisional_fields'])
+    assert reasons(response)['disease'] == 'no_projection'
+    assert response.json()['confirmed'] == []
+    assert stored(person).disease in (None, '') and not stored(person).user_edited_fields
+    assert 'disease' in read(client, person)['provisional_fields']      # still a proposal
 
 
-def test_a_dates_precision_is_confirmed_with_its_date_and_not_alone(snomed, org):
+def test_a_value_nothing_acknowledged_after_the_write_is_taken_back(snomed, org, monkeypatch):
+    """The safety net: a field the descriptor promised a way to be acknowledged, and none came,
+    is rolled back to the savepoint and reported, never left pinned."""
+    person = cancer_record(org)
+    client, _ = as_role('doctor', org)
+    monkeypatch.setattr(provisional_confirm, '_has_way_to_be_acknowledged', lambda entry: True)
+    assert 'disease' in read(client, person)['provisional_confirm']['confirmable']
+
+    response = confirm(client, person, fields=['disease'])
+
+    assert response.status_code == 200, response.content
+    assert reasons(response)['disease'] == 'no_projection' and response.json()['confirmed'] == []
+    record = stored(person)
+    assert record.disease in (None, '') and not record.user_edited_fields
+    assert not RecordRevision.objects.filter(patient_record__person=person).exists()
+    assert 'disease' in read(client, person)['provisional_fields']
+
+
+def test_a_marked_field_of_another_diseases_section_is_not_shown():
+    mine, _ = provisional_confirm.classify({'binet_stage': 80}, 'chronic lymphocytic leukemia', descriptor={
+        'binet_stage': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
+                        'projection': {'omop_table': 'observation', 'concept_id': 1, 'source_value': 'x'}}})
+    other, skipped = provisional_confirm.classify({'binet_stage': 80}, 'multiple myeloma')
+    assert mine == ['binet_stage']
+    assert other == [] and skipped == {'binet_stage': 'not_shown'}
+
+
+def test_the_dropped_group_members_are_reported_as_dropped_not_as_unwritten():
+    marks_after = {'weight': 80}
+    skipped = [{'field': 'disease_slugs', 'reason': 'list_field'}, {'field': 'weight', 'reason': 'not_shown'},
+               {'field': 'bmi', 'reason': 'calculated'}]
+    provisional_confirm.mark_dropped(skipped, marks_after, confirmed=['disease'])
+    assert [item['reason'] for item in skipped] == ['dropped_with_group', 'not_shown', 'calculated']
+
+
+@pytest.fixture()
+def paired(monkeypatch):
+    """Two labs that are one answer, as a date and its precision are: a group of two."""
+    monkeypatch.setitem(provisional_record.REJECTION_FOLLOWERS, 'hemoglobin_g_dl', ('sodium_meq_l',))
+
+
+@pytest.fixture()
+def pair_person(snomed, org, paired):
     made = PatientRecordFactory(organization=org, disease=None)
     with suppress_patient_record_refresh():
-        cancer(made.person, 82)
-    refresh_patient_record(made.person)
+        _add_lab(made.person, 0)
+    propose_hemoglobin(made.person)
+    return made.person
+
+
+def test_a_group_is_decided_whole_and_the_read_names_it(pair_person, org):
     client, _ = as_role('doctor', org)
-    assert 'diagnosis_date_precision' in read(client, made.person)['provisional_fields']
+    block = read(client, pair_person)['provisional_confirm']
+    assert block['groups'] == [['hemoglobin_g_dl', 'sodium_meq_l']]
 
-    alone = confirm(client, made.person, fields=['diagnosis_date_precision'])
-    assert reasons(alone) == {'diagnosis_date_precision': 'follows_field'}
+    response = confirm(client, pair_person, fields=['hemoglobin_g_dl'], expected=seen(client, pair_person))
 
-    together = confirm(client, made.person, fields=['diagnosis_date'])
-    assert {'diagnosis_date', 'diagnosis_date_precision'} <= set(together.json()['confirmed'])
+    assert response.status_code == 200, response.content
+    assert response.json()['confirmed'] == ['hemoglobin_g_dl', 'sodium_meq_l']
+    assert reasons(response) == {} or 'sodium_meq_l' not in reasons(response)
+
+
+def test_a_member_that_changed_skips_the_whole_group_and_writes_nothing(pair_person, org):
+    client, _ = as_role('doctor', org)
+    expected = {**seen(client, pair_person), 'sodium_meq_l': '1.0'}
+
+    response = confirm(client, pair_person, fields=['hemoglobin_g_dl'], expected=expected)
+
+    assert response.status_code == 409
+    assert reasons(response) == {'hemoglobin_g_dl': 'changed', 'sodium_meq_l': 'changed'}
+    record = stored(pair_person)
+    assert record.hemoglobin_g_dl is None and record.sodium_meq_l is None
+    assert not RecordRevision.objects.filter(patient_record__person=pair_person).exists()
+
+
+def test_a_member_the_page_never_listed_skips_the_whole_group(pair_person, org):
+    client, _ = as_role('doctor', org)
+    only_the_leader = {'hemoglobin_g_dl': seen(client, pair_person)['hemoglobin_g_dl']}
+
+    for body in ({'fields': ['hemoglobin_g_dl']}, {'all': True, 'bare': True}):
+        response = confirm(client, pair_person, expected=only_the_leader, **body)
+        assert response.status_code == 200, response.content
+        assert {f: r for f, r in reasons(response).items() if f in ('hemoglobin_g_dl', 'sodium_meq_l')} == {
+            'hemoglobin_g_dl': 'not_seen', 'sodium_meq_l': 'not_seen'}
+        assert response.json()['confirmed'] == []
+    assert stored(pair_person).hemoglobin_g_dl is None and stored(pair_person).sodium_meq_l is None
+
+
+def test_named_alone_without_expected_a_group_is_confirmed_whole_from_the_servers_members(pair_person, org):
+    client, _ = as_role('doctor', org)
+
+    response = confirm(client, pair_person, fields=['hemoglobin_g_dl'])
+
+    assert response.json()['confirmed'] == ['hemoglobin_g_dl', 'sodium_meq_l']
+    assert float(stored(pair_person).sodium_meq_l) == 140                   # the server's own, not the client's
+
+
+def test_no_field_is_reported_twice(pair_person, org):
+    client, _ = as_role('doctor', org)
+    expected = {**seen(client, pair_person), 'sodium_meq_l': '1.0'}
+
+    response = confirm(client, pair_person, all=True, expected=expected)
+
+    listed = [item['field'] for item in response.json()['skipped']]
+    assert len(listed) == len(set(listed))
+
+
+def test_all_without_expected_is_refused(person, doctor):
+    response = confirm(doctor, person, all=True, bare=True)
+
+    assert response.status_code == 400
+    assert 'expected' in response.json()
+    assert stored(person).hemoglobin_g_dl is None
+
+
+def test_a_dates_precision_is_confirmed_with_its_date_and_not_alone(snomed, org, monkeypatch):
+    """A precision is marked only with its date; named alone it is skipped, with the date it goes together."""
+    marks = {'sct_date': 80, 'sct_date_precision': 80}
+    confirmable, skipped = ['sct_date'], {'sct_date_precision': 'follows_field'}
+    assert provisional_confirm.groups(marks, confirmable, skipped) == [['sct_date', 'sct_date_precision']]
 
 
 def test_a_value_the_records_validation_refuses_is_skipped_not_fatal(person, doctor, monkeypatch):
@@ -419,6 +567,38 @@ def test_a_doctor_who_is_also_the_patient_confirms_their_own_record_as_a_patient
     PatientUser.objects.create(identity=identity, person=person, is_active=True)
 
     assert confirm(signed_in(identity), person, fields=['hemoglobin_g_dl']).status_code == 403
+
+
+def test_staff_who_is_this_records_patient_is_the_patient_here_too(person, org):
+    identity = account('confirm-staff-patient@example.test', is_staff=True)
+    PatientUser.objects.create(identity=identity, person=person, is_active=True)
+    client = signed_in(identity)
+
+    assert confirm(client, person, fields=['hemoglobin_g_dl']).status_code == 403
+    assert 'provisional_confirm' not in read(client, person)
+    assert stored(person).hemoglobin_g_dl is None
+    # Staff who are not this patient still may.
+    assert confirm(as_role('staff', org, email='confirm-other-staff@example.test')[0], person,
+                   fields=['hemoglobin_g_dl']).status_code == 200
+
+
+def test_who_may_confirm_is_who_may_write_apart_from_the_patient_themselves(person, org, elsewhere):
+    """``may_confirm`` is ``can_write_patient`` less the account's own and represented records."""
+    from omop_core.authorization import can_write_patient
+    actors = []
+    for role, home in (('doctor', org), ('org_admin', org), ('analyst', org), ('doctor', elsewhere),
+                       ('org_admin', elsewhere), ('patient', org)):
+        identity = account(f'confirm-eq-{role}-{home.slug}@example.test')
+        grant(identity, home, role)
+        actors.append(identity)
+    own = account('confirm-eq-own@example.test')
+    grant(own, org, 'doctor')
+    PatientUser.objects.create(identity=own, person=person, is_active=True)
+    actors += [own, account('confirm-eq-staff@example.test', is_staff=True), account('confirm-eq-none@example.test')]
+
+    for actor in actors:
+        expected = can_write_patient(actor, person.person_id) and actor is not own
+        assert provisional_confirm.may_confirm(actor, person.person_id) is expected, actor.email
 
 
 def test_a_machine_credential_is_refused(settings, person):
@@ -596,8 +776,11 @@ def test_the_work_beyond_the_editors_own_write_does_not_grow_with_the_number_of_
     few, few_overhead = overhead(0)
     many, many_overhead = overhead(4)
 
+    # The dating of each fact reads the rows again per provisional code (bounded by
+    # MAX_ORIGIN_GROUPS), so the overhead follows the codes, a few queries each; it never
+    # follows the number of fields written beyond that.
     assert many >= few + 3, (few, many)
-    assert abs(many_overhead - few_overhead) <= 2, (few_overhead, many_overhead)
+    assert many_overhead - few_overhead <= 3 * (many - few), (few_overhead, many_overhead)
 
 
 LABS = [('2951-2', 'sodium_meq_l', 'Sodium', 140), ('2823-3', 'potassium_meq_l', 'Potassium', 4.1),
@@ -628,16 +811,157 @@ def test_the_revision_history_names_who_confirmed_and_it_is_not_the_patient(snom
     assert revisions[0].old_value is None and float(revisions[0].new_value) == 11.5
 
 
-def test_the_audit_trail_records_the_confirmation_without_values(person, org):
+def test_the_audit_trail_records_the_confirmation_as_an_update_with_no_field_names(person, org):
     client, doctor = as_role('doctor', org)
 
     assert confirm(client, person, fields=['hemoglobin_g_dl']).status_code == 200
+    assert confirm(client, person, all=True).status_code == 200
 
-    event = AuditEvent.objects.filter(path__endswith='confirm-provisional/', user_id=str(doctor.pk)).get()
-    assert event.method == 'POST' and event.status_code == 200
-    assert event.resource_id == str(person.person_id)
-    assert event.detail['provisional_confirm']['fields'] == ['hemoglobin_g_dl']
-    assert '11.5' not in str(event.detail)
+    events = list(AuditEvent.objects.filter(path__endswith='confirm-provisional/', user_id=str(doctor.pk))
+                  .order_by('pk'))
+    assert [e.event_type for e in events] == ['record_update', 'record_update']
+    assert all(e.method == 'POST' and e.status_code == 200 for e in events)
+    assert all(e.resource_id == str(person.person_id) for e in events)
+    assert events[0].detail == {'provisional_confirm': {'mode': 'fields'}}       # the revisions name the fields
+    assert '11.5' not in str(events[0].detail) and 'hemoglobin' not in str(events[0].detail)
+
+
+def test_the_patients_own_confirmation_is_classified_as_before():
+    from django.test import RequestFactory
+    from patient_portal.api.middleware import _classify_event_type
+    factory = RequestFactory()
+    assert _classify_event_type(factory.post('/api/patient-info/me/confirm/')) == 'record_create'
+    assert _classify_event_type(factory.post('/api/v1/patient-records/7/confirm-provisional/')) == 'record_update'
+    assert _classify_event_type(factory.post('/api/v1/patient-records/7/refresh/')) == 'record_create'
+
+
+# --- the approved fact keeps the reading's own date -----------------------------------------------
+
+def approved_hemoglobin(person):
+    return Measurement.objects.filter(person=person, confidence__isnull=True, measurement_source_value='718-7')
+
+
+def test_the_approved_fact_is_dated_when_the_reading_was_taken_not_today(person, org):
+    from datetime import date
+    proposal = Measurement.objects.get(person=person, confidence__isnull=False)
+    assert proposal.measurement_date == date(2024, 6, 1)
+    client, _ = as_role('doctor', org)
+
+    assert confirm(client, person, fields=['hemoglobin_g_dl']).status_code == 200
+
+    fact = approved_hemoglobin(person).get()
+    assert fact.measurement_date == date(2024, 6, 1)
+    assert float(fact.value_as_number) == 11.5 and fact.unit_source_value == 'g/dL'
+    assert fact.measurement_concept_id == proposal.measurement_concept_id
+    # The proposal's own row stays as it was: its mapping's approval is what promotes it.
+    proposal.refresh_from_db()
+    assert proposal.confidence == 82 and proposal.measurement_date == date(2024, 6, 1)
+
+
+def test_a_typed_value_is_still_todays_fact(snomed, org):
+    from django.utils import timezone
+    made = PatientRecordFactory(organization=org, disease=None)
+    propose_hemoglobin(made.person)
+    client, _ = as_role('doctor', org)
+
+    assert client.patch(url(made.person), {'hemoglobin_g_dl': '11.5'}, format='json').status_code == 200
+
+    assert approved_hemoglobin(made.person).get().measurement_date == timezone.localdate()
+
+
+def test_the_proposals_time_of_day_comes_with_its_date(person, org):
+    from datetime import datetime, timezone as utc
+    taken = datetime(2024, 6, 1, 8, 30, tzinfo=utc.utc)
+    Measurement.objects.filter(person=person, confidence__isnull=False).update(measurement_datetime=taken)
+    client, _ = as_role('doctor', org)
+
+    assert confirm(client, person, fields=['hemoglobin_g_dl']).status_code == 200
+
+    assert approved_hemoglobin(person).get().measurement_datetime == taken
+
+
+def test_a_newer_approved_fact_replaces_a_confirmed_value_and_an_older_one_does_not(person, org):
+    from datetime import date
+    from tests.factories import MeasurementFactory
+    client, _ = as_role('doctor', org)
+    assert confirm(client, person, fields=['hemoglobin_g_dl']).status_code == 200
+    concept = Measurement.objects.get(person=person, confidence__isnull=False).measurement_concept
+    assert not stored(person).user_edited_fields            # acknowledged by the projected fact, not pinned
+
+    def real(value, when):
+        MeasurementFactory(person=person, measurement_concept=concept, measurement_date=when, value_as_number=value,
+                           measurement_source_value='718-7', unit_source_value='g/dL', value_source_value=str(value))
+
+    with suppress_patient_record_refresh():
+        real(8.0, date(2023, 1, 1))                           # before the reading: does not distort latest-wins
+    refresh_patient_record(person)
+    assert float(stored(person).hemoglobin_g_dl) == 11.5
+
+    with suppress_patient_record_refresh():
+        real(9.0, date(2025, 1, 1))                           # a newer approved fact
+    refresh_patient_record(person)
+    assert float(stored(person).hemoglobin_g_dl) == 9.0
+
+
+@pytest.mark.parametrize('table, value, kind', [('observation', 4.5, 'number'), ('condition', True, 'boolean')])
+def test_the_projection_dates_an_observation_or_a_condition_as_it_is_told(snomed, table, value, kind):
+    from datetime import date
+    from django.utils import timezone
+    from omop_core.models import ConditionOccurrence
+    from omop_core.services.omop_projection import project_single_value
+    person = PatientRecordFactory().person
+    domain = 'Observation' if table == 'observation' else 'Condition'
+    concept = _concept(domain, 9100001, 'DATED-1', 'Dated concept')
+    projection = {'omop_table': table, 'concept_id': concept.concept_id, 'source_value': 'DATED-1',
+                  'type_concept_id': 32817, 'value_kind': kind}
+
+    assert project_single_value(person, 'dated_field', value, projection, as_of=date(2021, 3, 4))
+
+    model = Observation if table == 'observation' else ConditionOccurrence
+    date_column = 'observation_date' if table == 'observation' else 'condition_start_date'
+    assert getattr(model.objects.get(person=person), date_column) == date(2021, 3, 4)
+    # Without as_of it is today's fact, as before.
+    other = PatientRecordFactory().person
+    assert project_single_value(other, 'dated_field', value, projection)
+    assert getattr(model.objects.get(person=other), date_column) == timezone.localdate()
+
+
+def test_a_proposal_of_today_is_not_overwritten_by_the_fact_that_approves_it(snomed, org):
+    """Dated at the reading's day, the new fact could once have matched the proposal's own row."""
+    from django.utils import timezone
+    made = PatientRecordFactory(organization=org, disease=None)
+    with suppress_patient_record_refresh():
+        _add_measurement(made.person, 82)
+    Measurement.objects.filter(person=made.person).update(measurement_date=timezone.localdate())
+    refresh_patient_record(made.person)
+    client, _ = as_role('doctor', org)
+
+    assert confirm(client, made.person, fields=['hemoglobin_g_dl']).status_code == 200
+
+    assert Measurement.objects.filter(person=made.person, confidence=82).count() == 1
+    assert approved_hemoglobin(made.person).count() == 1
+
+
+# --- what the read costs -------------------------------------------------------------------
+
+READ_EXTRA_BOUND = 9
+
+
+def test_the_read_costs_a_bounded_number_of_extra_queries(person, org, monkeypatch):
+    from patient_portal.api import views
+    spent = {}
+    for name in ('doctor', 'staff'):
+        who, _ = as_role(name, org, email=f'confirm-cost-{name}@example.test')
+        who.get(url(person))                                  # warm per-process caches
+        with CaptureQueriesContext(connection) as with_block:
+            assert 'provisional_confirm' in who.get(url(person)).json()['patient_info']
+        with monkeypatch.context() as patch:
+            patch.setattr(views.PatientRecordV1ViewSet, '_provisional_confirm_block',
+                          lambda self, request, patient_info, shown, marks: {})
+            with CaptureQueriesContext(connection) as without_block:
+                assert 'provisional_confirm' not in who.get(url(person)).json()['patient_info']
+        spent[name] = len(with_block) - len(without_block)
+    assert max(spent.values()) <= READ_EXTRA_BOUND, spent
 
 
 # --- what it must not do -------------------------------------------------------------------

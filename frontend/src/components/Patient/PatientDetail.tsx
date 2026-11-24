@@ -7,7 +7,7 @@ import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptor
 import { ProvisionalContext, type ProvisionalValue } from "@/components/PatientInfo/ProvisionalContext";
 import ConfirmProvisionalBanner from "@/components/PatientInfo/ConfirmProvisionalBanner";
 import {
-  ACTIONABLE_SKIPS, confirmableFields, confirmProvisional, skipText, type ConfirmResult,
+  ACTIONABLE_SKIPS, confirmableFields, confirmProvisional, humanize, shownValues, skipText, type ConfirmResult,
 } from "@/components/PatientInfo/provisionalConfirm";
 import {
   addedMark, addedMarks, attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals,
@@ -760,6 +760,8 @@ export default function PatientDetail({
   // proposal; the page sends what it showed so a stale page confirms nothing it did not see, then
   // reads the record again, which is how the marks the server cleared (a disease group, a
   // calculated field) go.
+  const confirmLabels = useRef<Record<string, string>>({});
+  const registerLabel = useCallback((name: string, label: string) => { confirmLabels.current[name] = label; }, []);
   const [confirmBusy, setConfirmBusy] = useState<string | null>(null);
   const [confirmErrors, setConfirmErrors] = useState<Record<string, string>>({});
   const [confirmNote, setConfirmNote] = useState<{ text: string; failed: boolean } | null>(null);
@@ -768,7 +770,9 @@ export default function PatientDetail({
     const info = editedInfoRef.current;
     const names = field ? [field] : confirmableFields(info);
     if (names.length === 0) return;
-    const expected = Object.fromEntries(names.map((name) => [name, info[name] ?? null]));
+    // What the page shows for each field and for every one confirmed together with it, so a
+    // stale page confirms nothing it did not see (the server decides each group whole).
+    const expected = shownValues(info, names);
     setConfirmBusy(field ?? '*');
     setConfirmErrors({});
     setConfirmNote(null);
@@ -958,10 +962,11 @@ export default function PatientDetail({
           busy: confirmBusy,
           errors: confirmErrors,
           onConfirm: (name: string) => { void runConfirm(name); },
+          registerLabel,
         },
       } : {}),
     }),
-    [editedInfo, patientMode, confirmable, confirmBusy, confirmErrors, runConfirm],
+    [editedInfo, patientMode, confirmable, confirmBusy, confirmErrors, runConfirm, registerLabel],
   );
   // The proposals still on the page that stop the patient confirming (#2761).
   const attestationBlockerCount = useMemo(
@@ -1221,6 +1226,7 @@ export default function PatientDetail({
               {!patientMode && (
                 <ConfirmProvisionalBanner
                   count={confirmable.length}
+                  labels={confirmable.map((name) => confirmLabels.current[name] ?? humanize(name))}
                   busy={confirmBusy !== null}
                   note={confirmNote}
                   onConfirmAll={() => { void runConfirm(null); }}

@@ -22,6 +22,28 @@ export function confirmableFields(info: Record<string, unknown> | null | undefin
   return (block.confirmable as string[]).filter((field) => field in marks).sort();
 }
 
+/** The fields confirmed together with `field` (the server's groups: a date and its precision),
+ *  `field` included. The page asks to confirm all of them or none, so it must show it saw each. */
+export function groupOf(info: Record<string, unknown> | null | undefined, field: string): string[] {
+  const block = info?.provisional_confirm as { groups?: unknown } | undefined;
+  const groups = Array.isArray(block?.groups) ? (block!.groups as string[][]) : [];
+  return groups.find((group) => group.includes(field)) ?? [field];
+}
+
+/** What the page shows for each of `fields` (and every member of their groups): the values the
+ *  server is asked to find unchanged, so a stale page confirms nothing it did not see. */
+export function shownValues(info: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  const names = new Set(fields.flatMap((field) => groupOf(info, field)));
+  return Object.fromEntries([...names].map((name) => [name, info[name] ?? null]));
+}
+
+/** A readable name for a field the page has not been shown a label for: `hemoglobin_g_dl` as
+ *  `Hemoglobin g dl`. A field whose control is on screen names itself (`registerLabel`). */
+export function humanize(name: string): string {
+  const text = name.replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** What a skip means to the person who pressed the button. */
 export function skipText(item: ConfirmSkip): string {
   switch (item.reason) {
@@ -33,6 +55,9 @@ export function skipText(item: ConfirmSkip): string {
     case 'rejected': return 'The proposal was rejected earlier and is not shown.';
     case 'not_provisional': return 'This field no longer shows a proposal.';
     case 'disabled': return 'Provisional data is switched off.';
+    case 'not_shown': return 'No tab shows this value, so it cannot be confirmed here.';
+    case 'no_projection': return 'This value cannot be saved as approved data here. Enter it in the field instead.';
+    case 'dropped_with_group': return 'This proposal went with the group it belongs to, as it does when its answer is typed.';
     default: return 'This value cannot be confirmed here.';
   }
 }

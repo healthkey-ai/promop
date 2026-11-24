@@ -175,6 +175,42 @@ describe('a professional confirming one proposal', () => {
   });
 });
 
+describe('a group confirmed together', () => {
+  const GROUPED = {
+    ...PROPOSED,
+    provisional_confirm: {
+      confirmable: ['hemoglobin_g_dl', 'sodium_meq_l'], skipped: { bmi: 'calculated' },
+      groups: [['hemoglobin_g_dl', 'sodium_meq_l']],
+    },
+  };
+
+  it('sends what the page shows for every member of the field\'s group, even on a single-field click', async () => {
+    serve(GROUPED, CONFIRMED);
+    await openLabs();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Hemoglobin (g/dL)' }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalledTimes(1));
+    expect(api.post).toHaveBeenCalledWith(
+      '/v1/patient-records/261/confirm-provisional/',
+      { fields: ['hemoglobin_g_dl'], expected: { hemoglobin_g_dl: '11.5', sodium_meq_l: '140' } },
+    );
+  });
+
+  it('shows a skipped group on the field the person pressed (the server skipped the whole group)', async () => {
+    (api.post as ReturnType<typeof vi.fn>).mockRejectedValue({
+      response: { status: 409, data: { confirmed: [], skipped: [
+        { field: 'hemoglobin_g_dl', reason: 'changed' }, { field: 'sodium_meq_l', reason: 'changed' }], remaining: 3 } },
+    });
+    serve(GROUPED);
+    await openLabs();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Hemoglobin (g/dL)' }));
+
+    expect(await screen.findByTestId('confirm-error-hemoglobin_g_dl')).toHaveTextContent(/changed since this page was loaded/i);
+  });
+});
+
 describe('who is offered it', () => {
   it('offers nothing to a patient on their own page, even if the record read carried the list', async () => {
     render(<PatientDetail patientMode />);
@@ -225,7 +261,9 @@ describe('Confirm all', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Confirm all 2 provisional values' }));
 
-    expect(screen.getByText('Save all 2 provisional values as approved data for this patient?')).toBeInTheDocument();
+    // The question names what will be confirmed: the labels of the fields, not only a number.
+    expect(screen.getByText(/Save these 2 provisional values as approved data for this patient:/)).toBeInTheDocument();
+    expect(screen.getByText('Hemoglobin g dl, Sodium meq l')).toBeInTheDocument();
     expect(api.post).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.getByRole('button', { name: 'Confirm all 2 provisional values' })).toBeInTheDocument();

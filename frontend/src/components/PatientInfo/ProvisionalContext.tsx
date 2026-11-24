@@ -23,6 +23,8 @@ export interface ProvisionalValue {
     errors: Readonly<Record<string, string>>;
     /** Confirm one field: the server saves its current proposal as approved data. */
     onConfirm: (name: string) => void;
+    /** A shown control tells the page its field's label, for the "Confirm all" question. */
+    registerLabel?: (name: string, label: string) => void;
   };
 }
 
@@ -42,5 +44,10 @@ export function useProvisionalMark(name: string): { confidence: number; patientM
 export function useConfirmControl(name: string) {
   const { marks, patientMode, confirm } = useContext(ProvisionalContext);
   if (!confirm || patientMode || typeof marks[name] !== 'number' || !confirm.confirmable.has(name)) return null;
-  return { busy: confirm.busy, error: confirm.errors[name] ?? null, onConfirm: () => confirm.onConfirm(name) };
+  return {
+    busy: confirm.busy,
+    error: confirm.errors[name] ?? null,
+    onConfirm: () => confirm.onConfirm(name),
+    registerLabel: confirm.registerLabel,
+  };
 }

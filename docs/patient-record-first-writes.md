@@ -81,8 +81,10 @@ the server's current proposal instead of the client: it locks the record, reads 
 calls `apply_patient_record_patch` once with every confirmed field, so the value lands on
 `PatientRecord` first, is tracked in `user_edited_fields` until OMOP holds it, projects through the
 field's descriptor, and drops its mark, exactly as an equivalent PATCH does (a revision row names the
-caller). It writes no clinical row of its own beyond that projection, approves no mapping, and never
-sets `validated`. See the provisional data plan, "Staff confirm provisional values".
+caller). The projected fact is dated when the reading was taken (`as_of`), not today as a typed edit's is.
+Only fields an OMOP projection (or a Person/Location column) acknowledges are confirmable: any other would stay
+pinned in `user_edited_fields`. It writes no clinical row of its own beyond that projection, approves no
+mapping, and never sets `validated`. See the provisional data plan, "Staff confirm provisional values".
 
 ### Created fields
 

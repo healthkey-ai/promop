@@ -245,7 +245,7 @@ def _drop_proposed_list_items(patient_info, patch_data):
     return stripped
 
 
-def apply_patient_record_patch(person, patient_info, data, *, actor, allow_reject=False):
+def apply_patient_record_patch(person, patient_info, data, *, actor, allow_reject=False, as_of=None):
     """Apply a partial update to a person's PatientRecord, as ``actor`` writes it.
 
     The save path of ``PATCH /api/v1/patient-records/<id>/`` and ``/me/``,
@@ -261,6 +261,10 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
     ``rejected_proposals`` and sends blank is the person rejecting the proposal the
     record shows there (#2671). Without it (the survey mapping, a machine credential,
     any other caller) the key is ignored and a blank is stored exactly as it always was.
+
+    ``as_of`` maps a field to ``(date, datetime or None)``, when the reading behind its
+    value was taken. Only a professional's confirmation of a proposal passes it (#2870):
+    the projected fact is then dated that day instead of today (``project_single_value``).
     """
     # patient_name targets Person, not PatientRecord, so it is handled by hand
     # here exactly as /patient-info/me/ handles it — through the same pair of
@@ -468,7 +472,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
                     previous_values.get('medication_contexts') or {},
                     projection_data['medication_contexts'])
             projected = PatientRecordViewSet._project_mapped_fields(
-                person, clinical_fields, projection_data, actor=actor,
+                person, clinical_fields, projection_data, actor=actor, as_of=as_of,
             )
             patient_info.user_edited_fields = sorted(
                 set(patient_info.user_edited_fields or []) - projected
@@ -1582,11 +1586,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({
             # legacy wire format — preserved for frontend/federation host compatibility
             'patient_info': {**patient_serializer.data, 'provisional_fields': provisional_fields,
-                             **self._provisional_confirm_block(request, patient_info, provisional_fields)},
+                             **self._provisional_confirm_block(request, patient_info, shown, provisional_fields)},
             'user': user_data
         })
 
-    def _provisional_confirm_block(self, request, patient_info, provisional_fields):
+    def _provisional_confirm_block(self, request, patient_info, shown, provisional_fields):
         """What the record read adds about confirming its proposals: nothing here.
 
         The legacy ``/api/patient-info/`` wire format is frozen; ``PatientRecordV1ViewSet``
@@ -1738,7 +1742,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None, as_of=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
@@ -1774,8 +1778,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if projection:
                 if authorship is None:
                     authorship = _patient_authorship(actor, person)
+                when = (as_of or {}).get(field)
+                dated = {'as_of': when[0], 'as_of_datetime': when[1]} if when else {}
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True, **authorship):
+                                        acknowledge_existing=True, **authorship, **dated):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     if (projection['omop_table'] in ('measurement', 'observation')
@@ -6566,18 +6572,19 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             data['name'] = data['email'] = None
         return data
 
-    def _provisional_confirm_block(self, request, patient_info, provisional_fields):
+    def _provisional_confirm_block(self, request, patient_info, shown, provisional_fields):
         """``provisional_confirm`` on the read, for a professional who may confirm (#2870).
 
-        ``{confirmable: [fields], skipped: {field: reason}}``: which marked fields
-        the confirm endpoint would act on, so the page offers a control only there
+        ``{confirmable: [fields], skipped: {field: reason}, groups: [[fields]]}``: which
+        marked fields the confirm endpoint would act on (only ones the page shows) and which
+        go together, so the page offers a control only there
         and never decides confirmability itself. A person at the page, not a
         credential, and only one ``may_confirm``; nobody else gets the key.
         """
         if not provisional_fields or not is_interactive_session(request) or is_machine_request(request):
             return {}
         from omop_core.services.provisional_confirm import read_block
-        return read_block(request.user, patient_info, provisional_fields)
+        return read_block(request.user, patient_info, shown, provisional_fields)
 
     @action(detail=True, methods=['post'], url_path='confirm-provisional',
             permission_classes=[InteractiveSessionPermission])
@@ -6618,10 +6625,13 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             raise ValidationError({'detail': "Send either 'fields' or 'all', not both."})
         if not everything and not fields:
             raise ValidationError({'detail': "Name the 'fields' to confirm, or send 'all': true."})
+        if everything and expected is None:
+            raise ValidationError({'expected': "'all' needs 'expected': the values the page showed, so it "
+                                               "confirms what the person saw and nothing that arrived since."})
         result = provisional_confirm.confirm(
             person, patient_info, request.user, fields, all_fields=bool(everything), expected=expected)
         if result['confirmed']:
-            request._request.audit_detail = provisional_confirm.audit_note(result['confirmed'])
+            request._request.audit_detail = provisional_confirm.audit_note('all' if everything else 'fields')
         refused = not result['confirmed'] and any(s['reason'] == provisional_confirm.CHANGED for s in result['skipped'])
         return Response({'person_id': person.person_id, **result},
                         status=status.HTTP_409_CONFLICT if refused else status.HTTP_200_OK)
