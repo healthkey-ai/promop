@@ -1196,6 +1196,8 @@ export default function FieldMappingPage() {
         <FieldChoiceEditor
           fieldName={choiceEditorField.field_name}
           canApprove={canApprove}
+          diseaseOptions={diseaseOptions}
+          diseaseOptionsIncomplete={categoriesState === "failed"}
           onClose={() => {
             setChoiceEditorField(null);
             fetchDescriptors();
