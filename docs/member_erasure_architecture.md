@@ -77,9 +77,37 @@ asked (`system` when nobody did), `resource_id` the person, and `detail` names
 them and nothing of what was held:
 
 ```json
-{"erasure": "account", "person_id": 1234, "identity_id": 567}
+{"erasure": "account", "person_id": 1234, "identity_id": 567, "subject": "9f2c..."}
 {"erasure": "record", "person_id": 1234, "purpose": "my_record"}
 ```
+
+`subject` is there only when the sign-in that was closed is a partner's
+(Firebase, the PHR host): a keyed digest of its issuer and subject
+(`erasure.subject_hash`, under `AUDIT_HMAC_KEY`), never the subject itself.
+
+## A closed account's partner token
+
+A partner's token is issued by the partner and stays valid after the account
+it opened is closed, until it expires; and `PartnerAuthentication` opens an
+account for any valid token whose subject it does not know. Left alone, the
+next request from a tab or an app that was still open would give the member
+who just closed their account a new, empty one (#2851).
+
+So a partner sign-in that matches no account is looked up in the deletion log
+first (`erasure.closed_recently`): when its account was closed within
+`ACCOUNT_CLOSED_BLOCK_SECONDS` (a day by default; `0` turns the check off) the
+request is a 401 "This account was closed." and nothing is created. After
+that the member can sign up again, as a new member.
+
+- Only a closed sign-in is refused. A withdrawal keeps the account, and an
+  admin delete that keeps the sign-in (a clinician who is also a member)
+  closes none, so both leave the token working.
+- A sign-in this deployment issued (`urn:local`) needs no check: its subject
+  is a random id that goes with the row.
+- The check costs one query, and only for a token whose subject has no
+  account: a request from a known member is unchanged.
+- Changing `AUDIT_HMAC_KEY` (or `SECRET_KEY`, where it stands in) changes
+  the digest, so accounts closed under the old key are no longer refused.
 
 ## Not here
 

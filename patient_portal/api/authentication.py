@@ -166,7 +166,15 @@ class PartnerAuthentication(BaseAuthentication):
 
     @staticmethod
     def _get_or_create_identity(claims: TokenClaims) -> Identity:
-        identity, created = Identity.objects.get_or_create_from_claims(claims)
+        try:
+            identity, created = Identity.objects.get(issuer=claims.issuer, sub=claims.sub), False
+        except Identity.DoesNotExist:
+            # A token still valid after its account was closed must not open
+            # a new one (docs/member_erasure_architecture.md).
+            from patient_portal.erasure import closed_recently
+            if closed_recently(claims.issuer, claims.sub):
+                raise AuthenticationFailed("This account was closed.")
+            identity, created = Identity.objects.get_or_create_from_claims(claims)
         if created:
             if claims.email and claims.email_verified:
                 identity.email = claims.email
