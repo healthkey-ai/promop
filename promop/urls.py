@@ -49,6 +49,9 @@ _v1 = [
 ]
 
 urlpatterns = [
+    # Staff sign-in through OpenID Connect providers; before the admin's own
+    # URLs, which would otherwise take the path (docs/staff-sign-in.md).
+    path('admin/sign-in/', include('patient_portal.staff_sign_in_urls')),
     path('admin/', admin.site.urls),
 
     # Versioned API — stable contract, consumed by external services.

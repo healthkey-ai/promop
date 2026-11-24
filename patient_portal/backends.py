@@ -24,6 +24,13 @@ class EmailBackend(ModelBackend):
         if identity.is_locked:
             return None
 
+        # Where staff sign in only through a provider (STAFF_PASSWORD_SIGN_IN
+        # off, docs/staff-sign-in.md), a staff password opens nothing, and a
+        # wrong one counts nothing: nobody can lock a staff account out.
+        if not settings.STAFF_PASSWORD_SIGN_IN and (identity.is_staff or identity.is_superuser):
+            Identity().set_password(password)  # the same work as a check, for timing
+            return None
+
         if identity.check_password(password) and self.user_can_authenticate(identity):
             if identity.failed_login_count or identity.locked_until:
                 identity.failed_login_count = 0

@@ -759,6 +759,13 @@ the Add Field link at the top and bottom of each patient tab
 (`AddFieldLink.tsx`, shown with the fields' globes) and the Field Mappings
 page's own button, both of which open the mapping dialog in create mode.
 
+**Staff in the admin** are a separate axis from `GroupAccess`: Django groups a
+deployment names in `STAFF_ROLES`, with `support_member_accounts` and
+`manage_staff` on `Identity`, and staff sign-in through the deployment's
+OpenID Connect providers with an emailed staff invitation. Only a superuser
+changes an account's address, staff or superuser status or password in the
+admin. See [docs/staff-sign-in.md](docs/staff-sign-in.md).
+
 ---
 
 ## Rule: Tests for Every New Feature

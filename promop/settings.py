@@ -312,6 +312,21 @@ SUGGEST_SEMANTIC_TIMEOUT_MS = max(1, int(os.environ.get('SUGGEST_SEMANTIC_TIMEOU
 # How long a curator's edit lock on a code mapping stays active (minutes).
 MAPPING_LOCK_TIMEOUT_MINUTES = max(1, int(os.environ.get('MAPPING_LOCK_TIMEOUT_MINUTES', '15')))
 
+# Staff sign-in through OpenID Connect providers (docs/staff-sign-in.md), as
+# JSON: a list of {"key", "label", "issuer", "client_id", "client_secret_env",
+# "claims", "require_mfa"}. "claims" are values the ID token must carry, which
+# pin the organisation (Microsoft: {"tid": "<tenant id>"}; Google: {"hd":
+# "<domain>"}); "require_mfa" refuses a sign-in whose token does not say the
+# provider did two-step verification. Empty: no provider sign-in.
+STAFF_SIGN_IN_PROVIDERS = json.loads(os.environ.get('STAFF_SIGN_IN_PROVIDERS', '') or '[]')
+# False: staff and superuser accounts cannot sign in with a password at all,
+# only through a provider above. Members are not affected.
+STAFF_PASSWORD_SIGN_IN = _env_bool('STAFF_PASSWORD_SIGN_IN', True)
+# The groups a staff invitation may give, and a staff manager may set: the
+# deployment's staff roles. Comma-separated names of existing groups.
+STAFF_ROLES = [r.strip() for r in os.environ.get('STAFF_ROLES', '').split(',') if r.strip()]
+STAFF_INVITATION_DAYS = int(os.environ.get('STAFF_INVITATION_DAYS', '7'))
+
 AUTHENTICATION_BACKENDS = [
     "patient_portal.backends.EmailBackend",
 ]

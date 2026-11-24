@@ -118,6 +118,13 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     class Meta:
         db_table = "identity"
         verbose_name_plural = "identities"
+        permissions = [
+            # Staff roles (docs/staff-sign-in.md): what a member-support role
+            # may do for a member, and what manages other staff.
+            ("support_member_accounts",
+             "Can help members with their accounts: password reset links, invitations, permission withdrawals"),
+            ("manage_staff", "Can invite staff and change or remove their roles"),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["issuer", "sub"],
@@ -218,6 +225,39 @@ class PatientUser(models.Model):
 
     def __str__(self):
         return f"{self.identity} - Person {self.person.person_id}"
+
+
+class StaffInvitation(models.Model):
+    """An invitation for one person to become staff here, signing in through
+    one of ``STAFF_SIGN_IN_PROVIDERS`` (patient_portal.staff_sign_in). The
+    link holds a token; only its hash is kept. Accepting it makes a staff
+    account tied to the provider account that signed in, with ``role``."""
+    email = models.EmailField()
+    provider = models.CharField(max_length=50, help_text="A key of STAFF_SIGN_IN_PROVIDERS.")
+    role = models.CharField(max_length=150, blank=True, default="",
+                            help_text="A group named in STAFF_ROLES, or none.")
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    invited_by = models.ForeignKey(
+        Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    accepted_identity = models.ForeignKey(
+        Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "staff_invitation"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.email} ({self.role or 'no role'}, {self.provider})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.accepted_at is None and self.cancelled_at is None and self.expires_at > timezone.now()
 
 
 class PatientInvitation(models.Model):

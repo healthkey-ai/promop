@@ -1,0 +1,19 @@
+{% extends "admin/login.html" %}
+{% load staff_sign_in %}
+
+{% block content %}
+{% staff_sign_in_options as options %}
+{% if options.providers %}
+<div class="staff-sign-in" style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px">
+  {% for provider in options.providers %}
+  <a class="button" style="display:block;text-align:center;padding:10px"
+     href="{% url 'staff-sign-in' provider.key %}{% if next %}?next={{ next|urlencode }}{% endif %}">Sign in with {{ provider.label }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+{% if options.password %}
+{{ block.super }}
+{% else %}
+<p>Staff sign in with their organisation's account above.</p>
+{% endif %}
+{% endblock %}

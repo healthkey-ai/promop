@@ -262,3 +262,31 @@ def record_mappings_check(app_configs, **kwargs):
             id='patient_portal.E007',
         )]
     return []
+
+
+@register(Tags.security)
+def staff_sign_in_check(app_configs, **kwargs):
+    """STAFF_SIGN_IN_PROVIDERS must be complete and safe (docs/staff-sign-in.md)."""
+    errors = []
+    keys = set()
+    for i, entry in enumerate(getattr(settings, 'STAFF_SIGN_IN_PROVIDERS', []) or []):
+        missing = [f for f in ('key', 'label', 'issuer', 'client_id', 'client_secret_env') if not entry.get(f)]
+        if missing:
+            errors.append(Error(f'STAFF_SIGN_IN_PROVIDERS[{i}] needs {", ".join(missing)}.',
+                                id='patient_portal.E010'))
+            continue
+        if entry['key'] in keys:
+            errors.append(Error(f'STAFF_SIGN_IN_PROVIDERS: "{entry["key"]}" is listed twice.', id='patient_portal.E011'))
+        keys.add(entry['key'])
+        if not entry['issuer'].startswith('https://'):
+            errors.append(Error(f'STAFF_SIGN_IN_PROVIDERS "{entry["key"]}": the issuer must be https.',
+                                id='patient_portal.E012'))
+        if not entry.get('claims'):
+            errors.append(Warning(
+                f'STAFF_SIGN_IN_PROVIDERS "{entry["key"]}" pins no organisation ("claims"): any account '
+                'of the provider can try to sign in, and only an invitation stops it.',
+                id='patient_portal.W010'))
+    if not getattr(settings, 'STAFF_PASSWORD_SIGN_IN', True) and not keys:
+        errors.append(Error('STAFF_PASSWORD_SIGN_IN is off and no STAFF_SIGN_IN_PROVIDERS are set: '
+                            'no staff member could sign in.', id='patient_portal.E013'))
+    return errors
