@@ -58,6 +58,10 @@ def test_0347_refuses_a_null_in_any_of_the_four_answers():
     assert last.reverse_code is migration.refuse_if_nulls
 
     record = PatientRecordFactory()
+    # A fresh factory row has all four unanswered; answer them first so each
+    # iteration isolates the field it names.
+    PatientRecord.objects.filter(pk=record.pk).update(
+        **{field: False for field in migration.FIELDS})
     for field in migration.FIELDS:
         PatientRecord.objects.filter(pk=record.pk).update(**{field: None})
         with pytest.raises(RuntimeError, match='NOT NULL'):

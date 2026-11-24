@@ -3939,7 +3939,7 @@ class PatientRecord(models.Model):
     no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=True, null=True, default=None)
     pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=True, null=True)
     no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=True, null=True, default=None)
-    no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=True, null=True)
+    no_concomitant_medication_status = models.BooleanField(help_text="Is the patient free of concomitant medication? Stored True when the patient reports no concomitant medication.", blank=True, null=True)
     concomitant_medication_details = models.CharField(max_length=255, help_text="Details about the patient's concomitant medications", blank=True, null=True)
     
     # Behavior tab - Lifestyle Factors

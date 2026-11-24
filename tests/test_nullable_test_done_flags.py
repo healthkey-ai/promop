@@ -95,10 +95,10 @@ def test_omitting_the_field_preserves_the_answer(field):
     assert getattr(record, field) is False
 
 
-def test_the_shared_labels_ask_the_positive_question():
+def test_the_shared_labels_follow_the_stored_polarity():
     descriptor = build_writable_field_descriptor()
     assert (descriptor['no_concomitant_medication_status']['label']
-            == 'Does the patient take concomitant medication?')
+            == 'No concomitant medication?')
     assert (descriptor['pregnancy_test_result']['label']
             == 'Negative pregnancy test result?')
 
@@ -112,6 +112,19 @@ def test_a_curator_choice_cannot_replace_the_three_state_control():
 
     assert entry['tri_state'] is True
     assert 'options' not in entry
+
+
+def test_only_the_reviewed_answers_are_three_state():
+    from omop_core.services.write_descriptor import (
+        _MYELOMA_RELATED_DISORDER_PROJECTIONS,
+    )
+
+    descriptor = build_writable_field_descriptor()
+    tri = {
+        name for name, entry in descriptor.items()
+        if not name.startswith('__') and entry.get('tri_state')
+    }
+    assert tri == set(FIELDS) | set(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
 
 
 def test_the_shared_form_api_clears_to_unknown():
@@ -131,3 +144,18 @@ def test_the_shared_form_api_clears_to_unknown():
     assert 'pulmonary_function_test_result' in response.data['write']['applied']
     record.refresh_from_db()
     assert record.pulmonary_function_test_result is None
+
+    descriptor = client.get(
+        '/api/v1/patient-records/writable-fields/',
+        {'person_id': record.person_id},
+        HTTP_X_PATIENT_FORM='1',
+    ).data
+    entry = descriptor['pulmonary_function_test_result']
+    assert entry['tri_state'] is True
+    assert entry['control'] == 'boolean'
+    assert 'options' not in entry
+    medication = descriptor['no_concomitant_medication_status']
+    assert medication['answer_labels'] == {
+        'true': 'No concomitant medication',
+        'false': 'Takes concomitant medication',
+    }

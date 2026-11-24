@@ -667,8 +667,8 @@ _TRI_STATE_ANSWERS = frozenset({
 #: wording change ("Normal" -> "Done").
 _TRI_STATE_LABELS = {
     'pregnancy_test_result': 'Negative pregnancy test result?',
-    'no_concomitant_medication_status': (
-        'Does the patient take concomitant medication?'),
+    # The column stores the negation: True = no concomitant medication.
+    'no_concomitant_medication_status': 'No concomitant medication?',
 }
 
 _MAPPING_TARGETS = {

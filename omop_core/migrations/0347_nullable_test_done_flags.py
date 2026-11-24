@@ -61,7 +61,10 @@ class Migration(migrations.Migration):
             name="no_concomitant_medication_status",
             field=models.BooleanField(
                 blank=True,
-                help_text="Does the patient have concomitant medication?",
+                help_text=(
+                    "Is the patient free of concomitant medication? Stored True "
+                    "when the patient reports no concomitant medication."
+                ),
                 null=True,
             ),
         ),
