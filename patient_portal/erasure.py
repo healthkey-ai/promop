@@ -14,11 +14,16 @@ so it is logged whoever calls it, from a view, the shell or a command.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
+from django.conf import settings
 from django.core.files.storage import Storage
 from django.db import transaction
+from django.utils import timezone
 from django.db.models import PROTECT
 
 from omop_core.models import PatientDocument, PatientRecord, Person
@@ -81,7 +86,7 @@ def close_account(person: Person, identity: Identity | None = None, *, actor: Id
         if identity is not None:
             identity.delete()
         _remove_files_on_commit(files, person_id)
-        _log('account', person_id, actor_id, identity_id=identity_id)
+        _log('account', person_id, actor_id, identity_id=identity_id, subject=_closed_subject(identity))
 
 
 def erase_record(person: Person, *, actor: Identity | None = None, purpose: str = '') -> PatientRecord:
@@ -174,6 +179,40 @@ def withdrawal_tables() -> list[tuple[type, str]]:
                 continue
             tables.append((below.related_model, f'{below.field.name}__{relation.field.name}'))
     return tables
+
+
+# A sign-in this deployment issued; its subject is a random id nobody can
+# present again once the row is gone.
+_LOCAL_ISSUER = 'urn:local'
+
+
+def subject_hash(issuer: str, sub: str) -> str:
+    """A keyed digest of a partner sign-in's issuer and subject: what the
+    deletion log keeps of a closed account's sign-in, so the log can answer
+    "was this one closed?" without naming it."""
+    key = (getattr(settings, 'AUDIT_HMAC_KEY', '') or settings.SECRET_KEY).encode()
+    return hmac.new(key, f'{issuer}|{sub}'.encode(), hashlib.sha256).hexdigest()
+
+
+def closed_recently(issuer: str, sub: str) -> bool:
+    """Whether the account behind this partner sign-in was closed within
+    ``ACCOUNT_CLOSED_BLOCK_SECONDS``. A partner's token outlives the account
+    it opened, and the next request carrying it would otherwise open a new,
+    empty one (``PartnerAuthentication``). 0 turns the check off."""
+    window = getattr(settings, 'ACCOUNT_CLOSED_BLOCK_SECONDS', 0)
+    if window <= 0 or issuer == _LOCAL_ISSUER:
+        return False
+    return AuditEvent.objects.filter(
+        event_type=AuditEvent.EVENT_DELETE, method='ERASE',
+        timestamp__gte=timezone.now() - timedelta(seconds=window),
+        detail__erasure='account', detail__subject=subject_hash(issuer, sub),
+    ).exists()
+
+
+def _closed_subject(identity: Identity | None) -> str:
+    if identity is None or identity.issuer == _LOCAL_ISSUER:
+        return ''
+    return subject_hash(identity.issuer, identity.sub)
 
 
 def _actor_id(actor: Identity | None) -> str:

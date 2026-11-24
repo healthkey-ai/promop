@@ -369,6 +369,10 @@ BREAK_GLASS_ALLOW_SERVICE = os.environ.get('BREAK_GLASS_ALLOW_SERVICE', 'false')
 # Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes
 # audit writes via an advisory lock; can be disabled under extreme write load.
 AUDIT_HASH_CHAIN_ENABLED = os.environ.get('AUDIT_HASH_CHAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+# How long a partner sign-in whose account was closed is refused, so a token
+# that is still valid cannot open a new, empty account (patient_portal.erasure).
+# Longer than any partner token lives; 0 turns the check off.
+ACCOUNT_CLOSED_BLOCK_SECONDS = int(os.environ.get('ACCOUNT_CLOSED_BLOCK_SECONDS', '86400'))
 
 # Data-exchange integrity & non-repudiation (S.3.6#10 / PH.2.3#09, issue #306).
 # Key used to sign exported FHIR bundles (HMAC-SHA256). Falls back to SECRET_KEY

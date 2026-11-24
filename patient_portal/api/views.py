@@ -2168,11 +2168,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         person_id = person.person_id
-        # Remove a purely-patient login alongside the record; keep an Identity that
-        # also holds provider access (GroupAccess) so we don't revoke a provider.
+        # Remove a purely-patient login alongside the record; keep an Identity
+        # that is staff or holds provider access, so we don't revoke a provider.
+        # A `patient` grant (an invitation's) is no reason to keep it: a
+        # sign-in left behind opens a new, empty record on its next request (#2851).
         linked_identity = None
         pu = PatientUser.objects.filter(person=person).select_related('identity').first()
-        if pu and not GroupAccess.objects.filter(identity=pu.identity).exists():
+        if pu and not (
+            pu.identity.is_staff or pu.identity.is_superuser
+            or GroupAccess.objects.filter(identity=pu.identity).exclude(role='patient').exists()
+        ):
             linked_identity = pu.identity
 
         from patient_portal.erasure import close_account

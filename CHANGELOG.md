@@ -8,6 +8,15 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A closed account's partner token no longer opens a new account** — a
+  Firebase or PHR-host token stays valid after the account it opened is
+  closed, and the next request carrying it used to provision a new, empty
+  account. The deletion log now keeps a keyed digest of the closed sign-in,
+  and a partner sign-in whose account was closed within
+  `ACCOUNT_CLOSED_BLOCK_SECONDS` (a day by default, `0` for off) gets a 401
+  "This account was closed." (#2851). See
+  [member erasure](docs/member_erasure_architecture.md#a-closed-accounts-partner-token).
+
 - **Wearables: readings come in as source codes, provisional or accepted by
   their mapping** — a device import (Garmin, Apple Health, a phone's sync)
   now files each row under the device's own code (`steps` under `Garmin`)
