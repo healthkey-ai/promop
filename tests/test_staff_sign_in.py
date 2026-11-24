@@ -326,11 +326,25 @@ def test_member_support_withdraws_a_permission_for_a_member(monkeypatch):
         'action': 'withdraw_permission', '_selected_action': [member.pk]})
     assert asked.status_code == 200 and b'Updates from us' in asked.content
 
+    asked = timezone.localdate() - timezone.timedelta(days=2)
+    tomorrow = timezone.localdate() + timezone.timedelta(days=1)
+    for missing_or_future in ('', tomorrow.isoformat()):
+        page = client.post('/admin/patient_portal/identity/', {
+            'action': 'withdraw_permission', '_selected_action': [member.pk], 'confirm': 'withdraw',
+            'purpose': 'updates', 'requested_on': missing_or_future})
+        assert b'today or earlier' in page.content
+    assert ConsentEvent.objects.filter(person=person).count() == 1  # nothing recorded yet
+
     client.post('/admin/patient_portal/identity/', {
         'action': 'withdraw_permission', '_selected_action': [member.pk], 'confirm': 'withdraw',
-        'purpose': 'updates'})
+        'purpose': 'updates', 'requested_on': asked.isoformat(), 'note': 'By email to the support address'})
     latest = ConsentEvent.objects.filter(person=person).order_by('-recorded_at', '-id').first()
     assert (latest.decision, latest.source, latest.recorded_by) == (ConsentEvent.WITHDRAWN, ConsentEvent.STAFF, me)
+    assert (latest.requested_on, latest.note) == (asked, 'By email to the support address')
+    from patient_portal.models import ConsentLedgerEntry
+
+    entry = ConsentLedgerEntry.objects.filter(key='updates').order_by('-recorded_at', '-id').first()
+    assert (entry.decision, entry.requested_on) == (ConsentEvent.WITHDRAWN, asked)
 
 
 def test_inviting_staff_needs_the_manager_permission_and_keeps_only_the_tokens_hash():
@@ -752,3 +766,44 @@ def test_settings_that_could_not_work_are_stopped(settings, monkeypatch):
 
     settings.STAFF_SIGN_IN_PROVIDERS = ['not an object']
     assert 'patient_portal.E016' in {e.id for e in staff_sign_in_check(None)}
+
+
+def test_closing_a_members_account_needs_its_permission_and_the_typed_address():
+    from django.contrib.admin.models import LogEntry
+    from omop_core.models import Organization, PatientRecord, Person
+
+    member = Identity.objects.create_user(email='leaving@example.test', password='Member-passw0rd-long')
+    person = Person.objects.create(person_id=990020, year_of_birth=1970, gender_source_value='female',
+                                   race_source_value='unknown', ethnicity_source_value='unknown')
+    PatientRecord.objects.create(person=person, organization=Organization.objects.create(name='O', slug='o'))
+    PatientUser.objects.create(identity=member, person=person)
+    _, other_staff = staff_client('Staff manager', email='other@example.test')
+
+    support, _ = staff_client('Member support')
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'require_password_change', '_selected_action': [member.pk]})  # leaves a history entry
+    page = support.get('/admin/patient_portal/identity/').content
+    assert b'close_member_account' not in page  # not without its permission
+
+    Group.objects.get(name='Member support').permissions.add(Permission.objects.get(codename='close_member_accounts'))
+    asked = support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [member.pk]})
+    assert asked.status_code == 200 and b'Type the member' in asked.content
+
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [member.pk], 'confirm': 'close',
+        'confirm_email': 'someone.else@example.test'})
+    assert Person.objects.filter(person_id=990020).exists()
+
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [other_staff.pk], 'confirm': 'close',
+        'confirm_email': 'other@example.test'})
+    assert Identity.objects.filter(pk=other_staff.pk).exists()  # never a staff account
+
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [member.pk], 'confirm': 'close',
+        'confirm_email': 'Leaving@Example.test'})
+    assert not Person.objects.filter(person_id=990020).exists()
+    assert not Identity.objects.filter(pk=member.pk).exists()
+    names = set(LogEntry.objects.filter(object_id=str(member.pk)).values_list('object_repr', flat=True))
+    assert names == {f'closed account {member.pk}'}  # the history stays, without the account's name

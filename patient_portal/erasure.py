@@ -65,6 +65,25 @@ KEPT_ON_WITHDRAWAL = frozenset({
 _MEMBERSHIP_FIELDS = ('organization',)
 
 
+def sign_in_to_close(person: Person) -> Identity | None:
+    """The member's sign-in that goes with their record when staff close it:
+    a purely-patient login. One that is staff or holds provider access stays,
+    so closing a record never revokes a provider. A `patient` grant (an
+    invitation's) is no reason to keep it: a sign-in left behind opens a new,
+    empty record on its next request (#2851)."""
+    from omop_core.models import GroupAccess
+    from patient_portal.models import PatientUser
+
+    account = PatientUser.objects.filter(person=person).select_related('identity').first()
+    if account is None:
+        return None
+    identity = account.identity
+    if identity.is_staff or identity.is_superuser or \
+            GroupAccess.objects.filter(identity=identity).exclude(role='patient').exists():
+        return None
+    return identity
+
+
 def close_account(person: Person, identity: Identity | None = None, *, actor: Identity | None = None) -> None:
     """Delete the person, their record and every row about them, and
     ``identity`` (their sign-in) when given. ``actor`` is who asked: the
@@ -84,6 +103,7 @@ def close_account(person: Person, identity: Identity | None = None, *, actor: Id
             delete_omop_clinical_rows(person)
             person.delete()
         if identity is not None:
+            _forget_admin_name(identity)
             identity.delete()
         _remove_files_on_commit(files, person_id)
         _log('account', person_id, actor_id, identity_id=identity_id, subject=_closed_subject(identity))
@@ -120,6 +140,17 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
         _remove_files_on_commit(files, person.person_id)
         _log('record', person.person_id, _actor_id(actor), purpose=purpose)
     return record
+
+
+def _forget_admin_name(identity: Identity) -> None:
+    """Staff actions on the account stay in the admin's history (who did what,
+    when), but not the name it kept for the account."""
+    from django.contrib.admin.models import LogEntry
+    from django.contrib.contenttypes.models import ContentType
+
+    LogEntry.objects.filter(
+        content_type=ContentType.objects.get_for_model(type(identity)), object_id=str(identity.pk),
+    ).update(object_repr=f'closed account {identity.pk}')
 
 
 def _forget_garmin(person: Person) -> None:

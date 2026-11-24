@@ -301,6 +301,7 @@ def record_consent(
     person, purpose: ConsentPurpose | str, decision: str, *, version: str | None = None,
     language: str = DEFAULT_LANGUAGE, frequency: str = '', recorded_by=None,
     source: str = ConsentEvent.MEMBER, recorded_at=None, email: str | None = None,
+    requested_on=None, note: str = '',
 ) -> ConsentEvent:
     """Append one answer and its ledger entry, in one transaction.
 
@@ -323,6 +324,7 @@ def record_consent(
         return _record_consent(
             person, purpose, decision, version=version, language=language, frequency=frequency,
             recorded_by=recorded_by, source=source, recorded_at=recorded_at, email=email,
+            requested_on=requested_on, note=note,
         )
 
 
@@ -336,7 +338,7 @@ def _lock_answers_of(person) -> None:
 
 
 def _record_consent(person, purpose, decision, *, version, language, frequency, recorded_by, source,
-                    recorded_at, email) -> ConsentEvent:
+                    recorded_at, email, requested_on=None, note='') -> ConsentEvent:
     if source == ConsentEvent.MEMBER:
         if not purpose.is_active:
             raise ValidationError(f'{purpose.key} is not active.')
@@ -391,11 +393,12 @@ def _record_consent(person, purpose, decision, *, version, language, frequency, 
         event = ConsentEvent.objects.create(
             person=person, purpose=purpose, text=text, version=version, language=text.language,
             decision=decision, frequency=frequency, source=source, recorded_by=recorded_by, recorded_at=when,
+            requested_on=requested_on, note=note[:500],
         )
         ConsentLedgerEntry.objects.create(
             email=addr, kind=ConsentLedgerEntry.CONSENT,
             key=purpose.key, version=version, language=text.language, decision=decision,
-            frequency=frequency, recorded_at=when,
+            frequency=frequency, recorded_at=when, requested_on=requested_on,
         )
         # The record depends on this permission: its health answers go now,
         # with the answer that ends it, or neither is kept.

@@ -103,11 +103,18 @@ promop adds two permissions on `Identity` for them:
 - `support_member_accounts`: the account actions on members, never on staff of
   either kind: "Email password reset link", "Require password change at next
   login", "Withdraw a permission on the member's behalf" (one member: choose
-  the permission, then `record_consent` as `staff`, with its consequences),
+  the permission, give the date the member asked and how, then
+  `record_consent` as `staff`, with its consequences; the event keeps the date
+  asked and the note, and the six-year ledger the date asked),
   and "Send the invitation again" on patient invitations (only a person's
   latest, uncancelled invitation, to the address their record holds). A
   patient invitation's token is shown to superusers only: it is the whole
   credential for claiming the member's account.
+- `close_member_accounts`: "Close the account on the member's behalf", one
+  member at a time, confirmed by typing their address. Everything goes at once,
+  as when the member closes it (`erasure.close_account`), except the consent
+  ledger and the audit trail; the admin's history of actions on the account
+  stays, without the account's name. Never a staff account.
 - `manage_staff`: invite staff with a role (Staff invitations → Add), cancel an
   invitation, set another role staff member's role (only to a `STAFF_ROLES`
   group; the account's other groups are kept; never their own), and "Remove
@@ -129,6 +136,8 @@ admin shows it an empty index:
 | Role | Permissions |
 |---|---|
 | Member support | `patient_portal.view_identity`, `patient_portal.support_member_accounts`, `patient_portal.view_patientinvitation` |
+| Closing accounts | `patient_portal.view_identity`, `patient_portal.close_member_accounts` |
+| Reading the access log | `patient_portal.view_auditevent` (the audit trail is read-only for everyone) |
 | Staff manager | `patient_portal.view_identity`, `patient_portal.change_identity` (the role field only), `patient_portal.manage_staff` |
 
 Support actions are one at a time where they are heavy or irreversible

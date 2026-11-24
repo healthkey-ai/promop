@@ -13,6 +13,19 @@ def _is_superuser(request) -> bool:
     return bool(request.user.is_active and request.user.is_superuser)
 
 
+def _requested_on(request):
+    """The date the member asked, from the withdrawal form: today or earlier."""
+    import datetime
+
+    from django.utils import timezone
+
+    try:
+        day = datetime.date.fromisoformat(request.POST.get('requested_on', ''))
+    except ValueError:
+        return None
+    return day if day <= timezone.localdate() else None
+
+
 @admin.register(Identity)
 class IdentityAdmin(UserAdmin):
     """Accounts. A superuser changes anything. Other staff see accounts, and
@@ -29,7 +42,7 @@ class IdentityAdmin(UserAdmin):
     ordering = ['email']
     readonly_fields = ['uid', 'issuer', 'sub', 'created_at']
     actions = ['grant_premium', 'revoke_premium', 'reset_password', 'require_password_change',
-               'withdraw_permission', 'remove_staff_access']
+               'withdraw_permission', 'close_member_account', 'remove_staff_access']
 
     fieldsets = (
         (None,          {'fields': ('uid', 'issuer', 'sub', 'email', 'name')}),
@@ -161,8 +174,10 @@ class IdentityAdmin(UserAdmin):
 
     @admin.action(description="Withdraw a permission on the member's behalf", permissions=['support'])
     def withdraw_permission(self, request, queryset):
-        """One member at a time: asks which permission, then records the
-        withdrawal as staff (``record_consent``), with its consequences."""
+        """One member at a time: asks which permission, when the member asked
+        and how, then records the withdrawal as staff (``record_consent``),
+        with its consequences. The date asked goes into the six-year ledger
+        too, as evidence the change was the member's."""
         from django.contrib import messages
         from django.template.response import TemplateResponse
 
@@ -184,23 +199,73 @@ class IdentityAdmin(UserAdmin):
             pk__in=[e.purpose_id for e in latest if e.decision == ConsentEvent.GRANTED], is_active=True,
         ).order_by('sort_order', 'key')
         key = request.POST.get('purpose')
+        requested_on, note, error = _requested_on(request), request.POST.get('note', '').strip(), ''
         if request.POST.get('confirm') == 'withdraw' and key:
             purpose = granted.filter(key=key).first()
             if purpose is None:
                 self.message_user(request, 'That permission is not granted.', level=messages.WARNING)
                 return None
-            record_consent(account.person, purpose, ConsentEvent.WITHDRAWN,
-                           source=ConsentEvent.STAFF, recorded_by=request.user)
-            self.log_change(request, identity, f'Withdrew {purpose.key} on the member\'s behalf')
-            self.message_user(request, f'Withdrew "{purpose.key}" for {identity.email}.')
-            return None
+            if requested_on is None:
+                error = 'Give the date the member asked, today or earlier.'
+            elif len(note) > 500:
+                error = 'Keep the note to 500 characters.'
+            else:
+                record_consent(account.person, purpose, ConsentEvent.WITHDRAWN, source=ConsentEvent.STAFF,
+                               recorded_by=request.user, requested_on=requested_on, note=note)
+                self.log_change(request, identity, f'Withdrew {purpose.key} on the member\'s behalf')
+                self.message_user(request, f'Withdrew "{purpose.key}" for {identity.email}.')
+                return None
         for purpose in granted:  # named as the member saw it
             text = purpose.texts.filter(published_at__isnull=False).order_by('-published_at').first()
             purpose.title = text.title if text else purpose.key
+        from django.utils import timezone
+
         return TemplateResponse(request, 'admin/withdraw_permission.html', {
             **self.admin_site.each_context(request), 'title': 'Withdraw a permission',
             'identity': identity, 'purposes': granted, 'action': 'withdraw_permission',
-            'selected': identity.pk, 'opts': self.model._meta,
+            'selected': identity.pk, 'opts': self.model._meta, 'error': error,
+            'requested_on': request.POST.get('requested_on') or timezone.localdate().isoformat(),
+            'note': note, 'chosen': key,
+        })
+
+    def has_close_accounts_permission(self, request):
+        return request.user.has_perm('patient_portal.close_member_accounts')
+
+    @admin.action(description="Close the account on the member's behalf", permissions=['close_accounts'])
+    def close_member_account(self, request, queryset):
+        """One member at a time, confirmed by typing their address: everything
+        goes straight away, as when the member closes it themselves
+        (``erasure.close_account``), except the consent ledger and the audit
+        trail. Never a staff account."""
+        from django.contrib import messages
+        from django.template.response import TemplateResponse
+
+        from .erasure import close_account, sign_in_to_close
+        from .models import PatientUser
+
+        members = self._members_only(request, queryset)
+        if members.count() != 1:
+            self.message_user(request, 'Choose one member.', level=messages.WARNING)
+            return None
+        identity = members.get()
+        account = PatientUser.objects.filter(identity=identity).select_related('person').first()
+        if account is None:
+            self.message_user(request, f'{identity.email} is not a member.', level=messages.WARNING)
+            return None
+        typed = request.POST.get('confirm_email', '').strip().lower()
+        if request.POST.get('confirm') == 'close':
+            if typed and typed == (identity.email or '').lower():
+                person_id = account.person.person_id
+                close_account(account.person, sign_in_to_close(account.person), actor=request.user)
+                self.message_user(request, f'Closed the account of person {person_id}: everything is deleted.')
+                return None
+            error = "That isn't the member's address."
+        else:
+            error = ''
+        return TemplateResponse(request, 'admin/close_member_account.html', {
+            **self.admin_site.each_context(request), 'title': "Close a member's account",
+            'identity': identity, 'action': 'close_member_account', 'selected': identity.pk,
+            'opts': self.model._meta, 'error': error,
         })
 
     @admin.action(description='Remove staff access', permissions=['manage_staff'])
@@ -664,7 +729,8 @@ class _AppendOnlyAdmin(admin.ModelAdmin):
 
 @admin.register(ConsentEvent)
 class ConsentEventAdmin(_AppendOnlyAdmin):
-    list_display = ['recorded_at', 'person', 'purpose', 'decision', 'version', 'language', 'frequency', 'source']
+    list_display = ['recorded_at', 'person', 'purpose', 'decision', 'version', 'language', 'frequency', 'source',
+                    'recorded_by', 'requested_on', 'note']
     list_filter = ['purpose', 'decision', 'source']
     search_fields = ['person__person_id']
 

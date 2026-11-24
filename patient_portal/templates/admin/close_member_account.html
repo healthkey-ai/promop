@@ -1,0 +1,22 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block content %}
+<h1>Close the account of {{ identity.email }}</h1>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="_selected_action" value="{{ selected }}">
+  <input type="hidden" name="confirm" value="close">
+  <p>Only when the member has asked. Ask them to close it themselves in their settings if they can.</p>
+  <p><strong>Everything goes straight away and cannot be undone:</strong> their account, their record, their
+     answers and their documents. Only the history of their permissions (six years) and the audit trail stay.</p>
+  {% if error %}<p class="errornote">{{ error }}</p>{% endif %}
+  <p>
+    <label for="confirm_email">Type the member's address to confirm</label><br>
+    <input type="email" id="confirm_email" name="confirm_email" autocomplete="off" required>
+  </p>
+  <input type="submit" value="Close the account">
+  <a href="{% url opts|admin_urlname:'changelist' %}">Cancel</a>
+</form>
+{% endblock %}
