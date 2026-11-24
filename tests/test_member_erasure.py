@@ -326,6 +326,8 @@ def test_every_table_a_withdrawal_reaches_is_a_decision():
         'omop_core.ConditionEra', 'omop_core.ConditionOccurrence', 'omop_core.Death', 'omop_core.DoseEra',
         'omop_core.DrugEra', 'omop_core.DrugExposure', 'omop_core.FhirConnection', 'omop_core.FhirOauthState',
         'omop_core.GarminConnection',
+        # A saved Garmin key could refill the erased record at the next sync (#2834).
+        'omop_core.GarminPersonalKey',
         # A phone left signed in would go on syncing into the erased record (#2810).
         'omop_core.OpenWearablesConnection',
         'omop_core.ImageOccurrence', 'omop_core.Measurement', 'omop_core.Note', 'omop_core.Observation',

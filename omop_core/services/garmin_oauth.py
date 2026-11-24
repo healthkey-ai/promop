@@ -357,6 +357,12 @@ def _fernet():
     return MultiFernet(keys)
 
 
+def can_encrypt():
+    """Whether this deployment has a key to store a secret under. The linked
+    account's tokens and a saved Personal API key (#2834) both need one."""
+    return bool(_token_keys())
+
+
 def encrypt(text):
     """A token as it is stored, under ``GARMIN_TOKEN_KEY``. Earlier keys
     (``GARMIN_TOKEN_KEY_FALLBACKS``) only decrypt."""

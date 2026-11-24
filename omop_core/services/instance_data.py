@@ -56,6 +56,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.FhirConnection', 'omop_core.FhirOauthState',
     # A patient's link to this deployment's Garmin app registration (#2802).
     'omop_core.GarminConnection',
+    # A patient's saved Garmin Connect Personal API key, encrypted (#2834).
+    'omop_core.GarminPersonalKey',
     # A patient's phones signed in to this deployment's Open Wearables SDK
     # routes, and the running day totals of what they sent (#2810).
     'omop_core.OpenWearablesConnection', 'omop_core.OpenWearablesDevice',

@@ -5616,19 +5616,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         """POST /api/v1/patient-records/sync-garmin/
 
         Read the signed-in patient's daily metrics from the Garmin Connect
-        Personal API with the key they send, and write them as the ``.fit``
-        upload does (#2794). The key is used for this request and kept
-        nowhere: not in the database, a log line or a queued task, which is
-        why the sync runs here and not on a worker.
+        Personal API with their key, and write them as the ``.fit`` upload
+        does (#2794). The key is never in a log line, an error or a queued
+        task, which is why the sync runs here and not on a worker. Once
+        Garmin has accepted it, it is saved encrypted for the patient's next
+        sync unless they decline (#2834, ``garmin_saved_key``).
 
         JSON body:
-          - api_key: the patient's Garmin Connect Personal API key
+          - api_key: the patient's Garmin Connect Personal API key. Left out
+            or blank, the key they saved earlier is used.
+          - remember: false to use ``api_key`` for this sync only (default
+            true: save it, where this deployment can encrypt it)
           - days: how many days to read, 1 to 90 (default 30)
           - end_date: last day to read, YYYY-MM-DD (default yesterday)
           - person_id: the record the page is showing; refused unless it is
             the caller's own
         """
-        from omop_core.services import garmin_connect
+        from omop_core.services import garmin_connect, garmin_saved_key
 
         # The person, signed in: not a service credential, and not an OAuth
         # token they delegated to an application, which could otherwise write
@@ -5659,14 +5663,38 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if shown not in (None, '') and str(shown) != str(person.person_id):
             return Response({'error': 'Garmin Connect sync writes to your own record only.'},
                             status=status.HTTP_403_FORBIDDEN)
+        remember = body.get('remember', True)
+        if not isinstance(remember, bool):
+            return Response({'error': 'remember must be true or false.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        sent = body.get('api_key')
+        # No key sent: the one the patient saved earlier.
+        from_saved = sent is None or (isinstance(sent, str) and not sent.strip())
         try:
-            api_key = garmin_connect.clean_api_key(body.get('api_key'))
+            api_key = garmin_saved_key.load(person) if from_saved else None
+            if api_key is None:
+                # Nothing saved either: the same answer as an empty field.
+                api_key = garmin_connect.clean_api_key(sent)
             start, end = garmin_connect.clean_range(
                 body.get('days'), body.get('end_date'), timezone.now().date())
             samples, failed = garmin_connect.fetch_daily_samples(api_key, start, end)
         except garmin_connect.GarminSyncError as exc:
             logger.info('garmin_sync_refused person_id=%s status=%s', person.person_id, exc.status)
+            # A saved key Garmin refuses will be refused every time: it goes,
+            # and the patient is asked for a new one.
+            if from_saved and exc.upstream in (401, 403) and garmin_saved_key.remove(person, 'refused'):
+                return Response({'error': garmin_saved_key.SAVED_KEY_REJECTED, 'key_saved': False},
+                                status=exc.status)
             return Response({'error': exc.message}, status=exc.status)
+        # Garmin accepted the key. Kept from here, before the rows are
+        # written: whether they could be stored says nothing about the key.
+        if from_saved:
+            garmin_saved_key.used(person)
+        elif remember:
+            garmin_saved_key.save(person, request.user, api_key)
+        # Not a local any more while the rows are written: an error report
+        # from there on would otherwise carry it among the frame's variables.
+        del api_key, sent
 
         response = self._store_wearable_samples(
             request, person, 'garmin', samples,
@@ -5681,8 +5709,38 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'start_date': start.isoformat(),
                 'end_date': end.isoformat(),
                 'datasets_failed': failed,
+                'key_saved': garmin_saved_key.is_saved(person),
             })
         return response
+
+    @action(detail=False, methods=['get', 'delete'], url_path='garmin-key',
+            permission_classes=[IsAuthenticated])
+    def garmin_key(self, request):
+        """GET, DELETE /api/v1/patient-records/garmin-key/
+
+        Whether the signed-in patient has a Garmin Connect Personal API key
+        saved for their syncs (#2834), and its removal. The answer is
+        ``{can_save, saved, saved_at, last_used_at}`` either way: the key
+        itself is returned by nothing.
+        """
+        from omop_core.services import garmin_saved_key
+
+        # As the sync: the person, signed in, about their own record.
+        if not is_interactive_session(request):
+            return Response({'error': 'Garmin Connect sync is for a signed-in patient.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        from patient_portal.models import PatientUser
+        try:
+            person = PatientUser.objects.get(identity=request.user).person
+        except PatientUser.DoesNotExist:
+            return Response(
+                {'error': 'No patient record linked to your account'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        # Removing a credential is never refused, a record that is off included.
+        if request.method == 'DELETE':
+            garmin_saved_key.remove(person, 'patient')
+        return Response(garmin_saved_key.describe(person))
 
     @action(detail=False, methods=['get'], url_path='wearable-uploads',
             permission_classes=[IsAuthenticated])

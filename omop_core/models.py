@@ -3580,6 +3580,40 @@ class GarminConnection(models.Model):
         return f'Garmin connection for person {self.person_id}'
 
 
+class GarminPersonalKey(models.Model):
+    """A patient's Garmin Connect Personal API key, saved for later syncs (#2834).
+
+    The patient pasted it into the Wearables tab to sync by key (#2794) and
+    left "Save this key for next time" ticked. ``api_key`` is never the key
+    itself: it is the key encrypted under ``GARMIN_TOKEN_KEY``
+    (``garmin_oauth.encrypt``), a key that is in no database, so a dump holds
+    nothing Garmin would accept. A deployment without that key saves nothing.
+
+    The key is read for one thing, a sync its patient starts, and is returned
+    by no endpoint. The patient removes it from the tab; it is also removed
+    when Garmin refuses it, and it goes with the person or their record.
+
+    System data: a credential, never copied between instances.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='garmin_personal_key',
+    )
+    api_key = models.TextField()
+    saved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='garmin_personal_keys',
+    )
+    saved_at = models.DateTimeField(default=timezone.now)
+    # When a sync last read it and Garmin accepted it.
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'garmin_personal_key'
+
+    def __str__(self):
+        return f'Saved Garmin key for person {self.person_id}'
+
+
 class OpenWearablesConnection(models.Model):
     """A patient's link to a phone app built on the Open Wearables SDK (#2810).
 
