@@ -38,8 +38,10 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
   const [removingCodeId, setRemovingCodeId] = useState<number | null>(null);
   const [error, setError] = useState("");
 
-  const fetchChoices = useCallback(async () => {
-    setLoading(true);
+  // ``silent`` reads the list again without replacing it with "Loading...", so
+  // an open answer panel keeps what was typed and the scroll position.
+  const fetchChoices = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const resp = await api.get(`/v1/field-choices/?field_name=${encodeURIComponent(fieldName)}`);
       setChoices(resp.data);
@@ -140,7 +142,10 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
 
   // Close on Escape
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const handler = (e: KeyboardEvent) => {
+      // Escape in a text box is for the box, not for the whole editor.
+      if (e.key === "Escape" && !(e.target instanceof HTMLInputElement)) onClose();
+    };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
@@ -232,7 +237,7 @@ export function FieldChoiceEditor({ fieldName, onClose, canApprove = false }: Pr
                         choiceLabel={choice.display}
                         mappings={choice.value_mappings}
                         canApprove={canApprove}
-                        onChanged={fetchChoices}
+                        onChanged={() => fetchChoices(true)}
                       />
                     )}
                   </div>

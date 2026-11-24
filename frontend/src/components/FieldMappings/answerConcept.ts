@@ -71,7 +71,7 @@ export function answerState(mappings: ValueMapping[] | undefined): AnswerState {
     if (approved.outcome === "no_equivalent") {
       return {
         kind: "approved_no_equivalent", approved, proposed, warning: null,
-        summary: "Reviewed: no standard concept for this answer. The value is saved as text.",
+        summary: "Reviewed: no standard concept for this answer. No concept is written; the value is saved as normal.",
       };
     }
     if (approved.target_state && approved.target_state !== "ok") {
@@ -88,7 +88,7 @@ export function answerState(mappings: ValueMapping[] | undefined): AnswerState {
     return {
       kind: "proposed", approved: null, proposed,
       warning: unresolved
-        ? `${label(proposed)} is not loaded in this instance, so it cannot be approved yet.`
+        ? `${label(proposed)} is not loaded here, or is no longer a valid concept, so it cannot be approved yet.`
         : null,
       summary: proposed.outcome === "no_equivalent"
         ? "Proposed: no standard concept for this answer (waiting for approval)"
@@ -97,7 +97,7 @@ export function answerState(mappings: ValueMapping[] | undefined): AnswerState {
   }
   return {
     kind: "unmapped", approved: null, proposed: null, warning: null,
-    summary: "No concept decided. Until one is, the value is saved with its legacy code, if it has one.",
+    summary: "No concept approved. An answer with a legacy code may still write that code's concept; one whose proposal was rejected, or whose approval was withdrawn, writes none.",
   };
 }
 

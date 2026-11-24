@@ -171,7 +171,9 @@ and never the model.
   above) and proposes, or records no equivalent with a reason; an org admin or
   staff approves, rejects or withdraws. Only `value_as_concept` is offered, since
   nothing projects the other roles. The panel shows the server's own refusal
-  text, and the editor passes `canApprove` from the page. Still not here: label
+  text (and reads the list again when a decision is refused, in case another
+  curator decided first), keeps its place on a save rather than reloading the
+  list, and the editor passes `canApprove` from the page. Still not here: label
   or alias editing, retiring an answer, revision history and the stable
   code/typed value in the editor, and lookup-backed (therapy catalog) choices.
 - **Transfer** carries the decision in force and the open proposal as

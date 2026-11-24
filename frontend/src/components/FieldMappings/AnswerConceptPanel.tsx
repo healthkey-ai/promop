@@ -43,7 +43,9 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
     setRationale("");
   };
 
-  const run = async (action: () => Promise<unknown>, failure: string) => {
+  // A decision that fails may have lost a race with another curator: read the
+  // list again so the buttons and summary are not the stale ones.
+  const run = async (action: () => Promise<unknown>, failure: string, refreshOnFailure = false) => {
     if (busy) return;
     setBusy(true);
     setError("");
@@ -53,12 +55,18 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
       await onChanged();
     } catch (e) {
       setError(errorText(e, failure));
+      if (refreshOnFailure) {
+        try { await onChanged(); } catch { /* the error above stands */ }
+      }
     } finally {
       setBusy(false);
     }
   };
 
+  const [total, setTotal] = useState(0);
+
   const search = async () => {
+    if (busy) return;
     if (query.trim().length < 3) {
       setError("Type at least 3 characters of a name, a code or a concept id.");
       return;
@@ -70,6 +78,7 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
         params: { q: query.trim(), role: "value_as_concept" },
       });
       setResults(resp.data.results);
+      setTotal(resp.data.count ?? resp.data.results.length);
       setRules(resp.data.rules);
     } catch (e) {
       setError(errorText(e, "The concept search failed."));
@@ -91,7 +100,7 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
     );
 
   const decide = (mapping: ValueMapping, action: "approve" | "reject") =>
-    run(() => api.post(`${BASE(choiceId)}${mapping.id}/${action}/`, {}), `The ${action} was not saved.`);
+    run(() => api.post(`${BASE(choiceId)}${mapping.id}/${action}/`, {}), `The ${action} was not saved.`, true);
 
   const tone =
     state.kind === "approved" || state.kind === "approved_no_equivalent"
@@ -103,7 +112,7 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
           : "text-gray-500";
 
   return (
-    <div className="mt-2 rounded bg-gray-50 p-2 text-xs" aria-label={`Concept for ${choiceLabel}`}>
+    <div role="group" className="mt-2 rounded bg-gray-50 p-2 text-xs" aria-label={`Concept for ${choiceLabel}`}>
       <div className={tone}>{state.summary}</div>
       {state.warning && <div className="mt-0.5 text-red-600">{state.warning}</div>}
       {state.approved?.outcome === "no_equivalent" && state.approved.rationale && (
@@ -121,7 +130,9 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
       <div className="mt-1 flex flex-wrap gap-1">
         {state.proposed && canApprove && (
           <>
-            <button type="button" disabled={busy} onClick={() => decide(state.proposed!, "approve")}
+            <button type="button"
+              disabled={busy || (state.proposed.outcome === "mapped" && !state.proposed.target)}
+              onClick={() => decide(state.proposed!, "approve")}
               aria-label={`Approve proposal for ${choiceLabel}`}
               className="rounded bg-primary px-2 py-0.5 text-primary-foreground disabled:opacity-50">
               Approve
@@ -179,7 +190,7 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
                 <input
                   type="text"
                   value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                  onChange={(e) => { setQuery(e.target.value); setResults(null); }}
                   onKeyDown={(e) => { if (e.key === "Enter") void search(); }}
                   placeholder="Concept name, code or id"
                   aria-label="Concept search"
@@ -197,10 +208,16 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
                 </div>
               )}
               {results && results.length === 0 && (
-                <div className="text-gray-500">No concept that can be proposed matches.</div>
+                <div role="status" className="text-gray-500">No concept that can be proposed matches.</div>
               )}
               {results && results.length > 0 && (
-                <ul className="max-h-40 divide-y overflow-y-auto rounded border border-gray-200 bg-white">
+                <>
+                {total > results.length && (
+                  <div className="text-[10px] text-gray-400">
+                    Showing the first {results.length} of {total}. Refine your search to narrow them.
+                  </div>
+                )}
+                <ul aria-live="polite" className="max-h-40 divide-y overflow-y-auto rounded border border-gray-200 bg-white">
                   {results.map((c) => (
                     <li key={c.concept_id} className="flex items-center justify-between gap-2 px-2 py-1">
                       <span className="min-w-0">
@@ -215,6 +232,7 @@ export function AnswerConceptPanel({ choiceId, choiceLabel, mappings, canApprove
                     </li>
                   ))}
                 </ul>
+                </>
               )}
             </>
           )}

@@ -143,4 +143,56 @@ describe("answer concept panel in the choice editor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Withdraw approval for In remission" }));
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/field-choices/1/value-mappings/7/reject/", {}));
   });
+
+  it("keeps the list, and what was typed in another answer, when one decision is saved", async () => {
+    const two = [choice([mapping()]), { ...choice([]), id: 2, display: "Relapse" }];
+    mockGet.mockImplementation(() => Promise.resolve({ data: two }));
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={vi.fn()} canApprove />);
+    fireEvent.click(await screen.findByRole("button", { name: "Map Relapse to a concept" }));
+    const box = screen.getAllByLabelText("Concept search")[0];
+    fireEvent.change(box, { target: { value: "relap" } });
+    fireEvent.click(screen.getByRole("button", { name: "Approve proposal for In remission" }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("Loading...")).toBeNull();
+    expect(screen.getByLabelText("Concept search")).toHaveValue("relap");
+  });
+
+  it("reads the list again when a decision is refused, so the buttons are not stale", async () => {
+    mockGet.mockImplementation(() => Promise.resolve({ data: [choice([mapping()])] }));
+    mockPost.mockRejectedValue({ response: { data: { detail: "Only a proposal can be approved." } } });
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={vi.fn()} canApprove />);
+    fireEvent.click(await screen.findByRole("button", { name: "Approve proposal for In remission" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Only a proposal can be approved.");
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+  });
+
+  it("does not offer Approve on a proposal whose concept is not loaded", async () => {
+    mockGet.mockImplementation(() => Promise.resolve({ data: [choice([mapping({ target: null })])] }));
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={vi.fn()} canApprove />);
+    expect(await screen.findByRole("button", { name: "Approve proposal for In remission" })).toBeDisabled();
+  });
+
+  it("says when only the first concepts are shown", async () => {
+    mockGet.mockImplementation((url: string) =>
+      url.includes("/targets/")
+        ? Promise.resolve({ data: { count: 60, results: [concept], rules: { required_domain: "Condition", excluded_domains: [], excluded_vocabularies: [] } } })
+        : Promise.resolve({ data: [choice([])] }));
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Map In remission to a concept" }));
+    fireEvent.change(screen.getByLabelText("Concept search"), { target: { value: "remission" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+    expect(await screen.findByText(/Showing the first 1 of 60/)).toBeInTheDocument();
+    expect(screen.getByText(/in the Condition domain/)).toBeInTheDocument();
+  });
+
+  it("leaves Escape in a text box to the box", async () => {
+    const onClose = vi.fn();
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={onClose} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Map In remission to a concept" }));
+    fireEvent.keyDown(screen.getByLabelText("Concept search"), { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
 });
