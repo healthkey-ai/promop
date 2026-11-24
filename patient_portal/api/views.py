@@ -6551,6 +6551,37 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             data['name'] = data['email'] = None
         return data
 
+    def list(self, request):
+        """The patient list, with ``other_roles`` on the rows that have any (#2838).
+
+        A row whose patient signs in with an account that also holds another
+        role (a staff account, an org admin, doctor or analyst grant) names
+        those roles, so the page can mark the record. It is told only to a
+        signed-in person who may already read those grants: see
+        ``omop_core.services.account_roles.other_roles_by_person``. Everyone
+        else, and every row whose demographics are withheld, gets no key.
+        """
+        response = super().list(request)
+        data = response.data
+        self._mark_other_roles(request, data['results'] if isinstance(data, dict) else data)
+        return response
+
+    def _mark_other_roles(self, request, rows):
+        # A person at the page, never a credential that can be presented
+        # without them.
+        if not is_interactive_session(request) or is_machine_request(request):
+            return
+        from omop_core.services.account_roles import other_roles_by_person
+        # A record whose demographics this reader is not shown is not marked:
+        # "also a doctor here" can name the one person it could be. That is
+        # every row but their own for the de-identified reader (#2460), who
+        # administers nothing and so is told nothing by the service either.
+        shown = [row for row in rows if not row.get('demographics_redacted')]
+        roles = other_roles_by_person(request.user, [row['person_id'] for row in shown])
+        for row in shown:
+            if row['person_id'] in roles:
+                row['other_roles'] = roles[row['person_id']]
+
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
         """Which PatientRecord fields a client may edit and their OMOP projection.

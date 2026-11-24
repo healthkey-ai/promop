@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { User } from '@/hooks/useAuth';
 
-import { canOpenPatients, canReadPatients, isAnalystOnly, isOwnRecord, ownPersonId } from './roles';
+import { canOpenPatients, canReadPatients, isAnalystOnly, isOwnRecord, ownPersonId, ownRecordPath } from './roles';
 
 const grant = (role: string, extra: Record<string, unknown> = {}) => ({
   org_name: 'Org', org_slug: 'org', role, expires_at: null, ...extra,
@@ -76,5 +76,27 @@ describe('ownPersonId / isOwnRecord (#2816)', () => {
     expect(isOwnRecord(u, '')).toBe(false);
     expect(isOwnRecord(null, '7')).toBe(false);
     expect(isOwnRecord(undefined, undefined)).toBe(false);
+  });
+});
+
+describe('ownRecordPath (#2838)', () => {
+  const link = { role: 'patient', scope: 'patient', source: 'patient_link', person_id: 12, expires_at: null };
+  const account = (extra: Record<string, unknown>): User =>
+    ({ id: 1, email: 'u@test.com', ...extra }) as unknown as User;
+
+  it("is home for a patient-only account, whose home is its record", () => {
+    expect(ownRecordPath(account({ is_patient: true, person_id: 7 }))).toBe('/');
+  });
+
+  it('is the record page for an account that is also staff, an org admin or a doctor', () => {
+    expect(ownRecordPath(account({ is_staff: true, effective_roles: [link] }))).toBe('/patient/12');
+    expect(ownRecordPath(account({ is_org_admin: true, effective_roles: [link] }))).toBe('/patient/12');
+    expect(ownRecordPath(account({ org_accesses: [grant('doctor')], effective_roles: [link] }))).toBe('/patient/12');
+  });
+
+  it('is nothing for an analyst-only account, or one with no record', () => {
+    expect(ownRecordPath(account({ org_accesses: [grant('analyst')], effective_roles: [link] }))).toBeNull();
+    expect(ownRecordPath(account({ is_staff: true }))).toBeNull();
+    expect(ownRecordPath(null)).toBeNull();
   });
 });

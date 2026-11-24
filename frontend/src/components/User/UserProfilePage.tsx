@@ -1,10 +1,11 @@
 import PageTitle from '@/components/Branding/PageTitle';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { useAuth, type EffectiveRole } from '@/hooks/useAuth';
 
 import RoleHint from '@/components/Roles/RoleHint';
 import { ROLE_LABELS } from '@/utils/roleDescriptions';
+import { ownRecordPath } from '@/utils/roles';
 
 const SOURCE_LABELS: Record<EffectiveRole['source'], string> = {
   staff_flag: 'Staff account', patient_link: 'Linked patient account',
@@ -32,6 +33,9 @@ export default function UserProfilePage() {
   const roles = currentUser.effective_roles ?? [];
   const delegations = currentUser.patient_delegations ?? [];
   const notices = (currentUser.org_accesses ?? []).filter(a => !a.role);
+  // The Patient role leads to the record it is for (#2838): the account's
+  // own, where the app can open it.
+  const recordPath = ownRecordPath(currentUser);
 
   return (
     <div className="p-6 max-w-3xl mx-auto space-y-6">
@@ -59,7 +63,11 @@ export default function UserProfilePage() {
                 <tbody>{roles.map((role, index) => (
                   <tr key={index} className="border-t border-gray-100">
                     <td className="py-2 pr-4">{role.role === 'staff' ? ROLE_LABELS.staff : <RoleHint role={role.role} />}</td>
-                    <td className="py-2 pr-4">{scopeLabel(role)}</td>
+                    <td className="py-2 pr-4">
+                      {role.role === 'patient' && recordPath
+                        ? <Link to={recordPath} className="text-blue-600 underline hover:text-blue-800">{scopeLabel(role)}</Link>
+                        : scopeLabel(role)}
+                    </td>
                     <td className="py-2 pr-4">{SOURCE_LABELS[role.source]}
                       {role.source_org_name ? ` from ${role.source_org_name}` : ''}
                       {role.source_domain ? ` for @${role.source_domain}` : ''}

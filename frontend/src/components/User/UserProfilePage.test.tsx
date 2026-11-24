@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { vi } from 'vitest';
 import UserProfilePage from './UserProfilePage';
@@ -68,5 +68,41 @@ describe('UserProfilePage', () => {
     expect(roles.getByText('Staff')).toBeInTheDocument();
     expect(roles.getByRole('link', { name: 'What the Doctor role can do' })).toHaveAttribute('href', '/roles');
     expect(roles.queryByRole('link', { name: /Staff/ })).not.toBeInTheDocument();
+  });
+  it('links the Patient role to the own record of an account that is also a professional (#2838)', () => {
+    showProfile({ is_org_admin: true, is_patient: false, person_id: null, effective_roles: [
+      { role: 'patient', scope: 'patient', person_id: 5552, source: 'patient_link', expires_at: null },
+      { role: 'patient', scope: 'organization', org_name: 'Clinic', source: 'org_grant', expires_at: null },
+      { role: 'org_admin', scope: 'organization', org_name: 'Clinic', source: 'org_grant', expires_at: null },
+    ] });
+    const roles = within(screen.getByRole('region', { name: 'Active roles' }));
+    expect(roles.getByRole('link', { name: 'Own patient record #5552' })).toHaveAttribute('href', '/patient/5552');
+    expect(roles.getByRole('link', { name: 'Patient membership in Clinic (own record only)' })).toHaveAttribute('href', '/patient/5552');
+    // Only the Patient role is a link to a record.
+    expect(roles.getByText('Clinic').closest('a')).toBeNull();
+  });
+
+  it("links a patient-only account's Patient role to its home, which is its record (#2838)", () => {
+    showProfile({ is_patient: true, person_id: 77, effective_roles: [
+      { role: 'patient', scope: 'patient', person_id: 77, source: 'patient_link', expires_at: null },
+    ] });
+    expect(screen.getByRole('link', { name: 'Own patient record #77' })).toHaveAttribute('href', '/');
+  });
+
+  it('leaves the Patient role plain where the account cannot open a record (#2838)', () => {
+    // An analyst-only account is turned away from the patient pages, its own included.
+    showProfile({ is_patient: false, person_id: null,
+      org_accesses: [{ org_name: 'Clinic', org_slug: 'clinic', role: 'analyst', expires_at: null }],
+      effective_roles: [
+        { role: 'patient', scope: 'patient', person_id: 9, source: 'patient_link', expires_at: null },
+        { role: 'analyst', scope: 'organization', org_name: 'Clinic', source: 'org_grant', expires_at: null },
+      ] });
+    expect(screen.getByText('Own patient record #9').closest('a')).toBeNull();
+    // A patient membership with no linked record names no record to open.
+    cleanup();
+    showProfile({ effective_roles: [
+      { role: 'patient', scope: 'organization', org_name: 'Clinic', source: 'org_grant', expires_at: null },
+    ] });
+    expect(screen.getByText('Patient membership in Clinic (own record only)').closest('a')).toBeNull();
   });
 });
