@@ -74,7 +74,7 @@ beforeEach(() => {
   (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {} });
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: {} });
-    const match = url.match(/\/patient-info\/(\d+)\//);
+    const match = url.match(/\/v1\/patient-records\/(\d+)\//);
     if (match) {
       return Promise.resolve({
         data: { patient_info: { person_id: Number(match[1]), patient_name: 'Ada Lovelace' }, user: null },

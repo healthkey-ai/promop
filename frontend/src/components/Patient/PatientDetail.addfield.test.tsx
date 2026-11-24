@@ -78,7 +78,7 @@ beforeEach(() => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
     if (url.includes('custom-patient-fields')) return Promise.resolve({ data: CUSTOM_FIELDS });
     if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
-    if (url.includes('/patient-info/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
+    if (url.includes('/v1/patient-records/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
     return Promise.resolve({ data: [] });
   });
 });
@@ -176,7 +176,7 @@ describe('PatientDetail — Add Field', () => {
         return Promise.resolve({ data: [...CUSTOM_FIELDS, custom(4, 'cd20_note', 'CD20 note', 'disease', ['DLBCL'])] });
       }
       if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
-      if (url.includes('/patient-info/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
+      if (url.includes('/v1/patient-records/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
       return Promise.resolve({ data: [] });
     });
     await renderPatient(DOCTOR);
@@ -367,7 +367,7 @@ describe('PatientDetail — editing an added field', () => {
     // arrives with a re-read of the record.
     record = { ...record, custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Robust' } };
     const reads = () => (api.get as ReturnType<typeof vi.fn>).mock.calls
-      .filter(([url]) => String(url).includes('/patient-info/101/')).length;
+      .filter(([url]) => String(url).includes('/v1/patient-records/101/')).length;
     const before = reads();
     openTab('Behavior');
     fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));

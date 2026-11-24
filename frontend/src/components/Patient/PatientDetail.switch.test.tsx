@@ -90,7 +90,7 @@ beforeEach(() => {
         ? descriptorGate.then(() => ({ data: DESCRIPTORS }))
         : Promise.resolve({ data: DESCRIPTORS });
     }
-    const id = url.match(/\/patient-info\/(\d+)\//)?.[1];
+    const id = url.match(/\/v1\/patient-records\/(\d+)\//)?.[1];
     if (id && RECORDS[id]) {
       const record = { ...RECORDS[id] };
       return Promise.resolve({ data: { patient_info: record, user: null } });
@@ -276,7 +276,7 @@ describe('PatientDetail — a server refresh on the same patient', () => {
     let finishReload!: (response: unknown) => void;
     const originalGet = (api.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
     (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) =>
-      url === '/patient-info/101/'
+      url === '/v1/patient-records/101/'
         ? new Promise((resolve) => { finishReload = resolve; })
         : originalGet(url),
     );

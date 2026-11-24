@@ -496,7 +496,7 @@ export default function PatientDetail({
     (async () => {
       try {
         setLoading(true);
-        const res = await api.get(`/patient-info/${personId}/`);
+        const res = await api.get(`/v1/patient-records/${personId}/`);
         const d = res.data.patient_info;
         adoptServerRecord(d, readRevision);
 
@@ -733,7 +733,7 @@ export default function PatientDetail({
   const reloadPatientInfo = useCallback((): Promise<void> => {
     if (!personId) return Promise.resolve();
     const readRevision = saveRevisionRef.current;
-    return api.get(`/patient-info/${personId}/`)
+    return api.get(`/v1/patient-records/${personId}/`)
       .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
       .catch(() => {});
   }, [personId, adoptServerRecord]);

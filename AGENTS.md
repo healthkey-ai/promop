@@ -751,6 +751,22 @@ password), or for themselves -- linked through `PatientUser`, with the `patient`
 role added at the organization beside `org_admin`. The organization must be one
 the caller administers (`get_admin_orgs`); machine credentials are refused.
 
+The record read carries the linked account as `user` (#2845). On
+`/api/v1/patient-records/<id>/` it depends on what the reader is to that
+account (`PatientRecordV1ViewSet._linked_account_block`): the account itself
+gets the full `UserSerializer`; staff and a direct `org_admin` grant at the
+record's organization (`has_explicit_org_admin_access`, not a trust) get the
+same block; every other reader (a doctor, a trust admin, a representative) and
+every machine credential (`is_machine_request`, whatever identity it carries)
+get `{id, name, email}` (`ReaderAccountSerializer`), with no role, grant,
+delegation or staff data of someone else's account. While the record's
+demographics are suppressed (`suppress_demographics_for_others`) `name` and
+`email` are null for everyone but the account itself. The legacy
+`/api/patient-info/<id>/` still returns the full block to every reader: its
+wire format is frozen for the federation host, whose source is not in this
+repo, and the React detail page reads the v1 path. A new reader of this block
+goes on the v1 path. Tests: `tests/test_patient_record_account_block.py`.
+
 Adding a field to PatientRecord is an approval, not a mapping write: `POST
 /api/v1/custom-patient-fields/` creates the field with an approved mapping, so
 it is gated by `_can_approve_mappings` and an analyst or a doctor gets 403
