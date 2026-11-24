@@ -303,6 +303,10 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
     # episode_source_concept, so PatientRecord.{prefix}_therapy_id resolves and drug-specific
     # matching sees the regimen. A None/absent id keeps the prior name-only round-trip.
     therapy_concept_id = getattr(patient_info, f'{prefix}_therapy_concept_id', None)
+    # The caller sets `{prefix}_therapy_replaced` only when the line's stored therapy differs from the new
+    # one. The line is re-sent whole on every edit, so neither changed_fields nor a name comparison here
+    # can tell (an imported line stores its own label, e.g. 'LOT-1'). Absent means "not replaced" (#2763).
+    therapy_replaced = getattr(patient_info, f'{prefix}_therapy_replaced', None) is True
 
     if not therapy_name:
         return
@@ -386,7 +390,9 @@ def _sync_therapy_line(person, patient_info, line_number: int, prefix: str, toda
         # CB has no therapy end_date field, so a None here is "omitted", never "clear the end date".
         preserve_end_date_when_none=True,
         # CB is authoritative for its patients' therapy lines: a re-resolved regimen must replace an
-        # existing source concept (else an A→B edit keeps deriving A). Still never clears — a null concept
-        # (unmapped slug on the whole-line re-send) leaves any imported concept intact.
+        # existing source concept (else an A→B edit keeps deriving A). A null concept (unmapped slug on the
+        # whole-line re-send) leaves any imported concept intact, unless the caller says the therapy was
+        # replaced: then the old concept no longer describes the line (#2763).
         overwrite_source_concept=True,
+        therapy_replaced=therapy_replaced,
     )

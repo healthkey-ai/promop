@@ -101,6 +101,7 @@ def upsert_therapy_line_episode(
     episode=None,
     preserve_end_date_when_none=False,
     overwrite_source_concept=False,
+    therapy_replaced=False,
     assert_line=True,
     asserted_by='authoring',
     write_guard=None,
@@ -125,7 +126,13 @@ def upsert_therapy_line_episode(
         overwrite_source_concept: when True, a provided regimen_source_concept replaces an
             existing episode_source_concept (the CB reverse-sync, authoritative for its own
             patients); default False keeps "fill only if empty" so import paths never clobber
-            an asserted source concept. A None concept never clears either way.
+            an asserted source concept. A None concept does not clear under this
+            flag either way; only therapy_replaced can.
+        therapy_replaced: the caller states that the line's therapy was replaced
+            (#2763). A concept slot it does not supply is reset, because the
+            stored one names the old therapy: episode_source_concept is cleared,
+            episode_object_concept goes to concept 0. Default False: a re-send
+            that does not say so never clears, whatever the stored name.
         preserve_end_date_when_none: compatibility for callers where None means
             "omitted" (the CB reverse-sync); explicit _UNSET still means leave
             unchanged, and the default preserves explicit None-as-clear behavior.
@@ -198,6 +205,14 @@ def upsert_therapy_line_episode(
         if episode.episode_source_value != episode_source_value:
             episode.episode_source_value = episode_source_value
             dirty.append('episode_source_value')
+        # A replaced therapy: a concept slot the caller did not supply still names the old therapy (#2763).
+        if therapy_replaced and regimen_source_concept is None and episode.episode_source_concept_id is not None:
+            episode.episode_source_concept = None
+            dirty.append('episode_source_concept')
+        if (therapy_replaced and regimen_concept is None
+                and episode.episode_object_concept_id != object_concept.concept_id):
+            episode.episode_object_concept = object_concept
+            dirty.append('episode_object_concept')
         if regimen_concept and episode.episode_object_concept_id != regimen_concept.concept_id:
             episode.episode_object_concept = regimen_concept
             dirty.append('episode_object_concept')
@@ -206,12 +221,13 @@ def upsert_therapy_line_episode(
         # line from regimen A to a different resolved regimen B updates episode_object_concept but leaves
         # episode_source_concept on A, and the derivation (which reads the source slot first) keeps
         # reporting A. The default stays "fill only if empty" so the enrich/FHIR import paths never clobber
-        # a concept they asserted from the source. A None here is always "not provided, keep what's there"
+        # a concept they asserted from the source. In this block a None is "not provided, keep what's there"
         # (mirrors preserve_end_date_when_none): the whole-line re-send carries a null concept for every
         # unmapped slug, and clearing on that would destroy an imported regimen concept on an unrelated
-        # (e.g. outcome-only) edit — so we never clear, only overwrite with another resolved concept.
+        # (e.g. outcome-only) edit — so this never clears. The one clear is `therapy_replaced` above,
+        # when the caller says the therapy itself was replaced.
         if (regimen_source_concept
-                and (overwrite_source_concept or not episode.episode_source_concept_id)
+                and (overwrite_source_concept or therapy_replaced or not episode.episode_source_concept_id)
                 and episode.episode_source_concept_id != regimen_source_concept.concept_id):
             episode.episode_source_concept = regimen_source_concept
             dirty.append('episode_source_concept')
