@@ -197,7 +197,19 @@ and never the model.
   so it is not offered) and without them the scope is shown, not edited. A
   category the list lacks but the answer already names stays ticked. Scope
   changes which answers a record of that category is offered; a value already
-  saved is neither changed nor hidden. Still not here: the typed `value` in the
+  saved is neither changed nor hidden.
+  **Answer coverage** heads the editor for a reader of the mapping pages
+  (`AnswerCoverage.tsx`, `answerCoverage` in `answerConcept.ts`), computed from
+  the list the editor already holds so it costs no request and sees what the
+  server's `answer-coverage` counts cannot: an approved concept that can no
+  longer be used. Each offered answer is in one bucket: decided (a concept, or
+  reviewed no standard equivalent), proposed, needs attention, or no decision
+  ("no decision" is not "writes no concept": an answer with a legacy code may
+  still write that code's concept). Retired answers are not counted. It says
+  that it counts the answers only, the field's own question concept being
+  mapped on the field. The chips beside it list just one bucket; a filtered
+  view cannot reorder, and an answer leaves a view as soon as a decision moves
+  it to another bucket. Still not here: the typed `value` in the
   editor (what a patient's save stores for an answer, label or value, is its own
   decision), and lookup-backed (therapy catalog) choices.
 - **Transfer** carries the decision in force and the open proposal as
