@@ -14,6 +14,9 @@ describe('RolesPage (#2473)', () => {
     // Doctor and Analyst both lack approval; it stays with org admins and staff.
     expect(screen.getAllByText(/Approve a mapping; that stays with org admins and staff/)).toHaveLength(2);
     expect(screen.getByText(/See any patient's data/)).toBeInTheDocument();
+    // What takes effect at once is for approvers, not for the analyst.
+    expect(screen.getByText(/Add a field, or change which Disease Categories a field or an answer belongs to/)).toBeInTheDocument();
+    expect(screen.getByText(/decide which Disease Categories a field or an answer belongs to/i)).toBeInTheDocument();
     expect(screen.getByText(/Roles are additive/)).toBeInTheDocument();
   });
 });

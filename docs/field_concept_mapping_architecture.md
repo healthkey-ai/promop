@@ -358,6 +358,18 @@ Because the field arrives approved, creating one is gated by
 link nor the page's own Add field button is offered to them. Saving or
 cancelling a dialog the link opened returns to the patient tab.
 
+A scope change takes effect at once and has no proposal stage, so it is an
+approval too (#1225): `PUT field-mappings/<name>/diseases/` and a `diseases`
+sent with a field mapping are 403 for an analyst, and the mapping dialog shows
+the scope read-only to anyone who cannot approve. The same holds for an
+existing answer's label, spellings, scope, retired flag and codes
+(`PATCH field-choices/<id>/` with anything but `sort_order`, and
+`field-choices/<id>/codes/`): a curator may add an answer (with no scope,
+spellings, codes or retirement), reorder answers and propose a concept, and the
+choice editor shows the rest to a non-approver read-only, with no code controls.
+Deleting an answer keeps its own rule (approvers only once it has an approved
+concept).
+
 `CustomPatientFields.tsx` renders created fields last on their tab, for
 every reader of the record, in the app's patient page and in the federated
 editor (which offers no Add Field: the host has no Field Mappings page):

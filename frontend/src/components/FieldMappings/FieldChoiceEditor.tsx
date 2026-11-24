@@ -250,6 +250,7 @@ export function FieldChoiceEditor({
                         contextKey={choice.context_key}
                         diseaseOptions={diseaseOptions}
                         optionsIncomplete={diseaseOptionsIncomplete}
+                        canEdit={canApprove}
                         onChanged={() => fetchChoices(true)}
                       />
                     )}
@@ -264,6 +265,7 @@ export function FieldChoiceEditor({
                           }`}
                         >
                           {c.vocabulary_id}:{c.code}
+                          {canApprove && (
                           <button
                             type="button"
                             onClick={() => choice.id && c.id !== undefined && handleRemoveCode(choice.id, c.id)}
@@ -274,8 +276,10 @@ export function FieldChoiceEditor({
                           >
                             <X size={10} /> {removingCodeId === c.id ? "Removing..." : "Remove code"}
                           </button>
+                          )}
                         </span>
                       ))}
+                      {canApprove && (
                       <button
                         onClick={() => choice.id && handleAddCode(choice.id)}
                         disabled={removingCodeId !== null}
@@ -284,6 +288,7 @@ export function FieldChoiceEditor({
                       >
                         <Plus size={10} className="inline" /> code
                       </button>
+                      )}
                     </div>
                     {choice.id !== undefined && (
                       <AnswerConceptPanel

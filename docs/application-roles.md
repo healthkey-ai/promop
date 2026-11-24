@@ -52,8 +52,9 @@ operation's validation, authentication, and scope requirements.
 | Invite org users; list/revoke org invitations and access grants; manage org trusts | Any org | Administered orgs | No | No | No |
 | Create/delete organizations or change their active status | Yes | No | No | No | No |
 | View the mapping pages (hub, Code Mapping, field mappings, therapy and disease-category reference, relevance signals, source systems) | Yes | Yes | Yes, read-only | Yes | No |
-| Create, edit, propose, upload or delete unapproved field/code mappings; synonyms, choices, custom fields; Suggest, Lock, Done, priority; source-system facility review; reject relevance signals | Yes | With org-admin authority | No | Yes | No |
+| Create, edit, propose, upload or delete unapproved field/code mappings; synonyms; add and reorder a field's answers and propose their concepts; Suggest, Lock, Done, priority; source-system facility review; reject relevance signals | Yes | With org-admin authority | No | Yes | No |
 | Approve mappings or delete approved mappings | Yes | With org-admin authority | No | No | No |
+| Add a field; change which Disease Categories a field or an answer belongs to; rename, retire or restore an answer, or change its spellings or codes (each takes effect at once, with no proposal to approve) | Yes | With org-admin authority | No | No | No |
 | Maintain therapy reference definitions and links | Yes | With org-admin authority | No | No | No |
 | Manage service applications and issue/revoke their tokens | Yes | No | No | No | No |
 | Read the audit-event API | All events | Own actor events | Own actor events | Own actor events | Own actor events |
@@ -117,10 +118,13 @@ doctor additional Org Admin authority explicitly or through a trust.
 
 Analyst is the mapping curator role (#2398, #2416). It opens every mapping page
 and writes them: creating, editing, proposing, uploading and deleting unapproved
-code and field mappings, synonyms, choices and custom fields, Suggest, Lock,
-Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting,
+code and field mappings, synonyms, a field's answers (adding and reordering them, and
+proposing their concepts), Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting,
 source-system facility review and rejecting relevance signals, without
-mapping-approval authority. It also reaches PRism analytics, a separate app
+mapping-approval authority. What takes effect at once with no proposal to approve
+stays with Staff and org admins: adding a field, changing which Disease Categories
+a field or an answer belongs to, and renaming, retiring or restoring an answer or
+changing its spellings or codes. It also reaches PRism analytics, a separate app
 that shares the identity table.
 
 An analyst sees **no individual patient's health data**: the patient list is

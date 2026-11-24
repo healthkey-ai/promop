@@ -17201,12 +17201,17 @@ def field_scope(request, field_name):
     An empty list makes the field part of the base record. Scope is keyed by
     name, so this needs no mapping row: a field with no concept yet is scoped
     without creating an empty proposed mapping for it. Reading follows mapping
-    read access and writing mapping write access, as a placement edit does.
+    read access; writing is for org admins and staff (``_can_approve_mappings``),
+    since a scope change takes effect at once with no proposal to approve.
     """
     if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     if request.method != 'GET' and not _can_manage_mappings(request.user):
         return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_approve_mappings(request.user):
+        # Scope decides which records have a field, and has no proposal stage.
+        return Response({'detail': 'Only org admins and staff can change which Disease Categories a field belongs to.'},
+                        status=status.HTTP_403_FORBIDDEN)
     from omop_core.models import FieldDiseaseMembership
     from omop_core.services import disease_profiles
 
@@ -17498,6 +17503,30 @@ def field_synonyms_batch(request):
 # Field Choices (everyone may read; mapping admins curate)
 # =============================================================================
 
+#: What a mapping curator who is not an approver may send when adding an answer
+#: or changing an existing one. Everything else changes what is offered or what
+#: is written for an answer that is already live and has no proposal stage, so
+#: it is for org admins and staff, as approving a mapping is.
+_CURATOR_CHOICE_CREATE_KEYS = frozenset({
+    'field_name', 'display', 'sort_order', 'code', 'context_key', 'value', 'value_type'})
+_CURATOR_CHOICE_EDIT_KEYS = frozenset({'sort_order'})
+
+
+def _approver_only_choice_keys(request, allowed):
+    """The 403 for a curator who is not an approver sending more than ``allowed``, else None."""
+    if _can_approve_mappings(request.user):
+        return None
+    data = request.data
+    sent = set(data.keys()) if hasattr(data, 'keys') else set()
+    if not (sent - allowed):
+        return None
+    return Response(
+        {'detail': 'Only org admins and staff can rename, retire, restore or rescope an answer, change its '
+                   'spellings or codes, or add one with them. A mapping curator can add an answer, '
+                   'reorder, and propose its concept.'},
+        status=status.HTTP_403_FORBIDDEN)
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def field_choice_list(request):
@@ -17532,6 +17561,9 @@ def field_choice_list(request):
 
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
+    refused = _approver_only_choice_keys(request, _CURATOR_CHOICE_CREATE_KEYS)
+    if refused is not None:
+        return refused
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
     try:
@@ -17573,6 +17605,9 @@ def field_choice_detail(request, pk):
         choice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    refused = _approver_only_choice_keys(request, _CURATOR_CHOICE_EDIT_KEYS)
+    if refused is not None:
+        return refused
     serializer = FieldChoiceSerializer(
         choice, data=request.data, partial=True,
         context={'request': request, **mapping_context},
@@ -17595,6 +17630,10 @@ def field_choice_codes(request, choice_pk):
     from .serializers import FieldChoiceCodeSerializer
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
+    if not _can_approve_mappings(request.user):
+        # A code is the concept an answer writes until a decision is approved.
+        return Response({'detail': 'Only org admins and staff can add or remove an answer\'s codes; '
+                                   'propose its concept instead.'}, status=status.HTTP_403_FORBIDDEN)
     try:
         choice = FieldChoice.objects.get(pk=choice_pk)
     except FieldChoice.DoesNotExist:

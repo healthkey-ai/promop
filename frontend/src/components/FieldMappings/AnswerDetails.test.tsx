@@ -310,7 +310,7 @@ describe("FieldChoiceEditor with answer details", () => {
 
   it("shows details and history for a reader of the mapping pages, and refreshes after a save", async () => {
     mockGet.mockResolvedValue({ data: choices() });
-    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} />);
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} canApprove />);
     expect(await screen.findByText("in_remission")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Show the history of In remission/ })).toBeInTheDocument();
     mockGet.mockResolvedValue({ data: choices({ retired: true }) });
@@ -322,7 +322,7 @@ describe("FieldChoiceEditor with answer details", () => {
   it("keeps the editor open when Escape is pressed in the spellings box", async () => {
     mockGet.mockResolvedValue({ data: choices() });
     const onClose = vi.fn();
-    render(<FieldChoiceEditor fieldName="disease_activity" onClose={onClose} />);
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={onClose} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: /Edit details of/ }));
     fireEvent.keyDown(screen.getByLabelText("Other spellings"), { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
@@ -332,11 +332,28 @@ describe("FieldChoiceEditor with answer details", () => {
 
   it("passes the categories on, so an answer's scope can be edited from the field's page", async () => {
     mockGet.mockResolvedValue({ data: choices({ diseases: ["MM"], context_key: "" }) });
-    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}}
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} canApprove
       diseaseOptions={[{ value: "MM", label: "Multiple Myeloma" }]} />);
     expect(await screen.findByText("Offered to: MM")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
     expect(screen.getByLabelText(/^MM/)).toBeChecked();
+  });
+
+  it("shows a mapping curator who is not an approver what is offered, and no way to change it", async () => {
+    mockGet.mockResolvedValue({ data: choices({
+      diseases: ["MM"], codes: [{ id: 5, code: "1", vocabulary_id: "LOCAL", display: "", is_primary: true }],
+    }) });
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}}
+      diseaseOptions={[{ value: "MM", label: "Multiple Myeloma" }]} />);
+    expect(await screen.findByText("Offered to: MM")).toBeInTheDocument();
+    expect(screen.getByText("in_remission")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit details of/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Retire In remission/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove code/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Add code to/ })).not.toBeInTheDocument();
+    // What a curator does: reorder, add an answer, propose a concept.
+    expect(screen.getByPlaceholderText(/New choice display name/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Map In remission to a concept/ })).toBeInTheDocument();
   });
 
   it("offers no history to someone who cannot read mappings", async () => {
