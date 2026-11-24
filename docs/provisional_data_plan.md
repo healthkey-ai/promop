@@ -813,7 +813,7 @@ not null) answers it, marked with the row's confidence.
   button; the server's 409 decides.
 - **Instances.** Both tables stay derived (`instance_data`): not copied, rebuilt after
   `copy_patient`. `backfill_patient_records --all` fills the new column; there is no data
-  migration (`0372` adds the column and widens `ProposalRejection.field_name` to 120 characters; its reverse drops the marks, and would fail on a rejection whose name is longer than 100).
+  migration (`0374` adds the column and widens `ProposalRejection.field_name` to 120 characters; its reverse drops the marks, and would fail on a rejection whose name is longer than 100).
 
 ### Computed fields
 
