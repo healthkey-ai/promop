@@ -135,8 +135,10 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
         status='approved', field_name__in=readable_fields,
     ).exclude(wrong_breast_field_mappings()).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
+        'value_kind',
     )
     sct_mapping = None
+    answers_by_concept = None   # read once, and only when a fact needs it
     for mapping in mappings:
         name = mapping['field_name']
         if name == 'sct_date':
@@ -185,6 +187,15 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
             values.update(blood_count_projection(count_field, row))
             continue
         value = row.value_as_number if row.value_as_number is not None else row.value_as_string
+        if value is None and mapping['value_kind'] == 'concept' and row.value_as_concept_id:
+            # A fact that carries the answer as a concept and no text (the
+            # ETL's, #1224) reads as the answer that concept stands for, by the
+            # same approved decisions the projection writes it from.
+            if answers_by_concept is None:
+                from omop_core.services.field_value_mappings import answer_values_by_concept
+                answers_by_concept = answer_values_by_concept(
+                    {m['field_name'] for m in mappings if m['value_kind'] == 'concept'})
+            value = answers_by_concept.get(name, {}).get(row.value_as_concept_id)
         if value is None:
             continue
         try:

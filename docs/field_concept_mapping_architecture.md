@@ -185,11 +185,26 @@ and never the model.
   concept" decision, writes none; a choice with no code and no decision says
   nothing, as before. Where a live choice and a retired one share a spelling, the
   live one decides.
+- **Derivation reads the decision back.** A fact that carries the answer as a
+  concept and no text (an ETL's `value_as_concept_id`) is read into a
+  concept-valued field as the answer that concept stands for
+  (`answer_values_by_concept`, called from `curated_values_from_snapshot`). It
+  is the inverse of the projection above and takes its decisions from the same
+  function, so an approved answer reads back as what it writes and a retired
+  target, a no-equivalent decision or a withdrawn approval reads as nothing,
+  and a choice nobody has decided keeps its primary code's concept, as in the
+  projection. The value is the choice's label, which the editor offers and the
+  projection stores. A fact's own text or number always
+  wins; the concept is the fallback. A concept that two answers of one field
+  share (or one live and one retired answer) is not guessed: the live answer
+  speaks over a retired one, and two live ones read as nothing. The lookup is
+  made once per refresh, and only when such a fact is met, so a refresh with
+  none costs no query more. Other readers (the dedicated extractors) are
+  unchanged.
 - **Not here.** `main_concept` and `context_recipe` decisions are recorded and
-  reviewed but nothing projects them yet; no read path (deriving a record from
-  `value_as_concept_id`) uses them. The two-person rule is not applied (as for
-  field mappings), no scoped question recipe beyond a recipe's own question
-  concept, and no UI (#1225).
+  reviewed but nothing projects or reads them; the two-person rule is not
+  applied (as for field mappings), there is no scoped question recipe beyond a
+  recipe's own question concept, and no UI (#1225).
 
 `FieldConceptMapping.provenance` distinguishes System Generated and Curator
 recipes. Approval state is separate from origin: approving a recipe does not
