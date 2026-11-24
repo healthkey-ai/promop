@@ -14,7 +14,9 @@ class EmailBackend(ModelBackend):
             return None
         try:
             identity = Identity.objects.get(email__iexact=username, issuer="urn:local")
-        except Identity.DoesNotExist:
+        except (Identity.DoesNotExist, Identity.MultipleObjectsReturned):
+            # Two local accounts on one address cannot be told apart by it:
+            # nobody signs in by password there (as password_reset does).
             # Equalize timing / resist account enumeration for unknown emails.
             Identity().set_password(password)
             return None
@@ -22,6 +24,16 @@ class EmailBackend(ModelBackend):
         # Locked accounts are refused regardless of password correctness; the
         # lockout is not revealed here (limited feedback — TI.1.1#10).
         if identity.is_locked:
+            return None
+
+        # Where staff sign in only through a provider (STAFF_PASSWORD_SIGN_IN
+        # off, docs/staff-sign-in.md), a staff password opens nothing, and a
+        # wrong one counts nothing: nobody can lock a staff account out.
+        if not settings.STAFF_PASSWORD_SIGN_IN and (
+            identity.is_staff or identity.is_superuser
+            or identity.groups.filter(name__in=settings.STAFF_ROLES).exists()
+        ):
+            Identity().set_password(password)  # the same work as a check, for timing
             return None
 
         if identity.check_password(password) and self.user_can_authenticate(identity):

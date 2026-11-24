@@ -316,7 +316,20 @@ def _find_local_or_any_identity(email):
     Preference order: local with usable password → local placeholder → any issuer.
     Returns None if no identity exists for this email.
     """
-    identities = list(Identity.objects.filter(email__iexact=email).order_by('id'))
+    from django.conf import settings
+
+    # A provider-made staff account is never claimed: it has no usable
+    # password and must not gain one or a patient record, so its holder gets a
+    # member account of their own. A local staff account still counts here, so
+    # the "an account already exists" refusal applies to it as before: a second
+    # local account on the same address would break password sign-in for both.
+    from django.db.models import Q
+
+    staff = Q(is_staff=True) | Q(is_superuser=True) | Q(groups__name__in=settings.STAFF_ROLES)
+    identities = list(
+        Identity.objects.filter(email__iexact=email).exclude(staff & ~Q(issuer='urn:local'))
+        .distinct().order_by('id')
+    )
     return (
         next((i for i in identities if i.issuer == 'urn:local' and i.has_usable_password()), None)
         or next((i for i in identities if i.issuer == 'urn:local'), None)

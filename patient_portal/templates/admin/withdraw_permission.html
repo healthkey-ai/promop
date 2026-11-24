@@ -1,0 +1,29 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block content %}
+<h1>Withdraw a permission for {{ identity.email }}</h1>
+{% if purposes %}
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="action" value="{{ action }}">
+  <input type="hidden" name="_selected_action" value="{{ selected }}">
+  <input type="hidden" name="confirm" value="withdraw">
+  <p>Record that the member has asked to withdraw one of the permissions they gave. Ask them to do it
+     themselves in their settings if they can.</p>
+  {% for purpose in purposes %}
+  <p>
+    <label><input type="radio" name="purpose" value="{{ purpose.key }}" required> {{ purpose.title }}</label>
+    {% if purpose.erases_record_on_withdrawal %}
+      <br><strong>Withdrawing this deletes the member's health answers straight away. It cannot be undone.</strong>
+    {% endif %}
+  </p>
+  {% endfor %}
+  <input type="submit" value="Withdraw">
+  <a href="{% url opts|admin_urlname:'changelist' %}">Cancel</a>
+</form>
+{% else %}
+<p>{{ identity.email }} has no permission granted to withdraw.</p>
+<p><a href="{% url opts|admin_urlname:'changelist' %}">Back</a></p>
+{% endif %}
+{% endblock %}

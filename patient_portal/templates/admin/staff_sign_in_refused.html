@@ -1,0 +1,10 @@
+{% extends "admin/base_site.html" %}
+
+{% block title %}Sign-in not completed{% endblock %}
+{% block nav-breadcrumbs %}{% endblock %}
+
+{% block content %}
+<h1>Sign-in not completed</h1>
+<p>{{ message }}</p>
+<p><a href="{% url 'admin:login' %}">Back to sign in</a></p>
+{% endblock %}

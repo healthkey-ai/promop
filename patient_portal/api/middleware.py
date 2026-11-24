@@ -297,6 +297,42 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
 _PUBLIC_VOTE_PREFIX = '/api/v1/public/mapping-votes/'
 
 
+class StaffSessionMiddleware:
+    """Staff sessions (docs/staff-sign-in.md):
+
+    - a provider sign-in ends at its deadline (``STAFF_SESSION_HOURS`` from the
+      sign-in, not from the last request), whatever the cookie says;
+    - once staff passwords are off (``STAFF_PASSWORD_SIGN_IN``), a staff
+      session that began with a password is signed out: switching passwords
+      off must end the sessions they made, not only refuse new ones.
+
+    A provider sign-in marks its session, so it never costs a query here; a
+    member's session costs one only while staff passwords are off and the
+    deployment has staff roles."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        from django.conf import settings
+
+        user = getattr(request, 'user', None)
+        if user is not None and user.is_authenticated:
+            from django.contrib.auth import logout
+
+            from patient_portal.staff_sign_in import STAFF_UNTIL_KEY, is_role_staff
+
+            until = request.session.get(STAFF_UNTIL_KEY)
+            if until is not None:
+                if time.time() > until:
+                    logout(request)
+            elif not settings.STAFF_PASSWORD_SIGN_IN and (
+                user.is_staff or user.is_superuser or (settings.STAFF_ROLES and is_role_staff(user))
+            ):
+                logout(request)
+        return self.get_response(request)
+
+
 class ForcePasswordChangeMiddleware:
     """
     Enforce Identity.must_change_password (HL7 PHR-S FM TI.1.1#09).

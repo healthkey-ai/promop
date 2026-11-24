@@ -27,6 +27,8 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.AuditEvent', 'patient_portal.BreakGlassGrant',
     'patient_portal.Identity', 'patient_portal.Identity_groups',
     'patient_portal.Identity_user_permissions', 'patient_portal.PasswordHistory',
+    # Invitations to become staff here, by this deployment's sign-in providers.
+    'patient_portal.StaffInvitation',
     'patient_portal.ServiceAccessToken', 'patient_portal.ServiceApplication',
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
