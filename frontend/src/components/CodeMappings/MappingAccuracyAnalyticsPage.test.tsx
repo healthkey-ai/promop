@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import MappingAccuracyAnalyticsPage, { type AccuracySection } from "./MappingAccuracyAnalyticsPage";
+import MappingAccuracyAnalyticsPage, { type AccuracySection, type AutoApprovedBlock } from "./MappingAccuracyAnalyticsPage";
 
 const get = vi.fn();
 vi.mock("@/api/axios", () => ({ default: { get: (...args: unknown[]) => get(...args) } }));
@@ -19,6 +19,17 @@ const sections: AccuracySection[] = [
   { key: "code2concept", label: "Code to Concept", rows: [row("overall", "Overall")] },
   { key: "patientcode", label: "Patient source codes", rows: [row("overall", "Overall")] },
 ];
+
+const autoRow = (key: string, label: string, overrides: Partial<AutoApprovedBlock["rows"][number]> = {}) => ({
+  key, label, total: 0, reviewed: 0, confirmed: 0, reversed: 0, unreviewed: 0, precision_of_reviewed: null, ...overrides,
+});
+const autoApproved: AutoApprovedBlock = {
+  key: "auto_approved", label: "Auto-approved by Suggest", rows: [
+    autoRow("overall", "Overall", { total: 10, reviewed: 4, confirmed: 3, reversed: 1, unreviewed: 6, precision_of_reviewed: 0.75 }),
+    autoRow("90-100", "90–100% confidence", { total: 10, reviewed: 4, confirmed: 3, reversed: 1, unreviewed: 6, precision_of_reviewed: 0.75 }),
+    autoRow("80-90", "80–90%"), autoRow("70-80", "70–80%"), autoRow("below-70", "Below 70%"),
+  ],
+};
 
 beforeEach(() => { get.mockReset(); });
 
@@ -65,6 +76,29 @@ describe("MappingAccuracyAnalyticsPage (#2383)", () => {
     for (const label of ["Concept to Code", "Code to Concept", "Patient source codes"]) {
       expect(screen.getByRole("region", { name: label })).toBeInTheDocument();
     }
+  });
+
+  it("shows what curators made of the auto-approvals in a block of its own (#2856)", async () => {
+    get.mockResolvedValue({ data: { sections, auto_approved: autoApproved } });
+    render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    const block = await screen.findByRole("region", { name: "Auto-approved by Suggest" });
+    expect(within(block).getAllByRole("columnheader").map(h => h.textContent)).toEqual(
+      ["Confidence", "Total", "Reviewed", "Confirmed", "Reversed", "Not yet reviewed", "Precision of reviewed"]);
+    const [, overall, top, mid] = within(block).getAllByRole("row");
+    expect(within(overall).getByRole("rowheader")).toHaveTextContent("Overall");
+    expect(within(overall).getAllByRole("cell").map(c => c.textContent)).toEqual(["10", "4", "3", "1", "6", "75.0%"]);
+    expect(within(top).getAllByRole("cell").map(c => c.textContent)).toEqual(["10", "4", "3", "1", "6", "75.0%"]);
+    expect(within(mid).getAllByRole("cell").map(c => c.textContent)).toEqual(["0", "0", "0", "0", "0", "—"]);
+    expect(within(block).getByText(/a sample, not all of them/)).toBeInTheDocument();
+    // The per-surface tables are the same as before.
+    expect(screen.getAllByRole("region")).toHaveLength(5);
+  });
+
+  it("shows no auto-approved block when the answer has none or predates it", async () => {
+    get.mockResolvedValue({ data: { sections } });
+    render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    await screen.findByRole("region", { name: "Overall" });
+    expect(screen.queryByRole("region", { name: "Auto-approved by Suggest" })).not.toBeInTheDocument();
   });
 
   it("reports a failed load", async () => {

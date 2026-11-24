@@ -62,6 +62,24 @@ describe("CodeMappingAccuracyPage", () => {
     expect(screen.queryByText(/Not counted here/)).not.toBeInTheDocument();
   });
 
+  it("says how many auto-approvals there are and how those a curator reviewed fared (#2856)", async () => {
+    const autoApproved = { total: 12, reviewed: 4, accepted: 3, overridden: 1, rejected: 0, unreviewed: 8, precision_of_reviewed: 0.75 };
+    get.mockResolvedValue({ data: {
+      models: [model("v0.4", { suggestions: 20, reviewed: 10, approved: 8, overridden: 2, precision: 0.8, auto_approved: autoApproved })],
+      overall: model("", { suggestions: 20, reviewed: 10, auto_approved: autoApproved }),
+    } });
+    const view = render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    expect(await screen.findByText(/Auto-approved by Suggest: 12/)).toHaveTextContent(
+      "a curator has since reviewed 4 (3 accepted, 1 given another destination, 0 rejected; precision of those reviewed 75.0%)");
+    expect(screen.getByText(/so it is a sample/)).toBeInTheDocument();
+    view.unmount();
+
+    get.mockResolvedValue({ data: { models: [model("v0.4")], overall: model("", { auto_approved: { ...autoApproved, total: 0, reviewed: 0, accepted: 0, overridden: 0, unreviewed: 0, precision_of_reviewed: null } }) } });
+    render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);
+    await screen.findByText(/Suggest v0\.4/);
+    expect(screen.queryByText(/Auto-approved by Suggest/)).not.toBeInTheDocument();
+  });
+
   it("says so when the history cannot be loaded", async () => {
     get.mockRejectedValue(new Error("500"));
     render(<MemoryRouter><CodeMappingAccuracyPage /></MemoryRouter>);

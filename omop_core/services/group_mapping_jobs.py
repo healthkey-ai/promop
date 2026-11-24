@@ -100,6 +100,11 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                 # One unanswered ranking would otherwise be scored against the
                 # model once per member of the group (#2743).
                 mapping.suggestion_fallback = is_fallback_note(proposal['note'])
+                # The flag travels with the outcome it explains and this path leaves the
+                # outcome alone, so only a flag with no review behind it is the old
+                # suggestion's to drop (#2856).
+                if not mapping.suggestion_outcome:
+                    mapping.suggestion_auto_approved = False
                 # None for an exact match: no ranker was asked.
                 mapping.suggestion_confidence = proposal.get('confidence')
                 mapping.last_suggest_attempt = f'{SUGGESTION_MODEL_VERSION}-group'
@@ -111,6 +116,7 @@ def _write_group_suggestion(mapping_ids, proposal, *, run, actor):
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
                     'suggestion_model_version', 'suggestion_fallback',
+                    'suggestion_auto_approved',
                     'suggestion_confidence', 'last_suggest_attempt',
                     'suggest_strategy', 'suggested_action', 'notes', 'proposed_by', 'updated_at',
                 ])

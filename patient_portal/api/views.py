@@ -14674,6 +14674,8 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         values['suggested_target_concept_id'] = concept.concept_id
         values['suggestion_model_version'] = SUGGESTION_MODEL_VERSION
         values['suggestion_fallback'] = False
+        # The auto-approval, if there was one, was of the suggestion this replaces.
+        values['suggestion_auto_approved'] = False
     is_suggestion = restamp or (mapping is not None and (
         mapping.origin_system.lower().startswith('suggest')
         or mapping.suggested_target_concept_id is not None
@@ -16369,6 +16371,32 @@ def _suggestion_accuracy_from_counts(counts):
     }
 
 
+def _auto_approved_from_counts(outcomes):
+    """What curators have made of the suggestions Suggest approved by itself (#2856).
+
+    *outcomes* counts those suggestions by first curator disposition (blank:
+    nobody has looked at it since). ``precision_of_reviewed`` is accepted over
+    reviewed, and covers only the rows a curator has since looked at, so it is a
+    sample of the auto-approvals, not all of them; ``unreviewed`` is the rest.
+    It is a separate figure from the model's precision and recall, which count
+    these rows exactly as they count any other.
+    """
+    accepted = outcomes.get('accepted', 0)
+    overridden = outcomes.get('overridden', 0)
+    rejected = outcomes.get('rejected', 0)
+    reviewed = accepted + overridden + rejected
+    total = sum(outcomes.values())
+    return {
+        'total': total,
+        'reviewed': reviewed,
+        'accepted': accepted,
+        'overridden': overridden,
+        'rejected': rejected,
+        'unreviewed': total - reviewed,
+        'precision_of_reviewed': accepted / reviewed if reviewed else None,
+    }
+
+
 def _suggestion_accuracy_groups():
     """Current suggestions and archived reviews, in one bounded grouped query.
 
@@ -16382,7 +16410,7 @@ def _suggestion_accuracy_groups():
     def groups(model):
         return model.objects.filter(suggestion_model_version__gt='').order_by().values(
             'source_vocabulary_id', 'suggestion_model_version', 'suggestion_outcome',
-            'suggestion_fallback',
+            'suggestion_fallback', 'suggestion_auto_approved',
         ).annotate(total=Count('id'))
 
     # ALL matters: equal groups in the two tables are independent reviews.
@@ -16421,14 +16449,20 @@ def code_mapping_accuracy(request):
 
     sources = defaultdict(lambda: defaultdict(Counter))
     overall_versions = defaultdict(Counter)
+    # The auto-approved suggestions, by outcome, over every model version.
+    auto_sources = defaultdict(Counter)
+    auto_overall = Counter()
     groups, fallbacks = _scored_accuracy_groups()
     for group in groups:
         source = canonical_source(group['source_vocabulary_id'])
         version, outcome, total = (group['suggestion_model_version'], group['suggestion_outcome'], group['total'])
         sources[source][version][outcome] += total
         overall_versions[version][outcome] += total
+        if group['suggestion_auto_approved']:
+            auto_sources[source][outcome] += total
+            auto_overall[outcome] += total
 
-    def snapshot(versions):
+    def snapshot(versions, auto):
         latest = max(versions, key=_suggestion_version_key, default=None)
         totals = Counter()
         for counts in versions.values():
@@ -16455,11 +16489,15 @@ def code_mapping_accuracy(request):
             **_suggestion_accuracy_from_counts(versions.get(latest, {})),
             'model_version': latest,
             'review_totals': _suggestion_review_totals(totals),
+            # Over every model version, whatever the scores above are over.
+            'auto_approved': _auto_approved_from_counts(auto),
         }
 
     return Response({
-        'overall': snapshot(overall_versions),
-        'by_source_vocabulary': {source: snapshot(versions) for source, versions in sources.items()},
+        'overall': snapshot(overall_versions, auto_overall),
+        'by_source_vocabulary': {
+            source: snapshot(versions, auto_sources[source]) for source, versions in sources.items()
+        },
         'fallbacks': fallbacks,
         'suggest_model_version': SUGGESTION_MODEL_VERSION,
     })
@@ -16473,18 +16511,29 @@ def code_mapping_accuracy_dashboard(request):
     from collections import Counter, defaultdict
     counts = defaultdict(Counter)
     totals = Counter()
+    auto_counts = defaultdict(Counter)
+    auto_totals = Counter()
     groups, fallbacks = _scored_accuracy_groups()
     for group in groups:
         outcome, total = group['suggestion_outcome'], group['total']
         counts[group['suggestion_model_version']][outcome] += total
         totals[outcome] += total
+        if group['suggestion_auto_approved']:
+            auto_counts[group['suggestion_model_version']][outcome] += total
+            auto_totals[outcome] += total
     versions = sorted(counts, key=_suggestion_version_key, reverse=True)
     return Response({
         'models': [
-            {'model_version': version, **_suggestion_accuracy_from_counts(counts[version])}
+            {
+                'model_version': version, **_suggestion_accuracy_from_counts(counts[version]),
+                'auto_approved': _auto_approved_from_counts(auto_counts[version]),
+            }
             for version in versions
         ],
-        'overall': _suggestion_accuracy_from_counts(totals) if versions else None,
+        'overall': {
+            **_suggestion_accuracy_from_counts(totals),
+            'auto_approved': _auto_approved_from_counts(auto_totals),
+        } if versions else None,
         # Written while no ranking model could be reached, and in no score
         # above: how many there are, and how many a curator has reviewed.
         'fallbacks': fallbacks,
@@ -16508,14 +16557,60 @@ DECISION_SURFACE_SECTIONS = (
 )
 
 
-def _decision_band_case():
+def _confidence_band_case(field):
+    """The band of the 0-1 confidence column *field* (blank when it is null)."""
     return Case(
-        When(decision_confidence__isnull=True, then=Value('')),
-        When(decision_confidence__gte=0.9, then=Value('90-100')),
-        When(decision_confidence__gte=0.8, then=Value('80-90')),
-        When(decision_confidence__gte=0.7, then=Value('70-80')),
+        When(**{f'{field}__isnull': True}, then=Value('')),
+        When(**{f'{field}__gte': 0.9}, then=Value('90-100')),
+        When(**{f'{field}__gte': 0.8}, then=Value('80-90')),
+        When(**{f'{field}__gte': 0.7}, then=Value('70-80')),
         default=Value('below-70'), output_field=CharField(),
     )
+
+
+def _decision_band_case():
+    return _confidence_band_case('decision_confidence')
+
+
+def _auto_approved_analytics():
+    """The "Auto-approved by Suggest" block of the analytics page (#2856).
+
+    Auto-approvals are not curator decisions (no ``decision_surface``, no
+    ``decision_confidence``), so the per-surface tables above never see them. Each
+    row here is the same count the accuracy endpoints give, narrowed to a band of
+    the ranker's stored ``suggestion_confidence``: ``confirmed`` is a curator's
+    first disposition of accepted, ``reversed`` an override or a rejection,
+    ``reviewed`` both, and ``unreviewed`` the auto-approvals nobody has looked at
+    since. Current mappings only: an archived review keeps no confidence, so a
+    suggestion re-suggested since is in the accuracy endpoints and not here. One
+    grouped query.
+    """
+    from collections import Counter
+
+    rows = {key: Counter() for key in ('overall', *[band for band, _label in DECISION_CONFIDENCE_BANDS])}
+    groups = (
+        SourceCodeConceptMapping.objects
+        .filter(suggestion_auto_approved=True, suggestion_fallback=False).order_by()
+        .annotate(band=_confidence_band_case('suggestion_confidence'))
+        .values('band', 'suggestion_outcome').annotate(total=Count('id'))
+    )
+    for group in groups:
+        rows['overall'][group['suggestion_outcome']] += group['total']
+        if group['band']:
+            rows[group['band']][group['suggestion_outcome']] += group['total']
+    labels = dict(DECISION_CONFIDENCE_BANDS)
+    out = []
+    for key, outcomes in rows.items():
+        figures = _auto_approved_from_counts(outcomes)
+        out.append({
+            'key': key, 'label': labels.get(key, 'Overall'),
+            'total': figures['total'], 'reviewed': figures['reviewed'],
+            'confirmed': figures['accepted'],
+            'reversed': figures['overridden'] + figures['rejected'],
+            'unreviewed': figures['unreviewed'],
+            'precision_of_reviewed': figures['precision_of_reviewed'],
+        })
+    return {'key': 'auto_approved', 'label': 'Auto-approved by Suggest', 'rows': out}
 
 
 def _decision_accuracy_row(key, label, statuses, outcomes):
@@ -16548,7 +16643,8 @@ def code_mapping_accuracy_analytics(request):
     an override is also the miss recall counts; ``scored`` is their
     denominator, since not every decision began as a suggestion. ``status``
     is the row's current state and the outcome its first disposition, both
-    read as they stand at the time of the request. One grouped query.
+    read as they stand at the time of the request. One grouped query, and a
+    second for the ``auto_approved`` block (:func:`_auto_approved_analytics`).
     """
     if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -16592,6 +16688,8 @@ def code_mapping_accuracy_analytics(request):
         ],
         # Reviewed decisions left out of every Scored count and score above.
         'unscored_fallbacks': unscored_fallbacks,
+        # Not a curator decision, so not in a section above (#2856).
+        'auto_approved': _auto_approved_analytics(),
     })
 
 

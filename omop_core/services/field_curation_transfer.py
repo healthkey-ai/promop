@@ -114,6 +114,9 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # Whether the stored suggestion is a ranker-unavailable fallback (#2743):
     # it travels with the suggestion and outcome it describes.
     'suggestion_fallback': False,
+    # Whether Suggest approved the stored suggestion itself (#2856): travels
+    # with the outcome that says whether a curator upheld it.
+    'suggestion_auto_approved': False,
     # Travels with the note it describes (#2423): the copy replaces the text,
     # so a payload without the key leaves no mark over the source's note.
     'curator_note_at': None,

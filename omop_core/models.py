@@ -2250,6 +2250,15 @@ class SourceCodeConceptMapping(models.Model):
             'answer, so its outcome is recorded and never scored (#2743).'
         ),
     )
+    suggestion_auto_approved = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            'Suggest approved the stored suggestion itself, at a confidence '
+            'at or above the approver\'s threshold (#1532). suggestion_outcome '
+            'stays the curator\'s first disposition, so a later review says '
+            'whether the auto-approval held (#2856).'
+        ),
+    )
     SUGGESTED_ACTION_CHOICES = [('reject', 'Reject')]
     suggested_action = models.CharField(
         max_length=12, choices=SUGGESTED_ACTION_CHOICES, blank=True,
@@ -2622,6 +2631,8 @@ class MappingSuggestionReview(models.Model):
     )
     # As on the mapping: a review of a fallback is kept and never scored.
     suggestion_fallback = models.BooleanField(default=False, db_default=False)
+    # As on the mapping: the reviewed suggestion had been auto-approved (#2856).
+    suggestion_auto_approved = models.BooleanField(default=False, db_default=False)
     archived_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

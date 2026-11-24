@@ -52,10 +52,11 @@ def clear_destination(mapping, user):
     """Send *mapping* back to the unmapped queue; return the destination it had.
 
     The source side, the curator's note, the axis variants and what Suggest
-    once proposed (``suggested_target_concept``, ``suggestion_outcome``) are
-    kept: they describe the code and its history, not the destination. The old
-    destination joins ``pending_repoint_concept_ids``, so the next approval
-    moves any stored row the background move did not reach.
+    once proposed (``suggested_target_concept``, ``suggestion_outcome``,
+    ``suggestion_auto_approved``) are kept: they describe the code and its
+    history, not the destination. The old destination joins
+    ``pending_repoint_concept_ids``, so the next approval moves any stored
+    row the background move did not reach.
     """
     previous = mapping.target_concept_id
     pending = list(mapping.pending_repoint_concept_ids or [])
