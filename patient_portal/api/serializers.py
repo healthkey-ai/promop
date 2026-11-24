@@ -302,6 +302,23 @@ class GroupAccessSerializer(serializers.ModelSerializer):
         return obj.redirect_url or None
 
 
+class GroupAccessV1Serializer(GroupAccessSerializer):
+    """A grant on /api/v1/: a patient grant names the record it is for (#2838).
+
+    ``person_id`` comes from the view's ``patient_record_links`` context,
+    which holds only the records this reader can open; the serializer looks
+    nothing up, so a grant without an entry is null.
+    """
+    person_id = serializers.SerializerMethodField()
+
+    class Meta(GroupAccessSerializer.Meta):
+        fields = GroupAccessSerializer.Meta.fields + ['person_id']
+        read_only_fields = fields
+
+    def get_person_id(self, obj):
+        return self.context.get('patient_record_links', {}).get(obj.id)
+
+
 class PatientListSerializer(serializers.ModelSerializer):
     """Serializer for patient list view with key fields"""
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)

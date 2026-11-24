@@ -13,6 +13,7 @@ import { loadPage } from '@/utils/loadPage';
 import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from '@/utils/download';
+import { otherRoleMarker } from '@/utils/roleDescriptions';
 
 interface Patient {
   person_id: number;
@@ -34,6 +35,9 @@ interface Patient {
   location_summary?: string | null;
   contact_available?: boolean;
   demographics_redacted?: boolean;
+  /** The other roles this patient's sign-in account holds (staff, org_admin,
+   *  doctor, analyst), sent only to a reader who may know them (#2838). */
+  other_roles?: string[];
 }
 
 const ALL_FILTER_VALUE = "all";
@@ -158,7 +162,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const fetchPatients = useCallback(async (): Promise<boolean> => {
     try {
       setLoading(true);
-      const response = await api.get<PaginatedPatientsResponse>("/patient-info/", {
+      // The v1 list: the same rows as the legacy path, plus what was added
+      // since that path was frozen (`other_roles`, #2838).
+      const response = await api.get<PaginatedPatientsResponse>("/v1/patient-records/", {
         params: {
           page,
           page_size: pageSize,
@@ -703,6 +709,18 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   </td>
                   {canOpen && <td className="px-4 py-3 font-medium" onClick={openPatient(patient.person_id)}>
                     <span className="block w-28 truncate" title={patient.patient_name || undefined}>{patient.demographics_redacted ? 'Withheld' : patient.patient_name || 'Not recorded'}</span>
+                    {!!patient.other_roles?.length && (
+                      <span className="mt-1 flex flex-wrap gap-1">
+                        {patient.other_roles.map((role) => {
+                          const marker = otherRoleMarker(role);
+                          return (
+                            <span key={role} title={marker.title} className="whitespace-nowrap rounded bg-purple-100 px-1.5 py-0.5 text-xs font-medium text-purple-700 dark:bg-purple-950 dark:text-purple-200">
+                              {marker.label}
+                            </span>
+                          );
+                        })}
+                      </span>
+                    )}
                   </td>}
                   <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.demographics_redacted ? 'Withheld' : patient.age ?? 'Not recorded'}

@@ -86,3 +86,18 @@ export const ROLE_LABELS: Record<string, string> = {
 };
 
 export const ROLES_PAGE_PATH = '/roles';
+
+/** The marker a patient-list row carries for each other role its patient's
+ *  sign-in account holds (#2838): the short text and what it means. The
+ *  server names the roles (`other_roles`) and only to a reader who may know
+ *  them; an unknown role shows its key. */
+export function otherRoleMarker(role: string): { label: string; title: string } {
+  if (role === 'staff') {
+    return { label: ROLE_LABELS.staff, title: "This patient's sign-in account is also a staff account." };
+  }
+  const name = ROLE_LABELS[role] ?? role;
+  return {
+    label: `Also ${name.toLowerCase()}`,
+    title: `This patient's sign-in account also holds the ${name} role.`,
+  };
+}

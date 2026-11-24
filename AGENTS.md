@@ -767,6 +767,22 @@ wire format is frozen for the federation host, whose source is not in this
 repo, and the React detail page reads the v1 path. A new reader of this block
 goes on the v1 path. Tests: `tests/test_patient_record_account_block.py`.
 
+An account can be a patient and something else, and two lists say so, on
+`/api/v1/` only (#2838; `omop_core/services/account_roles.py`). A patient-list
+row carries `other_roles` (`staff`, `org_admin`, `doctor`, `analyst`) when the
+patient's active sign-in link belongs to an account that holds them, and the
+page marks the record ("Also doctor"); an access-grants row for a `patient`
+grant carries `person_id`, and the page links the Patient role to that record,
+as My Profile links the account's own. Which roles an account holds is access
+administration, so `other_roles` goes only to a signed-in person who may
+already read those grants: staff (every role, and staff status), or a direct
+org admin of the organization a role is granted at (`get_access_admin_orgs`,
+the rule behind `IsStaffOrAccessAdmin`), never to a trust-derived admin, a
+doctor, an analyst, a patient, a machine credential or the de-identified
+reader, and never on a row whose demographics are withheld. `person_id` is
+set only for a record the reader can open (`accessible_person_ids`, the
+batched `can_access_patient`). Neither adds a query per row.
+
 Adding a field to PatientRecord is an approval, not a mapping write: `POST
 /api/v1/custom-patient-fields/` creates the field with an approved mapping, so
 it is gated by `_can_approve_mappings` and an analyst or a doctor gets 403

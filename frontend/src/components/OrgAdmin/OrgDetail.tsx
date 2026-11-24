@@ -66,6 +66,9 @@ interface AccessGrant {
   redirect_url: string | null;
   expires_at: string | null;
   granted_at: string;
+  /** On a patient grant: the record it is for, when this reader can open it
+   *  (#2838). Null or absent otherwise. */
+  person_id?: number | null;
 }
 
 interface DiseaseCount {
@@ -179,7 +182,8 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       const [trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
         canManageAccess ? api.get<Trust[]>(`${base}/trusts/`) : Promise.resolve({ data: [] as Trust[] }),
         canManageAccess ? api.get<Invitation[]>(`${base}/invitations/`) : Promise.resolve({ data: [] as Invitation[] }),
-        canManageAccess ? api.get<AccessGrant[]>(`${base}/access/`) : Promise.resolve({ data: [] as AccessGrant[] }),
+        // The v1 list: a patient grant names its record there (#2838).
+        canManageAccess ? api.get<AccessGrant[]>(`/v1${base}/access/`) : Promise.resolve({ data: [] as AccessGrant[] }),
         api.get<OrgStatsData[]>('/stats/org-disease/').catch(() => ({ data: [] as OrgStatsData[] })),
         api.get<Org[]>('/orgs/').catch(() => ({ data: [] as Org[] })),
       ]);
@@ -801,6 +805,24 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                       <td className="px-4 py-3">
                         {g.role === 'org_admin' ? (
                           <RoleHint role="org_admin" className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium" />
+                        ) : g.role === 'patient' ? (
+                          // A patient grant is not changed here; where this
+                          // reader can open the record, the role leads to it.
+                          g.person_id != null ? (
+                            <span className="inline-flex items-center gap-1 text-xs">
+                              <Link
+                                to={`/patient/${g.person_id}`}
+                                className="text-blue-600 underline hover:text-blue-800"
+                                aria-label={`Open the patient record of ${g.email}`}
+                                title="Open this patient's record"
+                              >
+                                {ROLE_LABELS.patient}
+                              </Link>
+                              <RoleHint role="patient" hideLabel />
+                            </span>
+                          ) : (
+                            <RoleHint role="patient" className="text-xs" />
+                          )
                         ) : (
                           <>
                             <select
