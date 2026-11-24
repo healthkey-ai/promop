@@ -14676,6 +14676,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         values['suggestion_fallback'] = False
         # The auto-approval, if there was one, was of the suggestion this replaces.
         values['suggestion_auto_approved'] = False
+        values['auto_approved_confidence'] = None
     is_suggestion = restamp or (mapping is not None and (
         mapping.origin_system.lower().startswith('suggest')
         or mapping.suggested_target_concept_id is not None
@@ -14697,6 +14698,22 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             )
         elif status_value == 'rejected':
             values['suggestion_outcome'] = 'rejected'
+    # A person changing what Suggest auto-approved, without un-approving it first
+    # (#2856): the destination moved to another concept, or the row rejected from
+    # approved. That is the first disposition of the suggestion, recorded in the
+    # same save. Only a curator's own save: a machine write (a reverse-Suggest
+    # proposal, an auto-approval, an upload) is no review, a silent re-save is no
+    # acceptance, and an outcome already set is immutable.
+    if (
+        mapping is not None and was_approved and mapping.suggestion_auto_approved
+        and not mapping.suggestion_outcome and 'suggestion_outcome' not in values
+        and record_decision and not machine_proposal and mapping_approval.is_person(user)
+    ):
+        suggested_id = mapping.suggested_target_concept_id or mapping.target_concept_id
+        if status_value == 'rejected':
+            values['suggestion_outcome'] = 'rejected'
+        elif concept is not None and concept.concept_id != suggested_id:
+            values['suggestion_outcome'] = 'overridden'
     # The sign-off. It records the *live* approval: who authorised the state
     # the mapping is in now, not an archaeological first-ever approval.
     #
@@ -16578,12 +16595,15 @@ def _auto_approved_analytics():
     Auto-approvals are not curator decisions (no ``decision_surface``, no
     ``decision_confidence``), so the per-surface tables above never see them. Each
     row here is the same count the accuracy endpoints give, narrowed to a band of
-    the ranker's stored ``suggestion_confidence``: ``confirmed`` is a curator's
+    the confidence the suggestion had when Suggest approved it
+    (``auto_approved_confidence``, which a later save does not change; the live
+    ``suggestion_confidence`` is not read): ``confirmed`` is a curator's
     first disposition of accepted, ``reversed`` an override or a rejection,
     ``reviewed`` both, and ``unreviewed`` the auto-approvals nobody has looked at
-    since. Current mappings only: an archived review keeps no confidence, so a
-    suggestion re-suggested since is in the accuracy endpoints and not here. One
-    grouped query.
+    since. A row with no approval-time confidence (one the backfill marked after a
+    save had cleared it) is in Overall and in no band. Current mappings only: an
+    archived review is not banded here, so a suggestion re-suggested since is in
+    the accuracy endpoints and not in a band. One grouped query.
     """
     from collections import Counter
 
@@ -16591,7 +16611,7 @@ def _auto_approved_analytics():
     groups = (
         SourceCodeConceptMapping.objects
         .filter(suggestion_auto_approved=True, suggestion_fallback=False).order_by()
-        .annotate(band=_confidence_band_case('suggestion_confidence'))
+        .annotate(band=_confidence_band_case('auto_approved_confidence'))
         .values('band', 'suggestion_outcome').annotate(total=Count('id'))
     )
     for group in groups:

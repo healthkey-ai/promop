@@ -1355,6 +1355,7 @@ def archive_suggestion_review(mapping):
         suggestion_outcome=mapping.suggestion_outcome,
         suggestion_fallback=mapping.suggestion_fallback,
         suggestion_auto_approved=mapping.suggestion_auto_approved,
+        auto_approved_confidence=mapping.auto_approved_confidence,
     )
 
 
@@ -2417,12 +2418,13 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 # The auto-approval belonged to the suggestion being replaced
                 # (the archive above kept it with that suggestion's review).
                 mapping.suggestion_auto_approved = False
+                mapping.auto_approved_confidence = None
                 mapping.suggested_action = ''
                 mapping.reviewer = None
                 mapping.reviewed_at = None
                 fields += [
                     'status', 'suggestion_outcome', 'suggestion_auto_approved',
-                    'suggested_action', 'reviewer', 'reviewed_at',
+                    'auto_approved_confidence', 'suggested_action', 'reviewer', 'reviewed_at',
                 ]
                 mapping.target_concept = concept
                 mapping.suggested_target_concept = concept

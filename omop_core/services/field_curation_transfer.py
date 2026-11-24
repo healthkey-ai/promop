@@ -117,6 +117,8 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # Whether Suggest approved the stored suggestion itself (#2856): travels
     # with the outcome that says whether a curator upheld it.
     'suggestion_auto_approved': False,
+    # The score it was approved at, which the analytics bands read (#2856).
+    'auto_approved_confidence': None,
     # Travels with the note it describes (#2423): the copy replaces the text,
     # so a payload without the key leaves no mark over the source's note.
     'curator_note_at': None,

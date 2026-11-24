@@ -101,21 +101,23 @@ export default function MappingAccuracyAnalyticsPage() {
     {auto && auto.rows.length > 0 && <section aria-labelledby="accuracy-auto-approved" className="mt-6">
       <h2 id="accuracy-auto-approved" className="text-lg font-semibold text-slate-950">{auto.label}</h2>
       <p className="mt-1 text-sm text-slate-600">
-        Mappings Suggest approved itself, by the confidence it stored. These are not curator decisions, so they are in
-        no table above until a curator reviews one. Confirmed is a first review that accepted the destination, Reversed
-        one that overrode or rejected it. Precision of reviewed covers only the auto-approvals a curator has looked at, so
-        it is a sample, not all of them.
+        Mappings Suggest approved itself, by the confidence it had when it approved them. These are not curator
+        decisions, so they are in no table above until a curator reviews one. Confirmed is a first review that accepted
+        the destination, Reversed one that moved it to another concept, rejected it or removed it, whether or not the
+        curator un-approved it first. An approved mapping nobody has changed is Not yet reviewed, even if it was
+        re-saved. Precision of reviewed covers only the auto-approvals a curator has looked at, so it is a sample, not
+        all of them.
       </p>
       <div className="mt-2 overflow-hidden rounded-md border border-slate-200 bg-white"><table className="w-full text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600"><tr>{AUTO_COLUMNS.map(h => <th key={h} scope="col" className="px-3 py-3">{h}</th>)}</tr></thead>
         <tbody>
           {auto.rows.map(row => <tr key={row.key} className={`border-t border-slate-200 ${row.key === "overall" ? "bg-slate-50 font-semibold" : ""}`}>
             <th scope="row" className="px-3 py-3 font-medium">{row.label}</th>
-            <td className="px-3 py-3 tabular-nums">{row.total}</td>
-            <td className="px-3 py-3 tabular-nums">{row.reviewed}</td>
-            <td className="px-3 py-3 tabular-nums">{row.confirmed}</td>
-            <td className="px-3 py-3 tabular-nums">{row.reversed}</td>
-            <td className="px-3 py-3 tabular-nums">{row.unreviewed}</td>
+            <td className="px-3 py-3 tabular-nums">{row.total.toLocaleString()}</td>
+            <td className="px-3 py-3 tabular-nums">{row.reviewed.toLocaleString()}</td>
+            <td className="px-3 py-3 tabular-nums">{row.confirmed.toLocaleString()}</td>
+            <td className="px-3 py-3 tabular-nums">{row.reversed.toLocaleString()}</td>
+            <td className="px-3 py-3 tabular-nums">{row.unreviewed.toLocaleString()}</td>
             <td className="px-3 py-3 tabular-nums">{metric(row.precision_of_reviewed)}</td>
           </tr>)}
         </tbody>

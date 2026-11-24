@@ -243,11 +243,17 @@ def approve(mapping, user, threshold, *, note_written=False) -> str:
                 mapping.target_concept, {'status': 'approved'}, fresh,
                 mapping=mapping, record_decision=False,
             )
-            fields = ['origin_system', 'suggestion_outcome', 'suggestion_auto_approved', 'updated_at']
+            fields = [
+                'origin_system', 'suggestion_outcome', 'suggestion_auto_approved',
+                'auto_approved_confidence', 'updated_at',
+            ]
             mapping.origin_system = approved_origin(threshold)
             # What the accuracy figures read (#2856): the origin stamp is replaced when a
             # curator saves the row and is not copied when a review is archived.
             mapping.suggestion_auto_approved = True
+            # The score as the approval saw it: suggestion_confidence is live and a later
+            # save, apply or upload clears or replaces it, so the bands read this copy.
+            mapping.auto_approved_confidence = mapping.suggestion_confidence
             # The first *curator* disposition of a suggestion: nobody has made one.
             mapping.suggestion_outcome = ''
             if note_written:

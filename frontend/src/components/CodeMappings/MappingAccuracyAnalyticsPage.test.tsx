@@ -94,6 +94,15 @@ describe("MappingAccuracyAnalyticsPage (#2383)", () => {
     expect(screen.getAllByRole("region")).toHaveLength(5);
   });
 
+  it("groups the thousands of the auto-approved counts and says an untouched approval is not yet reviewed", async () => {
+    const big: AutoApprovedBlock = { ...autoApproved, rows: [autoRow("overall", "Overall", { total: 12345, unreviewed: 12000, reviewed: 345, confirmed: 300, reversed: 45, precision_of_reviewed: 300 / 345 })] };
+    get.mockResolvedValue({ data: { sections, auto_approved: big } });
+    render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);
+    const block = await screen.findByRole("region", { name: "Auto-approved by Suggest" });
+    expect(within(block).getAllByRole("cell").map(c => c.textContent)).toEqual(["12,345", "345", "300", "45", "12,000", "87.0%"]);
+    expect(within(block).getByText(/nobody has changed is Not yet reviewed/)).toBeInTheDocument();
+  });
+
   it("shows no auto-approved block when the answer has none or predates it", async () => {
     get.mockResolvedValue({ data: { sections } });
     render(<MemoryRouter><MappingAccuracyAnalyticsPage /></MemoryRouter>);

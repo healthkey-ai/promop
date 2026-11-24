@@ -17,7 +17,10 @@ from rest_framework.test import APIClient
 
 from omop_core.mapping import suggestions
 from omop_core.mapping.suggestions import archive_suggestion_review
-from omop_core.models import MappingSuggestionReview, SourceCodeConceptMapping
+from omop_core.models import MappingSuggestionReview, SourceCodeConceptMapping, SuggestRun
+from omop_core.services.group_mapping_jobs import _write_group_suggestion
+from omop_core.services import mapping_removal
+from omop_core.services.mapping_browse import visible_rows
 from omop_core.services.field_curation_transfer import apply_payload, read_payload
 # The fixtures and helpers the auto-approval tests already share.
 from tests.test_suggest_auto_approve import (  # noqa: F401
@@ -57,7 +60,12 @@ def row(code, target, **overrides):
 
 
 def auto(code, target, outcome='', **overrides):
-    """An auto-approved row, with *outcome* the first disposition a curator gave it."""
+    """An auto-approved row, with *outcome* the first disposition a curator gave it.
+
+    ``auto_approved_confidence`` is the score the approval saw (1.0 unless given);
+    ``suggestion_confidence`` is the live one and may be set apart from it.
+    """
+    overrides.setdefault('auto_approved_confidence', overrides.get('suggestion_confidence', 1.0))
     return row(code, target, status='approved', origin_system=AUTO_ORIGIN,
                suggestion_auto_approved=True, suggestion_outcome=outcome, **overrides)
 
@@ -377,3 +385,267 @@ def test_the_number_of_queries_does_not_grow_with_the_rows(client, pick, url):
              suggestion_confidence=(1.0, 0.85, 0.5)[index % 3])
 
     assert _queries(client, url) == small
+
+
+# --- a person changing an auto-approval in place is a review (#2856) --------------
+
+@pytest.fixture
+def other():
+    return ConceptFactory(domain_id='Measurement', vocabulary_id='LOINC', concept_name='Other albumin')
+
+
+def detail(mapping):
+    return f'/api/v1/code-mappings/{mapping.pk}/'
+
+
+def test_moving_an_approved_auto_approval_to_another_concept_is_an_override(client, goal, other):
+    mapping = auto('MOVE', goal)
+
+    response = client.patch(detail(mapping), {'destination_concept_id': other.pk}, format='json')
+
+    assert response.status_code == 200, response.data
+    mapping.refresh_from_db()
+    assert (mapping.status, mapping.target_concept_id) == ('approved', other.pk)
+    assert (mapping.suggestion_outcome, mapping.suggestion_auto_approved) == ('overridden', True)
+    assert mapping.suggested_target_concept_id == goal.pk, 'the suggestion stays what the model said'
+
+
+def test_rejecting_an_approved_auto_approval_directly_is_a_rejection(client, goal):
+    mapping = auto('REJECT', goal)
+
+    response = client.patch(detail(mapping), {'status': 'rejected'}, format='json')
+
+    assert response.status_code == 200, response.data
+    mapping.refresh_from_db()
+    assert (mapping.status, mapping.suggestion_outcome) == ('rejected', 'rejected')
+
+
+def test_removing_the_destination_of_an_auto_approval_is_an_override(staff, goal):
+    mapping = auto('CLEAR', goal)
+
+    mapping_removal.clear_destination(mapping, staff)
+
+    mapping.refresh_from_db()
+    assert mapping.target_concept_id is None
+    assert (mapping.suggestion_outcome, mapping.suggestion_auto_approved) == ('overridden', True)
+    assert mapping.auto_approved_confidence == 1.0, 'kept with the flag, as the suggestion is'
+    assert mapping.suggestion_confidence is None
+
+
+def test_clear_destination_records_nothing_for_a_row_that_is_not_an_unreviewed_auto_approval(staff, goal):
+    plain = row('PLAIN', goal, status='approved')
+    reviewed = auto('REVIEWED', goal, 'accepted')
+    proposed = row('PROPOSED', goal, suggestion_auto_approved=True)   # un-approved already
+
+    for mapping in (plain, reviewed, proposed):
+        mapping_removal.clear_destination(mapping, staff)
+        mapping.refresh_from_db()
+
+    assert (plain.suggestion_outcome, reviewed.suggestion_outcome, proposed.suggestion_outcome) == (
+        '', 'accepted', '')
+
+
+def test_a_silent_re_save_records_no_acceptance_and_a_set_outcome_is_immutable(client, goal, other):
+    silent = auto('SILENT', goal)
+    reviewed = auto('REVIEWED', goal, 'accepted')
+
+    assert client.patch(detail(silent), {'notes': 'checked'}, format='json').status_code == 200
+    assert client.patch(detail(silent), {'destination_concept_id': goal.pk, 'status': 'approved'},
+                        format='json').status_code == 200
+    assert client.patch(detail(reviewed), {'destination_concept_id': other.pk}, format='json').status_code == 200
+
+    silent.refresh_from_db()
+    reviewed.refresh_from_db()
+    assert silent.suggestion_outcome == ''
+    assert reviewed.suggestion_outcome == 'accepted', 'the first disposition is never rewritten'
+
+
+def test_an_approved_row_that_was_not_auto_approved_is_unchanged(client, goal, other):
+    mapping = row('HAND', goal, status='approved', origin_system='curator@example.test')
+
+    assert client.patch(detail(mapping), {'destination_concept_id': other.pk}, format='json').status_code == 200
+
+    mapping.refresh_from_db()
+    assert mapping.suggestion_outcome == '', 'only a proposal that was un-approved first has ever recorded one'
+
+
+def test_a_machine_write_is_no_review(staff, goal, other):
+    from patient_portal.api.views import _upsert_source_code_mapping
+
+    for code, kwargs in (
+        ('NOT-RECORDED', {'record_decision': False}),
+        ('PROPOSAL', {'machine_proposal': True}),
+    ):
+        mapping = auto(code, goal)
+        _upsert_source_code_mapping(other, {'status': 'approved'}, staff, mapping=mapping, **kwargs)
+        mapping.refresh_from_db()
+        assert mapping.suggestion_outcome == '', code
+
+
+# --- the approval-time confidence ---------------------------------------------------
+
+def test_approval_stores_the_score_it_saw_and_a_later_save_does_not_move_the_band(
+    monkeypatch, client, pick, staff,
+):
+    queued = queue_row(source_code='BAND')
+    rank_as(monkeypatch, pick, 1.0)
+    run(staff, 90)
+    queued.refresh_from_db()
+    assert (queued.suggestion_auto_approved, queued.auto_approved_confidence) == (True, 1.0)
+
+    # A curator's save that moves the destination clears the live confidence.
+    moved = ConceptFactory(domain_id='Condition', vocabulary_id='SNOMED', concept_name='Moved')
+    assert client.patch(detail(queued), {'destination_concept_id': moved.pk}, format='json').status_code == 200
+    queued.refresh_from_db()
+    assert queued.suggestion_confidence is None
+    assert queued.suggestion_outcome == 'overridden'
+
+    by_key = {r['key']: r for r in client.get(ANALYTICS).data['auto_approved']['rows']}
+    assert (by_key['90-100']['total'], by_key['90-100']['reversed']) == (1, 1)
+    assert by_key['overall']['total'] == 1
+
+
+def test_a_row_with_no_approval_time_confidence_is_in_overall_and_in_no_band(client, pick):
+    auto('NULL', pick, auto_approved_confidence=None, suggestion_confidence=None)
+    # Auto-approved, then its live confidence changed: the band is the approval's.
+    auto('LIVE-LOW', pick, auto_approved_confidence=0.95, suggestion_confidence=0.2)
+
+    by_key = {r['key']: r for r in client.get(ANALYTICS).data['auto_approved']['rows']}
+
+    assert by_key['overall']['total'] == 2
+    assert by_key['90-100']['total'] == 1
+    assert by_key['below-70']['total'] == 0
+
+
+def test_the_archive_carries_the_approval_time_confidence(pick):
+    reviewed = row('R', pick, suggestion_auto_approved=True, auto_approved_confidence=0.93,
+                   suggestion_outcome='overridden')
+
+    archive_suggestion_review(reviewed)
+
+    assert MappingSuggestionReview.objects.get(mapping=reviewed).auto_approved_confidence == 0.93
+
+
+def test_a_forward_run_clears_the_approval_time_confidence_with_the_flag(monkeypatch, pick):
+    where = dict(source_vocabulary_id='ICD10', domain_id='Condition', omop_table='condition')
+    mapping = row('F', pick, suggestion_auto_approved=True, auto_approved_confidence=0.93,
+                  origin_system=AUTO_ORIGIN, **where)
+    rank_as(monkeypatch, pick, 0.5)
+
+    suggestions.suggest_mappings('condition', strategies=['umls'], min_occurrences=1, resuggest=True)
+
+    mapping.refresh_from_db()
+    assert (mapping.suggestion_auto_approved, mapping.auto_approved_confidence) == (False, None)
+
+
+def test_the_confidence_travels_with_a_copied_mapping_and_an_older_payload_reads_null(pick):
+    row('MARKED', pick, status='approved', suggestion_auto_approved=True, auto_approved_confidence=0.97)
+    payload = read_payload('default', tables=('code_mappings',))
+    assert payload['code_mappings'][0]['auto_approved_confidence'] == 0.97
+
+    SourceCodeConceptMapping.objects.all().delete()
+    apply_payload(payload, tables=('code_mappings',))
+    assert SourceCodeConceptMapping.objects.get().auto_approved_confidence == 0.97
+
+    del payload['code_mappings'][0]['auto_approved_confidence']
+    SourceCodeConceptMapping.objects.all().delete()
+    apply_payload(payload, tables=('code_mappings',))
+    assert SourceCodeConceptMapping.objects.get().auto_approved_confidence is None
+
+
+# --- group Suggest and the reverse restamp replace the suggestion ------------------
+
+def _group_write(members, concept, curator):
+    run_row = SuggestRun.objects.create(source_vocabulary_id='VendorLab', total=len(members))
+    _write_group_suggestion([m.pk for m in members], {
+        'concept': {'concept_id': concept.pk}, 'strategy': 'lexical', 'note': 'ranked', 'confidence': 0.9,
+    }, run=run_row, actor=curator)
+
+
+def test_a_group_suggestion_clears_the_mark_of_an_unreviewed_auto_approval(staff, goal, other):
+    member = row('G1', None, locked_by=staff, suggestion_auto_approved=True, auto_approved_confidence=0.95)
+
+    _group_write([member], other, staff)
+
+    member.refresh_from_db()
+    assert member.suggested_target_concept_id == other.pk
+    assert (member.suggestion_auto_approved, member.auto_approved_confidence) == (False, None)
+    assert not MappingSuggestionReview.objects.filter(mapping=member).exists()
+
+
+def test_a_group_suggestion_archives_a_review_with_its_mark_and_starts_clean(staff, goal, other):
+    member = row('G2', None, locked_by=staff, suggestion_auto_approved=True,
+                 auto_approved_confidence=0.95, suggestion_outcome='overridden')
+
+    _group_write([member], other, staff)
+
+    member.refresh_from_db()
+    assert (member.suggestion_outcome, member.suggestion_auto_approved, member.auto_approved_confidence) == (
+        '', False, None)
+    review = MappingSuggestionReview.objects.get(mapping=member)
+    assert (review.suggestion_outcome, review.suggestion_auto_approved, review.auto_approved_confidence) == (
+        'overridden', True, 0.95)
+
+
+def test_a_reverse_proposal_clears_the_mark_and_the_archive_carries_it(staff, goal, other):
+    from patient_portal.api.views import _upsert_source_code_mapping
+
+    unreviewed = row('REV-1', goal, suggestion_auto_approved=True, auto_approved_confidence=0.9)
+    reviewed = row('REV-2', goal, suggestion_auto_approved=True, auto_approved_confidence=0.9,
+                   suggestion_outcome='rejected')
+
+    for mapping in (unreviewed, reviewed):
+        _upsert_source_code_mapping(other, {}, staff, mapping=mapping, record_decision=False,
+                                    machine_proposal=True)
+        mapping.refresh_from_db()
+        assert mapping.suggested_target_concept_id == other.pk
+        assert (mapping.suggestion_auto_approved, mapping.auto_approved_confidence) == (False, None)
+
+    assert reviewed.suggestion_outcome == ''
+    review = MappingSuggestionReview.objects.get(mapping=reviewed)
+    assert (review.suggestion_outcome, review.suggestion_auto_approved, review.auto_approved_confidence) == (
+        'rejected', True, 0.9)
+    assert not MappingSuggestionReview.objects.filter(mapping=unreviewed).exists()
+
+
+# --- the list filter and the analytics agree ---------------------------------------
+
+def test_the_list_filter_finds_a_flagged_row_whatever_its_stamp_and_a_stamped_row_the_backfill_missed(goal):
+    row('FLAG', goal, status='approved', origin_system='curator@example.test', suggestion_auto_approved=True)
+    row('STAMP', goal, status='approved', origin_system=AUTO_ORIGIN)
+    row('NEITHER', goal, status='approved', origin_system='curator@example.test')
+
+    found = set(visible_rows(SourceCodeConceptMapping.objects.all(), {'auto_approved': '1'})
+                .values_list('source_code', flat=True))
+
+    assert found == {'FLAG', 'STAMP'}
+
+
+# --- the backfill, narrowed ----------------------------------------------------------
+
+def test_the_backfill_note_branch_skips_a_row_whose_suggestion_was_replaced_and_copies_the_confidence(
+    pick, goal,
+):
+    note = 'Auto-approved by Suggest: 100% confidence, threshold 100%.'
+    held = row('HELD', pick, status='approved', origin_system='curator@example.test', notes=note,
+               suggestion_confidence=0.96)
+    stamped = row('STAMPED', pick, status='approved', origin_system=AUTO_ORIGIN, suggestion_confidence=0.91)
+    stamped_cleared = row('STAMPED-CLEARED', pick, status='approved', origin_system=AUTO_ORIGIN,
+                          suggestion_confidence=None)
+    replaced = row('REPLACED', goal, status='approved', origin_system='curator@example.test', notes=note,
+                   target_concept=pick, suggested_target_concept=goal)
+    proposed = row('UNAPPROVED', pick, status='proposed', origin_system='curator@example.test', notes=note)
+    no_version = row('NO-VERSION', pick, status='approved', origin_system='curator@example.test',
+                     notes=note, suggestion_model_version='')
+
+    migration = import_module('omop_core.migrations.0373_backfill_suggestion_auto_approved')
+    migration.mark_auto_approved(apps, None)
+
+    for mapping in (held, stamped, stamped_cleared, replaced, proposed, no_version):
+        mapping.refresh_from_db()
+    assert (held.suggestion_auto_approved, held.auto_approved_confidence) == (True, 0.96)
+    assert (stamped.suggestion_auto_approved, stamped.auto_approved_confidence) == (True, 0.91)
+    assert (stamped_cleared.suggestion_auto_approved, stamped_cleared.auto_approved_confidence) == (True, None)
+    for mapping in (replaced, proposed, no_version):
+        assert mapping.suggestion_auto_approved is False, mapping.source_code
+        assert mapping.auto_approved_confidence is None

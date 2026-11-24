@@ -2259,6 +2259,14 @@ class SourceCodeConceptMapping(models.Model):
             'whether the auto-approval held (#2856).'
         ),
     )
+    auto_approved_confidence = models.FloatField(
+        null=True, blank=True,
+        help_text=(
+            'The ranker confidence (0-1) the suggestion had when Suggest '
+            'auto-approved it. suggestion_confidence is live and a later save '
+            'clears or replaces it; this is what the analytics bands read (#2856).'
+        ),
+    )
     SUGGESTED_ACTION_CHOICES = [('reject', 'Reject')]
     suggested_action = models.CharField(
         max_length=12, choices=SUGGESTED_ACTION_CHOICES, blank=True,
@@ -2633,6 +2641,7 @@ class MappingSuggestionReview(models.Model):
     suggestion_fallback = models.BooleanField(default=False, db_default=False)
     # As on the mapping: the reviewed suggestion had been auto-approved (#2856).
     suggestion_auto_approved = models.BooleanField(default=False, db_default=False)
+    auto_approved_confidence = models.FloatField(null=True, blank=True)
     archived_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

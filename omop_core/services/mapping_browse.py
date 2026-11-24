@@ -220,10 +220,12 @@ def _auto_approved(params):
     return value == '1'
 
 
-# What a Suggest run stamps on a row it approved on its own (#1532): provenance that
-# begins "suggest" and says it was auto-approved. A row a person later un-approves
-# keeps the stamp, so it stays findable for review. No column of its own.
-AUTO_APPROVED_BY_SUGGEST = Q(origin_system__istartswith='suggest', origin_system__icontains='auto-approved')
+# What marks a row Suggest approved on its own (#1532): the column the accuracy figures read
+# (#2856), or the provenance a run stamps, which begins "suggest" and says it was
+# auto-approved. The stamp also finds a row the backfill missed, and a row a person has
+# un-approved keeps it, so it stays findable for review.
+AUTO_APPROVED_BY_SUGGEST = Q(suggestion_auto_approved=True) | Q(
+    origin_system__istartswith='suggest', origin_system__icontains='auto-approved')
 
 
 def apply_auto_approved(queryset, params):

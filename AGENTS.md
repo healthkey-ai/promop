@@ -2140,9 +2140,9 @@ them and `suggest_jobs.execute_run` drives them.
   them" below.
 - **Finding them.** The Code Mapping list has an "auto-approved (Suggest)" filter
   (`auto_approved=1` on the browse, group-members and group-action endpoints;
-  `mapping_browse.AUTO_APPROVED_BY_SUGGEST`, which reads the `origin_system`
-  stamp and nothing else; the accuracy figures read the column below). A row a
-  person later un-approves keeps the stamp and stays findable.
+  `mapping_browse.AUTO_APPROVED_BY_SUGGEST`, which matches the
+  `suggestion_auto_approved` column or the `origin_system` stamp). A row a
+  person later un-approves keeps both and stays findable.
 - **Undoing one.** Only staff and org admins can (an analyst's change of an
   approved mapping's status is a 400), the same as any approved mapping, and the
   run's starter is not blocked (the machine proposed it, `proposed_by` is null).
@@ -2155,24 +2155,36 @@ them and `suggest_jobs.execute_run` drives them.
   concept.
 - **Measuring them (#2856).** `SourceCodeConceptMapping.suggestion_auto_approved`
   (and the same column on `MappingSuggestionReview`) is True when Suggest
-  approved the stored suggestion itself. It is a column, not a reading of the
-  `origin_system` stamp, because a curator's save replaces that stamp and the
-  review archive does not copy it. It is set by `suggest_auto_approve.approve()`,
-  cleared wherever a new suggestion replaces the old one (a forward run, a
-  reverse Suggest pick that restamps, a group suggestion on a row with no review
-  behind it), copied into the archive with the outcome it explains
-  (`archive_suggestion_review`), and travels with `copy_reference_data` (an
-  absent key in an older payload reads False). `clear_destination` keeps it, as
-  it keeps the suggestion and the outcome. Migration 0373 backfilled it from the
-  stamp, and from the note Suggest appends for a row whose stamp a curator's save
-  had replaced; it is best-effort (an archived review is not marked, and a row
-  whose stamp and note are both gone is not found).
+  approved the stored suggestion itself, and `auto_approved_confidence` is the
+  ranker's score at that moment (`suggestion_confidence` is live: a curator's
+  save, a Concept to Code apply or a code-mapping upload clears or replaces it).
+  They are columns, not a reading of the `origin_system` stamp, because a
+  curator's save replaces that stamp and the review archive does not copy it.
+  Both are set by `suggest_auto_approve.approve()`, cleared wherever a new
+  suggestion replaces the old one (a forward run, a reverse Suggest pick that
+  restamps, a group suggestion, which also archives the row's review first as a
+  forward run does), copied into the archive with the outcome they explain
+  (`archive_suggestion_review`), and carried by `copy_reference_data` (an absent
+  key in an older payload reads False and null), so a copied instance bands
+  correctly. `clear_destination` keeps them, as it keeps the suggestion.
+  Migration 0373 backfilled them: from the stamp, and from the note Suggest
+  appends for a row whose stamp a curator's save had replaced, but only a row
+  still approved at its suggested destination (a row whose suggestion was replaced
+  since is not marked). It is best-effort: an archived review is not marked, a row
+  whose stamp and note are both gone is not found, and a backfilled confidence is
+  the row's live one, so it can be null or a later score.
   `suggestion_outcome` is deliberately not reused: it stays the curator's first
-  disposition, so a curator who later reviews an auto-approved row records
+  disposition, set once, so a curator who reviews an auto-approved row records
   accepted (the auto-approval held) or overridden / rejected (it was wrong), and
-  that is the signal. Review happens the way it does for any proposal: the row is
-  un-approved, then approved again or changed (a status change of a row that is
-  still approved records no disposition).
+  that is the signal. Review happens the way it does for any proposal (un-approve,
+  then approve again or change it), and also in place: a curator's own save of an
+  approved, flagged row with no outcome yet records `overridden` when it moves
+  the destination to another concept than the suggested one, and `rejected` when
+  it rejects the row, in the same save; removing the destination
+  (`clear_destination`, Delete on a code patient data carries) records
+  `overridden`. A silent re-save records nothing, and `accepted` is never inferred
+  from one, so an untouched approved row stays "not yet reviewed". Machine writes
+  record nothing (an auto-approval, a reverse Suggest proposal, an upload).
   The accuracy endpoints add an `auto_approved` object, in each snapshot of
   `code-mappings/accuracy/` (over every model version) and in each model and the
   overall block of `.../accuracy/dashboard/`: `{total, reviewed, accepted,
@@ -2185,11 +2197,14 @@ them and `suggest_jobs.execute_run` drives them.
   scored like any reviewed suggestion. The analytics page
   (`.../accuracy/analytics/`) adds one "Auto-approved by Suggest" block, outside
   the per-surface tables (an auto-approval has no `decision_surface` or
-  `decision_confidence`): the same counts by band of the stored
-  `suggestion_confidence`, with `confirmed` (accepted) and `reversed` (overridden
-  or rejected). It reads current mappings only, since an archived review keeps no
-  confidence, so a suggestion re-suggested since is in the accuracy endpoints and
-  not in its band. Tests: `tests/test_suggest_auto_approve_accuracy.py`.
+  `decision_confidence`): the same counts by band of `auto_approved_confidence`,
+  with `confirmed` (accepted) and `reversed` (overridden or rejected). A row with
+  no approval-time confidence is in Overall and in no band. It reads current
+  mappings only, so a suggestion re-suggested since is in the accuracy endpoints
+  and not in a band. The list's "auto-approved (Suggest)" filter
+  (`AUTO_APPROVED_BY_SUGGEST`) matches the column or the stamp, so it finds what
+  the analytics count and a row the backfill missed. Tests:
+  `tests/test_suggest_auto_approve_accuracy.py`.
 - **Not covered.** Group Suggest (`group/suggest/`), the dialog's suggest-one
   preview and Concept to Code runs write or preview as before and never
   auto-approve.
