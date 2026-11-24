@@ -385,17 +385,23 @@ def _ingest(device, provider, device_type, batch):
     """
     from rest_framework.response import Response as DrfResponse
 
-    from omop_core.services.mappings import resolve_wearable_mappings
+    from omop_core.services import wearable_rows
 
     from .views import PatientRecordViewSet
 
     now = timezone.now()
     label = f'{open_wearables.HISTORY_LABELS[device_type]} {now:%Y-%m}'
     outcome = {'stored': 0, 'repeated': 0, 'late': 0, 'unmapped': 0, 'days_written': 0}
-    # A metric with no approved mapping is not counted at all: a day counted
-    # now and never written would not be written when its mapping is approved
-    # either, since only a day that grows is written.
-    mapped = {key for key, concept in resolve_wearable_mappings(device_type).items() if concept}
+    # Every metric the device has a code for is counted and written (#2835):
+    # under an approved mapping as accepted rows, otherwise unresolved, to be
+    # resolved when a mapping answers for the code. Only a metric with no code
+    # on this device, or an instance that cannot hold an unresolved row, is
+    # left out, and then not counted either: a day counted and never written
+    # would not be written later, since only a day that grows is written.
+    from omop_core.models import Concept
+    codes = wearable_rows.device_codes(device_type, {r.metric_key for r in batch.readings})
+    can_wait = Concept.objects.filter(concept_id=wearable_rows.NO_MATCHING_CONCEPT_ID).exists()
+    mapped = {key for key, code in codes.items() if can_wait or code.concept is not None}
     readings = [reading for reading in batch.readings if reading.metric_key in mapped]
     outcome['unmapped'] = len(batch.readings) - len(readings)
 

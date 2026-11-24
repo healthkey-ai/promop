@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
-import ProvisionalBadge, { MarkedControl } from './ProvisionalBadge';
+import ProvisionalBadge, { AcceptedBadge, MarkedControl } from './ProvisionalBadge';
 import { ProvisionalContext } from './ProvisionalContext';
 
 describe('ProvisionalBadge', () => {
@@ -76,5 +76,56 @@ describe('ProvisionalBadge via', () => {
       </ProvisionalContext.Provider>,
     );
     expect(screen.getByTestId('provisional-flipi_score').title).toMatch(/Edit the risk factors below to confirm/);
+  });
+});
+
+describe('AcceptedBadge', () => {
+  it('says Accepted, in green, for a field with no provisional mark', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { bmi: 74 }, patientMode: false }}>
+        <AcceptedBadge name="median_daily_steps_30d" />
+      </ProvisionalContext.Provider>,
+    );
+    const badge = screen.getByTestId('accepted-median_daily_steps_30d');
+    expect(badge.textContent).toBe('Accepted');
+    expect(badge).toHaveClass('bg-green-100', 'text-green-800');
+    expect(badge.title).toMatch(/code mapping is approved/);
+  });
+
+  it('is silent for a field marked provisional', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { median_daily_steps_30d: 70, vo2_max_avg_30d: 82 }, patientMode: false }}>
+        <AcceptedBadge name="median_daily_steps_30d" />
+        <AcceptedBadge name="vo2_max_avg_30d" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.queryByTestId('accepted-median_daily_steps_30d')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('accepted-vo2_max_avg_30d')).not.toBeInTheDocument();
+  });
+});
+
+describe('ProvisionalBadge for a summary of device readings (#2835)', () => {
+  it('says approval settles it, and never to edit the field', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { median_daily_steps_30d: 85 }, patientMode: false }}>
+        <ProvisionalBadge name="median_daily_steps_30d" fromDevice />
+      </ProvisionalContext.Provider>,
+    );
+    const badge = screen.getByTestId('provisional-median_daily_steps_30d');
+    expect(badge).toHaveTextContent('Provisional 85%');
+    expect(badge.title).toMatch(/device readings whose code mapping is not approved yet \(85% confidence\)/);
+    expect(badge.title).toMatch(/becomes accepted when that mapping is approved/);
+    expect(badge.title).not.toMatch(/Edit/);
+  });
+
+  it('tells a patient it is unconfirmed without asking them to enter it', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { median_daily_steps_30d: 70 }, patientMode: true }}>
+        <ProvisionalBadge name="median_daily_steps_30d" fromDevice />
+      </ProvisionalContext.Provider>,
+    );
+    const badge = screen.getByTestId('provisional-median_daily_steps_30d');
+    expect(badge.title).toMatch(/Not yet confirmed/);
+    expect(badge.title).not.toMatch(/enter it yourself/);
   });
 });

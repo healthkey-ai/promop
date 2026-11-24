@@ -1028,7 +1028,9 @@ def provisional_section_readers():
     """The readers the provisional pass runs: those whose fields can carry a confidence,
     in the real refresh's relative order."""
     # Vitals are here so a proposed weight and height can give a BMI (#2661).
-    wanted = {_get_assertion_data, _get_laboratory_data, _get_vitals_data}
+    # The wearable summaries are here so a 30-day metric whose readings came in
+    # under a proposed wearable mapping is shown, marked provisional (#2835).
+    wanted = {_get_assertion_data, _get_laboratory_data, _get_vitals_data, _get_wearable_data}
     return tuple(fn for fn in _section_readers() if fn in wanted)
 
 

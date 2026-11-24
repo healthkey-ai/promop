@@ -5,6 +5,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import { pendingClause } from './wearableResult';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 const ACTIVITY_TREND_OPTIONS = ['improving', 'stable', 'declining', 'insufficient_data'];
@@ -194,6 +195,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
     let totalCreated = 0;
     let totalDuplicates = 0;
+    let totalProvisional = 0;
+    let totalUnresolved = 0;
 
     try {
       for (const file of files) {
@@ -210,11 +213,17 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
         totalCreated += res.data.samples_created || 0;
         totalDuplicates += res.data.duplicates_skipped || 0;
+        totalProvisional += res.data.provisional_samples || 0;
+        totalUnresolved += res.data.unresolved_samples || 0;
       }
 
+      const pending = pendingClause({
+        provisional_samples: totalProvisional, unresolved_samples: totalUnresolved,
+      });
       setUploadResult(
         `Uploaded ${totalCreated} sample${totalCreated !== 1 ? 's' : ''}` +
-        (totalDuplicates > 0 ? ` (${totalDuplicates} duplicate${totalDuplicates !== 1 ? 's' : ''} skipped)` : '')
+        (totalDuplicates > 0 ? ` (${totalDuplicates} duplicate${totalDuplicates !== 1 ? 's' : ''} skipped)` : '') +
+        (pending ? `. ${pending}` : '')
       );
 
       // Refresh upload history and patient record
@@ -546,6 +555,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           {ownRecord
             ? 'Upload device data above and these follow.'
             : 'They follow from the device data the patient adds.'}
+          {' '}Each value is marked Accepted or Provisional by the mapping its readings
+          came in under: provisional means the mapping of the device code is proposed
+          and not yet approved.
         </p>
       </div>
 
@@ -556,6 +568,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="median_daily_steps_30d"
             descriptor={descriptors.median_daily_steps_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.median_daily_steps_30d}
             onChange={() => {}}
@@ -565,6 +578,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="active_minutes_per_day_30d"
             descriptor={descriptors.active_minutes_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.active_minutes_per_day_30d}
             onChange={() => {}}
@@ -574,6 +588,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="activity_trend_30d"
             descriptor={descriptors.activity_trend_30d}
             showReason={false}
+            showAccepted
             type="select"
             value={formData?.activity_trend_30d}
             options={ACTIVITY_TREND_OPTIONS}
@@ -589,6 +604,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="resting_heart_rate_avg_30d"
             descriptor={descriptors.resting_heart_rate_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.resting_heart_rate_avg_30d}
             onChange={() => {}}
@@ -601,6 +617,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="hrv_sdnn_avg_30d"
             descriptor={descriptors.hrv_sdnn_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.hrv_sdnn_avg_30d}
             onChange={() => {}}
@@ -610,6 +627,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="hrv_rmssd_avg_30d"
             descriptor={descriptors.hrv_rmssd_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.hrv_rmssd_avg_30d}
             onChange={() => {}}
@@ -624,6 +642,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="oxygen_saturation_min_30d"
             descriptor={descriptors.oxygen_saturation_min_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.oxygen_saturation_min_30d}
             onChange={() => {}}
@@ -633,6 +652,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="oxygen_saturation_avg_30d"
             descriptor={descriptors.oxygen_saturation_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.oxygen_saturation_avg_30d}
             onChange={() => {}}
@@ -642,6 +662,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="respiratory_rate_avg_30d"
             descriptor={descriptors.respiratory_rate_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.respiratory_rate_avg_30d}
             onChange={() => {}}
@@ -656,6 +677,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="sleep_duration_hours_avg_30d"
             descriptor={descriptors.sleep_duration_hours_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.sleep_duration_hours_avg_30d}
             onChange={() => {}}
@@ -670,6 +692,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="vo2_max_avg_30d"
             descriptor={descriptors.vo2_max_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.vo2_max_avg_30d}
             onChange={() => {}}
@@ -679,6 +702,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="distance_km_per_day_30d"
             descriptor={descriptors.distance_km_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.distance_km_per_day_30d}
             onChange={() => {}}
@@ -688,6 +712,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="flights_climbed_per_day_30d"
             descriptor={descriptors.flights_climbed_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.flights_climbed_per_day_30d}
             onChange={() => {}}
@@ -702,6 +727,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="walking_speed_avg_30d"
             descriptor={descriptors.walking_speed_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_speed_avg_30d}
             onChange={() => {}}
@@ -711,6 +737,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="walking_step_length_avg_30d"
             descriptor={descriptors.walking_step_length_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_step_length_avg_30d}
             onChange={() => {}}
@@ -720,6 +747,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="walking_double_support_pct_avg_30d"
             descriptor={descriptors.walking_double_support_pct_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_double_support_pct_avg_30d}
             onChange={() => {}}
@@ -729,6 +757,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="walking_hr_avg_30d"
             descriptor={descriptors.walking_hr_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_hr_avg_30d}
             onChange={() => {}}
@@ -743,6 +772,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="active_energy_per_day_30d"
             descriptor={descriptors.active_energy_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.active_energy_per_day_30d}
             onChange={() => {}}
@@ -752,6 +782,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="basal_energy_per_day_30d"
             descriptor={descriptors.basal_energy_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.basal_energy_per_day_30d}
             onChange={() => {}}
@@ -761,6 +792,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             name="body_mass_avg_30d"
             descriptor={descriptors.body_mass_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.body_mass_avg_30d}
             onChange={() => {}}

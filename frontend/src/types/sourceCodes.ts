@@ -1,3 +1,28 @@
+/**
+ * What a device's code says about its stored rows (#2835): how many are
+ * accepted (at an approved mapping's concept), provisional (given a concept by
+ * a proposed mapping) or unresolved (stored at concept 0, waiting for a
+ * mapping). Counts and dates only.
+ */
+export interface SourceCodeWearable {
+  device: "garmin" | "apple" | "android";
+  /** "Garmin", "Apple Health" or "Health Connect". */
+  source: string;
+  /** The vendor-neutral metric, e.g. "steps"; '' when unknown. */
+  metric_key: string;
+  rows: number;
+  accepted_rows: number;
+  provisional_rows: number;
+  unresolved_rows: number;
+  /** The lowest confidence percent among the provisional rows; null when there are none. */
+  confidence: number | null;
+  first_date: string | null;
+  last_date: string | null;
+  status: "accepted" | "provisional" | "unresolved" | "mixed" | "none";
+  /** The 30-day record metrics this code feeds. */
+  fields: { name: string; label: string }[];
+}
+
 export interface PatientSourceCode {
   source_code_id?: number;
   source_value: string;
@@ -26,6 +51,15 @@ export interface PatientSourceCode {
   mapping_created_by?: string;
   mapping_destination_concept_code?: string;
   mapping_destination_vocabulary_id?: string;
+  /** Present on a wearable device's code only; absent on a hospital code and an older server. */
+  wearable?: SourceCodeWearable;
+}
+
+/** A source code that is a wearable device's. */
+export type WearableSourceCode = PatientSourceCode & { wearable: SourceCodeWearable };
+
+export function isWearableSourceCode(code: PatientSourceCode): code is WearableSourceCode {
+  return code.wearable != null;
 }
 
 export interface SourceCodesSummary {

@@ -796,9 +796,11 @@ multiplied by 100. Anything else is rejected and counted.
 
 ### Limits
 
-- Android records are written only once the `HealthConnect` mappings are
-  approved; records sent before that are not kept. HRV needs a mapping a
-  curator adds (none is seeded).
+- Android records are stored from the first sync, unresolved or provisional
+  until the `HealthConnect` mappings are approved (#2835). A day already
+  stored is resolved by that approval, by Generate OMOP, or by the phone's
+  next record, not by the same records sent again. HRV (RMSSD) has no seeded
+  mapping: its first reading queues `HeartRateVariabilityRmssdRecord`.
 - A day's steps are every source's samples added up, as in the export parser,
   so an iPhone and a Watch together can be counted twice (#2823).
 - Distance, walking speed and step length are converted to the stored unit
@@ -859,30 +861,64 @@ a summary.
 
 ## Row shape written today
 
-Per `views.py:3746` (observation) and `:3759` (measurement):
+A reading comes in as a **source code**, as a hospital's result does (#2835).
+The importer (`_write_wearable_samples` in `patient_portal/api/views.py`, with
+`omop_core/services/wearable_rows.py`) files the row under the device's own
+code and records the code in the patient's source-code inventory; what the
+row's concept is, and whether it is accepted or provisional, is the mapping's
+to say, through the same resolver every other code goes through.
 
 | Column | Value | Notes |
 |---|---|---|
-| `person_id` | uploading patient's Person | resolved from `request.user` via `PatientUser` |
-| `measurement_concept_id` / `observation_concept_id` | concept via `_cc_by_vocab(vocab, code)` | skipped if unresolved, but **logged and counted** |
-| `measurement_date` / `observation_date` | sample date | date only; no `_datetime` — Gap D |
-| `*_type_concept_id` | 32865 *Patient self-report* | no fallback — missing concept returns HTTP 503 |
+| `person_id` | the patient's Person | |
+| `*_source_value` | the **device's code**: Garmin's metric key (`steps`), the HealthKit identifier, the Health Connect record type | cut to the 50-character column; the mapping and the inventory keep the whole code |
+| `measurement_concept_id` / `observation_concept_id` | the approved mapping's concept; else 0 until a mapping answers | a qualifying proposal's concept on a provisional row |
+| `confidence` | null on an accepted or unresolved row; the proposal's percent on a provisional one | a curated, unscored device proposal stands at `PROVISIONAL_CONFIDENCE_FLOOR` |
+| `measurement_date` / `observation_date` | sample date | date only; no `_datetime` (Gap D) |
+| `*_type_concept_id` | 32865 *Patient self-report* | no fallback: a missing concept returns HTTP 503 |
 | `value_as_number` | daily aggregate, rounded to 2dp | |
-| `*_source_value` | the concept code string | lets `_get_wearable_data` match rows whose concept FK is null |
-| `unit_source_value` | UCUM string from the table above | `unit_concept_id` **not set** — Gap B |
+| `unit_source_value` | UCUM string from the table above | `unit_concept_id` **not set** (Gap B) |
 
-Unresolvable concepts are reported rather than dropped silently: `upload_wearable` logs a WARNING
-at `views.py:3650` naming the affected metrics, and the HTTP response carries `unmapped_samples`
-and `unmapped_metrics` alongside `samples_created` and `duplicates_skipped`. A missing concept is
-therefore distinguishable from "the device exported no data for this metric" — previously the two
-were identical, and every local dev database silently discarded nine metrics while returning
-HTTP 200 with a success count.
+The table is the code's mapping's (`omop_table`), which follows its concept's
+domain; a code no mapping holds yet goes where its metric usually does
+(`default_table`).
 
-Dedup is `(metric_key, date, round(value, 2))` against existing rows (`views.py:3736`), reading
-whichever table the concept's domain routes it to, so re-uploading an overlapping export is safe.
-Rows carry `_skip_patient_record_refresh = True` and `refresh_patient_record(person)` is called
-once after the bulk insert. Each upload is recorded in `WearableUpload` for patient-visible
-history.
+### What a mapping makes of a row
+
+| The code's mapping | The row | 30-day metrics |
+|---|---|---|
+| approved (global, this device's vocabulary and code) | **accepted**: at the mapping's concept, no confidence | read as approved data |
+| proposed with a destination, `PROVISIONAL_DATA_ENABLED` on | **provisional**: at the proposal's concept, with its confidence | shown marked Provisional, only where no accepted reading decides the metric |
+| anything else: no mapping row, no destination, rejected, a ranker's score below the floor, a hospital-scoped mapping, the switch off | **unresolved**: concept 0, kept | not read |
+
+The mapping can change afterwards and the rows follow it by the resolver's own
+rules: approval re-points unresolved rows and makes provisional ones accepted;
+rejection sends provisional rows back to unresolved and keeps the readings;
+moving a mapping between measurement and observation relocates its rows. A
+patient's next import and Generate OMOP both resolve whatever is still
+waiting. See
+[AGENTS.md](../AGENTS.md#wearables--readings-come-in-as-source-codes) for the
+three rules that keep a device's code apart from a hospital's of the same
+spelling.
+
+The HTTP response carries `samples_created` and `duplicates_skipped`, plus,
+when there are some, `unresolved_samples` / `unresolved_metrics` (stored under
+a code no approved mapping answers for) and `provisional_samples` (rows a
+proposal gave a concept). `unmapped_samples` / `unmapped_metrics` now mean only
+a metric the device has no code for, which is not stored.
+
+Dedup is `(metric_key, date, round(value, 2))` against the rows already filed
+under the code, and against rows at the code's concept (those written before
+rows carried their device code, and another device's reading of the same
+metric), so re-uploading an overlapping export is safe. Rows carry
+`_skip_patient_record_refresh = True` and `refresh_patient_record(person)` is
+called once after the bulk insert. Each upload is recorded in `WearableUpload`
+for patient-visible history.
+
+Rows written before #2835 carried their destination concept's code as the
+source value. Migration `0371` re-files the ones an upload's history names and
+writes their inventory entries; older ones stay as they are and are still read
+by concept.
 
 ---
 

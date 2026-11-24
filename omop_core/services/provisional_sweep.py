@@ -62,12 +62,14 @@ from django.utils import timezone
 
 from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, _QUARANTINE_VOCABULARIES, _confidence_percent,
-    _usable_destination, choose_proposal, normalize_omop_table, resolve_person_source_codes,
+    choose_proposal, normalize_omop_table, proposal_percent, resolve_person_source_codes,
 )
 from omop_core.models import (
     Concept, PatientSourceCode, Person, SourceCodeConceptMapping, SourceCodeResolveRun,
 )
-from omop_core.services.source_vocabularies import canonical_source_vocabulary
+from omop_core.services.source_vocabularies import (
+    WEARABLE_DEVICE_VOCABULARIES, canonical_source_vocabulary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,22 +174,24 @@ def build_qualifying_index() -> dict:
     over the proposals plus one for the quarantine concepts; for a worker or the
     command, never a request.
     """
-    floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
     entries: dict[str, dict[str, list]] = {}
     codes: dict[str, set[str]] = {}
     rows = SourceCodeConceptMapping.objects.filter(
-        status='proposed', organization__isnull=True,
-        target_concept__isnull=False, suggestion_confidence__isnull=False,
+        status='proposed', organization__isnull=True, target_concept__isnull=False,
+    ).filter(
+        # A wearable device's curated proposal qualifies with no score (#2835).
+        Q(suggestion_confidence__isnull=False)
+        | Q(source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES),
     ).select_related('target_concept').only(
         'omop_table', 'source_code', 'source_vocabulary_id', 'suggestion_confidence', 'target_concept')
     for mapping in rows.iterator():
         table = normalize_omop_table(mapping.omop_table)
-        if not (table in CLINICAL_TABLES and mapping.source_code
-                and _confidence_percent(mapping.suggestion_confidence) >= floor
-                and _usable_destination(mapping.target_concept, table)):
+        percent = (proposal_percent(mapping, table)
+                   if table in CLINICAL_TABLES and mapping.source_code else None)
+        if percent is None:
             continue
         entries.setdefault(table, {}).setdefault(mapping.source_code.upper(), []).append(
-            (mapping.target_concept_id, _confidence_percent(mapping.suggestion_confidence),
+            (mapping.target_concept_id, percent,
              canonical_source_vocabulary(mapping.source_vocabulary_id)))
         codes.setdefault(table, set()).add(mapping.source_code)
     return {'entries': entries, 'codes': {t: sorted(c) for t, c in codes.items()},
@@ -637,7 +641,13 @@ def _state(mapping) -> tuple | None:
     """
     if mapping is None:
         return None
-    percent = None if mapping.suggestion_confidence is None else _confidence_percent(mapping.suggestion_confidence)
+    if mapping.suggestion_confidence is not None:
+        percent = _confidence_percent(mapping.suggestion_confidence)
+    elif mapping.source_vocabulary_id in WEARABLE_DEVICE_VOCABULARIES:
+        # A wearable device's curated proposal: unscored, it stands at the floor (#2835).
+        percent = max(settings.PROVISIONAL_CONFIDENCE_FLOOR, 1)
+    else:
+        percent = None
     qualifies = (
         mapping.status == 'proposed' and mapping.organization_id is None
         and mapping.target_concept_id is not None and percent is not None

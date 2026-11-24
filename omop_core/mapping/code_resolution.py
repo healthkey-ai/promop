@@ -57,7 +57,10 @@ from omop_core.mapping.therapy import (
 )
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.provenance_attribution import ATTRIBUTION, exclusively_attributed, with_attribution
-from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+from omop_core.services.source_vocabularies import (
+    VOCABULARY_OID_ALIASES, WEARABLE_DEVICE_VOCABULARIES, WEARABLE_LOCAL_VOCABULARY,
+    canonical_source_vocabulary,
+)
 from omop_core.services import source_vocabularies
 from omop_core.data_migrations.snomed_relationships_v1 import SINGLE_ORIGIN, MULTIPLE_ORIGIN
 from omop_core.services.snomed_identity import IDENTITY_ORIGIN, is_standard_snomed, promote_crossmap_identity
@@ -532,6 +535,90 @@ def _usable_destination(concept: Concept | None, omop_table: str) -> bool:
     )
 
 
+# ---- a wearable device's codes (#2835) ---------------------------------------------
+#
+# A device import files its rows under the device's own code and records, in
+# the patient's source-code inventory, that the patient holds that code under
+# the device's vocabulary. So a device's row, unlike a hospital's, can say
+# which code system it came from, and three rules follow, each the resolver's
+# general rule made exact:
+#
+# * a device's mapping answers only for a person who holds the code under that
+#   device's vocabulary (``spo2`` is Garmin's code and a hospital's local one);
+# * for a person who holds a code under device vocabularies only, no other
+#   vocabulary's mapping answers;
+# * a device's proposal qualifies for provisional rows with no ranker's score,
+#   at the floor: the wearable mappings are a curated proposal, written out by
+#   hand, and nobody has put them to a ranker. Its destination may be one of
+#   the local wearable concepts, which stand in where LOINC has none.
+
+def _device_held(vocabularies) -> set | None:
+    """The device vocabularies a code is held under, when it is held under nothing else."""
+    held = {canonical_source_vocabulary(vocabulary) for vocabulary in vocabularies or ()}
+    return held if held and held <= WEARABLE_DEVICE_VOCABULARIES else None
+
+
+def _answering(mappings, vocabularies):
+    """*mappings* (a queryset) narrowed to the code systems that may answer for a holder."""
+    held = _device_held(vocabularies)
+    if held is not None:
+        return mappings.filter(source_vocabulary_id__in=held, organization__isnull=True)
+    return mappings.exclude(source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES)
+
+
+def _code_match(source_value, width):
+    """Match a mapping's code to a row's source value, which is cut to its column.
+
+    A HealthKit identifier runs past the 50 characters a clinical row keeps, so
+    a row at the column's width matches the mappings whose code begins with it.
+    """
+    match = Q(source_code__iexact=source_value[:SOURCE_CODE_MAX])
+    if width and len(source_value) >= width:
+        match |= Q(source_code__istartswith=source_value)
+    return match
+
+
+def _device_holders(mapping, table, model, source_col):
+    """For a device's mapping, the persons who hold its code under its vocabulary; else None.
+
+    A re-point matches rows by code alone, and a device's code can be another
+    system's too. Its rows are those of the persons whose inventory says so.
+    """
+    if mapping.source_vocabulary_id not in WEARABLE_DEVICE_VOCABULARIES:
+        return None
+    width = model._meta.get_field(source_col).max_length or 50
+    return PatientSourceCode.objects.filter(
+        omop_table=table, source_vocabulary_id=mapping.source_vocabulary_id,
+    ).annotate(
+        stored_code=Upper(Substr('source_value', 1, width)),
+    ).filter(stored_code=mapping.source_code[:width].upper()).values('person_id')
+
+
+def proposal_percent(mapping, table) -> int | None:
+    """The confidence a provisional row of this proposal carries, or None when it makes none.
+
+    The one statement of which proposal qualifies, for the resolver, the sweep's
+    index and the mapping trigger: a destination a row may be written at, and a
+    ranker's confidence at or above ``PROVISIONAL_CONFIDENCE_FLOOR``. A wearable
+    device's proposal is the exception described above.
+    """
+    concept = mapping.target_concept
+    curated = mapping.source_vocabulary_id in WEARABLE_DEVICE_VOCABULARIES
+    usable = _usable_destination(concept, table) or (
+        curated and concept is not None and not concept.invalid_reason
+        and concept.vocabulary_id == WEARABLE_LOCAL_VOCABULARY
+        and concept.domain_id == _DOMAIN_FOR_TABLE.get(normalize_omop_table(table)))
+    if not usable:
+        return None
+    floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
+    if mapping.suggestion_confidence is None:
+        # Never 0: null is what an accepted row carries, and a reader that tests
+        # the number for truth would take 0 for one.
+        return max(floor, 1) if curated else None
+    percent = _confidence_percent(mapping.suggestion_confidence)
+    return percent if percent >= floor else None
+
+
 def _identity_for_table(mapping, table):
     """An automatic identity is only usable in its real clinical domain."""
     target = mapping.target_concept
@@ -915,6 +1002,9 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
     qs = model.objects.filter(match, **{concept_col: old_concept_id})
     if person_id is not None:
         qs = qs.filter(person_id=person_id)
+    holders = _device_holders(mapping, table, model, source_col)
+    if holders is not None:
+        qs = qs.filter(person_id__in=holders)
     if units is not None:
         if not any(f.name == 'unit_source_value' for f in model._meta.concrete_fields):
             return result
@@ -1093,6 +1183,9 @@ def promote_provisional_rows(*, mapping, person_id=None):
     qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
     if person_id is not None:
         qs = qs.filter(person_id=person_id)
+    holders = _device_holders(mapping, normalize_omop_table(mapping.omop_table), model, source_col)
+    if holders is not None:
+        qs = qs.filter(person_id__in=holders)
     qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
         mapping, normalize_omop_table(mapping.omop_table), concept_id, model, source_col,
         person_id=person_id))
@@ -1153,6 +1246,10 @@ def revert_provisional_rows(*, mapping, concept_id, person_id=None, omop_table=N
     qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
     if person_id is not None:
         qs = qs.filter(person_id=person_id)
+    holders = _device_holders(
+        mapping, normalize_omop_table(omop_table or mapping.omop_table), model, source_col)
+    if holders is not None:
+        qs = qs.filter(person_id__in=holders)
     if mapping.organization_id:
         qs = exclusively_attributed(qs, mapping.organization_id)
     person_ids = set(qs.values_list('person_id', flat=True).distinct())
@@ -1199,16 +1296,19 @@ def provisional_proposal(source_code, omop_table, vocabularies=None):
     table = normalize_omop_table(omop_table)
     if table not in CLINICAL_TABLES or not source_code:
         return None
+    model, _concept_col, source_col = CLINICAL_TABLES[table]
     proposals = SourceCodeConceptMapping.objects.filter(
-        source_code__iexact=source_code[:SOURCE_CODE_MAX], omop_table=table,
-        status='proposed', organization__isnull=True,
-        target_concept__isnull=False, suggestion_confidence__isnull=False,
+        _code_match(source_code, model._meta.get_field(source_col).max_length),
+        omop_table=table, status='proposed', organization__isnull=True,
+        target_concept__isnull=False,
+    ).filter(
+        Q(suggestion_confidence__isnull=False)
+        | Q(source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES),
     ).select_related('target_concept')
-    floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
     qualifying = {}
     for proposal in proposals:
-        percent = _confidence_percent(proposal.suggestion_confidence)
-        if percent >= floor and _usable_destination(proposal.target_concept, table):
+        percent = proposal_percent(proposal, table)
+        if percent is not None:
             qualifying.setdefault(proposal.target_concept_id, []).append(
                 (proposal.target_concept, percent,
                  canonical_source_vocabulary(proposal.source_vocabulary_id)))
@@ -1234,6 +1334,14 @@ def choose_proposal(entries, vocabularies=None):
     :func:`provisional_proposal`, so a caller holding the entries (the ingest
     check) decides exactly as the resolver does, with no query.
     """
+    # A device's proposal answers only for a holder of the device's code, and
+    # then alone (see "a wearable device's codes" above).
+    held_devices = _device_held(vocabularies)
+    entries = [
+        entry for entry in entries
+        if (entry[2] in held_devices if held_devices is not None
+            else entry[2] not in WEARABLE_DEVICE_VOCABULARIES)
+    ]
     by_target = {}
     for target_id, percent, vocabulary in entries:
         by_target.setdefault(target_id, []).append((percent, vocabulary))
@@ -1324,7 +1432,10 @@ def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=Non
     Returns ``(created_count, detail_list)`` where *detail_list* contains one
     dict per processed PSC entry.
     """
-    psc_qs = PatientSourceCode.objects.filter(person=person)
+    # Not a device's codes: an inventory entry of theirs is written with its
+    # rows, and a row with no reading is nothing a wearable metric can use.
+    psc_qs = PatientSourceCode.objects.filter(person=person).exclude(
+        source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES)
     if source_values:
         psc_qs = psc_qs.filter(source_value__in=source_values)
     if not psc_qs.exists():
@@ -1554,16 +1665,18 @@ def _resolve_groups(person, source_values, omop_tables, person_ids_touched):
         provisional_codes = set(
             qs.filter(confidence__isnull=False).values_list(source_col, flat=True).distinct())
         unresolved_codes, code_systems = set(), {}
+        width = model._meta.get_field(source_col).max_length or 50
+        # Keyed as a row holds the code: cut to its column.
+        for value, vocabulary in PatientSourceCode.objects.filter(
+                person=person, omop_table=table_key).values_list(
+                'source_value', 'source_vocabulary_id'):
+            code_systems.setdefault(value[:width].upper(), set()).add(vocabulary)
         if settings.PROVISIONAL_DATA_ENABLED:
             unresolved_base = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
             if quarantine_concept_ids:
                 unresolved_base |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
             unresolved_codes = set(
                 qs.filter(unresolved_base).values_list(source_col, flat=True).distinct())
-            for value, vocabulary in PatientSourceCode.objects.filter(
-                    person=person, omop_table=table_key).values_list(
-                    'source_value', 'source_vocabulary_id'):
-                code_systems.setdefault(value.upper(), set()).add(vocabulary)
 
         for group in groups:
             sv = group[source_col]
@@ -1573,12 +1686,10 @@ def _resolve_groups(person, source_values, omop_tables, person_ids_touched):
             # approved_mapping_for() which requires a vocabulary_id
             # that clinical rows don't store.
             mapping = (
-                SourceCodeConceptMapping.objects
-                .filter(
-                    source_code__iexact=sv,
-                    omop_table=table_key,
-                    status='approved',
-                )
+                _answering(
+                    SourceCodeConceptMapping.objects.filter(
+                        _code_match(sv, width), omop_table=table_key, status='approved'),
+                    code_systems.get(sv.upper()))
                 .select_related('target_concept', 'destination_unit_concept')
                 .first()
             )

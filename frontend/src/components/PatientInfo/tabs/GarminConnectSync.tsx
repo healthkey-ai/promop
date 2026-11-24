@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
+import { pendingClause } from './wearableResult';
 
 /** How far back one sync may read. The server allows 1 to 90 days. */
 const RANGES = [
@@ -25,6 +26,10 @@ interface SyncResult {
   unmapped_metrics?: string[];
   /** Whether a key is saved for this patient once the sync has run (#2834). */
   key_saved?: boolean;
+  /** Rows a proposed mapping gave a concept; sent only when there are some (#2835). */
+  provisional_samples?: number;
+  /** Readings stored with no approved mapping yet, the provisional ones included; sent only when there are some. */
+  unresolved_samples?: number;
 }
 
 /** What the server says about a saved key: that there is one, never the key. */
@@ -81,7 +86,8 @@ function describe(result: SyncResult): string {
   const parts = [`${count(result.samples_created, 'new value')}`];
   if (result.replaced > 0) parts.push(`${result.replaced} replaced`);
   if (result.duplicates_skipped > 0) parts.push(`${result.duplicates_skipped} already stored`);
-  return `Synced ${result.start_date} to ${result.end_date}: ${parts.join(', ')}.`;
+  const pending = pendingClause(result);
+  return `Synced ${result.start_date} to ${result.end_date}: ${parts.join(', ')}.${pending ? ` ${pending}` : ''}`;
 }
 
 /**

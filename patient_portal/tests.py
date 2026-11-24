@@ -18889,15 +18889,15 @@ class WearableUploadEndpointTest(TestCase):
                 measurement_concept=self.wearable_concepts['walking_step_length'],
             ).exists())
 
-    def test_unresolvable_metric_is_reported_not_silently_dropped(self):
-        """A missing concept must be distinguishable from "no data exported"."""
-        from omop_core.models import Concept
-        from omop_core.services.concept_cache import concept_cache_clear
+    def test_a_metric_with_no_approved_mapping_is_kept_unresolved_and_reported(self):
+        """A reading no approved mapping answers for is stored under its device
+        code and waits (#2835), and the answer says so: neither dropped, nor
+        indistinguishable from "no data exported"."""
+        from omop_core.models import Measurement, PatientSourceCode, SourceCodeConceptMapping
 
-        Concept.objects.filter(
-            concept_id=self.wearable_concepts['vo2_max'].concept_id).delete()
-        concept_cache_clear()
-        self.addCleanup(concept_cache_clear)
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple', source_code='HKQuantityTypeIdentifierVO2Max',
+        ).update(status='proposed', target_concept=None)
 
         xml = """<?xml version="1.0" encoding="UTF-8"?>
 <HealthData>
@@ -18907,9 +18907,17 @@ class WearableUploadEndpointTest(TestCase):
 </HealthData>
 """
         data = self._upload_apple(xml)
-        self.assertEqual(data['samples_created'], 0)
-        self.assertEqual(data['unmapped_samples'], 1, data)
-        self.assertIn('vo2_max', data['unmapped_metrics'])
+        self.assertEqual(data['samples_created'], 1)
+        self.assertEqual(data['unmapped_samples'], 0, data)
+        self.assertEqual((data['unresolved_samples'], data['unresolved_metrics']), (1, ['vo2_max']))
+        row = Measurement.objects.get(
+            person=self.person, measurement_source_value='HKQuantityTypeIdentifierVO2Max')
+        self.assertEqual((row.measurement_concept_id, float(row.value_as_number), row.confidence),
+                         (0, 34.5, None))
+        # The patient holds the code under Apple's vocabulary: the Source Codes tab lists it.
+        self.assertTrue(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='Apple',
+            source_value='HKQuantityTypeIdentifierVO2Max', omop_table='measurement').exists())
 
     def test_rows_are_typed_patient_self_report(self):
         """Provenance must be 32865, not 'Survey' (32883) or 'Lab' (32856). (#441)"""
@@ -19354,7 +19362,8 @@ class GarminSyncEndpointTest(TestCase):
         self.assertEqual(float(steps.value_as_number), 9200.0)
         self.assertEqual(steps.observation_date, self.day)
         self.assertEqual(steps.observation_type_concept_id, WEARABLE_TYPE_CONCEPT_ID)
-        self.assertEqual(steps.observation_source_value, self.wearable_concepts['steps'].concept_code)
+        # Filed under Garmin's own code, as a hospital's result is under its (#2835).
+        self.assertEqual(steps.observation_source_value, 'steps')
         self.assertEqual(steps.unit_source_value, '/d')
         hr = Measurement.objects.get(
             person=self.person, measurement_concept=self.wearable_concepts['resting_hr'])
@@ -19395,11 +19404,20 @@ class GarminSyncEndpointTest(TestCase):
         self.assertEqual(resp.data['samples_created'], 1)
         self.assertEqual(self._values('spo2'), [])
 
-    def test_a_metric_with_no_approved_garmin_mapping_is_reported_not_written(self):
+    def test_a_metric_with_no_garmin_mapping_is_kept_unresolved_and_queued(self):
+        from omop_core.models import Measurement, SourceCodeConceptMapping
         resp, _ = self._sync([self._sample('body_mass', 70.0), self._sample('steps', 9200.0)])
-        self.assertEqual(resp.data['samples_created'], 1)
-        self.assertEqual(resp.data['unmapped_samples'], 1)
-        self.assertEqual(resp.data['unmapped_metrics'], ['body_mass'])
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertEqual(resp.data['unmapped_samples'], 0)
+        self.assertEqual((resp.data['unresolved_samples'], resp.data['unresolved_metrics']),
+                         (1, ['body_mass']))
+        row = Measurement.objects.get(person=self.person, measurement_source_value='body_mass')
+        self.assertEqual((row.measurement_concept_id, float(row.value_as_number)), (0, 70.0))
+        # The code joins the mapping queue, as a hospital's unmapped code does.
+        queued = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin', source_code='body_mass')
+        self.assertEqual((queued.status, queued.target_concept_id, queued.omop_table, queued.metric_key),
+                         ('proposed', None, 'measurement', 'body_mass'))
 
     # -- a day's total replaces what Garmin uploads wrote for the day ---------
 
@@ -36605,11 +36623,15 @@ class OpenWearablesEndpointTest(TestCase):
     def _approve_health_connect(self, metric_key='steps', code='StepsRecord'):
         from omop_core.models import SourceCodeConceptMapping
         concept = self.wearable_concepts[metric_key]
-        return SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='HealthConnect', source_code=code, metric_key=metric_key,
-            target_concept=concept, destination_vocabulary_id=concept.vocabulary_id,
-            domain_id=concept.domain_id, omop_table=concept.domain_id.lower(),
-            status='approved', origin='import')
+        # The queue row a first sync left for the code, if there is one: a
+        # code has one global mapping row.
+        mapping, _created = SourceCodeConceptMapping.objects.update_or_create(
+            source_vocabulary_id='HealthConnect', source_code=code, organization=None,
+            defaults=dict(
+                metric_key=metric_key, target_concept=concept,
+                destination_vocabulary_id=concept.vocabulary_id, domain_id=concept.domain_id,
+                omop_table=concept.domain_id.lower(), status='approved', origin='import'))
+        return mapping
 
     def test_samsung_health_is_read_as_android(self):
         """A Galaxy phone's SDK reads Samsung Health unless the app chose Health Connect."""
@@ -36651,21 +36673,50 @@ class OpenWearablesEndpointTest(TestCase):
         newer.save(update_fields=['target_concept'])
         self.assertEqual(resolve_wearable_mappings('android')['steps'], self.wearable_concepts['flights_climbed'])
 
-    def test_health_connect_is_written_once_its_mappings_are_approved(self):
-        from omop_core.models import WearableUpload
+    def test_health_connect_is_kept_unresolved_until_its_mapping_is_approved(self):
+        """Counted and stored from the first sync (#2835), so nothing is lost
+        while the mapping waits; the next sync after approval accepts it."""
+        from omop_core.models import Observation, PatientSourceCode, WearableUpload
         tokens = self._connect()
         records = [self._record('STEP_COUNT', 4000, f'{self.day.isoformat()}T18:00:00Z', record_id='hc-1')]
         waiting, _ = self._sync(tokens, records, provider='google')
         self.assertEqual(waiting.status_code, 202)
-        self.assertEqual((waiting.json()['unmapped'], waiting.json()['stored']), (1, 0))
+        self.assertEqual((waiting.json()['unmapped'], waiting.json()['stored']), (0, 1))
         self.assertEqual(self._values('steps'), [])
+        row = Observation.objects.get(person=self.person, observation_source_value='StepsRecord')
+        self.assertEqual((row.observation_concept_id, float(row.value_as_number)), (0, 4000.0))
+        self.assertTrue(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='HealthConnect', source_value='StepsRecord').exists())
+
+        # Approved here without the API, whose re-point would resolve the row
+        # at once: the phone's next record for the day does it instead.
         self._approve_health_connect()
-        # Nothing was counted while it was unmapped, so the same records are new now.
-        approved, _ = self._sync(tokens, records, provider='health_connect')
+        more = [self._record('STEP_COUNT', 500, f'{self.day.isoformat()}T19:00:00Z', record_id='hc-2')]
+        approved, _ = self._sync(tokens, more, provider='health_connect')
         self.assertEqual(approved.json()['stored'], 1)
-        self.assertEqual(self._values('steps'), [4000.0])
-        self.assertEqual(WearableUpload.objects.get(person=self.person).device_type, 'android')
+        self.assertEqual(self._values('steps'), [4500.0])
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).first().device_type, 'android')
         self.assertEqual(self._as(self.identity).get(self.STATUS).data['providers'], ['health_connect'])
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_proposed_health_connect_mapping_makes_the_phones_days_provisional(self):
+        from omop_core.models import Observation
+        # As Athena ships it: a proposal's destination has to be a standard concept.
+        Concept.objects.filter(pk=self.wearable_concepts['steps'].pk).update(standard_concept='S')
+        mapping = self._approve_health_connect()
+        mapping.status = 'proposed'
+        mapping.save()
+        tokens = self._connect()
+        records = [self._record('STEP_COUNT', 4000, f'{self.day.isoformat()}T18:00:00Z', record_id='hc-1')]
+
+        proposed, _ = self._sync(tokens, records, provider='health_connect')
+
+        self.assertEqual((proposed.json()['unmapped'], proposed.json()['stored']), (0, 1))
+        rows = Observation.objects.filter(
+            person=self.person, observation_concept=self.wearable_concepts['steps'])
+        # A curated proposal nobody scored stands at the floor.
+        self.assertEqual([(float(r.value_as_number), r.confidence) for r in rows], [(4000.0, 70)])
 
     def test_a_record_that_is_off_stores_nothing_and_does_not_fail_the_phone(self):
         from unittest import mock
@@ -36925,3 +36976,441 @@ class OpenWearablesEndpointTest(TestCase):
         call_command('close_open_wearables_days', stdout=out)
         self.assertIn('Closed 1 day total(s).', out.getvalue())
         self.assertEqual(OpenWearablesDay.objects.get().seen, {})
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True, PROVISIONAL_CONFIDENCE_FLOOR=70)
+class WearableSourceCodesTest(RunsRepointJobsMixin, TestCase):
+    """Wearable readings come in as source codes and are resolved as a hospital's are (#2835).
+
+    A row carries its device's code, the patient's inventory says which device,
+    and the mapping decides the rest: approved is an accepted row, a qualifying
+    proposal a provisional one, anything else an unresolved row that waits.
+    The Garmin Connect read is patched, as in ``GarminSyncEndpointTest``.
+    """
+
+    URL = GarminSyncEndpointTest.URL
+    KEY = GarminSyncEndpointTest.KEY
+
+    @classmethod
+    def setUpTestData(cls):
+        GarminSyncEndpointTest.setUpTestData.__func__(cls)
+        cls.admin = Identity.objects.create_user(
+            email='wearable-codes-admin@test.com', password='pw', is_staff=True)
+        # As Athena ships them: the LOINC concepts are standard, the local
+        # wearable ones (HK-Wearable) are not. A proposal's destination has to
+        # be one or the other for a row to be written from it.
+        Concept.objects.filter(
+            concept_id__in=[c.concept_id for c in cls.wearable_concepts.values()],
+            vocabulary_id='LOINC').update(standard_concept='S')
+        for concept in cls.wearable_concepts.values():
+            concept.refresh_from_db()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    _client_as = GarminSyncEndpointTest._client_as
+    _sample = GarminSyncEndpointTest._sample
+    _sync = GarminSyncEndpointTest._sync
+
+    def _mapping(self, metric_key):
+        from omop_core.models import SourceCodeConceptMapping
+        return SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin', source_code=metric_key)
+
+    def _propose(self, metric_key, confidence=None):
+        """The seeded Garmin mapping as a proposal, as a new device's mappings start."""
+        mapping = self._mapping(metric_key)
+        mapping.status = 'proposed'
+        mapping.suggestion_confidence = confidence
+        mapping.save()
+        return mapping
+
+    def _decide(self, mapping, **changes):
+        """A curator's save through the API, with its re-point run in place."""
+        resp = self._client_as(self.admin).patch(
+            f'/api/v1/code-mappings/{mapping.pk}/', changes, format='json')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        return resp
+
+    def _rows(self, code, person=None):
+        """(value, concept id, confidence) of a person's rows filed under a device code."""
+        from omop_core.models import Measurement, Observation
+        rows = [
+            (float(value), concept_id, confidence)
+            for value, concept_id, confidence in Measurement.objects.filter(
+                person=person or self.person, measurement_source_value=code,
+            ).values_list('value_as_number', 'measurement_concept_id', 'confidence')
+        ] + [
+            (float(value), concept_id, confidence)
+            for value, concept_id, confidence in Observation.objects.filter(
+                person=person or self.person, observation_source_value=code,
+            ).values_list('value_as_number', 'observation_concept_id', 'confidence')
+        ]
+        return sorted(rows)
+
+    def _month(self, metric_key, value):
+        """Ten days of a metric, enough for a 30-day summary."""
+        return [self._sample(metric_key, value + i, self.day - timedelta(days=i)) for i in range(10)]
+
+    def _cid(self, metric_key):
+        return self.wearable_concepts[metric_key].concept_id
+
+    # -- what an import stores ------------------------------------------------
+
+    def test_an_approved_mapping_stores_an_accepted_row_under_the_device_code(self):
+        from omop_core.models import PatientSourceCode
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertNotIn('unresolved_samples', resp.data)
+        self.assertNotIn('provisional_samples', resp.data)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), None)])
+        # The patient's inventory says they hold the code under Garmin's vocabulary.
+        self.assertEqual(
+            sorted(PatientSourceCode.objects.filter(person=self.person).values_list(
+                'source_vocabulary_id', 'source_value', 'omop_table', 'occurrence_count', 'source_unit')),
+            [('Garmin', 'resting_hr', 'measurement', 1, '/min'), ('Garmin', 'steps', 'observation', 1, '/d')])
+
+    def test_a_proposed_mapping_makes_provisional_rows(self):
+        self._propose('steps')                              # curated, nobody scored it
+        self._propose('resting_hr', confidence=0.85)
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertEqual(resp.data['unresolved_metrics'], ['resting_hr', 'steps'])
+        self.assertEqual(resp.data['provisional_samples'], 2)
+        # Unscored stands at the floor; null would read as an accepted row.
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), 85)])
+
+    def test_a_proposal_to_a_local_wearable_concept_qualifies(self):
+        """RMSSD has no LOINC: its concept is local and not standard, and still a destination."""
+        self.assertEqual(self.wearable_concepts['hrv_rmssd'].vocabulary_id, 'HK-Wearable')
+        self._propose('hrv_rmssd')
+        self._sync([self._sample('hrv_rmssd', 48.0)])
+
+        self.assertEqual(self._rows('hrv_rmssd'), [(48.0, self._cid('hrv_rmssd'), 70)])
+
+    def test_a_proposal_scored_below_the_floor_leaves_the_reading_unresolved(self):
+        self._propose('steps', confidence=0.55)
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertNotIn('provisional_samples', resp.data)
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=False)
+    def test_with_provisional_data_off_a_proposed_mapping_keeps_the_reading_unresolved(self):
+        self._propose('steps')
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['unresolved_samples']), (1, 1))
+        self.assertNotIn('provisional_samples', resp.data)
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+    def test_a_proposal_with_no_destination_or_for_one_hospital_makes_nothing_provisional(self):
+        org = Organization.objects.create(name='Wearable Codes Hospital', slug='wearable-codes-hospital')
+        steps = self._propose('steps')
+        steps.organization = org
+        steps.save()
+        resting = self._propose('resting_hr')
+        resting.target_concept = None
+        resting.save()
+
+        self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, 0, None)])
+
+    def test_a_resync_of_a_provisional_day_replaces_it_and_stays_provisional(self):
+        self._propose('steps')
+        self._sync([self._sample('steps', 4000.0)])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+    def test_a_resync_of_an_unresolved_day_replaces_it(self):
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 4000.0)])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+    def test_a_row_stored_before_rows_carried_their_code_is_still_found_as_stored(self):
+        from omop_core.models import Observation
+        concept = self.wearable_concepts['steps']
+        GarminSyncEndpointTest._stored(self, 'garmin', 'steps', [9200.0])
+
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['duplicates_skipped']), (0, 1))
+        self.assertEqual(Observation.objects.filter(person=self.person, observation_concept=concept).count(), 1)
+
+    # -- the rows follow the mapping, by the resolver's own rules -------------
+
+    def test_approving_the_mapping_accepts_its_provisional_rows(self):
+        mapping = self._propose('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+        self._decide(mapping, status='approved')
+
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+        self.patient_rec.refresh_from_db()
+        self.assertEqual(self.patient_rec.derivation_version, 0)
+
+    def test_approving_the_mapping_resolves_its_unresolved_rows(self):
+        mapping = self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+        self._decide(mapping, status='approved')
+
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+    def test_rejecting_the_proposal_reverts_its_rows_and_keeps_the_readings(self):
+        mapping = self._propose('steps')
+        self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self._decide(mapping, status='rejected')
+
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), None)])
+
+    def test_unapproving_keeps_accepted_rows_and_later_readings_are_provisional(self):
+        mapping = self._mapping('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self._decide(mapping, status='proposed')
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+        self._sync([self._sample('steps', 7000.0, self.day - timedelta(days=1))])
+        self.assertEqual(self._rows('steps'),
+                         [(7000.0, self._cid('steps'), 70), (9200.0, self._cid('steps'), None)])
+
+    def test_the_next_import_resolves_rows_a_bulk_update_left_waiting(self):
+        from omop_core.models import SourceCodeConceptMapping
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        # update() fires no signal and queues no re-point.
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin', source_code='steps').update(status='approved')
+
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['duplicates_skipped'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+    def test_generate_omop_resolves_a_wearable_code_like_any_other(self):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.models import Observation, SourceCodeConceptMapping
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin', source_code='steps').update(status='approved')
+
+        with use_dispatcher(FakeDispatcher()):
+            outcome = resolve_person_source_codes(self.person)
+
+        self.assertEqual(outcome['resolved'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+        # No empty row is made for an inventory entry: a wearable row is its reading.
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 1)
+
+    # -- a device's code is not a hospital's of the same spelling -------------
+
+    def _hospital_spo2(self, status='approved', confidence=None):
+        """A hospital's local SPO2 code (the same letters as Garmin's ``spo2``), mapped elsewhere."""
+        from omop_core.models import SourceCodeConceptMapping
+        return SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.3.4.5', source_code='SPO2', omop_table='measurement',
+            target_concept=self.wearable_concepts['vo2_max'], status=status,
+            suggestion_confidence=confidence)
+
+    def test_a_hospitals_mapping_does_not_answer_for_a_devices_code(self):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        self._propose('spo2', confidence=0.2)               # Garmin's own does not qualify
+        self._sync([self._sample('spo2', 97.0)])
+        self._hospital_spo2(status='approved')
+
+        with use_dispatcher(FakeDispatcher()):
+            resolve_person_source_codes(self.person)
+
+        self.assertEqual(self._rows('spo2'), [(97.0, 0, None)])
+
+    def test_a_hospitals_proposal_neither_answers_for_nor_blocks_a_devices_code(self):
+        self._hospital_spo2(status='proposed', confidence=0.95)
+        self._propose('spo2')
+
+        self._sync([self._sample('spo2', 97.0)])
+
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), 70)])
+
+    def test_a_devices_mapping_answers_only_for_a_holder_of_its_code(self):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.models import Measurement
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        from omop_core.services.pk import next_pk
+        # Another patient with a hospital's unresolved SPO2 result and no Garmin inventory.
+        other = Person.objects.create(person_id=99002, family_name='Hospital', given_name='Hal')
+        PatientRecord.objects.create(person=other)
+        Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'), person=other,
+            measurement_concept_id=0, measurement_date=self.day, value_as_number=91,
+            measurement_type_concept_id=32817, measurement_source_value='spo2')
+        mapping = self._propose('spo2')
+        self._sync([self._sample('spo2', 97.0)])
+
+        # Generate OMOP for the other patient, a qualifying Garmin proposal in place...
+        with use_dispatcher(FakeDispatcher()):
+            resolve_person_source_codes(other)
+        self.assertEqual(self._rows('spo2', other), [(91.0, 0, None)])
+        # ...and the approval's own re-point across every patient.
+        self._decide(mapping, status='approved')
+        self.assertEqual(self._rows('spo2', other), [(91.0, 0, None)])
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), None)])
+
+    # -- the 30-day metrics ---------------------------------------------------
+
+    def _record(self):
+        resp = self._client_as(self.admin).get(f'/api/v1/patient-records/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        return resp.data['patient_info']
+
+    def test_a_metric_from_provisional_rows_is_marked_and_one_from_accepted_rows_is_not(self):
+        self._propose('steps', confidence=0.85)
+        self._sync(self._month('steps', 9000.0) + self._month('resting_hr', 50.0))
+
+        self.patient_rec.refresh_from_db()
+        # The approved record holds accepted data only.
+        self.assertIsNone(self.patient_rec.median_daily_steps_30d)
+        self.assertEqual(self.patient_rec.resting_heart_rate_avg_30d, 54)
+
+        record = self._record()
+        self.assertEqual(record['median_daily_steps_30d'], 9004)
+        self.assertEqual(record['resting_heart_rate_avg_30d'], 54)
+        self.assertEqual(record['provisional_fields'].get('median_daily_steps_30d'), 85)
+        self.assertNotIn('resting_heart_rate_avg_30d', record['provisional_fields'])
+
+    def test_an_unresolved_reading_feeds_no_metric_at_all(self):
+        self._propose('steps', confidence=0.2)
+        self._sync(self._month('steps', 9000.0))
+
+        record = self._record()
+        self.assertIsNone(record['median_daily_steps_30d'])
+        self.assertNotIn('median_daily_steps_30d', record['provisional_fields'])
+
+    def test_approval_turns_the_provisional_metric_into_an_accepted_one(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        mapping = self._propose('steps')
+        self._sync(self._month('steps', 9000.0))
+        self.assertEqual(self._record()['provisional_fields'].get('median_daily_steps_30d'), 70)
+
+        self._decide(mapping, status='approved')
+        refresh_patient_record(self.person)
+
+        record = self._record()
+        self.assertEqual(record['median_daily_steps_30d'], 9004)
+        self.assertNotIn('median_daily_steps_30d', record['provisional_fields'])
+
+    def test_a_provisional_wearable_metric_does_not_stop_the_patient_confirming_their_record(self):
+        from omop_core.services.provisional_record import attestation_blockers
+        self._propose('steps')
+        self._sync(self._month('steps', 9000.0))
+
+        self.patient_rec.refresh_from_db()
+        self.assertEqual(attestation_blockers(self.patient_rec), [])
+
+    # -- the Source Codes tab -------------------------------------------------
+
+    def _codes(self):
+        resp = self._client_as(self.admin).get(
+            f'/api/v1/patient-records/{self.person.person_id}/source-codes/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        return {entry['source_code']: entry for entry in resp.data['source_codes']}
+
+    def test_the_source_codes_tab_lists_each_device_code_and_what_its_rows_are(self):
+        self._propose('steps', confidence=0.85)
+        self._propose('spo2', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0), self._sample('steps', 8000.0, self.day - timedelta(days=1)),
+                    self._sample('resting_hr', 52.0), self._sample('spo2', 97.0)])
+
+        codes = self._codes()
+        self.assertEqual(set(codes), {'steps', 'resting_hr', 'spo2'})
+        steps = codes['steps']
+        self.assertEqual(
+            (steps['source_vocabulary_id'], steps['omop_table'], steps['mapping_status'],
+             steps['mapping_id'], steps['mapping_target_concept_id'], steps['row_count']),
+            ('Garmin', 'observation', 'proposed', self._mapping('steps').pk, self._cid('steps'), 2))
+        self.assertEqual(steps['wearable'], {
+            'device': 'garmin', 'source': 'Garmin', 'metric_key': 'steps', 'rows': 2,
+            'accepted_rows': 0, 'provisional_rows': 2, 'unresolved_rows': 0, 'confidence': 85,
+            'first_date': (self.day - timedelta(days=1)).isoformat(), 'last_date': self.day.isoformat(),
+            'status': 'provisional',
+            'fields': [{'name': 'median_daily_steps_30d', 'label': 'Median Daily Steps'},
+                       {'name': 'activity_trend_30d', 'label': 'Activity Trend'}],
+        })
+        self.assertEqual(
+            {key: codes['resting_hr']['wearable'][key]
+             for key in ('status', 'accepted_rows', 'provisional_rows', 'unresolved_rows', 'confidence')},
+            {'status': 'accepted', 'accepted_rows': 1, 'provisional_rows': 0, 'unresolved_rows': 0,
+             'confidence': None})
+        self.assertEqual(
+            (codes['spo2']['wearable']['status'], codes['spo2']['wearable']['unresolved_rows']),
+            ('unresolved', 1))
+
+    def test_a_code_with_rows_of_both_kinds_says_mixed(self):
+        mapping = self._mapping('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self._decide(mapping, status='proposed')
+        self._sync([self._sample('steps', 7000.0, self.day - timedelta(days=1))])
+
+        wearable = self._codes()['steps']['wearable']
+        self.assertEqual((wearable['status'], wearable['accepted_rows'], wearable['provisional_rows'],
+                          wearable['confidence']), ('mixed', 1, 1, 70))
+
+    def test_a_hospital_code_carries_no_wearable_block(self):
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='GLU', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+        self._sync([self._sample('steps', 9200.0)])
+
+        codes = self._codes()
+        self.assertNotIn('wearable', codes['GLU'])
+        self.assertIn('wearable', codes['steps'])
+
+    def test_describing_the_codes_costs_the_same_queries_whatever_their_number(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from omop_core.services import wearable_rows
+        self._sync([self._sample('resting_hr', 52.0)])
+        few = [{'source_value': 'resting_hr', 'source_code': 'resting_hr',
+                'source_vocabulary_id': 'Garmin', 'omop_table': 'measurement'}]
+        with CaptureQueriesContext(connection) as one:
+            wearable_rows.describe(self.person, few)
+        self._sync(self._month('resting_hr', 40.0) + self._month('spo2', 88.0)
+                   + self._month('respiratory_rate', 12.0))
+        many = [{'source_value': code, 'source_code': code, 'source_vocabulary_id': 'Garmin',
+                 'omop_table': 'measurement'} for code in ('resting_hr', 'spo2', 'respiratory_rate')]
+        with CaptureQueriesContext(connection) as three:
+            wearable_rows.describe(self.person, many)
+        self.assertEqual(len(one), len(three))
+        self.assertEqual([entry['wearable']['rows'] for entry in many], [10, 10, 10])
+
+    def test_deleting_the_upload_removes_the_code_from_the_patients_inventory(self):
+        from omop_core.models import PatientSourceCode, WearableUpload
+        self._sync([self._sample('steps', 9200.0)])
+        upload = WearableUpload.objects.get(person=self.person)
+
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._rows('steps'), [])
+        self.assertFalse(PatientSourceCode.objects.filter(person=self.person).exists())

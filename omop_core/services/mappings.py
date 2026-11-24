@@ -339,6 +339,35 @@ WEARABLE_ARTIFACT_BOUNDS = {
     'body_mass':        (20.0, 300.0),     # kg
 }
 
+# The 30-day PatientRecord fields each metric feeds, with the label the Wearables
+# tab gives them. Every metric an import can write has at least one: a reading
+# that reaches OMOP and no summary would be data nobody is shown (#2835).
+# tests/test_wearable_rows.py holds this to WEARABLE_CONCEPT_CODE, to the model
+# and to what the derivation produces.
+WEARABLE_METRIC_FIELDS = {
+    'steps': (('median_daily_steps_30d', 'Median Daily Steps'),
+              ('activity_trend_30d', 'Activity Trend')),
+    'active_minutes': (('active_minutes_per_day_30d', 'Active Minutes / Day'),),
+    'resting_hr': (('resting_heart_rate_avg_30d', 'Resting Heart Rate (bpm)'),),
+    'hrv_sdnn': (('hrv_sdnn_avg_30d', 'HRV SDNN (ms)'),),
+    'hrv_rmssd': (('hrv_rmssd_avg_30d', 'HRV RMSSD (ms)'),),
+    'spo2': (('oxygen_saturation_avg_30d', 'Avg SpO\u2082 (%)'),
+             ('oxygen_saturation_min_30d', 'Min SpO\u2082 (%)')),
+    'respiratory_rate': (('respiratory_rate_avg_30d', 'Respiratory Rate (breaths/min)'),),
+    'sleep_duration': (('sleep_duration_hours_avg_30d', 'Avg Sleep Duration (hours)'),),
+    'vo2_max': (('vo2_max_avg_30d', 'VO\u2082 Max (mL/kg/min)'),),
+    'distance': (('distance_km_per_day_30d', 'Distance (km/day)'),),
+    'walking_speed': (('walking_speed_avg_30d', 'Walking Speed (km/hr)'),),
+    'walking_step_length': (('walking_step_length_avg_30d', 'Step Length (cm)'),),
+    'walking_double_support_pct': (
+        ('walking_double_support_pct_avg_30d', 'Double Support (%)'),),
+    'walking_hr_avg': (('walking_hr_avg_30d', 'Walking Heart Rate (bpm)'),),
+    'flights_climbed': (('flights_climbed_per_day_30d', 'Flights Climbed / Day'),),
+    'active_energy': (('active_energy_per_day_30d', 'Active Energy (kcal/day)'),),
+    'basal_energy': (('basal_energy_per_day_30d', 'Basal Energy (kcal/day)'),),
+    'body_mass': (('body_mass_avg_30d', 'Body Mass (kg)'),),
+}
+
 # Provenance type concept for wearable rows: 32865 'Patient self-report'.
 #
 # OMOP's Type Concept vocabulary contains no device or wearable type — all 81

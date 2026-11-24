@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { VocabSource } from '@/hooks/useVocabulary';
 import { VocabularyTooltip } from '../UI/VocabularyTooltip';
 import FieldMappingLink from './FieldMappingLink';
-import ProvisionalBadge from './ProvisionalBadge';
+import ProvisionalBadge, { AcceptedBadge } from './ProvisionalBadge';
 import SelectControl from './controls/SelectControl';
 import BooleanControl from './controls/BooleanControl';
 import MultiSelectControl from './controls/MultiSelectControl';
@@ -22,6 +22,14 @@ interface FieldProps {
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
   precision?: 'day' | 'month' | 'year' | null;
+  /** Say "Accepted" beside the label when the field holds a value that is not a
+   *  proposal. Opt-in: the Wearables tab, where every value is one or the other. */
+  showAccepted?: boolean;
+}
+
+/** 0 and false are values; null, undefined, '' and an empty list are none. */
+function hasValue(value: unknown): boolean {
+  return value !== null && value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0);
 }
 
 export default function Field({
@@ -35,6 +43,7 @@ export default function Field({
   readOnly,
   vocabSource,
   precision,
+  showAccepted,
 }: FieldProps) {
   const isDisabled = disabled || readOnly;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
@@ -143,7 +152,8 @@ export default function Field({
           {label}
           {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
         </label>
-        <ProvisionalBadge name={name} />
+        <ProvisionalBadge name={name} fromDevice={showAccepted} />
+        {showAccepted && hasValue(value) && <AcceptedBadge name={name} />}
         <FieldMappingLink name={name} label={label} />
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>

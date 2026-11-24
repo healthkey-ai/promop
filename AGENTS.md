@@ -1099,6 +1099,98 @@ follow the copied rows. A missing concept becomes 0 where required, else null.
 
 ---
 
+## Wearables — Readings Come In as Source Codes
+
+A device import (a Garmin sync or push, an Apple Health or `.fit` upload, a
+phone's sync) files each row under the **device's own code**, and from there a
+wearable code is resolved, re-pointed, reverted and listed exactly as a
+hospital's is (#2835). There is no wearable-only path for what a mapping
+means. `omop_core/services/wearable_rows.py` holds what is the device's own;
+`omop_core/mapping/code_resolution.py` decides the rest. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#row-shape-written-today).
+
+| Device (`WearableUpload.device_type`) | Source vocabulary | A row's source value |
+|---|---|---|
+| `garmin` | `Garmin` | the metric key (`steps`) |
+| `apple` | `Apple` | the HealthKit identifier, cut to the 50-character column |
+| `android` | `HealthConnect` | the Health Connect record type (`HEALTH_CONNECT_CODES`; the code of an approved mapping that names the metric wins) |
+
+- **What an import stores.** The approved global mapping for exactly that
+  vocabulary and code gives the row its concept: an **accepted** row. With
+  none, the row is stored **unresolved** (concept 0) where it used to be
+  dropped, the code joins the mapping queue if no row holds it
+  (`queue_unmapped`, `origin_system` `wearable-import`), and the resolver is
+  run for the patient's waiting codes in the same transaction
+  (`resolve_person_source_codes`, `derive=False`): a qualifying proposal
+  makes the rows **provisional**. The response adds `unresolved_samples` /
+  `unresolved_metrics` and `provisional_samples` when there are some;
+  `unmapped_*` is now only a metric the device has no code for.
+- **The inventory is what makes it work.** `record_inventory` writes one
+  `PatientSourceCode` per code (`source_vocabulary_id` the device's, the
+  count of rows stored), as the ETL's source-code upload does. The resolver
+  reads it to tell which code system a row's code came from; the Source
+  Codes tab lists it. An entry with no row left is removed
+  (`prune_inventory`, after an upload is deleted).
+- **Three rules for a device's code, in `code_resolution`** (the block headed
+  "a wearable device's codes"). They exist because a device's row can say
+  which system it came from, and its code is not unique: `spo2` is Garmin's
+  code and two hospitals' local one.
+  1. A device's mapping answers only for a person who holds the code under
+     that device's vocabulary (`_answering`, `choose_proposal`,
+     `_device_holders` on re-point, promote and revert).
+  2. For a person who holds a code under device vocabularies only, no other
+     vocabulary's mapping answers.
+  3. A device's proposal qualifies for provisional rows **unscored, at the
+     floor** (`proposal_percent`): the wearable mappings are a curated
+     proposal nobody put to a ranker. Its destination may be a local
+     `HK-Wearable` concept, which is not standard. A ranker's score below
+     the floor still disqualifies it. **Never 0 and never null**: null is an
+     accepted row in the clinical tables, `patient_record_confidence` and the
+     PHR API's `confidence`, and a reader that tests the number for truth
+     would take 0 for one.
+- **A mapping change is the generic one.** Approving re-points and promotes
+  (`repoint_jobs`, or `repoint_for_person` from a patient's page), rejecting
+  reverts provisional rows to unresolved and **keeps the readings**, a table
+  change relocates. A patient's next import, and Generate OMOP, resolve what
+  a missed hook left (`needs_resolving`).
+- **Finding what is already stored.** `existing_rows` reads rows filed under
+  the code, and rows at the code's concept: what was written before #2835,
+  and another device's reading of the same metric, which was always read as
+  "already stored" at the same value. Replacement by day still goes by the
+  rows an upload's history names.
+- **Rows from before #2835** carried their destination concept's code as the
+  source value. Migration `0371` re-files the ones an upload's history names
+  (`row_id`, since #2794) and writes their inventory; older ones are left,
+  still read by concept, and not listed as device codes.
+- **30-day metrics.** `_get_wearable_data` is one of the provisional pass's
+  readers, so a metric fed only by provisional rows is shown marked, one fed
+  by accepted rows is approved data, and an unresolved reading feeds neither.
+  `WEARABLE_METRIC_FIELDS` (`mappings.py`) names the 30-day fields of every
+  metric an import can write; `tests/test_wearable_rows.py` holds every
+  importer's metrics to it. The Wearables tab marks each value Accepted or
+  Provisional. The fields are not writable, so a provisional one never
+  blocks "Confirm my record".
+- **Source Codes tab.** `wearable_rows.describe` adds a `wearable` block to
+  each device code of `GET patient-records/<id>/source-codes/`: rows
+  accepted, provisional and unresolved, their dates, the lowest provisional
+  confidence, a status (`accepted`, `provisional`, `unresolved`, `mixed`,
+  `none`) and the 30-day fields it feeds. Counts and dates only. The tab
+  shows these in a Wearables section above the other codes
+  (`PatientWearableCodes.tsx`); a row opens the same Edit Mapping dialog.
+- **Not done.** The phone sync writes a day only when it grows, so a day
+  stored unresolved is resolved by the mapping's approval through the API
+  (its re-point), by Generate OMOP, or by the phone's next record for a
+  code, not by a repeat of the same records. The saved-run check after an
+  ETL ingest (`person_needs_resolve`) keys codes at full length, so the one
+  HealthKit identifier longer than the column is resolved by the import
+  itself and by an approval, not by that check.
+
+Tests: `tests/test_wearable_rows.py`,
+`patient_portal.tests.WearableSourceCodesTest`,
+`PatientSourceCodesTab.wearables.test.tsx`, `PatientWearableCodes.test.tsx`.
+
+---
+
 ## Wearables — Garmin Connect Sync
 
 `POST /api/v1/patient-records/sync-garmin/` (`{api_key?, remember?, days?,
@@ -1205,8 +1297,10 @@ Reader: `omop_core/services/garmin_connect.py`. Writer, shared with
   older history: wearable type concept, a value a `garmin` upload lists and
   no other device's does) and writes the total. A new daily-total source must
   use it; the file upload must not.
-- Only metrics with an approved `Garmin` code mapping are read. Floors and
-  weight wait on #444.
+- Every metric the reader returns is stored, under Garmin's own code; what
+  its mapping makes of it is in
+  [Wearables — Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes).
+  Floors and weight are not read yet (#444).
 
 Tests: `tests/test_garmin_connect.py` (Garmin's real client over a fake HTTP
 session), `patient_portal.tests.GarminSyncEndpointTest`,
@@ -1440,17 +1534,18 @@ redirect that would add one.
   first changed batch queues it 75 seconds out and batches in the next 60
   ride on it (`_derive_soon`; a first export is thousands of batches).
   Without a worker it runs in the request, as the Garmin push's does.
-- **HealthKit works as installed; Android waits for approval.** HealthKit
-  records carry the identifiers the approved `Apple` mappings are keyed by.
-  Android records (`health_connect`, its older name `google`, and
+- **HealthKit works as installed; Android is kept and waits for approval.**
+  HealthKit records carry the identifiers the approved `Apple` mappings are
+  keyed by. Android records (`health_connect`, its older name `google`, and
   `samsung`: the Android SDK reads one store, and on a Galaxy phone that is
-  Samsung Health unless the app chose Health Connect) resolve through
-  approved `HealthConnect` mappings by their `metric_key`, and those rows
-  are seeded `proposed`: until a curator approves them an Android phone's
-  records are answered `unmapped`, **not counted and not kept**, so approve
-  them before connecting Android phones. No Health Connect code is seeded
-  for HRV (RMSSD): a curator adds one with metric key `hrv_rmssd` to have
-  it stored.
+  Samsung Health unless the app chose Health Connect) are filed under their
+  Health Connect record type (`wearable_rows.HEALTH_CONNECT_CODES`), and the
+  `HealthConnect` mappings are seeded `proposed`. Until a curator approves
+  one, an Android phone's days are **counted and stored**, unresolved or
+  provisional, and become accepted when the mapping is approved (#2835; see
+  [Wearables — Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)).
+  HRV (RMSSD) has no seeded Health Connect mapping: its first reading queues
+  `HeartRateVariabilityRmssdRecord` for a curator.
 - **What is read.** From an iPhone, the HealthKit types of `_APPLE_TYPE_MAP`
   that the SDK sends; it does not send Apple Exercise Time or Walking Heart
   Rate Average, so active minutes and walking heart rate come only from an
@@ -1467,7 +1562,7 @@ redirect that would add one.
   can store different numbers for the same records; the sync's are in the
   stored unit.
 - **Answers.** 202 with `stored` (records counted), `days_written`,
-  `repeated`, `late`, `unmapped`, `rejected` and `unrecognized`. A day whose
+  `repeated`, `late`, `unmapped` (a metric this device has no code for), `rejected` and `unrecognized`. A day whose
   value falls outside `WEARABLE_ARTIFACT_BOUNDS` is counted and not written.
   401 for a token that is missing, expired or no longer names a phone (the
   SDK refreshes and tries once more), 403 for a good token on another
@@ -2287,6 +2382,12 @@ organization-scoped ones (set when the caller passes an organization for Epic or
 Cerner code systems) are ignored; confirm HealthTree's ETL does not rely on them
 before enabling it there.** Off, nothing is queried, queued or written. See
 [the plan](docs/provisional_data_plan.md#as-built-in-2662-the-server-makes-the-rows).
+
+Which proposal qualifies is stated once, `code_resolution.proposal_percent`,
+and read by the resolver, the sweep's index, the mapping trigger and the
+`fill_provisional_record` report. One exception to "a ranker's confidence at
+or above the floor": a wearable device's proposal, which is curated and
+unscored ([below](#wearables--readings-come-in-as-source-codes)).
 
 ### What the provisional pass reads (#2534)
 
