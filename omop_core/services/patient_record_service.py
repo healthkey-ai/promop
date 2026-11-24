@@ -207,7 +207,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 33
+DERIVATION_VERSION = 34
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1576,7 +1576,15 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             patient_info,
             changed_fields=(
                 user_edited & {'flipi_score_options', 'gelf_criteria_options'}
-            ) | ({'disease'} if 'disease' in user_edited else set()),
+            ) | ({'disease'} if 'disease' in user_edited else set())
+            # A pending edit of a verdict input that survived this refresh is
+            # still not backed by OMOP: re-derive the verdict from the record's
+            # final inputs, as a direct edit does, or SLiM keeps the stale
+            # False from the OMOP scan (#2732).
+            | (
+                MEETS_SLIM_INPUT_FIELDS
+                & set(patient_info.user_edited_fields or ())
+            ),
             # A stated CRAB result (an 89599-5 fact or an approved mapping)
             # stands. Otherwise the verdict comes from the record's final
             # inputs, after pending edits and source pairs are settled, with
