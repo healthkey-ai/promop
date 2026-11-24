@@ -309,6 +309,17 @@ All notable changes to PRomop are documented here.
   legacy column default would otherwise print as a patient answer). A backend
   test keeps the report's list equal to the descriptor's `tri_state` set minus
   that one field.
+- **A pending verdict input decides the verdict on refresh (#2732)** —
+  `refresh_patient_record` derives `meets_slim` from OMOP and then restores
+  pending edits, but the restored SLiM inputs never reached the final
+  recompute, so a patient who edited clonal plasma cells (or a light chain)
+  saw the stale OMOP verdict until they edited something else. The refresh now
+  re-derives `meets_slim` from the record's final inputs whenever a SLiM input
+  survives the refresh as pending, exactly as a direct edit does.
+  `DERIVATION_VERSION` 34; re-derive stale records with
+  `backfill_patient_records` (the cohort is records whose `user_edited_fields`
+  names a SLiM input), comparing `meets_slim` with `preview_rederivation`
+  first.
 - **A `bulk_update` batch releases the keys it changes before writing any
   group (#2709)** — the endpoint applies one `UPDATE` per patched column set,
   so a key transfer between two rows (clear on one, set on another) failed with
