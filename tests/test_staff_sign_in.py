@@ -112,7 +112,8 @@ def test_an_invitation_makes_a_staff_account_with_its_role_and_no_password(fake)
     assert list(identity.groups.values_list('name', flat=True)) == ['Member support']
     invitation.refresh_from_db()
     assert invitation.accepted_identity == identity and not invitation.is_open
-    assert client.get('/admin/').status_code == 200
+    page = client.get('/admin/')
+    assert page.status_code == 200 and b'Alex' in page.content  # greeted by name, not issuer and subject
     assert client.session.get_expiry_age() <= 8 * 3600
     assert client.session[staff_sign_in.PROVIDER_SESSION_KEY] == 'work'
 

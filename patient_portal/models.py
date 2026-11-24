@@ -108,6 +108,14 @@ class Identity(AbstractBaseUser, PermissionsMixin):
 
     objects = IdentityManager()
 
+    def get_full_name(self) -> str:
+        return self.name
+
+    def get_short_name(self) -> str:
+        """What the admin greets the account by: the first name, else the
+        address. Without it Django shows the username, the issuer and subject."""
+        return (self.name or '').split(' ')[0] or self.email or self.uid
+
     @property
     def is_locked(self) -> bool:
         return bool(self.locked_until and self.locked_until > timezone.now())
