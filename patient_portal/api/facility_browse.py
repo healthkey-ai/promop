@@ -92,10 +92,10 @@ def facility_browse(request):
         return Response({'detail': 'page must be a positive integer.'},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    if not facility:
+    if not facility and not system:
         return Response({'facilities': _facility_list(params.get('search', '').strip())})
 
-    systems = _systems_of(facility)
+    systems = {system} if system and not facility else _systems_of(facility)
     counts = _code_counts(systems)
     other = {}
     if facility != UNATTRIBUTED:

@@ -1,9 +1,8 @@
 import type { SourceSystemContext } from "./SourceEvidencePanel";
 
-export function sourceSystemManagementUrl(system: string, facility?: string): string {
-  const params = new URLSearchParams({ system });
-  if (facility) params.set("facility", facility);
-  return `/code-mappings/source-systems?${params.toString()}`;
+/** Browse by facility, showing every code under one exact source system. */
+export function sourceSystemManagementUrl(system: string): string {
+  return `/code-mappings/facilities?${new URLSearchParams({ system }).toString()}`;
 }
 
 export function hospitalContextText(context?: SourceSystemContext): string {

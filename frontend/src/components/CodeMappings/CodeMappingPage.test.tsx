@@ -2974,11 +2974,11 @@ describe("server mapping pages", () => {
     expect(picker.selectedOptions[0].textContent).toContain("UPMC");
     expect(screen.getByText(oid, { selector: "code" })).toBeInTheDocument();
     const systemLink = screen.getByRole("link", { name: oid });
-    expect(systemLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+    expect(systemLink).toHaveAttribute("href", `/code-mappings/facilities?system=${encodeURIComponent(oid)}`);
     expect(systemLink).toHaveAttribute("title", expect.stringContaining("review and manage facilities"));
     expect(screen.queryByRole("link", { name: "Manage hospitals for this source code system" })).not.toBeInTheDocument();
     const facilityLink = screen.getByRole("link", { name: "UPMC" });
-    expect(facilityLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}&facility=UPMC`);
+    expect(facilityLink).toHaveAttribute("href", `/code-mappings/facilities?system=${encodeURIComponent(oid)}`);
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {
@@ -4021,7 +4021,7 @@ describe("write controls follow the role (#2416)", () => {
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Mapping" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Suggest controls" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse by facility" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: `Edit ${proposedRow.source_code}` })).toBeInTheDocument();
   });
 
@@ -4032,7 +4032,7 @@ describe("write controls follow the role (#2416)", () => {
     const cells = await screen.findAllByText(proposedRow.source_code);
     expect(cells.length).toBeGreaterThan(0);
     expect(screen.getByText("Read-only: mapping codes needs the analyst role.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse by facility" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upload" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New Mapping" })).not.toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Suggest controls" })).not.toBeInTheDocument();
@@ -4077,6 +4077,6 @@ describe("write controls follow the role (#2416)", () => {
     renderPage([proposedRow]);
     await screen.findByText("Code Mapping");
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse by facility" })).toBeInTheDocument();
   });
 });

@@ -86,3 +86,9 @@ def test_requires_mapping_read_access(data):
     assert c.get(URL).status_code in (401, 403)
     c.force_authenticate(Identity.objects.create_user(email='p@example.test'))
     assert c.get(URL).status_code == 403
+
+
+def test_system_only_view_lists_that_systems_codes(client, data):
+    body = client.get(URL, {'system': SYS_Q}).json()
+    assert [r['source_code'] for r in body['results']] == ['ALB']
+    assert body['systems'][0]['shared_with_facilities'] == 2
