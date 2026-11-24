@@ -176,3 +176,28 @@ def test_the_shared_form_api_clears_to_unknown():
         'true': 'No concomitant medication',
         'false': 'Takes concomitant medication',
     }
+
+
+def test_the_patient_report_lists_the_tri_state_answers():
+    """The report cannot query the descriptor, so its pinned list must name every
+    tri-state answer the tabs render (#2830)."""
+    import re
+    from pathlib import Path
+
+    from django.conf import settings
+
+    source = Path(
+        settings.BASE_DIR,
+        'frontend/src/components/Patient/download/patientReport.ts',
+    ).read_text()
+    block = source.split('TRI_STATE_FIELDS = new Set([', 1)[1].split(']);', 1)[0]
+    listed = set(re.findall(r"'([a-z_]+)'", block))
+    tri_state = {
+        name for name, entry in build_writable_field_descriptor().items()
+        if isinstance(entry, dict) and entry.get('tri_state') is True
+    }
+
+    # Every tri-state answer the tabs ask must be listed. The medication answer
+    # was never collected in this app, so the report still omits it rather than
+    # print a legacy column default as a patient answer.
+    assert listed == tri_state - {'no_concomitant_medication_status'}
