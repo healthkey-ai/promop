@@ -67,7 +67,7 @@ print('compatible')
 def test_cloud_run_and_external_identity_contracts_are_preserved():
     workflow = (ROOT / '.github/workflows/deploy-staging.yml').read_text()
     assert 'branches: [dev]' in workflow
-    assert 'SERVICE_NAME: ctomop-staging' in workflow
+    assert 'SERVICE_NAME: promop-staging' in workflow
     assert '${ARTIFACT_REPO}/ctomop:${IMAGE_TAG}' in workflow
     assert '--to-latest' in workflow
     dockerfile = (ROOT / 'Dockerfile.gcp').read_text()

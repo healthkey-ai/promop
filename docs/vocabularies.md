@@ -172,7 +172,7 @@ For Google Cloud Storage, upload the Athena CSV files to a bucket root and load
 from the bucket:
 
 ```bash
-VOCAB_BUCKET=ctomop-staging-vocab \
+VOCAB_BUCKET=promop-staging-vocab \
   python manage.py load_athena_vocabularies --bucket "$VOCAB_BUCKET"
 ```
 

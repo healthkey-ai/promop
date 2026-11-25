@@ -158,7 +158,7 @@ def test_loader_requires_exactly_one_source():
         cmd.handle(
             path='/tmp/vocab',
             archive=None,
-            bucket='ctomop-staging-vocab',
+            bucket='promop-staging-vocab',
             gdrive=None,
             replace=False,
             dry_run=True,
