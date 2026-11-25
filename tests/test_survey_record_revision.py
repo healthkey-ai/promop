@@ -174,7 +174,7 @@ def _profile_definition():
             _q(t + 'resp', 'Response?', ['complete', 'partial', 'stable', 'worked_type_unknown', 'not_assessed'],
                visible_if=[{'question': t + 'end', 'op': 'neq', 'value': 'ongoing'}]),
             _q(t + 'back', 'Came back?', ['yes_once', 'yes_more', 'no']),
-            _date(t + 'back_date', 'When?', visible_if=[{'question': t + 'back', 'op': 'in', 'values': ['yes_once', 'yes_more']}]),
+            _date(t + 'back_date', 'When?', ['not_sure'], visible_if=[{'question': t + 'back', 'op': 'in', 'values': ['yes_once', 'yes_more']}]),
             _q(t + 'times', 'How many times?', ['twice', 'three'],
                visible_if=[{'question': t + 'back', 'op': 'eq', 'value': 'yes_more'}]),
         ]
@@ -391,3 +391,54 @@ def test_a_treatment_still_received_since_finished_takes_its_end_date(
     answers = revision_answers(record.person_id, profile.cached_definition, dict(still))
 
     assert answers['t4_end'] == {'date': '2023-03'}
+
+
+CHECKIN = 'checkin-example'
+
+
+@pytest.fixture
+def checkin(profile, settings):
+    """A second questionnaire whose mapping writes when the cancer came back to
+    the patient's latest line, as a deployment's check-in does."""
+    from pathlib import Path
+
+    mapping = {'mapping_version': 1, 'survey': CHECKIN, 'versions': ['1.0'], 'record': [],
+               'therapy_lines': [{'line': 'latest', 'progression_date': 'came_back'}]}
+    (Path(settings.PROLOG_RECORD_MAPPING_DIRS[0]) / 'checkin.json').write_text(json.dumps(mapping))
+    srm.reset_cache()
+    definition = {
+        'schema_version': 1, 'slug': CHECKIN, 'version': '1.0', 'status': 'draft', 'default_language': 'en',
+        'languages': ['en'], 'title': {'en': 'Check-in'},
+        'participation': {'anonymous': False, 'resume': 'account', 'repeatable': True},
+        'sections': [{'key': 's', 'title': {'en': 'Since'}, 'questions': [_date('came_back', 'When did it come back?')]}],
+    }
+    return load_definition(definition, activate=True).version
+
+
+NOT_SURE_WHEN = {**FOUR_LINES, 't4_back': {'option': 'yes_once'}, 't4_back_date': {'option': 'not_sure'}}
+
+
+def test_a_date_another_questionnaire_wrote_since_replaces_not_sure(
+    profile, checkin, patient, django_capture_on_commit_callbacks,
+):
+    record, _ = patient
+    submit(profile, record, NOT_SURE_WHEN, django_capture_on_commit_callbacks)
+    submit(checkin, record, {'came_back': {'date': '2024-05'}}, django_capture_on_commit_callbacks)
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(NOT_SURE_WHEN))
+
+    assert answers['t4_back_date'] == {'date': '2024-05'}
+
+
+def test_a_date_from_a_writer_that_cannot_be_told_replaces_not_sure(
+    profile, patient, django_capture_on_commit_callbacks,
+):
+    record, _ = patient
+    submit(profile, record, FOUR_LINES, django_capture_on_commit_callbacks)
+    not_sure = {**FOUR_LINES, 't1_start': {'option': 'not_sure'}}
+    submit(profile, record, not_sure, django_capture_on_commit_callbacks)
+    srm._write_detail(_line(record), {}, 'an-import:line-1')  # not a response of any questionnaire
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(not_sure))
+
+    assert answers['t1_start'] == {'date': '2019-06'}
