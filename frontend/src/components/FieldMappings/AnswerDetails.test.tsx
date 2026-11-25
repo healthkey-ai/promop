@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { AnswerDetailsPanel } from "./AnswerDetailsPanel";
@@ -382,5 +382,65 @@ describe("FieldChoiceEditor with answer details", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Delete choice In remission/ }));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("retire it instead"));
     expect(await screen.findByText(/retire it to stop offering it/)).toBeInTheDocument();
+  });
+});
+
+describe("lookup options in the editor", () => {
+  const lookup = (over: Record<string, unknown> = {}) => ({
+    source: {
+      kind: "vocabulary", name: "her2-status", label: "Her2Status", enforced: false,
+      source_name: "ASCO/CAP", source_url: "https://example.org/her2", ...over,
+    },
+    options: [{ code: "pos", title: "Positive" }, { code: "neg", title: "Negative" }],
+  });
+  const serve = (lookupBody: unknown, choiceList: unknown[] = []) =>
+    mockGet.mockImplementation(async (url: string) =>
+      ({ data: url.startsWith("/v1/field-choices/lookup/") ? lookupBody : choiceList }));
+
+  const choices = () => [{
+    id: 1, field_name: "her2_status", display: "Positive", sort_order: 0, codes: [], value_mappings: [], retired: false,
+  }];
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("lists a field's lookup read only, without copying it into answers", async () => {
+    serve(lookup());
+    render(<FieldChoiceEditor fieldName="her2_status" onClose={() => {}} canApprove />);
+    const section = await screen.findByRole("region", { name: "Lookup options" });
+    expect(section).toHaveTextContent("Her2Status");
+    expect(section).toHaveTextContent("2 entries");
+    expect(section).toHaveTextContent("shown here read only");
+    expect(mockGet).toHaveBeenCalledWith("/v1/field-choices/lookup/", { params: { field_name: "her2_status" } });
+    expect(screen.queryByText("Positive")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show entries" }));
+    expect(screen.getByText("Positive")).toBeInTheDocument();
+    expect(within(section).queryByRole("button", { name: /Delete|Edit|Add/ })).not.toBeInTheDocument();
+  });
+
+  it("says an enforced lookup wins over answers added here", async () => {
+    serve(lookup({ enforced: true }));
+    render(<FieldChoiceEditor fieldName="her2_status" onClose={() => {}} />);
+    expect(await screen.findByText(/only these entries are offered and answers added below are not/)).toBeInTheDocument();
+  });
+
+  it("says when answers added here replace the tab's lookup", async () => {
+    serve(lookup(), choices());
+    render(<FieldChoiceEditor fieldName="her2_status" onClose={() => {}} />);
+    expect(await screen.findByText(/those are offered instead of these/)).toBeInTheDocument();
+    expect(screen.getByText(/This field has answers below/)).toBeInTheDocument();
+  });
+
+  it("shows nothing for a field with no lookup, and the server's reason when it cannot load", async () => {
+    serve({ source: null, options: [] });
+    const { unmount } = render(<FieldChoiceEditor fieldName="hemoglobin_g_dl" onClose={() => {}} canApprove />);
+    await screen.findByText("No choices defined yet.");
+    expect(screen.queryByRole("region", { name: "Lookup options" })).not.toBeInTheDocument();
+    unmount();
+    mockGet.mockImplementation(async (url: string) => {
+      if (url.startsWith("/v1/field-choices/lookup/")) throw refused({ detail: "Mapping access required." });
+      return { data: [] };
+    });
+    render(<FieldChoiceEditor fieldName="her2_status" onClose={() => {}} canApprove />);
+    expect(await screen.findByText("Mapping access required.")).toBeInTheDocument();
   });
 });

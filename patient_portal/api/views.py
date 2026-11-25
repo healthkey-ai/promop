@@ -18080,6 +18080,66 @@ def field_choice_value_mapping_targets(request, choice_pk):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def field_choice_lookup(request):
+    """GET the controlled lookup a field's options come from, read only (#1225).
+
+    ``?field_name=`` -> ``{field_name, source, options}``. ``source`` is null when
+    the field offers no lookup. Otherwise it names the lookup (``name`` is the slug
+    of ``/vocabularies/<name>/``, ``label`` its table) and says whether the
+    binding is ``enforced`` (the field's approved, complete mapping names it in
+    ``value_vocabulary``, so the write descriptor offers only its titles and the
+    field's own answers are not offered) or only what the tab offers. The
+    entries are the lookup's own, never copied into choices.
+    """
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.option_sources import LOOKUP_FIELDS
+
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
+    field_name = (request.query_params.get('field_name') or '').strip()
+    if not field_name:
+        return Response({'field_name': 'Required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    from omop_core import models as omop_models
+    from omop_core.models import VocabularyLookup
+
+    by_class = {model.__name__: slug for slug, model in _VOCABULARY_REGISTRY.items()}
+    row = (FieldConceptMapping.objects.filter(field_name=field_name, status='approved')
+           .exclude(value_vocabulary='').first())
+    model = None
+    enforced = False
+    if row is not None:
+        # The write descriptor resolves the class by name on the models module,
+        # whatever the registry serves, so this does too.
+        candidate = getattr(omop_models, row.value_vocabulary, None)
+        if isinstance(candidate, type) and issubclass(candidate, VocabularyLookup) and not candidate._meta.abstract:
+            model = candidate
+    if model is None and LOOKUP_FIELDS.get(field_name):
+        model = _VOCABULARY_REGISTRY.get(LOOKUP_FIELDS[field_name])
+    if model is None:
+        return Response({'field_name': field_name, 'source': None, 'options': []})
+    slug = by_class.get(model.__name__, '')
+    if row is not None and model.__name__ == row.value_vocabulary:
+        # The descriptor offers only the lookup's titles when the row is complete
+        # enough to write (a concept and a table) and the lookup has entries.
+        enforced = bool(row.concept_id is not None and row.omop_table)
+    has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
+    order = 'title' if enforced else ('sort_key' if has_sort_key else 'title')
+    rows = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order))
+    enforced = enforced and bool(rows)
+    first = rows[0] if rows else {}
+    return Response({
+        'field_name': field_name,
+        'source': {
+            'kind': 'vocabulary', 'name': slug, 'label': model.__name__, 'enforced': enforced,
+            'source_name': first.get('source_name') or '', 'source_url': first.get('source_url') or '',
+        },
+        'options': [{'code': r['code'], 'title': r['title']} for r in rows],
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def field_choice_answer_coverage(request):
     """GET how many of each field's answers are mapped, apart from its question."""
     from omop_core.services import field_value_mappings as fvm

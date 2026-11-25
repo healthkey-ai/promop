@@ -4,6 +4,7 @@ import api from "@/api/axios";
 import { AnswerConceptPanel } from "./AnswerConceptPanel";
 import { AnswerDetailsPanel } from "./AnswerDetailsPanel";
 import { AnswerHistory } from "./AnswerHistory";
+import { LookupOptions } from "./LookupOptions";
 import type { DiseaseCategoryOption } from "@/types/fieldScope";
 import { AnswerCoverage } from "./AnswerCoverage";
 import {
@@ -212,6 +213,8 @@ export function FieldChoiceEditor({
         ) : (
           <>
             {/* Existing choices */}
+            {/* The editor is opened only by a mapping curator, who may read the lookup. */}
+            <LookupOptions fieldName={fieldName} answers={choices.length} />
             {reviewing && choices.length > 0 && (
               <AnswerCoverage coverage={coverage} filter={filter} onFilter={chooseFilter} />
             )}

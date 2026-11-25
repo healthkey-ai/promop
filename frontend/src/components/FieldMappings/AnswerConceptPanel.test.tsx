@@ -15,6 +15,9 @@ vi.mock("@/api/axios", () => ({
   },
 }));
 
+/** How many times the answers were read; the lookup read beside them is not one. */
+const listReads = () => mockGet.mock.calls.filter(([url]) => String(url).startsWith("/v1/field-choices/?")).length;
+
 const concept = { concept_id: 4014046, vocabulary_id: "SNOMED", concept_code: "103338009", concept_name: "In remission", domain_id: "Observation" };
 
 const mapping = (over: Partial<ValueMapping> = {}): ValueMapping => ({
@@ -153,7 +156,7 @@ describe("answer concept panel in the choice editor", () => {
     fireEvent.change(box, { target: { value: "relap" } });
     fireEvent.click(screen.getByRole("button", { name: "Approve proposal for In remission" }));
     await waitFor(() => expect(mockPost).toHaveBeenCalled());
-    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(listReads()).toBe(2));
     expect(screen.queryByText("Loading...")).toBeNull();
     expect(screen.getByLabelText("Concept search")).toHaveValue("relap");
   });
@@ -164,7 +167,7 @@ describe("answer concept panel in the choice editor", () => {
     render(<FieldChoiceEditor fieldName="disease_activity" onClose={vi.fn()} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: "Approve proposal for In remission" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Only a proposal can be approved.");
-    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(listReads()).toBe(2));
   });
 
   it("does not offer Approve on a proposal whose concept is not loaded", async () => {
