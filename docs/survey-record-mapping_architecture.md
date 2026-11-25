@@ -94,6 +94,41 @@ is offered. Loading refuses a mapping that is not readable JSON, names a field
 check `patient_portal.E007` runs the load at startup, so a broken file fails
 `check` and the deploy rather than every submission.
 
+## Updating answers (revisable questionnaires)
+
+PROlog's revisable questionnaires (RUN-4) let a patient update what they
+submitted: a new response, which this mapping applies like any other. Two
+things keep an update from undoing what has happened since:
+
+- **It starts from the last answers, with what the record says differently
+  now** (`survey_record_revision.revision_answers`, PROlog's
+  `PROLOG_REVISION_ANSWERS_PROVIDER`). The last answers are replayed through
+  the mapping; where the record now holds something other than they would
+  write (a check-in finished a treatment, recorded its response), that answer
+  is read back from the record: the option, date (at its stored precision),
+  number or text its rule takes, and for a numbered line its regimen and
+  names, dates, outcome and details, each from the line itself (its own
+  LOT-n outcome and progression, never the record's summary of later lines).
+  Everything unchanged stays exactly as the patient answered it. Nothing is
+  guessed: a field several questions write (`relapse_count`) is left alone,
+  as is a rule whose `when` the last answers do not meet and a field the last
+  answers give nothing for (the mapping never clears a value, so the record's
+  may be one taken back), unless that question was left unanswered. A last
+  answer the record contradicts, with no single answer for what it says now,
+  is left out and asked again. An answer from the record that its question's
+  conditions would hide opens its way only through questions left unanswered
+  and only where one answer does it; an answer the patient gave is never
+  changed. PROlog checks every answer as one given now. With the record's
+  permission withdrawn, the update starts from the last answers.
+- **What an update takes out goes.** Submitting an update (a response with
+  `revises`) retracts the patient's own lines that the mapping numbers, that
+  this questionnaire wrote (one of the patient's responses to it is among the
+  line's sources), and that the update no longer gives: they took the
+  treatment out. A line another questionnaire added (a check-in's, perhaps
+  after the update started) is not the update's to take out, nor is a line
+  from the EHR or a clinician. Retracting keeps the row for audit. A record
+  field an update no longer gives is not cleared.
+
 ## Not yet
 
 - Fields with no `PatientRecord` column yet; their answers stay in the survey

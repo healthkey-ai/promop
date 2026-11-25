@@ -23,6 +23,7 @@ database by this project's migrations, and every response is bound to an
 | `patient_portal.services.prolog_participant_id` | `PROLOG_PARTICIPANT_RESOLVER` — the signed-in patient's `person_id`, or `None` |
 | `patient_portal.services.create_unidentified_person` | `PROLOG_PARTICIPANT_FACTORY` — mints the person for a respondent who is not signed in |
 | `patient_portal.prolog_facts.facts_for` | `PROLOG_FACTS_PROVIDER` — the facts a questionnaire declares that promop knows about the signed-in patient (see "What v0.7.0 added") |
+| `patient_portal.survey_record_revision.revision_answers` | `PROLOG_REVISION_ANSWERS_PROVIDER` — the answers an update of a revisable questionnaire starts from: the patient's last answers, with what their record says differently now read back through the questionnaire's record mapping, so an update never resubmits answers later questionnaires have overtaken (see survey-record-mapping_architecture.md, "Updating answers"). Used from the PROlog release that adds the hook; inert before it |
 | `REST_FRAMEWORK.DEFAULT_THROTTLE_RATES` | the `run.*` scopes, per hashed client key |
 | `RUNNER_DIST` | the built runner front end, when `PROLOG_RUNNER_DIST` names one |
 
