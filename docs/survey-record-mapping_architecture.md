@@ -56,12 +56,42 @@ wording and no deployment's rules.
 
 A mapping writes only what an answer gives. A skipped or unanswered question, an
 answer given instead of a date ("not sure"), an option the mapping does not
-list, or a rule whose `when` does not hold writes nothing and clears nothing.
-`when` uses PROlog's own condition engine, so a rule's condition means exactly
-what the same condition means in `visible_if`.
+list, or a rule whose `when` does not hold writes nothing and clears nothing,
+unless the mapping says the answer clears the field (below). `when` uses
+PROlog's own condition engine, so a rule's condition means exactly what the
+same condition means in `visible_if`.
 
 A date answer is written as its first day; a record rule may name the field that
 keeps its precision (`diagnosis_date_precision`).
+
+**Clearing.** A date rule may list the options of its question that clear the
+field: `"clears": ["not_sure"]`. A patient who gave a date before and now says
+they are not sure has it removed, with its precision, but only when the value
+is still their own: the last change to the field was theirs, to what it holds
+now (`RecordRevision`). A value a clinician or an import gave stays. A line may
+clear when the disease came back after it, `"clears": {"progression_date":
+["not_sure"]}`, which removes only the progression the patient reported (typed
+patient self-report); a clinical one stays. Its start and end dates cannot be
+cleared: a line needs its start, and a line with no end is one still received.
+`clears` is checked to sit on a date question. A date can also be cleared by
+another answer: a record or detail rule with `"value": null` and a `when` (the
+patient now says it was never transformed), or a line's `clears_when`, PROlog
+conditions that clear its progression (`{"progression_date": [{"question":
+"q_back", "op": "eq", "value": "no"}]}`). Either way only the patient's own
+value is emptied. A clear never empties what was written after the response
+was submitted, so applying an older response again (a retry, a backfill)
+leaves newer answers alone.
+
+**Adding up.** A numeric field may be the sum of several answers:
+`{"field": "relapse_count", "sum": [{"answer": "q_after_first", "values":
+{"yes_once": 1, "no": 0}}, …]}`. Each term maps an option to a number and may
+have its own `when`; the field is written when at least one term counts. A
+questionnaire that asks the same thing after each treatment gives the total
+this way, where separate rules would let the last one win. A sum totals what
+the response itself answers, so it suits a questionnaire that restates the
+whole history each time (an FL profile), not one that asks about part of it.
+Each term counts a whole number, or `null` for an answer that leaves the total
+unknown ("not sure how many"): then the field is not written.
 
 ## Lines
 
