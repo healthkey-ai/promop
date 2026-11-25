@@ -234,11 +234,42 @@ and never the model.
   and a field with an approved concept mapping and answers offers those
   instead, which the section says. `LOOKUP_FIELDS` must match the tabs;
   `tests/test_option_sources.py` fails when a `useVocabulary` call names a
-  lookup no field uses, or an enforced seed names one it does not map. Not
-  here: concept mapping for a lookup's entries (a mapping keyed by provider and
-  code rather than by a choice row, with its migration), and the therapy
-  catalogs, which are lookups of the same kind (`therapy-regimen`,
-  `-component`, `-class`) but carry their own mappings.
+  lookup no field uses, or an enforced seed names one it does not map.
+  **What an entry means as a concept** is decided here too (#1225). Each entry
+  row has a Concept control that opens the same panel an answer has: search,
+  propose, approve, reject, withdraw, history. The decision is held by a
+  `FieldChoice` made when a curator first decides something for the entry
+  (`POST field-choices/lookup/answer/` `{field_name, code}`, mapping curators,
+  `option_sources.ensure_answer`): its context is `lookup:<slug>`, its label the
+  entry's title (which is also how the entry is found again) and its value what
+  the tab stores, the entry's code for `CODE_VALUED` fields (ECOG, Karnofsky)
+  and its title for the rest. Because it is an ordinary choice, propose,
+  approve, revisions, the projection (`answer_concept_ids`: the title and the
+  code both project), the readback (`answer_values_by_concept` returns the
+  stored value for such a row), the curation transfer and the two-role rules
+  all apply unchanged, and no migration was needed. It is **not an answer**:
+  `lookup:` rows are left out of `GET field-choices/`, the descriptors'
+  `choices`, the write descriptor's options, `answer_coverage` and
+  `field_choices.offered`; they cannot be created, renamed, retired, scoped or
+  given codes through the answer endpoints (400), and a `context_key` starting
+  `lookup:` cannot be sent when adding an answer. `GET field-choices/lookup/`
+  returns each entry's `choice_id` and `value_mappings` (null and empty for an
+  entry nobody has decided anything for, so reading makes nothing) and
+  `orphaned`: decisions about a title the lookup no longer has (a renamed
+  entry starts afresh and its old decision stays, listed there). A row holding
+  decisions cannot be deleted either (400, even for an approver): a decision is
+  withdrawn or rejected, so its history stays. **A curated answer speaks over
+  a lookup entry**: in both `answer_concept_ids` and `answer_values_by_concept`
+  a lookup row fills only the spellings (and concepts) no curated answer of the
+  field uses, so a decision about an entry can neither void nor override an
+  answer the field has of its own. The response says whether the field's
+  approved mapping stores a concept (`writes_concepts`): where it stores text
+  (`value_kind` other than `concept`, as `her2_status` does today) a decision is
+  recorded and reviewed but not written, and the section says so. The tab says
+  how many entries have a concept decided. Not here: therapy catalogs, which
+  are lookups of the same kind (`therapy-regimen`, `-component`, `-class`) but
+  carry their own mappings, and reconciling a renamed entry with its old
+  decision.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
   loaded, or that is not a valid target here, cannot be approved here: the

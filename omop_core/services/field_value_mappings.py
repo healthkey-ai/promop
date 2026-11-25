@@ -397,7 +397,7 @@ def _answer_meanings(field_names):
     if not field_names:
         return [], {}, {}, _NO_CONCEPT
     choices = list(FieldChoice.objects.filter(field_name__in=field_names)
-                   .values('pk', 'field_name', 'display', 'value', 'retired_at'))
+                   .values('pk', 'field_name', 'display', 'value', 'retired_at', 'context_key'))
     if not choices:
         return [], {}, {}, _NO_CONCEPT
     ids = [c['pk'] for c in choices]
@@ -504,20 +504,41 @@ def answer_concept_ids(field_names) -> dict[str, dict[str, int]]:
     # means exactly one concept is projected; where a live choice and a retired
     # one share a spelling, the live one speaks.
     choices, meanings, aliases, NONE = _answer_meanings(field_names)
-    live: dict[str, dict[str, set]] = {}
-    retired: dict[str, dict[str, set]] = {}
-    for choice in choices:
-        pk = choice['pk']
-        if pk not in meanings:
-            continue
-        target = retired if choice['retired_at'] else live
-        for text in {choice['display'], choice['value'] or choice['display'], *aliases.get(pk, ())}:
-            target.setdefault(choice['field_name'], {}).setdefault(text, set()).add(meanings[pk])
-    result: dict[str, dict[str, int]] = {}
-    for field in {*live, *retired}:
-        merged = {**retired.get(field, {}), **live.get(field, {})}
-        result[field] = {text: next(iter(concepts)) for text, concepts in merged.items()
-                         if len(concepts) == 1 and NONE not in concepts}
+
+    def spellings(rows):
+        live: dict[str, dict[str, set]] = {}
+        retired: dict[str, dict[str, set]] = {}
+        for choice in rows:
+            pk = choice['pk']
+            if pk not in meanings:
+                continue
+            target = retired if choice['retired_at'] else live
+            for text in {choice['display'], choice['value'] or choice['display'], *aliases.get(pk, ())}:
+                target.setdefault(choice['field_name'], {}).setdefault(text, set()).add(meanings[pk])
+        merged: dict[str, dict[str, set]] = {}
+        for field in {*live, *retired}:
+            merged[field] = {**retired.get(field, {}), **live.get(field, {})}
+        return merged
+
+    def resolved(merged):
+        return {field: {text: next(iter(concepts)) for text, concepts in by_text.items()
+                        if len(concepts) == 1 and NONE not in concepts}
+                for field, by_text in merged.items()}
+
+    curated_rows = [c for c in choices if not c['context_key'].startswith('lookup:')]
+    lookup_rows = [c for c in choices if c['context_key'].startswith('lookup:')]
+    curated = spellings(curated_rows)
+    result = resolved(curated)
+    # A decision about a lookup entry speaks only where no curated answer of the
+    # field uses the spelling: once a field has answers of its own they replace
+    # the lookup, and a lookup decision must not void or override one (a spelling
+    # two answers read differently writes none, so even an ambiguous curated
+    # spelling is left alone).
+    for field, by_text in resolved(spellings(lookup_rows)).items():
+        taken = curated.get(field, {})
+        for text, concept in by_text.items():
+            if text not in taken:
+                result.setdefault(field, {})[text] = concept
     return result
 
 
@@ -538,20 +559,38 @@ def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
     show (the typed ``value`` follows when the editor offers it, #1225).
     """
     choices, meanings, _, NONE = _answer_meanings(field_names)
-    live: dict[str, dict[int, set]] = {}
-    retired: dict[str, dict[int, set]] = {}
-    for choice in choices:
-        meaning = meanings.get(choice['pk'])
-        if meaning is None or meaning is NONE:
-            continue
-        target = retired if choice['retired_at'] else live
-        target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(
-            choice['display'])
-    result: dict[str, dict[int, str]] = {}
-    for field in {*live, *retired}:
-        merged = {**retired.get(field, {}), **live.get(field, {})}
-        result[field] = {concept: next(iter(values)) for concept, values in merged.items()
-                         if len(values) == 1}
+
+    def values(rows):
+        live: dict[str, dict[int, set]] = {}
+        retired: dict[str, dict[int, set]] = {}
+        for choice in rows:
+            meaning = meanings.get(choice['pk'])
+            if meaning is None or meaning is NONE:
+                continue
+            target = retired if choice['retired_at'] else live
+            # What a lookup's tab stores is the entry's own value (its code for
+            # ECOG); an answer's label is what its select shows.
+            shown = (choice['value'] or choice['display']
+                     if choice['context_key'].startswith('lookup:') else choice['display'])
+            target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(shown)
+        merged: dict[str, dict[int, set]] = {}
+        for field in {*live, *retired}:
+            merged[field] = {**retired.get(field, {}), **live.get(field, {})}
+        return merged
+
+    def resolved(merged):
+        return {field: {concept: next(iter(vals)) for concept, vals in by_concept.items() if len(vals) == 1}
+                for field, by_concept in merged.items()}
+
+    curated = values([c for c in choices if not c['context_key'].startswith('lookup:')])
+    result = resolved(curated)
+    # A curated answer speaks over a lookup entry decided to the same concept,
+    # as in the other direction (see ``answer_concept_ids``).
+    for field, by_concept in resolved(values([c for c in choices if c['context_key'].startswith('lookup:')])).items():
+        taken = curated.get(field, {})
+        for concept, value in by_concept.items():
+            if concept not in taken:
+                result.setdefault(field, {})[concept] = value
     return result
 
 
@@ -565,7 +604,7 @@ def coverage(field_name: str | None = None) -> dict[str, dict[str, int]]:
     """
     from omop_core.models import FieldChoice, FieldValueConceptMapping as Mapping
 
-    choices = FieldChoice.objects.filter(retired_at__isnull=True)
+    choices = FieldChoice.objects.filter(retired_at__isnull=True).exclude(context_key__startswith='lookup:')
     if field_name:
         choices = choices.filter(field_name=field_name)
     states: dict[int, str] = {}

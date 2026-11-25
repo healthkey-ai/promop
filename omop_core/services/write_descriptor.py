@@ -142,7 +142,8 @@ def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
     """Return curator-managed displays and their preferred code for every field."""
     result: dict[str, list[tuple[str, str | None]]] = {}
     seen: set[tuple[str, str]] = set()
-    for choice in FieldChoice.objects.prefetch_related('codes').all():
+    # A row holding decisions about a lookup's entries is not offered (option_sources).
+    for choice in FieldChoice.objects.prefetch_related('codes').exclude(context_key__startswith='lookup:'):
         # One answer offered in several contexts (stage I in two staging
         # systems) is one text to accept here; which meaning a record means
         # is the scope's business, not this list's.

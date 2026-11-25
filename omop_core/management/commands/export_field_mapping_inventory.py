@@ -143,6 +143,8 @@ def collect_rows(tables, lookups, frontend):
     for code in tables['field_choice_code']:
         codes[code['choice_id']].append(code)
     for choice in tables['field_choice']:
+        if str(choice.get('context_key') or '').startswith('lookup:'):
+            continue  # holds decisions about a lookup's entries; the lookup is its own inventory
         row = inventory_row('promop_choice', choice['field_name'], choice['id'], choice['display'],
                             field=choice['field_name'], value=choice['display'])
         row['identity_limitation'] = 'Legacy choice ID is stable only within this source database; display is mutable.'

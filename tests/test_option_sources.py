@@ -129,7 +129,7 @@ def test_a_proposed_mapping_does_not_enforce_it():
 
 def test_a_field_with_no_lookup_has_no_source():
     body = as_role('doctor').get(URL, {'field_name': 'hemoglobin_g_dl'}).json()
-    assert body == {'field_name': 'hemoglobin_g_dl', 'source': None, 'options': []}
+    assert body == {'field_name': 'hemoglobin_g_dl', 'source': None, 'options': [], 'orphaned': []}
 
 
 def test_a_field_name_is_required():

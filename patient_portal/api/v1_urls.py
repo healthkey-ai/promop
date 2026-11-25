@@ -76,7 +76,7 @@ from .views import (
     field_choice_list, field_choice_detail, field_choice_codes,
     field_choice_value_mappings, field_choice_value_mapping_decide,
     field_choice_value_mapping_revisions, field_choice_value_mapping_targets,
-    field_choice_answer_coverage, field_choice_lookup,
+    field_choice_answer_coverage, field_choice_lookup, field_choice_lookup_answer,
     field_formula_list, field_formula_detail, field_formula_test,
 )
 from .org_views import (
@@ -301,6 +301,7 @@ urlpatterns = [
     path('field-choices/<int:pk>/', field_choice_detail, name='v1-field-choice-detail'),
     path('field-choices/answer-coverage/', field_choice_answer_coverage, name='v1-field-choice-answer-coverage'),
     path('field-choices/lookup/', field_choice_lookup, name='v1-field-choice-lookup'),
+    path('field-choices/lookup/answer/', field_choice_lookup_answer, name='v1-field-choice-lookup-answer'),
     path('field-choices/<int:choice_pk>/codes/', field_choice_codes, name='v1-field-choice-codes'),
     path('field-choices/<int:choice_pk>/value-mappings/', field_choice_value_mappings,
          name='v1-field-choice-value-mappings'),
