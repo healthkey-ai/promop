@@ -142,10 +142,20 @@ def test_an_invitation_works_once_and_only_for_its_address(fake):
     assert Client().get(f'/admin/sign-in/invitation/{token}/').status_code == 404
 
 
-def test_no_account_without_an_invitation(fake):
+def test_no_account_without_an_invitation(fake, monkeypatch):
+    from django.contrib import admin
+    from django.contrib.auth.models import AnonymousUser
+    from django.test import RequestFactory
+
+    monkeypatch.setattr(admin.site, 'site_header', 'Example back office')
     response, _ = sign_in(Client(), fake, '/admin/sign-in/work/')
 
     assert response.status_code == 403 and b'invitation' in response.content
+    # The deployment's header, as the admin's own context gives it (an admin
+    # theme may take it from its own settings), not Django's.
+    probe = RequestFactory().get('/admin/')
+    probe.user = AnonymousUser()
+    assert str(admin.site.each_context(probe)['site_header']).encode() in response.content
     assert not Identity.objects.filter(sub='sub-1').exists()
 
 

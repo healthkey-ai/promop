@@ -344,7 +344,11 @@ def _audit(request, identity, provider: Provider, outcome: str, **detail):
 
 
 def _refused(request, message: str, status: int = 403):
-    return render(request, 'admin/staff_sign_in_refused.html', {'message': message}, status=status)
+    from django.contrib import admin
+
+    # The admin's own context, so the page carries the deployment's site header.
+    return render(request, 'admin/staff_sign_in_refused.html',
+                  {**admin.site.each_context(request), 'message': message}, status=status)
 
 
 def _on_own_host(request, path: str):
