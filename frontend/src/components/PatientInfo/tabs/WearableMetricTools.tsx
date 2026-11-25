@@ -1,4 +1,4 @@
-import { useContext, useEffect, useId, useState, type ComponentProps } from 'react';
+import { useContext, useEffect, useId, useRef, useState, type ComponentProps } from 'react';
 import { ChartLine, Database } from 'lucide-react';
 import {
   CartesianGrid, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -25,6 +25,8 @@ interface MetricDay {
   /** Provisional rows beside accepted ones on this day: not part of `value`. */
   provisional_rows_excluded: number;
   in_window: boolean;
+  /** Whether the stored aggregate counts this day (in the window, recent enough, and accepted where it needs to be). */
+  counted: boolean;
 }
 
 interface MetricGroup extends OmopFocus {
@@ -41,6 +43,8 @@ interface MetricSeries {
   aggregate: string;
   window: { start: string; end: string } | null;
   days: MetricDay[];
+  /** The derivation reads no reading older than this day, when any wearable reading is newer. */
+  recency_cutoff: string | null;
   truncated: boolean;
   /** Null for a reader who does not see the OMOP tab. */
   groups: MetricGroup[] | null;
@@ -82,6 +86,9 @@ function useMetricSeries(personId: number | undefined, field: string, enabled: b
   return { series, state };
 }
 
+const DAY_MS = 86_400_000;
+const toTime = (iso: string) => new Date(`${iso}T00:00:00Z`).getTime();
+
 function dayLabel(iso: string) {
   const parsed = new Date(`${iso}T00:00:00Z`);
   return Number.isNaN(parsed.getTime())
@@ -91,43 +98,56 @@ function dayLabel(iso: string) {
 
 function Chart({ series }: { series: MetricSeries }) {
   const { days, window } = series;
-  const inWindow = days.filter((d) => d.in_window);
+  // A time axis, so a gap in syncing is a gap on the chart and the 30-day band is 30 days wide.
+  const points = days.map((d) => ({ ...d, time: toTime(d.date) }));
+  const uncounted = days.filter((d) => d.in_window && !d.counted).length;
+  const low = Math.min(points[0].time, window ? toTime(window.start) : Infinity);
+  const high = Math.max(points[points.length - 1].time, window ? toTime(window.end) : -Infinity);
   return (
     <div>
       {/* A chart is a picture of numbers; the same numbers as a table are what a
           screen reader (and a test) can read. */}
       <table className="sr-only">
         <caption>{series.label} by day</caption>
-        <thead><tr><th>Date</th><th>Value</th><th>Rows</th><th>Status</th></tr></thead>
+        <thead><tr><th>Date</th><th>Value</th><th>Rows</th><th>Status</th><th>In the aggregate</th></tr></thead>
         <tbody>
           {days.map((d) => (
             <tr key={d.date}>
               <td>{d.date}</td><td>{d.value}</td><td>{d.rows}</td><td>{STATUS_LABEL[d.status]}</td>
+              <td>{d.counted ? 'Counted' : 'Not counted'}</td>
             </tr>
           ))}
         </tbody>
       </table>
       <div className="h-64 w-full" aria-hidden="true">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={days} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+          <LineChart data={points} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} />
-            <XAxis dataKey="date" tickFormatter={dayLabel} tick={{ fontSize: 11 }} minTickGap={24} />
+            <XAxis
+              dataKey="time"
+              type="number"
+              scale="time"
+              domain={[low - DAY_MS, high + DAY_MS]}
+              tickFormatter={(time) => dayLabel(new Date(Number(time)).toISOString().slice(0, 10))}
+              tick={{ fontSize: 11 }}
+              minTickGap={24}
+            />
             <YAxis tick={{ fontSize: 11 }} width={48} domain={['auto', 'auto']} />
-            {window && inWindow.length > 0 && (
+            {window && (
               <ReferenceArea
-                x1={inWindow[0].date}
-                x2={inWindow[inWindow.length - 1].date}
+                x1={toTime(window.start)}
+                x2={toTime(window.end)}
                 fill="#0f766e"
                 fillOpacity={0.08}
                 ifOverflow="extendDomain"
               />
             )}
             <Tooltip
-              labelFormatter={(label) => dayLabel(String(label))}
+              labelFormatter={(time) => dayLabel(new Date(Number(time)).toISOString().slice(0, 10))}
               formatter={(value) => [String(value), series.label]}
             />
             <Line
-              type="monotone"
+              type="linear"
               dataKey="value"
               stroke="#64748b"
               strokeWidth={1.5}
@@ -135,14 +155,18 @@ function Chart({ series }: { series: MetricSeries }) {
               dot={(props: { cx?: number; cy?: number; payload?: MetricDay; index?: number }) => {
                 const { cx, cy, payload, index } = props;
                 if (cx == null || cy == null || !payload) return <g key={index} />;
+                const color = STATUS_COLOR[payload.status];
+                // A day in the window the aggregate does not count is drawn hollow.
+                const hollow = payload.in_window && !payload.counted;
                 return (
                   <circle
                     key={payload.date}
                     cx={cx}
                     cy={cy}
                     r={3.5}
-                    fill={STATUS_COLOR[payload.status]}
-                    stroke={payload.status === 'accepted' ? STATUS_COLOR.accepted : '#fff'}
+                    fill={hollow ? '#fff' : color}
+                    stroke={color}
+                    strokeWidth={hollow ? 1.5 : 1}
                   />
                 );
               }}
@@ -159,6 +183,12 @@ function Chart({ series }: { series: MetricSeries }) {
           <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: STATUS_COLOR.provisional }} />
           Provisional (no accepted reading that day)
         </span>
+        {uncounted > 0 && (
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block h-2.5 w-2.5 rounded-full border-2 border-slate-500 bg-white" />
+            In the window but not counted in the aggregate ({uncounted})
+          </span>
+        )}
         {window && (
           <span className="inline-flex items-center gap-1">
             <span className="inline-block h-2.5 w-4 rounded-sm bg-teal-700/10" />
@@ -166,6 +196,12 @@ function Chart({ series }: { series: MetricSeries }) {
           </span>
         )}
       </div>
+      {uncounted > 0 && (
+        <p role="note" className="mt-1 text-xs text-muted-foreground">
+          {series.recency_cutoff && `Readings before ${dayLabel(series.recency_cutoff)} are not read while newer ones exist. `}
+          A day that has only provisional readings is not in the value while accepted readings are.
+        </p>
+      )}
     </div>
   );
 }
@@ -222,7 +258,7 @@ function ChartDialog({
                       <span className="ml-2 text-xs text-muted-foreground">{group.table}</span>
                     </span>
                     <span className="text-xs text-muted-foreground">
-                      {group.rows} {group.rows === 1 ? 'row' : 'rows'}
+                      {group.rows} {group.rows === 1 ? 'row' : 'rows'} counted
                     </span>
                   </button>
                 </li>
@@ -242,6 +278,14 @@ function MetricTools({ field, label, hasValue }: { field: string; label: string;
   const [opening, setOpening] = useState(false);
   const [failed, setFailed] = useState(false);
   const noteId = useId();
+  // A lookup that answers after the reader has left the tab must not move them.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   if (!hasValue || personId == null) return null;
 
@@ -253,6 +297,7 @@ function MetricTools({ field, label, hasValue }: { field: string; label: string;
     setFailed(false);
     try {
       const res = await api.get(`/v1/patient-records/${personId}/wearable-metric/`, { params: { field } });
+      if (!mounted.current) return;
       const groups: MetricGroup[] = res.data?.groups ?? [];
       if (groups.length === 0) {
         setFailed(true);
@@ -263,9 +308,9 @@ function MetricTools({ field, label, hasValue }: { field: string; label: string;
         setChartOpen(true);
       }
     } catch {
-      setFailed(true);
+      if (mounted.current) setFailed(true);
     } finally {
-      setOpening(false);
+      if (mounted.current) setOpening(false);
     }
   };
 

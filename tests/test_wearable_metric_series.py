@@ -224,3 +224,50 @@ def test_the_query_count_does_not_grow_with_the_rows(world):
     for offset in range(1, 25):
         measurement(w, w['rest_hr'].concept_id, DAY - timedelta(days=offset), value=60 + offset)
     assert count() == few
+
+
+def test_days_the_aggregate_does_not_count_are_said(world):
+    """The derivation reads only the last 90 days while any wearable reading is that recent."""
+    from django.utils import timezone
+    w = world
+    today = timezone.now().date()
+    rest = w['rest_hr'].concept_id
+    measurement(w, rest, today, value=60)                         # recent: counted
+    measurement(w, rest, today - timedelta(days=20), value=61)    # inside the 90 days: counted
+    measurement(w, rest, today - timedelta(days=100), value=62)   # older than the cutoff: not read
+    anchor(w, today)
+    body = get(w, 'staff', 'resting_heart_rate_avg_30d').json()
+    counted = {d['date']: d['counted'] for d in body['days']}
+    assert counted[today.isoformat()] and counted[(today - timedelta(days=20)).isoformat()]
+    assert counted[(today - timedelta(days=100)).isoformat()] is False
+    assert body['recency_cutoff'] == (today - timedelta(days=90)).isoformat()
+
+
+def test_with_nothing_recent_the_derivation_reads_every_day(world):
+    w = world
+    from django.utils import timezone
+    old = timezone.now().date() - timedelta(days=200)
+    measurement(w, w['rest_hr'].concept_id, old, value=60)
+    anchor(w, old)
+    body = get(w, 'staff', 'resting_heart_rate_avg_30d').json()
+    assert body['recency_cutoff'] is None
+    assert [d['counted'] for d in body['days']] == [True]
+
+
+def test_a_provisional_only_day_is_not_counted_while_accepted_readings_are(world):
+    w = world
+    rest = w['rest_hr'].concept_id
+    measurement(w, rest, DAY, value=60)
+    measurement(w, rest, DAY - timedelta(days=1), value=61, confidence=55)
+    anchor(w)
+    counted = {d['date']: d['counted']
+               for d in get(w, 'staff', 'resting_heart_rate_avg_30d').json()['days']}
+    assert counted == {'2026-11-20': True, '2026-11-19': False}
+
+
+def test_with_no_accepted_reading_the_provisional_days_are_the_value(world):
+    w = world
+    measurement(w, w['rest_hr'].concept_id, DAY, value=61, confidence=55)
+    anchor(w)
+    day, = get(w, 'staff', 'resting_heart_rate_avg_30d').json()['days']
+    assert day['status'] == 'provisional' and day['counted'] is True

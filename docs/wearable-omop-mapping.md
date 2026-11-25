@@ -913,6 +913,12 @@ and, for staff and org admins only, the concept groups holding the rows.
   (`provisional_rows_excluded`). Not applied: the derivation's proof of a
   measurement's unit against its source value, and its cleared-history rule; a
   wearable's row is stored in the unit its importer wrote.
+- **Which days the aggregate counts.** Every day has `counted`: inside the
+  30-day window, not before the derivation's recency cutoff (it reads only the
+  last 90 days while any wearable reading is that recent; `recency_cutoff`),
+  and, when the window holds accepted readings, not a provisional-only day. The
+  chart draws a window day the aggregate does not count hollow and says why.
+  The axis is time, so a gap in syncing is a gap.
 - **The day's value is the derivation's:** a total for steps, active minutes,
   sleep, distance, flights and energy; a mean for the rest; the day's lowest
   reading for Min SpO2. `activity_trend_30d` charts the steps.

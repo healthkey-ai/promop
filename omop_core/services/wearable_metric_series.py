@@ -30,6 +30,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from django.db.models import BooleanField, Case, Count, Min, Q, Sum, Value, When
+from django.utils import timezone
 
 from omop_core.services import omop_row_pages
 from omop_core.services.mappings import (
@@ -170,6 +171,28 @@ def _groups(person, metric: str) -> list[dict]:
     return result
 
 
+# The derivation reads only the last 90 days of readings when any wearable row
+# is that recent, and every row when none is.
+RECENCY_DAYS = 90
+
+
+def _recency_cutoff(person) -> date | None:
+    """The day the derivation drops older readings before, or ``None`` when it keeps them all.
+
+    ``_get_wearable_data`` drops every wearable row older than 90 days whenever
+    *any* wearable row, of any metric, is newer; with none newer it reads all.
+    """
+    cutoff = timezone.now().date() - timedelta(days=RECENCY_DAYS)
+    for table, (code_col, source_col) in _TABLES.items():
+        spec = omop_row_pages.SPECS[table]
+        if spec.model.objects.filter(
+                Q(**{f'{code_col}__in': _ALL_CODES}) | Q(**{f'{source_col}__in': _ALL_CODES}),
+                person=person, is_erroneous=False, value_as_number__isnull=False,
+                **{f'{spec.date}__gte': cutoff}).exists():
+            return cutoff
+    return None
+
+
 def series(person, field: str, anchor: date | None, include_groups: bool) -> dict:
     """The daily values behind *field*, and (for an admin) the groups holding the rows.
 
@@ -186,6 +209,13 @@ def series(person, field: str, anchor: date | None, include_groups: bool) -> dic
     end = anchor if anchor is not None else (ordered[-1] if ordered else None)
     start = end - timedelta(days=WINDOW_DAYS - 1) if end else None
 
+    # Which days the stored aggregate counts. The derivation drops readings older
+    # than its recency cutoff, and, when the metric has accepted readings in the
+    # window, reads those alone: a provisional-only day is then not in the number.
+    cutoff = _recency_cutoff(person)
+    in_window_days = [d for d in ordered if start and start <= d <= end]
+    accepted_in_window = any(daily[d]['accepted']['n'] for d in in_window_days)
+
     days = []
     for day in ordered:
         entry = daily[day]
@@ -200,6 +230,10 @@ def series(person, field: str, anchor: date | None, include_groups: bool) -> dic
             # Provisional rows beside accepted ones are not part of the value.
             'provisional_rows_excluded': entry['provisional']['n'] if accepted else 0,
             'in_window': bool(start and start <= day <= end),
+            # Whether the stored aggregate counts this day.
+            'counted': bool(start and start <= day <= end
+                            and (cutoff is None or day >= cutoff)
+                            and (accepted or not accepted_in_window)),
         })
     return {
         'field': field,
@@ -209,6 +243,7 @@ def series(person, field: str, anchor: date | None, include_groups: bool) -> dic
         'aggregate': _aggregate(field, metric, label),
         'window': {'start': start.isoformat(), 'end': end.isoformat()} if end else None,
         'days': days,
+        'recency_cutoff': cutoff.isoformat() if cutoff else None,
         'truncated': truncated,
         'groups': _groups(person, metric) if include_groups else None,
     }

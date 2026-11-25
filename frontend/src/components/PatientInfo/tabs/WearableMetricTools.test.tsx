@@ -24,9 +24,10 @@ const series = (overrides: Record<string, unknown> = {}) => ({
   aggregate: "Median of the days' step totals",
   window: { start: '2026-10-22', end: '2026-11-20' },
   truncated: false,
+  recency_cutoff: '2026-08-27',
   days: [
-    { date: '2026-11-19', value: 4000, rows: 1, provisional_rows_excluded: 0, status: 'accepted', in_window: true },
-    { date: '2026-11-20', value: 5500, rows: 2, provisional_rows_excluded: 0, status: 'provisional', in_window: true },
+    { date: '2026-11-19', value: 4000, rows: 1, provisional_rows_excluded: 0, status: 'accepted', in_window: true, counted: true },
+    { date: '2026-11-20', value: 5500, rows: 2, provisional_rows_excluded: 0, status: 'provisional', in_window: true, counted: false },
   ],
   groups: [{
     table: 'observations', concept_id: 3, concept_name: 'Steps', concept_code: '55423-8',
@@ -78,6 +79,28 @@ describe('30-day metric tools', () => {
     expect(within(table).getByText('5500')).toBeInTheDocument();
     expect(within(table).getByText('Provisional')).toBeInTheDocument();
     expect(within(table).getByText('Accepted')).toBeInTheDocument();
+    // Whether the stored aggregate counts a day is said, not only drawn.
+    expect(within(table).getByText('Counted')).toBeInTheDocument();
+    expect(within(table).getByText('Not counted')).toBeInTheDocument();
+    expect(within(dialog).getByText(/not counted in the aggregate/i)).toBeInTheDocument();
+  });
+
+  it('does not move the reader once they have left the tab', async () => {
+    let answer: (value: unknown) => void = () => {};
+    mockGet.mockImplementation((url: string) => (
+      String(url).includes('wearable-metric')
+        ? new Promise((resolve) => { answer = resolve; })
+        : Promise.resolve({ data: {} })
+    ));
+    const open = vi.fn();
+    const { unmount } = renderField(5500, open);
+    await userEvent.click(screen.getByRole('button', { name: /omop rows/i }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      '/v1/patient-records/7/wearable-metric/', expect.anything()));
+    unmount();
+    answer({ data: series() });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(open).not.toHaveBeenCalled();
   });
 
   it('says so when no reading is stored', async () => {
