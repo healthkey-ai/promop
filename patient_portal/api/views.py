@@ -2133,8 +2133,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         Requires body ``{"confirm": "DELETE"}``. The request is audited by
         AuditLogMiddleware (record_delete); an explicit log line is also emitted.
         """
-        from patient_portal.models import PatientUser
-        from omop_core.models import GroupAccess, Person
+        from omop_core.models import Person
 
         # Resolve by person_id directly — authorization here is the explicit
         # staff/org-admin check below, which is stricter than mere view access
@@ -2168,19 +2167,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         person_id = person.person_id
-        # Remove a purely-patient login alongside the record; keep an Identity
-        # that is staff or holds provider access, so we don't revoke a provider.
-        # A `patient` grant (an invitation's) is no reason to keep it: a
-        # sign-in left behind opens a new, empty record on its next request (#2851).
-        linked_identity = None
-        pu = PatientUser.objects.filter(person=person).select_related('identity').first()
-        if pu and not (
-            pu.identity.is_staff or pu.identity.is_superuser
-            or GroupAccess.objects.filter(identity=pu.identity).exclude(role='patient').exists()
-        ):
-            linked_identity = pu.identity
+        # A purely-patient login goes with the record; a provider's stays.
+        from patient_portal.erasure import close_account, sign_in_to_close
+        linked_identity = sign_in_to_close(person)
 
-        from patient_portal.erasure import close_account
         with transaction.atomic():
             close_account(person, linked_identity, actor=actor)
 

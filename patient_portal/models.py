@@ -132,6 +132,7 @@ class Identity(AbstractBaseUser, PermissionsMixin):
             ("support_member_accounts",
              "Can help members with their accounts: password reset links, invitations, permission withdrawals"),
             ("manage_staff", "Can invite staff and change or remove their roles"),
+            ("close_member_accounts", "Can close a member's account on their behalf, deleting everything"),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -1030,6 +1031,10 @@ class ConsentEvent(AppendOnlyModel):
     source = models.CharField(max_length=10, choices=SOURCES, default=MEMBER)
     recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     recorded_at = models.DateTimeField(default=timezone.now)
+    # A change staff record on the member's behalf: when the member asked, and
+    # how (e.g. "by email to the support address"). Empty for the member's own.
+    requested_on = models.DateField(null=True, blank=True, help_text='When the member asked, for a change staff recorded.')
+    note = models.CharField(max_length=500, blank=True, default='', help_text='How the member asked; no health details.')
 
     class Meta:
         db_table = 'consent_event'
@@ -1066,7 +1071,8 @@ class ConsentLedgerEntry(AppendOnlyModel):
     """The permission history kept after the account is gone.
 
     Holds the member's email address and what they decided (which purpose or
-    document, which version, when) and nothing else: no foreign key to the
+    document, which version, when, and for a change staff recorded on their
+    behalf the date they asked) and nothing else: no foreign key to the
     account or person, so deleting either leaves this row in place. Written
     in the same transaction as every ConsentEvent and DocumentAcceptance.
     """
@@ -1081,6 +1087,10 @@ class ConsentLedgerEntry(AppendOnlyModel):
     decision = models.CharField(max_length=10, help_text='A ConsentEvent decision, or "accepted" for a document.')
     frequency = models.CharField(max_length=30, blank=True, default='')
     recorded_at = models.DateTimeField(default=timezone.now)
+    # When the member asked, for a change staff recorded on their behalf: kept
+    # with the decision, as evidence it was theirs. No note: free text stays
+    # with the account, not in the six-year history.
+    requested_on = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = 'consent_ledger_entry'

@@ -336,6 +336,7 @@ def _audit(request, identity, provider: Provider, outcome: str, **detail):
         AuditEvent.objects.create(
             event_type=AuditEvent.EVENT_AUTH, method=request.method, path=reverse('staff-sign-in-callback'),
             user_id=str(identity.pk) if identity is not None else None,
+            user_email=(identity.email or None) if identity is not None else None,
             detail={'staff_sign_in': outcome, 'provider': provider.key, **detail},
         )
     except Exception:  # noqa: BLE001 - the audit trail's own failure is logged, not raised

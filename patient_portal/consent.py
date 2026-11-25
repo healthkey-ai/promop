@@ -301,6 +301,7 @@ def record_consent(
     person, purpose: ConsentPurpose | str, decision: str, *, version: str | None = None,
     language: str = DEFAULT_LANGUAGE, frequency: str = '', recorded_by=None,
     source: str = ConsentEvent.MEMBER, recorded_at=None, email: str | None = None,
+    requested_on=None, note: str = '',
 ) -> ConsentEvent:
     """Append one answer and its ledger entry, in one transaction.
 
@@ -323,6 +324,7 @@ def record_consent(
         return _record_consent(
             person, purpose, decision, version=version, language=language, frequency=frequency,
             recorded_by=recorded_by, source=source, recorded_at=recorded_at, email=email,
+            requested_on=requested_on, note=note,
         )
 
 
@@ -336,7 +338,7 @@ def _lock_answers_of(person) -> None:
 
 
 def _record_consent(person, purpose, decision, *, version, language, frequency, recorded_by, source,
-                    recorded_at, email) -> ConsentEvent:
+                    recorded_at, email, requested_on=None, note='') -> ConsentEvent:
     if source == ConsentEvent.MEMBER:
         if not purpose.is_active:
             raise ValidationError(f'{purpose.key} is not active.')
@@ -391,11 +393,12 @@ def _record_consent(person, purpose, decision, *, version, language, frequency, 
         event = ConsentEvent.objects.create(
             person=person, purpose=purpose, text=text, version=version, language=text.language,
             decision=decision, frequency=frequency, source=source, recorded_by=recorded_by, recorded_at=when,
+            requested_on=requested_on, note=note[:500],
         )
         ConsentLedgerEntry.objects.create(
             email=addr, kind=ConsentLedgerEntry.CONSENT,
             key=purpose.key, version=version, language=text.language, decision=decision,
-            frequency=frequency, recorded_at=when,
+            frequency=frequency, recorded_at=when, requested_on=requested_on,
         )
         # The record depends on this permission: its health answers go now,
         # with the answer that ends it, or neither is kept.
@@ -404,7 +407,8 @@ def _record_consent(person, purpose, decision, *, version, language, frequency, 
             erase_record(person, actor=recorded_by, purpose=purpose.key)
         # What depends on it stops with it, on the record and in the ledger.
         if ends_grant:
-            _withdraw_dependents(person, purpose, when=when, recorded_by=recorded_by, email=addr)
+            _withdraw_dependents(person, purpose, when=when, recorded_by=recorded_by, email=addr,
+                                 requested_on=requested_on)
     return event
 
 
@@ -416,7 +420,7 @@ def _granted(person, key: str) -> bool:
     return latest == ConsentEvent.GRANTED
 
 
-def _withdraw_dependents(person, purpose: ConsentPurpose, *, when, recorded_by, email) -> None:
+def _withdraw_dependents(person, purpose: ConsentPurpose, *, when, recorded_by, email, requested_on=None) -> None:
     """Withdraw each purpose that requires ``purpose`` and is still granted,
     under the version the member granted, as a system event. Each in turn
     withdraws its own dependents."""
@@ -433,7 +437,7 @@ def _withdraw_dependents(person, purpose: ConsentPurpose, *, when, recorded_by, 
         record_consent(
             person, dependent, ConsentEvent.WITHDRAWN, version=standing.version, language=standing.language,
             recorded_by=recorded_by, source=ConsentEvent.SYSTEM, recorded_at=max(when, standing.recorded_at),
-            email=email,
+            email=email, requested_on=requested_on,
         )
 
 
@@ -566,7 +570,9 @@ def consent_history(person, *, include_legacy: bool = False) -> list[dict]:
     """Every answer and acceptance the member has, newest first: what it was
     (``kind`` consent or document, its ``key`` and the ``title`` of the
     wording answered), the decision, the version and language, the frequency,
-    who recorded it (``source``) and when. The history endpoint, the record
+    who recorded it (``source``) and when, and for a change staff recorded on
+    the member's behalf when they asked and staff's note (``requested_on``,
+    ``note``). The history endpoint (its own fields), the record
     export's PDF and its FHIR Consent resources all read this. ``current`` is
     true on the row that is the member's position for that key.
 
@@ -579,6 +585,7 @@ def consent_history(person, *, include_legacy: bool = False) -> list[dict]:
             'kind': 'consent', 'key': e.purpose.key, 'title': e.text.title if e.text else e.purpose.key,
             'decision': e.decision, 'version': e.version, 'language': e.language, 'frequency': e.frequency,
             'source': e.source, 'recorded_at': e.recorded_at, 'order': e.id,
+            'requested_on': e.requested_on, 'note': e.note,
         }
         for e in ConsentEvent.objects.filter(person=person).select_related('purpose', 'text')
     ]
@@ -586,7 +593,7 @@ def consent_history(person, *, include_legacy: bool = False) -> list[dict]:
         {
             'kind': 'document', 'key': a.document.key, 'title': a.text.title if a.text else a.document.name,
             'decision': ACCEPTED, 'version': a.version, 'language': a.language, 'frequency': '',
-            'source': a.source, 'recorded_at': a.accepted_at, 'order': a.id,
+            'source': a.source, 'recorded_at': a.accepted_at, 'order': a.id, 'requested_on': None, 'note': '',
         }
         for a in DocumentAcceptance.objects.filter(person=person).select_related('document', 'text')
     ]
@@ -599,7 +606,7 @@ def consent_history(person, *, include_legacy: bool = False) -> list[dict]:
                 'kind': 'legacy', 'key': c.consent_type, 'title': c.get_consent_type_display(),
                 'decision': ConsentEvent.GRANTED if c.consent_granted else ConsentEvent.DECLINED,
                 'version': '', 'language': '', 'frequency': '', 'source': ConsentEvent.MEMBER,
-                'recorded_at': c.consent_date, 'order': c.id,
+                'recorded_at': c.consent_date, 'order': c.id, 'requested_on': None, 'note': '',
             }
             for c in PatientConsent.objects.filter(patient_user__person=person)
         ]
@@ -655,4 +662,12 @@ def consent_fhir_resources(person, patient_ref: str) -> list[dict]:
             },
             'provision': {'type': 'permit' if permits else 'deny'},
         })
+        # A change staff recorded for the member: when they asked, and how.
+        extension = []
+        if row['requested_on']:
+            extension.append({'url': 'urn:promop:consent-requested-on', 'valueDate': row['requested_on'].isoformat()})
+        if row['note']:
+            extension.append({'url': 'urn:promop:consent-note', 'valueString': row['note']})
+        if extension:
+            resources[-1]['extension'] = extension
     return resources
