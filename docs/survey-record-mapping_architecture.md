@@ -56,12 +56,29 @@ wording and no deployment's rules.
 
 A mapping writes only what an answer gives. A skipped or unanswered question, an
 answer given instead of a date ("not sure"), an option the mapping does not
-list, or a rule whose `when` does not hold writes nothing and clears nothing.
-`when` uses PROlog's own condition engine, so a rule's condition means exactly
-what the same condition means in `visible_if`.
+list, or a rule whose `when` does not hold writes nothing and clears nothing,
+unless the mapping says the answer clears the field (below). `when` uses
+PROlog's own condition engine, so a rule's condition means exactly what the
+same condition means in `visible_if`.
 
 A date answer is written as its first day; a record rule may name the field that
 keeps its precision (`diagnosis_date_precision`).
+
+**Clearing.** A date rule may list the options of its question that clear the
+field: `"clears": ["not_sure"]`. A patient who gave a date before and now says
+they are not sure has it removed, with its precision. It is the patient's own
+edit, so it empties only what they had said: a clinical fact sits beside a
+patient's as its own fact and is never touched. A line may clear when the
+disease came back after it, `"clears": {"progression_date": ["not_sure"]}`,
+which removes the line's own progression. Its start and end dates cannot be
+cleared: a line needs its start, and a line with no end is one still received.
+
+**Adding up.** A numeric field may be the sum of several answers:
+`{"field": "relapse_count", "sum": [{"answer": "q_after_first", "values":
+{"yes_once": 1, "no": 0}}, …]}`. Each term maps an option to a number and may
+have its own `when`; the field is written when at least one term counts. A
+questionnaire that asks the same thing after each treatment gives the total
+this way, where separate rules would let the last one win.
 
 ## Lines
 

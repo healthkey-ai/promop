@@ -19,9 +19,10 @@ mapping as the patient:
 
 A mapping writes only what an answer gives: a skipped or unanswered question,
 an option the mapping does not list, or a rule whose ``when`` does not hold
-writes nothing, and never clears a field. Applying a response again writes the
-same values, so a retry or a backfill is safe; a later response overwrites
-what an earlier one wrote.
+writes nothing. A field is cleared only where the mapping says an answer
+clears it (``clears``, below). Applying a response again writes the same
+values, so a retry or a backfill is safe; a later response overwrites what an
+earlier one wrote.
 
 A mapping file (JSON, ``mapping_version`` 1)::
 
@@ -53,9 +54,20 @@ A mapping file (JSON, ``mapping_version`` 1)::
 Record rules take their value from exactly one of: ``answer`` (a question key;
 ``values`` maps an option to the value written, and is required for a choice;
 a date answer is written as its first day, with its precision in
-``precision_field`` when named), ``value`` (a constant), or ``submitted_on``
-(the submission's date). ``when`` is a list of PROlog conditions, evaluated
-with PROlog's own engine, so it means what ``visible_if`` means.
+``precision_field`` when named), ``value`` (a constant), ``submitted_on``
+(the submission's date), or ``sum`` (a number added up from several answers:
+a list of terms, each ``{"answer", "values"}`` mapping an option to a number,
+with its own ``when``; written when at least one term counts). ``when`` is a
+list of PROlog conditions, evaluated with PROlog's own engine, so it means what
+``visible_if`` means.
+
+A date rule may list the options of its question that clear the field
+(``"clears": ["not_sure"]``): answering one of them writes the field, and its
+precision, empty. As the patient's own edit, that empties only what they had
+said; a clinical fact is never touched. A line may do the same for when the
+disease came back after it (``"clears": {"progression_date": ["not_sure"]}``);
+its start and end dates cannot be cleared, since a line needs a start and a
+line with no end is one still received.
 
 A line's ``line`` is its number, ``"next"`` (a new line after the person's
 last one: a treatment reported later) or ``"latest"`` (their last line: a
@@ -87,7 +99,9 @@ logger = logging.getLogger(__name__)
 
 MAPPING_VERSION = 1
 QUESTIONNAIRE = 'questionnaire'
-_RECORD_SOURCES = ('answer', 'value', 'submitted_on')
+_RECORD_SOURCES = ('answer', 'value', 'submitted_on', 'sum')
+# Line dates an answer may clear: a line needs its start, and one with no end is still received.
+_LINE_CLEARABLE = ('progression_date',)
 _LINE_DATES = ('start_date', 'end_date', 'progression_date')
 _TARGETS = ('next', 'latest')
 
@@ -153,7 +167,7 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
             fail(f'{where}: give exactly one of answer, value, submitted_on')
         if rule.get('precision_field') is not None and rule['precision_field'] not in fields:
             fail(f'{where}: precision_field must be a PatientRecord field')
-        _check_when(rule, where, fail)
+        _check_value_rule(rule, where, fail)
     numbers = set()
     detail_fields = _detail_fields()
     for i, line in enumerate(mapping.get('therapy_lines', [])):
@@ -180,12 +194,37 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
                 fail(f'{where}.details[{j}]: give exactly one of answer, value, submitted_on')
             if rule.get('precision_field') is not None and rule['precision_field'] not in detail_fields:
                 fail(f'{where}.details[{j}]: precision_field must be a line detail')
-            _check_when(rule, f'{where}.details[{j}]', fail)
+            _check_value_rule(rule, f'{where}.details[{j}]', fail)
         outcome = line.get('outcome')
         if outcome is not None and (not isinstance(outcome, dict) or 'answer' not in outcome
                                     or not isinstance(outcome.get('values'), dict)):
             fail(f'{where}: outcome needs an answer and values')
+        clears = line.get('clears', {})
+        if not isinstance(clears, dict) or any(
+                key not in _LINE_CLEARABLE or not line.get(key) or not _option_list(options)
+                for key, options in clears.items()):
+            fail(f'{where}: clears maps a mapped {" or ".join(_LINE_CLEARABLE)} to the options that clear it')
         _check_when(line, where, fail)
+
+
+def _option_list(value) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(o, str) for o in value)
+
+
+def _check_value_rule(rule: dict, where: str, fail) -> None:
+    """A record or detail rule's ``clears`` and ``sum``, and its ``when``."""
+    if 'clears' in rule and ('answer' not in rule or 'values' in rule or not _option_list(rule['clears'])):
+        fail(f'{where}: clears lists the options of a date answer that clear the field')
+    if 'sum' in rule:
+        terms = rule['sum']
+        if not isinstance(terms, list) or not terms or not all(
+                isinstance(t, dict) and isinstance(t.get('answer'), str) and isinstance(t.get('values'), dict)
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in t['values'].values())
+                for t in terms):
+            fail(f'{where}: sum is a list of terms, each an answer and the number each option counts')
+        for k, term in enumerate(terms):
+            _check_when(term, f'{where}.sum[{k}]', fail)
+    _check_when(rule, where, fail)
 
 
 def _check_when(rule: dict, where: str, fail) -> None:
@@ -226,6 +265,11 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
                 options(rule['answer'], rule['values'], where)
             else:
                 question(rule['answer'], where)
+            if 'clears' in rule:
+                options(rule['answer'], rule['clears'], f'{where}.clears')
+        for k, term in enumerate(rule.get('sum', [])):
+            options(term['answer'], term['values'], f'{where}.sum[{k}]')
+            conditions(term, f'{where}.sum[{k}]')
         conditions(rule, where)
 
     for i, rule in enumerate(mapping.get('record', [])):
@@ -241,6 +285,8 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
         for key in ('names', *_LINE_DATES):
             if line.get(key):
                 question(line[key], f'{where}.{key}')
+        for key, cleared_by in line.get('clears', {}).items():
+            options(line[key], cleared_by, f'{where}.clears.{key}')
         conditions(line, where)
     return problems
 
@@ -303,6 +349,15 @@ def _values(rules: list[dict], answers: dict[str, dict], submitted_on: dt.date) 
             patch[field_name] = rule['value']
         elif rule.get('submitted_on'):
             patch[field_name] = submitted_on.isoformat()
+        elif 'sum' in rule:
+            counted = [term['values'][option] for term in rule['sum']
+                       if _holds(term, answers) and (option := _option(answers, term['answer'])) in term['values']]
+            if counted:
+                patch[field_name] = sum(counted)
+        elif _option(answers, rule['answer']) in rule.get('clears', ()):
+            patch[field_name] = None
+            if rule.get('precision_field'):
+                patch[rule['precision_field']] = None
         else:
             given = answers.get(rule['answer']) or {}
             if 'values' in rule:
@@ -346,6 +401,11 @@ def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
         for key in _LINE_DATES:
             if line.get(key) and (dated := answer_date(answers.get(line[key]))) is not None:
                 kwargs[key], detail[f'{key}_precision'] = dated
+            elif _option(answers, line.get(key) or '') in line.get('clears', {}).get(key, ()):
+                # The patient no longer gives the date: the line's own is removed
+                # (the writer deletes what a replace sets to nothing).
+                kwargs[key], detail[f'{key}_precision'] = None, None
+                kwargs['replace'] = True
         outcome = line.get('outcome')
         if outcome and (value := outcome['values'].get(_option(answers, outcome['answer']))):
             kwargs['outcome'] = value

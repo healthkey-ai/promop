@@ -46,6 +46,12 @@ DEFINITION = {
          'options': [_option('complete'), _option('unsure')]},
         {'key': 'trial', 'type': 'single', 'text': {'en': 'In a trial?'}, 'required': False,
          'options': [_option('yes'), _option('no')]},
+        {'key': 'progressed', 'type': 'date', 'text': {'en': 'When did it come back?'}, 'required': False,
+         'config': {'precision': ['month', 'year']}, 'options': [_option('not_sure')]},
+        {'key': 'came_back', 'type': 'single', 'text': {'en': 'Came back after the first?'}, 'required': False,
+         'options': [_option('yes_once'), _option('no')]},
+        {'key': 'came_back_2', 'type': 'single', 'text': {'en': 'Came back after the second?'}, 'required': False,
+         'options': [_option('yes_once'), _option('twice'), _option('no')]},
     ]}],
 }
 
@@ -494,3 +500,93 @@ def test_latest_never_updates_a_line_from_the_ehr(mapped, checkin, patient, djan
     submit(checkin, record, {'finished_on': {'date': '2023-12'}}, django_capture_on_commit_callbacks)
 
     assert Episode.objects.get(person=record.person, episode_number=1).episode_end_date is None
+
+
+# --- answers that clear, and answers added up ----------------------------------
+
+CLEARING = {
+    **MAPPING,
+    'record': [
+        {'field': 'diagnosis_date', 'answer': 'diagnosed', 'precision_field': 'diagnosis_date_precision',
+         'clears': ['not_sure']},
+        {'field': 'relapse_count', 'sum': [
+            {'answer': 'came_back', 'values': {'yes_once': 1, 'no': 0}},
+            {'answer': 'came_back_2', 'values': {'yes_once': 1, 'twice': 2, 'no': 0}},
+        ]},
+    ],
+    'therapy_lines': [{**MAPPING['therapy_lines'][0], 'progression_date': 'progressed',
+                       'clears': {'progression_date': ['not_sure']}}],
+}
+
+
+@pytest.fixture
+def clearing(settings, tmp_path):
+    (tmp_path / 'history.json').write_text(json.dumps(CLEARING))
+    settings.PROLOG_RECORD_MAPPING_DIRS = [str(tmp_path)]
+    settings.CELERY_BROKER_URL = ''
+    srm.reset_cache()
+    yield load_definition(json.loads(json.dumps(DEFINITION)), activate=True).version
+    srm.reset_cache()
+
+
+def test_not_sure_clears_a_date_the_patient_gave_before(clearing, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    submit(clearing, record, ANSWERS, django_capture_on_commit_callbacks)
+    assert PatientRecord.objects.get(pk=record.pk).diagnosis_date == dt.date(2019, 3, 1)
+
+    submit(clearing, record, {**ANSWERS, 'diagnosed': {'option': 'not_sure'}}, django_capture_on_commit_callbacks)
+
+    record = PatientRecord.objects.get(pk=record.pk)
+    assert record.diagnosis_date is None and not record.diagnosis_date_precision
+
+
+def test_not_sure_clears_when_it_came_back_after_a_line(clearing, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    submit(clearing, record, {**ANSWERS, 'progressed': {'date': '2021-01'}}, django_capture_on_commit_callbacks)
+    assert PatientRecord.objects.get(pk=record.pk).first_line_progression_date == dt.date(2021, 1, 1)
+
+    submit(clearing, record, {**ANSWERS, 'progressed': {'option': 'not_sure'}}, django_capture_on_commit_callbacks)
+
+    assert PatientRecord.objects.get(pk=record.pk).first_line_progression_date is None
+    line = Episode.objects.get(person=record.person, episode_number=1)
+    assert (line.episode_start_date, line.episode_end_date) == (dt.date(2019, 6, 1), dt.date(2019, 11, 1))
+    assert line.detail.progression_date_precision is None
+
+
+def test_a_sum_adds_up_each_answer_that_counts(clearing, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    # Nothing counted: the mapping writes nothing (the record keeps its own default).
+    assert 'relapse_count' not in srm.record_patch(CLEARING, ANSWERS, dt.date(2026, 1, 1))
+
+    submit(clearing, record, {**ANSWERS, 'came_back': {'option': 'yes_once'}, 'came_back_2': {'option': 'twice'}},
+           django_capture_on_commit_callbacks)
+    assert PatientRecord.objects.get(pk=record.pk).relapse_count == 3
+
+    submit(clearing, record, {**ANSWERS, 'came_back': {'option': 'no'}, 'came_back_2': {'option': 'no'}},
+           django_capture_on_commit_callbacks)
+    assert PatientRecord.objects.get(pk=record.pk).relapse_count == 0
+
+
+@pytest.mark.parametrize('change', [
+    lambda m: m['record'][0].update(values={'not_sure': '2000-01-01'}),  # clears on a choice
+    lambda m: m['therapy_lines'][0].update(clears={'start_date': ['not_sure']}),  # a line needs its start
+    lambda m: m['therapy_lines'][0].update(clears={'progression_date': []}),
+    lambda m: m['record'][1].update(sum=[{'answer': 'came_back', 'values': {'yes_once': 'one'}}]),
+])
+def test_a_mapping_that_clears_or_adds_up_what_it_cannot_is_refused(change):
+    mapping = json.loads(json.dumps(CLEARING))
+    change(mapping)
+
+    with pytest.raises(srm.MappingError):
+        srm.check_mapping(mapping)
+
+
+def test_clears_and_sums_name_options_the_question_offers():
+    mapping = json.loads(json.dumps(CLEARING))
+    mapping['record'][0]['clears'] = ['unknown']
+    mapping['record'][1]['sum'][0]['values'] = {'thrice': 3}
+
+    problems = srm.check_against_definition(mapping, DEFINITION)
+
+    assert any("'diagnosed' has no option 'unknown'" in p for p in problems)
+    assert any("'came_back' has no option 'thrice'" in p for p in problems)
