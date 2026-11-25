@@ -11,9 +11,16 @@ observation rows. This module reads those same rows back, so the tab can
 The match mirrors the derivation: a row belongs to a metric when its concept's
 code is the metric's wearable code, or, for a row whose concept is not any
 wearable code, when its source value is. Entered-in-error rows and readings
-outside the metric's artifact bounds are left out, as there. Unlike the
-derivation (which reads approved rows for the record and provisional rows for
-the provisional pass) this reads both, and says which each day is made of.
+outside the metric's artifact bounds are left out, as there. The derivation
+also proves a measurement's unit against its source value and drops cleared
+history; this does not, since a wearable's row is stored in the unit its
+importer wrote.
+
+A day takes its value from its accepted rows, which are what the stored
+aggregate is computed from, and only a day with no accepted row takes the
+provisional rows' value (marked ``provisional``). A provisional row beside an
+accepted one on the same day is counted in ``provisional_rows_excluded``, not
+added to the value, so the plotted days reproduce the aggregate.
 
 Nothing here decides who may read a patient; the caller does. A value is never
 logged.
@@ -22,7 +29,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from django.db.models import Avg, Count, Min, Q, Sum
+from django.db.models import BooleanField, Case, Count, Min, Q, Sum, Value, When
 
 from omop_core.services import omop_row_pages
 from omop_core.services.mappings import (
@@ -101,21 +108,27 @@ def _rows(person, table: str, metric: str):
 
 
 def _daily(person, metric: str) -> dict:
-    """``{day: {'total', 'n', 'low', 'provisional'}}`` over both tables."""
+    """``{day: {'accepted': {...}, 'provisional': {...}}}`` over both tables.
+
+    Each side is ``{'total', 'n', 'low'}``; the two are kept apart because the
+    stored aggregate is computed from the accepted rows alone.
+    """
     days: dict[date, dict] = {}
     for table in _TABLES:
         spec, qs = _rows(person, table, metric)
-        for row in (qs.values(spec.date)
-                    .annotate(total=Sum('value_as_number'), n=Count(spec.pk),
-                              low=Min('value_as_number'),
-                              provisional=Count(spec.pk, filter=Q(confidence__isnull=False)))
-                    .order_by()):
-            day = days.setdefault(row[spec.date], {'total': 0.0, 'n': 0, 'low': None, 'provisional': 0})
-            day['total'] += float(row['total'])
-            day['n'] += row['n']
-            low = float(row['low'])
-            day['low'] = low if day['low'] is None else min(day['low'], low)
-            day['provisional'] += row['provisional']
+        for kind, rows in (('accepted', qs.filter(confidence__isnull=True)),
+                           ('provisional', qs.filter(confidence__isnull=False))):
+            for row in (rows.values(spec.date)
+                        .annotate(total=Sum('value_as_number'), n=Count(spec.pk),
+                                  low=Min('value_as_number'))
+                        .order_by()):
+                day = days.setdefault(row[spec.date], {
+                    side: {'total': 0.0, 'n': 0, 'low': None} for side in ('accepted', 'provisional')})
+                side = day[kind]
+                side['total'] += float(row['total'])
+                side['n'] += row['n']
+                low = float(row['low'])
+                side['low'] = low if side['low'] is None else min(side['low'], low)
     return days
 
 
@@ -130,19 +143,25 @@ def _groups(person, metric: str) -> list[dict]:
     for table in _TABLES:
         spec, qs = _rows(person, table, metric)
         device = omop_row_pages.is_device_row(spec, held[table])
-        for row in (qs.values(spec.concept, spec.source)
-                    .annotate(rows=Count(spec.pk), wearable=Count(spec.pk, filter=device))
+        for row in (qs.annotate(is_device=Case(When(device, then=Value(True)), default=Value(False),
+                                                output_field=BooleanField()))
+                    .values(spec.concept, spec.source, 'is_device')
+                    .annotate(rows=Count(spec.pk))
                     .order_by()):
+            unresolved = row[spec.concept] == omop_row_pages.NO_MATCHING_CONCEPT_ID
             groups.append({
                 'table': table, 'concept_id': row[spec.concept],
-                'source_value': (row[spec.source] or '')
-                if row[spec.concept] == omop_row_pages.NO_MATCHING_CONCEPT_ID else None,
-                'rows': row['rows'], 'wearable': row['wearable'] > 0,
+                'source_value': (row[spec.source] or '') if unresolved else None,
+                'rows': row['rows'], 'wearable': row['is_device'],
             })
-    # Several source values of one concept are one group on the OMOP tab.
+    # Several source values of one concept are one group on the OMOP tab. At
+    # concept 0 a device's rows and a hospital's of one spelling (``spo2``) are
+    # two, as that tab lists them, so the mark is part of the key there.
     merged: dict = {}
     for group in groups:
-        key = (group['table'], group['concept_id'], group['source_value'])
+        unresolved = group['concept_id'] == omop_row_pages.NO_MATCHING_CONCEPT_ID
+        key = (group['table'], group['concept_id'], group['source_value'],
+               group['wearable'] if unresolved else None)
         into = merged.setdefault(key, {**group, 'rows': 0, 'wearable': False})
         into['rows'] += group['rows']
         into['wearable'] = into['wearable'] or group['wearable']
@@ -160,7 +179,8 @@ def series(person, field: str, anchor: date | None, include_groups: bool) -> dic
     metric, label = FIELD_METRICS[field]
     statistic = _statistic(field, metric)
     daily = _daily(person, metric)
-    ordered = sorted(daily)
+    ordered = sorted(day for day, entry in daily.items()
+                     if entry['accepted']['n'] or entry['provisional']['n'])
     truncated = len(ordered) > MAX_DAYS
     ordered = ordered[-MAX_DAYS:]
     end = anchor if anchor is not None else (ordered[-1] if ordered else None)
@@ -169,15 +189,16 @@ def series(person, field: str, anchor: date | None, include_groups: bool) -> dic
     days = []
     for day in ordered:
         entry = daily[day]
-        value = {'sum': entry['total'], 'mean': entry['total'] / entry['n'],
-                 'min': entry['low']}[statistic]
+        accepted = entry['accepted']['n'] > 0
+        side = entry['accepted'] if accepted else entry['provisional']
+        value = {'sum': side['total'], 'mean': side['total'] / side['n'], 'min': side['low']}[statistic]
         days.append({
             'date': day.isoformat(),
             'value': round(value, 2),
-            'rows': entry['n'],
-            'provisional_rows': entry['provisional'],
-            'status': ('accepted' if entry['provisional'] == 0
-                       else 'provisional' if entry['provisional'] == entry['n'] else 'mixed'),
+            'rows': side['n'],
+            'status': 'accepted' if accepted else 'provisional',
+            # Provisional rows beside accepted ones are not part of the value.
+            'provisional_rows_excluded': entry['provisional']['n'] if accepted else 0,
             'in_window': bool(start and start <= day <= end),
         })
     return {

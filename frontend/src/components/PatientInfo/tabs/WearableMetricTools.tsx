@@ -21,8 +21,9 @@ interface MetricDay {
   date: string;
   value: number;
   rows: number;
-  provisional_rows: number;
-  status: 'accepted' | 'provisional' | 'mixed';
+  status: 'accepted' | 'provisional';
+  /** Provisional rows beside accepted ones on this day: not part of `value`. */
+  provisional_rows_excluded: number;
   in_window: boolean;
 }
 
@@ -46,13 +47,9 @@ interface MetricSeries {
 }
 
 
-const STATUS_COLOR = {
-  accepted: '#0f766e',
-  provisional: '#b45309',
-  mixed: '#b45309',
-} as const;
+const STATUS_COLOR = { accepted: '#0f766e', provisional: '#b45309' } as const;
 
-const STATUS_LABEL = { accepted: 'Accepted', provisional: 'Provisional', mixed: 'Partly provisional' } as const;
+const STATUS_LABEL = { accepted: 'Accepted', provisional: 'Provisional' } as const;
 
 function groupName(group: MetricGroup) {
   return group.concept_id === 0
@@ -160,7 +157,7 @@ function Chart({ series }: { series: MetricSeries }) {
         </span>
         <span className="inline-flex items-center gap-1">
           <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: STATUS_COLOR.provisional }} />
-          Provisional (or partly)
+          Provisional (no accepted reading that day)
         </span>
         {window && (
           <span className="inline-flex items-center gap-1">
@@ -204,7 +201,7 @@ function ChartDialog({
         )}
         {series && series.days.length > 0 && <Chart series={series} />}
         {series?.truncated && (
-          <p role="note" className="text-xs text-muted-foreground">Only the most recent 365 days are shown.</p>
+          <p role="note" className="text-xs text-muted-foreground">Only the 365 most recent days with readings are shown.</p>
         )}
         {series?.groups && series.groups.length > 0 && onOpenOmopRows && (
           <div>
@@ -297,8 +294,8 @@ function MetricTools({ field, label, hasValue }: { field: string; label: string;
         <ChartLine aria-hidden="true" size={16} />
       </button>
       {failed && (
-        <span id={noteId} role="status" className="sr-only">
-          No OMOP rows could be found for {label}.
+        <span id={noteId} role="status" className="ml-1 whitespace-nowrap text-[11px] text-red-700">
+          No OMOP rows found.
         </span>
       )}
       {chartOpen && (

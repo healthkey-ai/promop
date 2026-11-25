@@ -73,6 +73,18 @@ describe('PatientDetail and a 30-day wearable value', () => {
     });
   });
 
+  it('opens the OMOP tab from the tab bar as it always does, not at the last link\'s group', async () => {
+    await renderPatient(STAFF);
+    fireEvent.click(await screen.findByRole('button', { name: /show the omop rows behind median daily steps/i }));
+    expect(JSON.parse((await screen.findByTestId('omop-tab')).textContent ?? 'null')).not.toBeNull();
+
+    const tabs = within(screen.getByRole('navigation', { name: 'Patient info tabs' }));
+    fireEvent.click(tabs.getByRole('button', { name: /wearable/i }));
+    fireEvent.click(tabs.getByRole('button', { name: 'OMOP' }));
+
+    expect((await screen.findByTestId('omop-tab')).textContent).toBe('null');
+  });
+
   it('offers the chart and no link to rows to a reader without the OMOP tab', async () => {
     await renderPatient(DOCTOR);
     expect(await screen.findByRole('button', { name: /chart median daily steps/i })).toBeInTheDocument();

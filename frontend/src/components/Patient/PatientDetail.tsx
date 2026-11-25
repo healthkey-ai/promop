@@ -394,7 +394,8 @@ export default function PatientDetail({
   const [editedName, setEditedName] = useState("");
   const [chosenTab, setChosenTab] = useState(0);
   const [sourceCodesOpened, setSourceCodesOpened] = useState(false);
-  const [omopFocus, setOmopFocus] = useState<OmopFocus | null>(null);
+  // The group a 30-day wearable value pointed at, and the record it was for.
+  const [omopFocus, setOmopFocus] = useState<(OmopFocus & { personId: string }) | null>(null);
   // Coming back from Field Concept Mapping after Add field (#721): the tab
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
@@ -978,11 +979,14 @@ export default function PatientDetail({
     if (index === sourceCodesIdx || activeTab === sourceCodesIdx) setSourceCodesOpened(true);
     setReturnTab(null);
     setChosenTab(index);
+    // Reached from the tab bar, the OMOP tab opens as it always does: the
+    // focus belongs to the click that set it.
+    setOmopFocus(null);
   };
   // A 30-day wearable value's link to its rows opens the OMOP tab at that group (#2887).
   const openOmopRows = (focus: OmopFocus) => {
-    setOmopFocus(focus);
     setActiveTab(omopIdx);
+    if (personId) setOmopFocus({ ...focus, personId });
   };
   const fieldTab = fieldTabs[activeTab];
   // The record's Disease Category, which scopes a field added from the
@@ -1237,7 +1241,7 @@ export default function PatientDetail({
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
-                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} focus={omopFocus} />}
+                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} focus={omopFocus?.personId === personId ? omopFocus : null} />}
                 {/* Fields added through Field Concept Mapping render last on
                     their tab, then the tab's second Add Field (#721). */}
                 {fieldTab && (

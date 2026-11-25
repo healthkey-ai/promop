@@ -1275,8 +1275,9 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
   `GET patient-records/<id>/wearable-metric/?field=<30-day field>`
   (`omop_core/services/wearable_metric_series.py`) reads the rows the derivation
   reads (same concept-code or source-value match, bounds, entered-in-error left
-  out) plus provisional ones, as daily values with the window the aggregate
-  covers; `groups` (the OMOP tab's concept groups) only for an administrator.
+  out; not its unit proof or cleared-history rule) as daily values from the
+  accepted rows (a day with none shows its provisional rows, marked) with the
+  window the aggregate covers; `groups` (the OMOP tab's concept groups) only for an administrator.
   A new 30-day field needs an entry in `WEARABLE_METRIC_FIELDS`; the series reads
   it from there, and `tests/test_wearable_metric_series.py` holds the two.
 - **Source Codes tab.** `wearable_rows.describe` adds a `wearable` block to

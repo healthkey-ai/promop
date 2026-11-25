@@ -25,8 +25,8 @@ const series = (overrides: Record<string, unknown> = {}) => ({
   window: { start: '2026-10-22', end: '2026-11-20' },
   truncated: false,
   days: [
-    { date: '2026-11-19', value: 4000, rows: 1, provisional_rows: 0, status: 'accepted', in_window: true },
-    { date: '2026-11-20', value: 5500, rows: 2, provisional_rows: 2, status: 'provisional', in_window: true },
+    { date: '2026-11-19', value: 4000, rows: 1, provisional_rows_excluded: 0, status: 'accepted', in_window: true },
+    { date: '2026-11-20', value: 5500, rows: 2, provisional_rows_excluded: 0, status: 'provisional', in_window: true },
   ],
   groups: [{
     table: 'observations', concept_id: 3, concept_name: 'Steps', concept_code: '55423-8',
@@ -135,7 +135,10 @@ describe('30-day metric tools', () => {
     const open = vi.fn();
     renderField(5500, open);
     await userEvent.click(screen.getByRole('button', { name: /omop rows/i }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/no omop rows could be found/i));
+    // Said where a sighted reader sees it, not only to a screen reader.
+    const note = await screen.findByText(/no omop rows found/i);
+    expect(note).toBeVisible();
+    expect(note).not.toHaveClass('sr-only');
     expect(open).not.toHaveBeenCalled();
   });
 });

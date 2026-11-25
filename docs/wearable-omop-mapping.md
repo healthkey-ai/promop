@@ -899,15 +899,20 @@ has the OMOP tab a link to the rows behind it. `GET
 /api/v1/patient-records/<id>/wearable-metric/?field=<30-day field>`
 (`omop_core/services/wearable_metric_series.py`) returns the metric's daily
 values (the newest 365 days, oldest first, each with its row count and whether
-it is accepted, provisional or mixed), the 30-day window the stored aggregate
+it is accepted or provisional), the 30-day window the stored aggregate
 covers (it ends at the record's `wearable_last_sync_at`, as the reader sees it),
 and, for staff and org admins only, the concept groups holding the rows.
 
 - **Same rows as the derivation.** A row is behind a metric when its concept's
   code is the metric's wearable code, or, for a row whose concept is not any
   wearable code, when its source value is; entered-in-error rows and readings
-  outside the metric's artifact bounds are left out. Provisional rows are
-  included and marked, which the derivation's approved pass does not read.
+  outside the metric's artifact bounds are left out. A day's value comes from
+  its accepted rows, which are what the stored aggregate is computed from; a
+  day with none takes its provisional rows' value and is marked provisional,
+  and provisional rows beside accepted ones are counted, not added
+  (`provisional_rows_excluded`). Not applied: the derivation's proof of a
+  measurement's unit against its source value, and its cleared-history rule; a
+  wearable's row is stored in the unit its importer wrote.
 - **The day's value is the derivation's:** a total for steps, active minutes,
   sleep, distance, flights and energy; a mean for the rest; the day's lowest
   reading for Min SpO2. `activity_trend_30d` charts the steps.
