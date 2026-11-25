@@ -8,7 +8,7 @@ interface LookupSource {
   name: string;
   /** The lookup table. */
   label: string;
-  /** The field's approved mapping names it: ingest keeps only these titles. */
+  /** The field's approved mapping names it, so only these entries are offered. */
   enforced: boolean;
   source_name: string;
   source_url: string;
@@ -21,7 +21,7 @@ interface LookupAnswer {
 
 interface Props {
   fieldName: string;
-  /** How many answers have been added to this field in the editor. */
+  /** How many answers have been added to this field in the editor, retired ones included. */
   answers: number;
 }
 
@@ -38,6 +38,8 @@ export function LookupOptions({ fieldName, answers }: Props) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setError("");
+      setData(null);
       try {
         const resp = await api.get("/v1/field-choices/lookup/", { params: { field_name: fieldName } });
         if (!cancelled) setData(resp.data);
@@ -64,7 +66,7 @@ export function LookupOptions({ fieldName, answers }: Props) {
       </div>
       <div className={`mt-1 ${source.enforced ? "text-amber-700" : ""}`}>
         {source.enforced
-          ? "The field's approved mapping names this lookup: ingest keeps only these entries, and answers added below are not offered."
+          ? "The field's approved mapping names this lookup, so only these entries are offered and answers added below are not."
           : "The tab draws its dropdown from this lookup. Once the field has an approved concept mapping and answers below, those are offered instead of these."}
         {!source.enforced && answers > 0 && " This field has answers below."}
       </div>

@@ -9,8 +9,10 @@ only reads: the lookup tables stay managed where they are loaded.
 A field is bound in one of two ways:
 
 * **enforced**: its approved ``FieldConceptMapping`` names the lookup in
-  ``value_vocabulary``. Ingest keeps only those titles and the write descriptor
-  offers only them, so answers curated for the field are not offered.
+  ``value_vocabulary`` and is complete enough to write (a concept and a table).
+  The write descriptor then offers only those titles, so answers curated for the
+  field are not offered. (The two transplant fields also have serializer and
+  upload validators that keep only the lookup's titles, whatever the mapping.)
 * **offered**: the tab draws its dropdown from the lookup. A field with an
   approved concept mapping and curated answers offers those instead, since the
   write descriptor's options win over the tab's own.

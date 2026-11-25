@@ -226,9 +226,11 @@ and never the model.
   now lists that lookup, read only and never copied into choices (so there is
   no second list to drift), with its source and a Show entries control. The
   binding is **enforced** when the field's approved mapping names the lookup in
-  `value_vocabulary` (five fields today: ingest keeps only those titles and the
-  write descriptor offers only them, so answers added in the editor are not
-  offered), otherwise **offered**: the tab draws its dropdown from the lookup,
+  `value_vocabulary` and is complete enough to write (a concept and a table; five
+  fields today): the write descriptor then offers only those titles, so answers
+  added in the editor are not offered (the two transplant fields also have
+  serializer and upload validators that keep only the lookup's titles),
+  otherwise **offered**: the tab draws its dropdown from the lookup,
   and a field with an approved concept mapping and answers offers those
   instead, which the section says. `LOOKUP_FIELDS` must match the tabs;
   `tests/test_option_sources.py` fails when a `useVocabulary` call names a

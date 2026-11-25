@@ -9,7 +9,7 @@ from omop_core.models import FieldChoice, FieldConceptMapping, GroupAccess, Her2
 from omop_core.services.option_sources import LOOKUP_FIELDS
 from patient_portal.api.views import _VOCABULARY_REGISTRY
 from patient_portal.models import Identity
-from tests.factories import OrganizationFactory
+from tests.factories import ConceptFactory, OrganizationFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -40,9 +40,11 @@ def test_every_lookup_a_tab_draws_a_dropdown_from_is_bound_to_a_field():
     for tab in TABS.glob('*.tsx'):
         if tab.name.endswith('.test.tsx'):
             continue
-        used |= set(re.findall(r"useVocabulary\(\s*'([a-z0-9-]+)'", tab.read_text()))
+        used |= set(re.findall(r"useVocabulary\(\s*['\"]([a-z0-9-]+)['\"]", tab.read_text()))
     assert used, 'the tabs no longer call useVocabulary; update this test'
     assert used <= set(LOOKUP_FIELDS.values()), sorted(used - set(LOOKUP_FIELDS.values()))
+    # And the other way: a binding no tab draws from is stale.
+    assert set(LOOKUP_FIELDS.values()) <= used, sorted(set(LOOKUP_FIELDS.values()) - used)
 
 
 def test_the_seeded_enforced_bindings_agree_with_the_registry():
@@ -89,9 +91,34 @@ def test_a_field_the_tab_draws_from_a_lookup_lists_its_entries_and_copies_nothin
 def test_an_approved_mapping_that_names_the_lookup_makes_it_enforced():
     Her2Status.objects.create(code='pos', title='Positive')
     FieldConceptMapping.objects.update_or_create(
-        field_name='her2_status', defaults={'status': 'approved', 'value_vocabulary': 'Her2Status'})
+        field_name='her2_status',
+        defaults={'status': 'approved', 'value_vocabulary': 'Her2Status',
+                  'concept': ConceptFactory(), 'omop_table': 'Observation'})
     source = as_role('staff').get(URL, {'field_name': 'her2_status'}).json()['source']
     assert source['name'] == 'her2-status' and source['enforced'] is True
+
+
+def test_an_approved_mapping_too_incomplete_to_write_does_not_enforce_it():
+    """No concept, or an empty lookup: the descriptor offers nothing, so the editor must not say it does."""
+    Her2Status.objects.create(code='pos', title='Positive')
+    FieldConceptMapping.objects.update_or_create(
+        field_name='her2_status', defaults={'status': 'approved', 'value_vocabulary': 'Her2Status'})
+    assert as_role('staff').get(URL, {'field_name': 'her2_status'}).json()['source']['enforced'] is False
+    FieldConceptMapping.objects.filter(field_name='her2_status').update(
+        concept=ConceptFactory(), omop_table='Observation')
+    Her2Status.objects.all().delete()
+    assert as_role('staff').get(URL, {'field_name': 'her2_status'}).json()['source']['enforced'] is False
+
+
+def test_the_lookup_a_mapping_names_wins_over_the_tabs_hint():
+    from omop_core.models import Language
+    FieldConceptMapping.objects.update_or_create(
+        field_name='ethnicity',
+        defaults={'status': 'approved', 'value_vocabulary': 'Language',
+                  'concept': ConceptFactory(), 'omop_table': 'Observation'})
+    Language.objects.create(code='en', title='English')
+    source = as_role('staff').get(URL, {'field_name': 'ethnicity'}).json()['source']
+    assert source['label'] == 'Language' and source['enforced'] is True
 
 
 def test_a_proposed_mapping_does_not_enforce_it():

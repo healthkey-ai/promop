@@ -17951,10 +17951,10 @@ def field_choice_lookup(request):
     ``?field_name=`` -> ``{field_name, source, options}``. ``source`` is null when
     the field offers no lookup. Otherwise it names the lookup (``name`` is the slug
     of ``/vocabularies/<name>/``, ``label`` its table) and says whether the
-    binding is ``enforced`` (the field's approved mapping names it in
-    ``value_vocabulary``: ingest keeps only its titles and the field's own
-    answers are not offered) or only what the tab offers. The entries are the
-    lookup's own, never copied into choices.
+    binding is ``enforced`` (the field's approved, complete mapping names it in
+    ``value_vocabulary``, so the write descriptor offers only its titles and the
+    field's own answers are not offered) or only what the tab offers. The
+    entries are the lookup's own, never copied into choices.
     """
     from omop_core.models import FieldConceptMapping
     from omop_core.services.option_sources import LOOKUP_FIELDS
@@ -17965,19 +17965,33 @@ def field_choice_lookup(request):
     if not field_name:
         return Response({'field_name': 'Required.'}, status=status.HTTP_400_BAD_REQUEST)
 
+    from omop_core import models as omop_models
+    from omop_core.models import VocabularyLookup
+
     by_class = {model.__name__: slug for slug, model in _VOCABULARY_REGISTRY.items()}
-    bound = (FieldConceptMapping.objects.filter(field_name=field_name, status='approved')
-             .exclude(value_vocabulary='').values_list('value_vocabulary', flat=True).first())
-    slug = by_class.get(bound) if bound else None
-    enforced = slug is not None
-    if slug is None:
-        slug = LOOKUP_FIELDS.get(field_name)
-    model = _VOCABULARY_REGISTRY.get(slug) if slug else None
+    row = (FieldConceptMapping.objects.filter(field_name=field_name, status='approved')
+           .exclude(value_vocabulary='').first())
+    model = None
+    enforced = False
+    if row is not None:
+        # The write descriptor resolves the class by name on the models module,
+        # whatever the registry serves, so this does too.
+        candidate = getattr(omop_models, row.value_vocabulary, None)
+        if isinstance(candidate, type) and issubclass(candidate, VocabularyLookup) and not candidate._meta.abstract:
+            model = candidate
+    if model is None and LOOKUP_FIELDS.get(field_name):
+        model = _VOCABULARY_REGISTRY.get(LOOKUP_FIELDS[field_name])
     if model is None:
         return Response({'field_name': field_name, 'source': None, 'options': []})
+    slug = by_class.get(model.__name__, '')
+    if row is not None and model.__name__ == row.value_vocabulary:
+        # The descriptor offers only the lookup's titles when the row is complete
+        # enough to write (a concept and a table) and the lookup has entries.
+        enforced = bool(row.concept_id is not None and row.omop_table)
     has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
-    rows = list(model.objects.values('code', 'title', 'source_name', 'source_url')
-                .order_by('sort_key' if has_sort_key else 'title'))
+    order = 'title' if enforced else ('sort_key' if has_sort_key else 'title')
+    rows = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order))
+    enforced = enforced and bool(rows)
     first = rows[0] if rows else {}
     return Response({
         'field_name': field_name,
