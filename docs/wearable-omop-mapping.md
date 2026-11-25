@@ -892,6 +892,47 @@ only the day (Gap D below), so its "datetime" is shown as the date and marked
 "date only". Giving a daily total a time of day (the end of the day, say) would
 be a decision about what a sample means, and is not made here.
 
+### Tracing a 30-day value to its rows (#2887)
+
+Each 30-day value on the Wearables tab has a chart icon, and for a reader who
+has the OMOP tab a link to the rows behind it. `GET
+/api/v1/patient-records/<id>/wearable-metric/?field=<30-day field>`
+(`omop_core/services/wearable_metric_series.py`) returns the metric's daily
+values (the newest 365 days, oldest first, each with its row count and whether
+it is accepted or provisional), the 30-day window the stored aggregate
+covers (it ends at the record's `wearable_last_sync_at`, as the reader sees it),
+and, for staff and org admins only, the concept groups holding the rows.
+
+- **Same rows as the derivation.** A row is behind a metric when its concept's
+  code is the metric's wearable code, or, for a row whose concept is not any
+  wearable code, when its source value is; entered-in-error rows and readings
+  outside the metric's artifact bounds are left out. A day's value comes from
+  its accepted rows, which are what the stored aggregate is computed from; a
+  day with none takes its provisional rows' value and is marked provisional,
+  and provisional rows beside accepted ones are counted, not added
+  (`provisional_rows_excluded`). Not applied: the derivation's proof of a
+  measurement's unit against its source value, and its cleared-history rule; a
+  wearable's row is stored in the unit its importer wrote.
+- **Which days the aggregate counts.** Every day has `counted`: inside the
+  30-day window, not before the derivation's recency cutoff (it reads only the
+  last 90 days while any wearable reading is that recent; `recency_cutoff`),
+  and, when the window holds accepted readings, not a provisional-only day. The
+  chart draws a window day the aggregate does not count hollow and says why.
+  The axis is time, so a gap in syncing is a gap.
+- **The day's value is the derivation's:** a total for steps, active minutes,
+  sleep, distance, flights and energy; a mean for the rest; the day's lowest
+  reading for Min SpO2. `activity_trend_30d` charts the steps.
+- **Rows never leave through the chart.** Anyone who may read the record may
+  read the daily values; the groups, which name the OMOP tab's concept groups,
+  are returned only where `omop-rows/` would be.
+- **The link** switches the patient page to the OMOP tab and opens that group
+  (`omop-rows/` reads only that group's rows). When the rows are in several
+  groups the chart's list names each.
+
+Tests: `tests/test_wearable_metric_series.py`,
+`WearableMetricTools.test.tsx`, `PatientDetail.metricrows.test.tsx`,
+`PatientOmopTab.test.tsx`.
+
 ### What a mapping makes of a row
 
 | The code's mapping | The row | 30-day metrics |

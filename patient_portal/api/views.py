@@ -6881,6 +6881,38 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
         return Response(omop_row_pages.read_page(qs, omop_row_pages.CODE_SPECS[table], cursor, limit))
 
+    @action(detail=True, methods=['get'], url_path='wearable-metric',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def wearable_metric(self, request: Request, pk: str | None = None) -> Response:
+        """GET .../wearable-metric/?field=<30-day field>
+
+        The daily values behind one 30-day wearable aggregate on the Wearables
+        tab, and the OMOP concept groups the rows sit in (#2887).
+        ``omop_core.services.wearable_metric_series`` reads the rows the
+        derivation reads. Whoever may read the record may read the daily
+        values; the groups, which are how the OMOP tab opens the rows, are
+        returned only to the administrators who see that tab.
+        """
+        from omop_core.services import wearable_metric_series as metric_series
+        from omop_core.services.provisional_record import overlay
+
+        person, patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+        field = request.query_params.get('field', '')
+        if field not in metric_series.FIELD_METRICS:
+            return Response({'field': 'field must be a 30-day wearable field.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # The window the stored aggregate covers ends at the record's last
+        # sync, as the reader sees it (a proposed value shows its own).
+        shown = overlay(patient_info, lists=False, custom=False)[0]
+        synced = getattr(shown, 'wearable_last_sync_at', None)
+        anchor = timezone.localtime(synced).date() if synced else None
+        response = Response(metric_series.series(
+            person, field, anchor, include_groups=_is_admin_actor(request)))
+        response['Cache-Control'] = 'no-store'
+        return response
+
     def _patch_source_code(self, request: Request, person: Person) -> Response:
         """Correct displayed source context without rewriting ETL evidence."""
         from omop_core.models import PatientSourceCode
