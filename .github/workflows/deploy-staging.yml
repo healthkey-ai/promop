@@ -13,7 +13,7 @@ env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
   ARTIFACT_REPO: ${{ vars.GCP_REGION || 'us-central1' }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ht-phr
-  SERVICE_NAME: ctomop-staging
+  SERVICE_NAME: promop-staging
   IMAGE_TAG: ${{ github.sha }}
 
 permissions:
