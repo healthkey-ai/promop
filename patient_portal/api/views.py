@@ -11534,55 +11534,12 @@ def concept_replacement(request, concept_id):
 # GET /api/vocabularies/<model_name>/ → [{code, title}, ...]
 # =============================================================================
 
-_VOCABULARY_REGISTRY = {
-    'ethnicity':                     Ethnicity,
-    'stem-cell-transplant':          StemCellTransplant,
-    'sct-eligibility':               SctEligibility,
-    'histologic-type':               HistologicType,
-    'estrogen-receptor-status':      EstrogenReceptorStatus,
-    'progesterone-receptor-status':  ProgesteroneReceptorStatus,
-    'her2-status':                   Her2Status,
-    'hr-status':                     HrStatus,
-    'hrd-status':                    HrdStatus,
-    'mutation-origin':               MutationOrigin,
-    'mutation-gene':                 MutationGene,
-    'mutation-interpretation':       MutationInterpretation,
-    'mutation-code':                 MutationCode,
-    'tumor-stage':                   TumorStage,
-    'nodes-stage':                   NodesStage,
-    'distant-metastasis-stage':      DistantMetastasisStage,
-    'staging-modality':              StagingModality,
-    'toxicity-grade':                ToxicityGrade,
-    'language':                      Language,
-    'language-skill-level':          LanguageSkillLevel,
-    'binet-stage':                   BinetStage,
-    'protein-expression':            ProteinExpression,
-    'richter-transformation':        RichterTransformation,
-    'tumor-burden':                  TumorBurden,
-    'morphologic-variant':           MorphologicVariant,
-    'disease-activity':              DiseaseActivity,
-    'pre-existing-condition-category': PreExistingConditionCategory,
-    'disease':                         Disease,
-    'cancer-stage':                    CancerStage,
-    'karnofsky-score':                 KarnofskyScore,
-    'ecog-status':                     EcogStatus,
-    'peripheral-neuropathy-grade':     PeripheralNeuropathyGrade,
-    'infection-status':                InfectionStatus,
-    'disease-progression':             DiseaseProgression,
-    'measurable-disease':              MeasurableDisease,
-    'gelf-criteria':                   GelfCriteria,
-    'flipi-score':                     FlipIScore,
-    'follicular-lymphoma-grade':             FollicularLymphomaGrade,
-    'post-transformation-outcome':           PostTransformationOutcome,
-    'breast-cancer-first-line-therapy':      BreastCancerFirstLineTherapy,
-    'breast-cancer-second-line-therapy':     BreastCancerSecondLineTherapy,
-    'breast-cancer-later-line-therapy':      BreastCancerLaterLineTherapy,
-    'myeloma-type':                          MyelomaType,
-    'therapy-regimen':                       TherapyRegimen,
-    'therapy-component':                     TherapyComponent,
-    'therapy-class':                         TherapyClass,
-    'therapy-round':                         TherapyRound,
-}
+from omop_core import models as _omop_models  # noqa: E402
+from omop_core.services.option_sources import LOOKUP_CONTEXT_PREFIX as _LOOKUP_CONTEXT_PREFIX, VOCABULARY_MODELS  # noqa: E402
+
+#: slug -> lookup model, as served by ``/vocabularies/<slug>/``; the names live in
+#: ``option_sources`` so the services that read lookups do not import this module.
+_VOCABULARY_REGISTRY = {slug: getattr(_omop_models, name) for slug, name in VOCABULARY_MODELS.items()}
 
 
 @api_view(['GET'])
@@ -17795,7 +17752,9 @@ def field_choice_list(request):
     from .serializers import FieldChoiceSerializer
 
     if request.method == 'GET':
-        qs = FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope').all()
+        # A row that only holds decisions about a lookup's entries is not an answer.
+        qs = (FieldChoice.objects.prefetch_related('codes', 'aliases', 'disease_scope')
+              .exclude(context_key__startswith=_LOOKUP_CONTEXT_PREFIX))
         include_mappings = _can_view_mappings(request.user)
         if include_mappings:
             qs = qs.prefetch_related(
@@ -17865,6 +17824,10 @@ def field_choice_detail(request, pk):
         choice.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    if choice.context_key.startswith(_LOOKUP_CONTEXT_PREFIX):
+        return Response({'detail': "This holds decisions about a lookup entry; the entry's label, "
+                                   "spellings and scope are the lookup's. Propose its concept instead."},
+                        status=status.HTTP_400_BAD_REQUEST)
     refused = _approver_only_choice_keys(request, _CURATOR_CHOICE_EDIT_KEYS)
     if refused is not None:
         return refused
@@ -17898,6 +17861,9 @@ def field_choice_codes(request, choice_pk):
         choice = FieldChoice.objects.get(pk=choice_pk)
     except FieldChoice.DoesNotExist:
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if choice.context_key.startswith(_LOOKUP_CONTEXT_PREFIX):
+        return Response({'detail': "A lookup entry has no codes of its own; propose its concept instead."},
+                        status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == 'POST':
         serializer = FieldChoiceCodeSerializer(data=request.data)
@@ -18081,7 +18047,7 @@ def field_choice_value_mapping_targets(request, choice_pk):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def field_choice_lookup(request):
-    """GET the controlled lookup a field's options come from, read only (#1225).
+    """GET the controlled lookup a field's options come from, and what is decided for each entry (#1225).
 
     ``?field_name=`` -> ``{field_name, source, options}``. ``source`` is null when
     the field offers no lookup. Otherwise it names the lookup (``name`` is the slug
@@ -18089,10 +18055,14 @@ def field_choice_lookup(request):
     binding is ``enforced`` (the field's approved, complete mapping names it in
     ``value_vocabulary``, so the write descriptor offers only its titles and the
     field's own answers are not offered) or only what the tab offers. The
-    entries are the lookup's own, never copied into choices.
+    entries are the lookup's own, never copied into choices. An entry a curator
+    has decided something for carries ``choice_id`` and its ``value_mappings``
+    (the decision in force and the open proposal), the same shape the choice
+    list returns; the rest carry null. ``orphaned`` lists such rows whose entry
+    is no longer in the lookup.
     """
-    from omop_core.models import FieldConceptMapping
-    from omop_core.services.option_sources import LOOKUP_FIELDS
+    from omop_core.models import FieldChoice
+    from omop_core.services import option_sources
 
     if not _can_view_mappings(request.user):
         return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -18100,42 +18070,75 @@ def field_choice_lookup(request):
     if not field_name:
         return Response({'field_name': 'Required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-    from omop_core import models as omop_models
-    from omop_core.models import VocabularyLookup
-
-    by_class = {model.__name__: slug for slug, model in _VOCABULARY_REGISTRY.items()}
-    row = (FieldConceptMapping.objects.filter(field_name=field_name, status='approved')
-           .exclude(value_vocabulary='').first())
-    model = None
-    enforced = False
-    if row is not None:
-        # The write descriptor resolves the class by name on the models module,
-        # whatever the registry serves, so this does too.
-        candidate = getattr(omop_models, row.value_vocabulary, None)
-        if isinstance(candidate, type) and issubclass(candidate, VocabularyLookup) and not candidate._meta.abstract:
-            model = candidate
-    if model is None and LOOKUP_FIELDS.get(field_name):
-        model = _VOCABULARY_REGISTRY.get(LOOKUP_FIELDS[field_name])
-    if model is None:
-        return Response({'field_name': field_name, 'source': None, 'options': []})
-    slug = by_class.get(model.__name__, '')
-    if row is not None and model.__name__ == row.value_vocabulary:
-        # The descriptor offers only the lookup's titles when the row is complete
-        # enough to write (a concept and a table) and the lookup has entries.
-        enforced = bool(row.concept_id is not None and row.omop_table)
+    binding = option_sources.resolve_lookup(field_name)
+    if binding is None:
+        return Response({'field_name': field_name, 'source': None, 'options': [], 'orphaned': []})
+    model = binding.model
     has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
-    order = 'title' if enforced else ('sort_key' if has_sort_key else 'title')
+    order = 'title' if binding.enforced else ('sort_key' if has_sort_key else 'title')
     rows = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order))
-    enforced = enforced and bool(rows)
     first = rows[0] if rows else {}
+
+    from .serializers import value_mapping_data
+    from omop_core.services import field_value_mappings as fvm
+    context = option_sources.lookup_context(binding.slug or binding.name)
+    answers = list(FieldChoice.objects.filter(field_name=field_name, context_key=context)
+                   .prefetch_related('value_mappings__target_concept__domain', 'value_mappings__question_concept',
+                                     'value_mappings__proposed_by', 'value_mappings__reviewer',
+                                     'value_mappings__choice'))
+    by_title = {a.display: a for a in answers}
+    ctx = fvm.CheckContext()
+
+    def decisions(answer):
+        return [value_mapping_data(m, ctx) for m in answer.value_mappings.all()
+                if m.status in ('approved', 'proposed')]
+
+    options = []
+    for r in rows:
+        answer = by_title.pop(r['title'], None)
+        options.append({
+            'code': r['code'], 'title': r['title'],
+            'choice_id': answer.pk if answer else None,
+            'value_mappings': decisions(answer) if answer else [],
+        })
+    orphaned = [{'choice_id': a.pk, 'title': a.display, 'value_mappings': decisions(a)}
+                for a in by_title.values() if decisions(a)]
     return Response({
         'field_name': field_name,
         'source': {
-            'kind': 'vocabulary', 'name': slug, 'label': model.__name__, 'enforced': enforced,
+            'kind': 'vocabulary', 'name': binding.slug, 'label': binding.name, 'enforced': binding.enforced,
             'source_name': first.get('source_name') or '', 'source_url': first.get('source_url') or '',
         },
-        'options': [{'code': r['code'], 'title': r['title']} for r in rows],
+        'options': options,
+        'orphaned': orphaned,
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def field_choice_lookup_answer(request):
+    """POST ``{field_name, code}``: the answer row that holds decisions about one lookup entry (#1225).
+
+    Made when a curator first decides something for the entry, and the same row
+    afterwards. It adds nothing to what a field offers: it is not an answer a
+    patient is offered, it has no label or spelling of its own to change, and it
+    only becomes a place to propose that entry's concept through the answer's
+    ``value-mappings/`` endpoints. Mapping curators, as those are.
+    """
+    from omop_core.services import option_sources
+
+    if not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
+    data = request.data if hasattr(request.data, 'get') else {}
+    field_name = str(data.get('field_name') or '').strip()
+    code = str(data.get('code') or '').strip()
+    if not field_name or not code:
+        return Response({'detail': 'Send field_name and the entry code.'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        answer = option_sources.ensure_answer(field_name, code, user=request.user)
+    except option_sources.NoLookup as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_404_NOT_FOUND)
+    return Response({'choice_id': answer.pk, 'title': answer.display}, status=status.HTTP_200_OK)
 
 
 @api_view(['GET'])

@@ -243,3 +243,33 @@ export function answerCoverage(choices: Reviewable[]): AnswerCoverage {
   }
   return out;
 }
+
+/** One short phrase for a lookup entry's row: where its concept decision stands. */
+export function entryStatus(mappings: ValueMapping[] | undefined): string {
+  const state = answerState(mappings);
+  switch (state.kind) {
+    case "approved":
+    case "approved_invalid":
+      return state.summary;
+    case "approved_no_equivalent":
+      return "Approved: no standard equivalent";
+    case "proposed":
+      return state.summary.startsWith("Proposed: no") ? "Proposed: no standard equivalent" : state.summary.replace(/ \(waiting for approval\)$/, " (proposed)");
+    default:
+      return "No concept decided";
+  }
+}
+
+/** How many of a lookup's entries have a decision, and how many are waiting on one. */
+export function lookupCoverage(options: { value_mappings: ValueMapping[] }[]) {
+  let decided = 0;
+  let proposed = 0;
+  let attention = 0;
+  for (const o of options) {
+    const kind = answerState(o.value_mappings).kind;
+    if (kind === "approved" || kind === "approved_no_equivalent") decided += 1;
+    else if (kind === "approved_invalid") attention += 1;
+    else if (kind === "proposed") proposed += 1;
+  }
+  return { total: options.length, decided, proposed, attention, undecided: options.length - decided - proposed - attention };
+}

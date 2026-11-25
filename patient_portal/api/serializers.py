@@ -2164,6 +2164,10 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
                     {'context_key': 'A choice cannot move to another context.'})
         field_name = attrs.get('field_name', getattr(instance, 'field_name', None))
         context = attrs.get('context_key', getattr(instance, 'context_key', ''))
+        from omop_core.services.option_sources import is_lookup_context
+        if instance is None and is_lookup_context(context):
+            raise serializers.ValidationError(
+                {'context_key': 'That context is reserved for the decisions made about a lookup\'s entries.'})
         display = ' '.join(str(attrs.get('display', getattr(instance, 'display', ''))).split())
         value_type = attrs.get('value_type', getattr(instance, 'value_type', 'text'))
         errors = {}

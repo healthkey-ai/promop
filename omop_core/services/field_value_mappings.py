@@ -397,7 +397,7 @@ def _answer_meanings(field_names):
     if not field_names:
         return [], {}, {}, _NO_CONCEPT
     choices = list(FieldChoice.objects.filter(field_name__in=field_names)
-                   .values('pk', 'field_name', 'display', 'value', 'retired_at'))
+                   .values('pk', 'field_name', 'display', 'value', 'retired_at', 'context_key'))
     if not choices:
         return [], {}, {}, _NO_CONCEPT
     ids = [c['pk'] for c in choices]
@@ -545,8 +545,11 @@ def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
         if meaning is None or meaning is NONE:
             continue
         target = retired if choice['retired_at'] else live
-        target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(
-            choice['display'])
+        # What a lookup's tab stores is the entry's own value (its code for ECOG);
+        # an answer's label is what its select shows.
+        shown = (choice['value'] or choice['display']
+                 if choice['context_key'].startswith('lookup:') else choice['display'])
+        target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(shown)
     result: dict[str, dict[int, str]] = {}
     for field in {*live, *retired}:
         merged = {**retired.get(field, {}), **live.get(field, {})}
@@ -565,7 +568,7 @@ def coverage(field_name: str | None = None) -> dict[str, dict[str, int]]:
     """
     from omop_core.models import FieldChoice, FieldValueConceptMapping as Mapping
 
-    choices = FieldChoice.objects.filter(retired_at__isnull=True)
+    choices = FieldChoice.objects.filter(retired_at__isnull=True).exclude(context_key__startswith='lookup:')
     if field_name:
         choices = choices.filter(field_name=field_name)
     states: dict[int, str] = {}

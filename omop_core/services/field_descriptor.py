@@ -607,8 +607,11 @@ def get_all_field_descriptors() -> list[dict]:
     # 3b. Load field choices (curator-managed value sets).
     choices_by_field: dict[str, list[dict]] = {}
     from omop_core.services import field_value_mappings
+    from omop_core.services.option_sources import LOOKUP_CONTEXT_PREFIX
     answer_coverage = field_value_mappings.coverage()
-    for fc in FieldChoice.objects.prefetch_related('codes', 'disease_scope').all():
+    # A row holding decisions about a lookup's entries is not an answer (option_sources).
+    for fc in (FieldChoice.objects.prefetch_related('codes', 'disease_scope')
+               .exclude(context_key__startswith=LOOKUP_CONTEXT_PREFIX)):
         choices_by_field.setdefault(fc.field_name, []).append({
             'id': fc.id,
             'display': fc.display,
