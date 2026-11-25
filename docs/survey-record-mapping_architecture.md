@@ -66,19 +66,24 @@ keeps its precision (`diagnosis_date_precision`).
 
 **Clearing.** A date rule may list the options of its question that clear the
 field: `"clears": ["not_sure"]`. A patient who gave a date before and now says
-they are not sure has it removed, with its precision. It is the patient's own
-edit, so it empties only what they had said: a clinical fact sits beside a
-patient's as its own fact and is never touched. A line may clear when the
-disease came back after it, `"clears": {"progression_date": ["not_sure"]}`,
-which removes the line's own progression. Its start and end dates cannot be
+they are not sure has it removed, with its precision, but only when the value
+is still their own: the last change to the field was theirs, to what it holds
+now (`RecordRevision`). A value a clinician or an import gave stays. A line may
+clear when the disease came back after it, `"clears": {"progression_date":
+["not_sure"]}`, which removes only the progression the patient reported (typed
+patient self-report); a clinical one stays. Its start and end dates cannot be
 cleared: a line needs its start, and a line with no end is one still received.
+`clears` is checked to sit on a date question.
 
 **Adding up.** A numeric field may be the sum of several answers:
 `{"field": "relapse_count", "sum": [{"answer": "q_after_first", "values":
 {"yes_once": 1, "no": 0}}, …]}`. Each term maps an option to a number and may
 have its own `when`; the field is written when at least one term counts. A
 questionnaire that asks the same thing after each treatment gives the total
-this way, where separate rules would let the last one win.
+this way, where separate rules would let the last one win. A sum totals what
+the response itself answers, so it suits a questionnaire that restates the
+whole history each time (an FL profile), not one that asks about part of it.
+Each term counts a whole number.
 
 ## Lines
 

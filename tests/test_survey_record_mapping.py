@@ -553,6 +553,34 @@ def test_not_sure_clears_when_it_came_back_after_a_line(clearing, patient, djang
     assert line.detail.progression_date_precision is None
 
 
+def test_not_sure_leaves_a_value_someone_else_gave(clearing, patient, django_capture_on_commit_callbacks):
+    from patient_portal.api.views import apply_patient_record_patch
+
+    record, _ = patient
+    # A clinician's edit: not the patient's own last change.
+    clinician = Identity.objects.create_user(email='clinician@example.test', is_staff=True)
+    apply_patient_record_patch(record.person, record, {'diagnosis_date': '2017-05-01'}, actor=clinician)
+    assert PatientRecord.objects.get(pk=record.pk).diagnosis_date == dt.date(2017, 5, 1)
+
+    submit(clearing, record, {**ANSWERS, 'diagnosed': {'option': 'not_sure'}}, django_capture_on_commit_callbacks)
+
+    assert PatientRecord.objects.get(pk=record.pk).diagnosis_date == dt.date(2017, 5, 1)
+
+
+def test_not_sure_leaves_a_clinical_progression(clearing, patient, django_capture_on_commit_callbacks):
+    from omop_core.models import Observation
+
+    record, _ = patient
+    submit(clearing, record, {**ANSWERS, 'progressed': {'date': '2021-01'}}, django_capture_on_commit_callbacks)
+    # A clinician records the same progression on the patient's line.
+    Observation.objects.filter(person=record.person, observation_source_value='LOT-1-progression').update(
+        observation_type_concept_id=32817)
+
+    submit(clearing, record, {**ANSWERS, 'progressed': {'option': 'not_sure'}}, django_capture_on_commit_callbacks)
+
+    assert Observation.objects.filter(person=record.person, observation_source_value='LOT-1-progression').exists()
+
+
 def test_a_sum_adds_up_each_answer_that_counts(clearing, patient, django_capture_on_commit_callbacks):
     record, _ = patient
     # Nothing counted: the mapping writes nothing (the record keeps its own default).
@@ -572,6 +600,7 @@ def test_a_sum_adds_up_each_answer_that_counts(clearing, patient, django_capture
     lambda m: m['therapy_lines'][0].update(clears={'start_date': ['not_sure']}),  # a line needs its start
     lambda m: m['therapy_lines'][0].update(clears={'progression_date': []}),
     lambda m: m['record'][1].update(sum=[{'answer': 'came_back', 'values': {'yes_once': 'one'}}]),
+    lambda m: m['record'][1].update(sum=[{'answer': 'came_back', 'values': {'yes_once': 0.5}}]),  # a count is whole
 ])
 def test_a_mapping_that_clears_or_adds_up_what_it_cannot_is_refused(change):
     mapping = json.loads(json.dumps(CLEARING))
@@ -590,3 +619,12 @@ def test_clears_and_sums_name_options_the_question_offers():
 
     assert any("'diagnosed' has no option 'unknown'" in p for p in problems)
     assert any("'came_back' has no option 'thrice'" in p for p in problems)
+
+
+def test_clears_is_for_a_date_question():
+    mapping = json.loads(json.dumps(CLEARING))
+    mapping['record'].append({'field': 'stage', 'answer': 'treatment_names', 'clears': ['not_sure']})
+
+    problems = srm.check_against_definition(mapping, DEFINITION)
+
+    assert any("'treatment_names' is not a date question" in p for p in problems)

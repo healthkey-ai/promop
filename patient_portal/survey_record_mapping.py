@@ -62,12 +62,14 @@ list of PROlog conditions, evaluated with PROlog's own engine, so it means what
 ``visible_if`` means.
 
 A date rule may list the options of its question that clear the field
-(``"clears": ["not_sure"]``): answering one of them writes the field, and its
-precision, empty. As the patient's own edit, that empties only what they had
-said; a clinical fact is never touched. A line may do the same for when the
-disease came back after it (``"clears": {"progression_date": ["not_sure"]}``);
-its start and end dates cannot be cleared, since a line needs a start and a
-line with no end is one still received.
+(``"clears": ["not_sure"]``): answering one of them empties the field, and its
+precision, when the value there is the patient's own (their change was the
+last to it); a value anyone else gave stays. A line may do the same for when
+the disease came back after it (``"clears": {"progression_date":
+["not_sure"]}``), removing only the progression the patient reported; its
+start and end dates cannot be cleared, since a line needs a start and a line
+with no end is one still received. A ``sum`` totals what the response itself
+answers: it suits a questionnaire that restates the whole history each time.
 
 A line's ``line`` is its number, ``"next"`` (a new line after the person's
 last one: a treatment reported later) or ``"latest"`` (their last line: a
@@ -164,7 +166,7 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
         if not isinstance(rule, dict) or rule.get('field') not in fields:
             fail(f'{where}: field must be a PatientRecord field')
         if sum(1 for k in _RECORD_SOURCES if k in rule) != 1:
-            fail(f'{where}: give exactly one of answer, value, submitted_on')
+            fail(f'{where}: give exactly one of answer, value, submitted_on, sum')
         if rule.get('precision_field') is not None and rule['precision_field'] not in fields:
             fail(f'{where}: precision_field must be a PatientRecord field')
         _check_value_rule(rule, where, fail)
@@ -191,7 +193,7 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
             if not isinstance(rule, dict) or rule.get('field') not in detail_fields:
                 fail(f'{where}.details[{j}]: field must be a line detail ({", ".join(sorted(detail_fields))})')
             if sum(1 for k in _RECORD_SOURCES if k in rule) != 1:
-                fail(f'{where}.details[{j}]: give exactly one of answer, value, submitted_on')
+                fail(f'{where}.details[{j}]: give exactly one of answer, value, submitted_on, sum')
             if rule.get('precision_field') is not None and rule['precision_field'] not in detail_fields:
                 fail(f'{where}.details[{j}]: precision_field must be a line detail')
             _check_value_rule(rule, f'{where}.details[{j}]', fail)
@@ -219,9 +221,9 @@ def _check_value_rule(rule: dict, where: str, fail) -> None:
         terms = rule['sum']
         if not isinstance(terms, list) or not terms or not all(
                 isinstance(t, dict) and isinstance(t.get('answer'), str) and isinstance(t.get('values'), dict)
-                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in t['values'].values())
+                and all(isinstance(v, int) and not isinstance(v, bool) for v in t['values'].values())
                 for t in terms):
-            fail(f'{where}: sum is a list of terms, each an answer and the number each option counts')
+            fail(f'{where}: sum is a list of terms, each an answer and the whole number each option counts')
         for k, term in enumerate(terms):
             _check_when(term, f'{where}.sum[{k}]', fail)
     _check_when(rule, where, fail)
@@ -267,6 +269,8 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
                 question(rule['answer'], where)
             if 'clears' in rule:
                 options(rule['answer'], rule['clears'], f'{where}.clears')
+                if (questions.get(rule['answer']) or {}).get('type') not in (None, 'date'):
+                    problems.append(f'{where}.clears: {rule["answer"]!r} is not a date question')
         for k, term in enumerate(rule.get('sum', [])):
             options(term['answer'], term['values'], f'{where}.sum[{k}]')
             conditions(term, f'{where}.sum[{k}]')
@@ -398,14 +402,15 @@ def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
         if line['line'] != 'latest' and 'source_value' not in kwargs:
             continue  # a line that may be new is written only with its treatment
         detail = _values(line.get('details', []), answers, submitted_on)
+        clears: list[str] = []
         for key in _LINE_DATES:
             if line.get(key) and (dated := answer_date(answers.get(line[key]))) is not None:
                 kwargs[key], detail[f'{key}_precision'] = dated
             elif _option(answers, line.get(key) or '') in line.get('clears', {}).get(key, ()):
-                # The patient no longer gives the date: the line's own is removed
-                # (the writer deletes what a replace sets to nothing).
-                kwargs[key], detail[f'{key}_precision'] = None, None
-                kwargs['replace'] = True
+                # The patient no longer gives the date: what they had said is
+                # removed after the line is written (_clear_own_progression).
+                detail[f'{key}_precision'] = None
+                clears.append(key)
         outcome = line.get('outcome')
         if outcome and (value := outcome['values'].get(_option(answers, outcome['answer']))):
             kwargs['outcome'] = value
@@ -413,7 +418,7 @@ def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
             continue
         if line.get('disease'):
             kwargs['disease'] = line['disease']
-        lines.append({'index': index, 'target': line['line'], 'kwargs': kwargs, 'detail': detail})
+        lines.append({'index': index, 'target': line['line'], 'kwargs': kwargs, 'detail': detail, 'clears': clears})
     return lines
 
 
@@ -516,6 +521,8 @@ def apply_response(response) -> Applied | None:
     answers = {a.question_key: a.value for a in response.answers.all()}
     submitted_on = response.submitted_at.date()
     patch = record_patch(mapping, answers, submitted_on)
+    record = PatientRecord.objects.filter(person=person).first()
+    patch = _own_clears_only(mapping, patch, record, account.identity)
     lines = therapy_lines(mapping, answers, submitted_on)
     applied = Applied(str(response.pk), sorted(patch))
     with transaction.atomic():
@@ -552,6 +559,8 @@ def apply_response(response) -> Applied | None:
                             )
                             if result.episode is not None:
                                 _write_detail(result.episode, write['detail'], write['reference'])
+                                if 'progression_date' in write.get('clears', ()):
+                                    _clear_own_progression(person, write['line_number'], result.episode)
                     except TherapyLineValidationError as exc:
                         # A line the writer refuses (no start date, a future one, an
                         # end before the start, a cancer the record does not have) is
@@ -574,6 +583,38 @@ def apply_response(response) -> Applied | None:
         applied.response_id, applied.fields, applied.lines, applied.retracted,
     )
     return applied
+
+
+def _own_clears_only(mapping: dict[str, Any], patch: dict[str, Any], record, identity) -> dict[str, Any]:
+    """``patch`` with each field it clears kept only where the record's value is
+    the patient's own: the last change to it was theirs, to what it holds now.
+    A value from anyone else (a clinician, an import) stays, with its precision."""
+    from omop_core.models import RecordRevision
+
+    precision_of = {r['field']: r['precision_field'] for r in mapping.get('record', []) if r.get('precision_field')}
+    kept = dict(patch)
+    for field_name, value in patch.items():
+        if value is not None or field_name in precision_of.values() or record is None:
+            continue
+        now = getattr(record, field_name, None)
+        if now is None or now == '':
+            continue  # nothing to clear
+        last = RecordRevision.objects.filter(patient_record=record, field=field_name).order_by('-changed_at', '-pk').first()
+        if last is None or last.changed_by != str(identity.pk) or last.new_value != str(now):
+            kept.pop(field_name)
+            if field_name in precision_of:
+                kept.pop(precision_of[field_name], None)
+    return kept
+
+
+def _clear_own_progression(person, line_number: int, episode) -> None:
+    """Remove when the disease came back after this line, as the patient had
+    said it (typed patient self-report); a clinical progression stays."""
+    from omop_core.services.episode_service import _line_observations
+    from omop_core.services.omop_projection import PATIENT_SELF_REPORT_TYPE
+
+    _line_observations(person, f'LOT-{line_number}-progression', episode, False).filter(
+        observation_type_concept_id=PATIENT_SELF_REPORT_TYPE).delete()
 
 
 def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str, Any]], response) -> list[int]:
