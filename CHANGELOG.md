@@ -295,6 +295,23 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A SLiM criterion with no evidence reads unknown, on the scan and on refresh
+  (#2876)** — the OMOP scan started from `False`, so a plasma-cell result below
+  60 % with no same-event free-light-chain pair read "not met", while an edit of
+  the same inputs answered unknown. Each criterion is now assessed separately
+  and three-valued, and one shared rule combines them. A refresh also merges
+  per criterion: a pending edit replaces only its own criterion and the other
+  keeps the scan's answer, so mixed-draw chains no longer make a pending marrow
+  value read `True`, and a pending chain no longer loses an older qualifying
+  marrow. A single pending chain is never paired with another draw's
+  counterpart, so it leaves the light criterion unknown instead of asserting a
+  ratio from two draws. Records move `False` → `None` where neither criterion is
+  positive and one was never assessed; the patient report prints Unknown for
+  that state instead of dropping the row. A direct edit's answer stays
+  provisional until the next refresh settles it (#2885). `DERIVATION_VERSION`
+  35; compare `meets_slim` per patient with
+  `preview_rederivation --field meets_slim` and re-derive with
+  `backfill_patient_records`.
 - **The patient report prints an explicit Unknown for the tri-state answers
   (#2830)** — the report dropped a field whose value formatted to `null`, so a
   stored `NULL` (the third state of a tri-state answer: "no known answer",

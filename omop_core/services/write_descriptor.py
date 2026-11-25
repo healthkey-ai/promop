@@ -661,6 +661,11 @@ _TRI_STATE_ANSWERS = frozenset({
     'no_concomitant_medication_status',
 })
 
+#: Derived verdicts whose third state is a real answer too: a stored NULL means
+#: "not assessed", so the patient report prints Unknown instead of dropping the
+#: row, exactly as it does for the tri-state questions (#2830, #2876).
+_TRI_STATE_VERDICTS = frozenset({'meets_crab', 'meets_slim'})
+
 #: The question a host without its own label shows. The medication column's name
 #: reads as a negation while Yes means "takes medication"; pregnancy is a
 #: negative-result question. The two test-done labels are part of the follow-up
@@ -1250,6 +1255,8 @@ def build_writable_field_descriptor():
                     'Computed from OMOP facts; there is no record field to edit.'
                 ),
             }
+            if field in _TRI_STATE_VERDICTS:
+                descriptor[field]['tri_state'] = True
             continue
         if field in _WEARABLE_METRIC:
             metric = _WEARABLE_METRIC[field]

@@ -117,6 +117,7 @@ def test_a_curator_choice_cannot_replace_the_three_state_control():
 def test_only_the_reviewed_answers_are_three_state():
     from omop_core.services.write_descriptor import (
         _MYELOMA_RELATED_DISORDER_PROJECTIONS,
+        _TRI_STATE_VERDICTS,
     )
 
     descriptor = build_writable_field_descriptor()
@@ -124,7 +125,8 @@ def test_only_the_reviewed_answers_are_three_state():
         name for name, entry in descriptor.items()
         if not name.startswith('__') and entry.get('tri_state')
     }
-    assert tri == set(FIELDS) | set(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
+    assert tri == (set(FIELDS) | set(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
+                   | set(_TRI_STATE_VERDICTS))
 
 
 def test_the_native_patch_clears_to_unknown():

@@ -180,6 +180,20 @@ def test_slim_verdict_keeps_the_involved_chain_burden_guard():
     assert derive_meets_slim(record) is None
 
 
+def test_slim_merge_keeps_the_records_marrow_when_the_scan_read_no_row():
+    """The light criterion never falls back to the record (two chains may come
+    from different draws), but Sixty does: a marrow percentage is a single
+    measurement, and an approved mapping can carry it as text (#2876)."""
+    from omop_core.models import PatientRecord
+    from omop_core.services.patient_record_service import derive_meets_slim
+
+    record = PatientRecord(clonal_plasma_cells='65', kappa_flc='300')
+    assert derive_meets_slim(
+        record, scan_components={'sixty': None, 'light': None},
+        changed_fields={'kappa_flc'},
+    ) is True
+
+
 def test_cb_trial_details_can_resolve_the_behavior_assertions():
     """Trial Details names these columns in camelCase; the shared form needs a
     binding or the row has no editor even though migration 0160 made it writable."""

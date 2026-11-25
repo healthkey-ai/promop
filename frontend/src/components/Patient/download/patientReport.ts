@@ -136,6 +136,9 @@ const TRI_STATE_FIELDS = new Set([
   'igm_multiple_myeloma',
   'al_amyloidosis',
   'poems_syndrome',
+  // Derived verdicts: a stored NULL is "not assessed", not a missing row.
+  'meets_crab',
+  'meets_slim',
 ]);
 
 /** Fields a tab renders outside a ClinicalField, placed where the tab puts them. */
