@@ -207,7 +207,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 34
+DERIVATION_VERSION = 35
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1882,8 +1882,18 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         # A source-pair edit changes the canonical g/dL read-model without
         # being an explicit canonical write, so the verdict must follow it too.
         patient_info.meets_crab = derive_meets_crab(patient_info)
-    if MEETS_SLIM_INPUT_FIELDS.intersection(changed_fields):
-        patient_info.meets_slim = derive_meets_slim(patient_info)
+    slim_inputs = MEETS_SLIM_INPUT_FIELDS.intersection(changed_fields)
+    if slim_inputs:
+        # Only the criterion this edit touches is re-read from the record; a
+        # refresh keeps the scan's answer for the other one, so a pending
+        # marrow value does not recombine mixed-draw chains into a verdict, and
+        # a pending chain does not lose an older qualifying marrow (#2876).
+        patient_info.meets_slim = derive_meets_slim(
+            patient_info,
+            scan_components=getattr(patient_info, '_meets_slim_components', None),
+            changed_fields=slim_inputs,
+        )
+
     # `disease_slug` is what the descriptor names as computed from `disease`, so a
     # direct edit to the name has to move the slug here; the full refresh only
     # derives it from the OMOP condition, which a record-level edit does not touch.
@@ -4733,9 +4743,13 @@ MEETS_CRAB_INPUT_FIELDS = frozenset({
     'hemoglobin_g_dl', 'serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
     'serum_creatinine_mg_dl', 'bone_lesions',
 })
-MEETS_SLIM_INPUT_FIELDS = frozenset({
-    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
-})
+#: The two SLiM criteria, each with the record fields that carry its evidence.
+#: A pending edit moves only the criterion its own inputs belong to; the other
+#: one keeps the scan's assessment, so evidence from different draws or from
+#: different measurements is never recombined into a single verdict (#2876).
+_SLIM_SIXTY_INPUTS = frozenset({'clonal_plasma_cells'})
+_SLIM_LIGHT_INPUTS = frozenset({'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio'})
+MEETS_SLIM_INPUT_FIELDS = _SLIM_SIXTY_INPUTS | _SLIM_LIGHT_INPUTS
 
 
 def _decimal_or_none(value):
@@ -4823,14 +4837,13 @@ def derive_meets_crab(patient_info: PatientRecord):
     return None
 
 
-def derive_meets_slim(patient_info: PatientRecord):
-    """Three-valued SLiM from the record's canonical inputs.
+def _slim_record_components(patient_info: PatientRecord) -> dict:
+    """The record's own assessment of each SLiM criterion, three-valued.
 
-    Uses the same Sixty and Light-chain rule as :func:`_get_mm_specific_data`,
-    including the involved-chain burden guard. The MRI-lesion criterion is not
-    inferred here: ``bone_lesions`` is a shared CRAB presence flag whose value
-    set does not distinguish "one lesion" from "more than one", so treating any
-    recorded value as the SLiM-M criterion would invent a positive.
+    ``None`` means the criterion has no usable input. The light-chain
+    criterion reads the record's two chains as one pair, which is why a caller
+    that also holds the OMOP scan's assessment keeps it for the criterion the
+    edit did not touch: the record's fields can come from different draws.
     """
     plasma = _decimal_or_none(patient_info.clonal_plasma_cells)
     sixty = None if plasma is None else plasma >= Decimal('60')
@@ -4841,12 +4854,95 @@ def derive_meets_slim(patient_info: PatientRecord):
         light = None
     else:
         light = _meets_flc_criterion(kappa, lam, ratio)
-    components = [sixty, light]
-    if any(component is True for component in components):
+    return {'sixty': sixty, 'light': light}
+
+
+def _edited_light_component(patient_info, changed, same_event_pair):
+    """The light criterion an edit assesses, without pairing across draws.
+
+    Only a complete pair may satisfy it: the scan's same-event chain pair with a
+    reported ratio the edit supplies, or two chains the edit itself supplies.
+    One chain from the reader beside the counterpart derivation happened to
+    select from another draw is not a pair, so the criterion stays unknown
+    rather than asserting the defining event.
+    """
+    ratio_edited = 'kappa_lambda_ratio' in changed
+    ratio = _decimal_or_none(patient_info.kappa_lambda_ratio) if ratio_edited else None
+    kappa_edited = 'kappa_flc' in changed
+    lam_edited = 'lambda_flc' in changed
+    if not (kappa_edited or lam_edited):
+        # Only the ratio is the edit: it carries no concentration, so the scan's
+        # same-event pair supplies the involved-chain burden.
+        if same_event_pair is None or ratio is None:
+            return None
+        return _meets_flc_criterion(same_event_pair[0], same_event_pair[1], ratio)
+    if not (kappa_edited and lam_edited):
+        return None
+    kappa = _decimal_or_none(patient_info.kappa_flc)
+    lam = _decimal_or_none(patient_info.lambda_flc)
+    if kappa is None or lam is None:
+        return None
+    return _meets_flc_criterion(kappa, lam, ratio)
+
+
+def _combine_slim(sixty, light):
+    """One SLiM verdict from its two criteria.
+
+    A positive criterion establishes the event; a negative answer needs both
+    criteria assessed, otherwise the result is unknown ("not enough data")
+    rather than asserting that the defining event was never met.
+    """
+    if sixty is True or light is True:
         return True
-    if all(component is False for component in components):
+    if sixty is False and light is False:
         return False
     return None
+
+
+def derive_meets_slim(patient_info: PatientRecord, *, scan_components=None,
+                      changed_fields=None):
+    """Three-valued SLiM from the record's canonical inputs.
+
+    Uses the same Sixty and Light-chain rule as :func:`_get_mm_specific_data`,
+    including the involved-chain burden guard. The MRI-lesion criterion is not
+    inferred here: ``bone_lesions`` is a shared CRAB presence flag whose value
+    set does not distinguish "one lesion" from "more than one", so treating any
+    recorded value as the SLiM-M criterion would invent a positive.
+
+    ``scan_components`` is the refresh's per-criterion assessment (the same-draw
+    FLC pair and any qualifying marrow measurement). When it is given, only the
+    criterion named by ``changed_fields`` is re-read from the record and the
+    other keeps the scan's answer, so a pending edit of one input cannot
+    recombine the other criterion's evidence from the record (`#2876`). Without
+    it — a direct edit, which does not read OMOP history — both criteria come
+    from the record.
+    """
+    record = _slim_record_components(patient_info)
+    if scan_components is None:
+        return _combine_slim(record['sixty'], record['light'])
+    changed = (
+        MEETS_SLIM_INPUT_FIELDS if changed_fields is None else set(changed_fields)
+    )
+    sixty = (
+        record['sixty'] if changed & _SLIM_SIXTY_INPUTS
+        else scan_components.get('sixty')
+    )
+    if sixty is None:
+        # The scan reads Measurement rows, including a percentage an approved
+        # mapping carried as text. A reader it lacks (an Observation-based
+        # mapping) still lands on the record, and one measurement has no pairing
+        # to get wrong, so the record answers a criterion the scan could not
+        # read (#2876). The untouched light criterion has no such fallback:
+        # there the scan's None means no same-event pair, which the record's two
+        # chains cannot supply.
+        sixty = record['sixty']
+    if changed & _SLIM_LIGHT_INPUTS:
+        light = _edited_light_component(
+            patient_info, changed, scan_components.get('pair'),
+        )
+    else:
+        light = scan_components.get('light')
+    return _combine_slim(sixty, light)
 
 
 #: Imported marker concept names -> the picker's reviewed label (#2574). A
@@ -4962,32 +5058,53 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     _slim_seen = set()
     slim_measurements = []
     for m in _slim_candidates:
-        if m.measurement_id not in _slim_seen and m.value_as_number is not None:
-            _slim_seen.add(m.measurement_id)
-            slim_measurements.append(m)
-    slim_measurements.sort(key=lambda m: (m.measurement_date or date.min, m.measurement_id))
-    for m in slim_measurements:
+        if m.measurement_id in _slim_seen:
+            continue
         # A row that matched on source_value resolved its concept to some other
         # code; _lab_field_for_measurement falls back to the display name map.
         field = _lab_field_for_measurement(m, code_fields)
-        if field in _SLIM_FIELDS:
-            slim_vals.setdefault(field, []).append(
-                (float(m.value_as_number), m.unit_source_value))
+        if field not in _SLIM_FIELDS:
+            continue
+        value = m.value_as_number
+        if value is None and field == 'clonal_plasma_cells':
+            # An approved mapping can carry the percentage as text; the scan
+            # reads the evidence the record's own Sixty assessment reads, so a
+            # qualifying marrow result is not invisible to it (#2876).
+            value = _decimal_or_none(m.value_as_string)
+        if value is None:
+            continue
+        _slim_seen.add(m.measurement_id)
+        slim_measurements.append((m, field, float(value)))
+    slim_measurements.sort(
+        key=lambda item: (item[0].measurement_date or date.min, item[0].measurement_id))
+    for m, field, value in slim_measurements:
+        slim_vals.setdefault(field, []).append((value, m.unit_source_value))
 
-    plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
+    # Only a usable percentage can assess the criterion: a negative or
+    # non-finite row is no evidence, the same rule `_slim_record_components`
+    # applies to the record's value.
+    plasma_pcts = [
+        value for value, _unit in slim_vals.get('clonal_plasma_cells', [])
+        if _decimal_or_none(value) is not None
+    ]
     flc_pair = _select_flc_pair_with_ratio(snapshot.measurements, code_fields)
 
-    meets_slim = False
-    # Sixty criterion: any plasma cells measurement ≥60%
-    if any(v >= 60.0 for v in plasma_pcts):
-        meets_slim = True
+    # Each criterion is three-valued: no plasma-cell result (or no same-event
+    # pair) is unknown, not "not met", so a partially assessed record agrees
+    # with an edit's `derive_meets_slim` instead of asserting False (#2876).
+    sixty = None if not plasma_pcts else any(v >= 60.0 for v in plasma_pcts)
     # Ratio alone is not enough. A patient with both chains low reaches a ratio
     # of 100 without the absolute burden, and this decides a myeloma defining
     # event.
-    elif flc_pair is not None and _meets_flc_criterion(*flc_pair):
-        meets_slim = True
-
-    data['meets_slim'] = meets_slim
+    light = None if flc_pair is None else _meets_flc_criterion(*flc_pair)
+    # Transient, like `_flc_pair`: the refresh merges a pending edit's own
+    # criterion with the scan's assessment of the other one, and re-reads the
+    # light criterion from its same-event pair when the edit supplies one chain.
+    # Never an API field.
+    data['_meets_slim_components'] = {
+        'sixty': sixty, 'light': light, 'pair': flc_pair,
+    }
+    data['meets_slim'] = _combine_slim(sixty, light)
 
     # meets_crab is not computed here unless an explicit 89599-5 fact states
     # it: without one, refresh_patient_record derives it from the record's

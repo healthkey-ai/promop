@@ -390,10 +390,12 @@ def test_slim_sixty_criterion_fires_on_ehr_coded_marrow_result():
 
 
 def test_slim_sixty_criterion_does_not_fire_below_threshold():
+    """12 % fails Sixty, and no chain pair was assessed, so the answer is not
+    "not met": a criterion with no evidence is unknown (#2876)."""
     person = PersonFactory()
     _measure(person, '11118-7', 12.0)
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_light_chain_criterion_needs_both_halves():
@@ -407,13 +409,35 @@ def test_slim_light_chain_criterion_needs_both_halves():
 
 
 def test_slim_does_not_fire_on_a_high_ratio_with_a_low_involved_chain():
-    """Both chains low, so the ratio reaches 100 without the absolute burden."""
+    """Both chains low, so the ratio reaches 100 without the absolute burden.
+
+    The light criterion is assessed and negative; the marrow count is unknown,
+    so the verdict is unknown rather than "not met" (#2876).
+    """
     person = PersonFactory()
     _measure(person, '48378-4', 140.0)
     _measure(person, '36916-5', 30.0, unit='mg/L')
     _measure(person, '33944-0', 0.2, unit='mg/L')
 
+    assert _get_mm_specific_data(person)['meets_slim'] is None
+
+
+def test_slim_is_not_met_when_both_criteria_are_assessed_and_negative():
+    """A negative answer needs both criteria assessed (#2876)."""
+    person = PersonFactory()
+    _measure(person, '11118-7', 12.0, date='2024-06-01')
+    _measure(person, '36916-5', 30.0, date='2024-06-01', unit='mg/L')
+    _measure(person, '33944-0', 0.2, date='2024-06-01', unit='mg/L')
+
     assert _get_mm_specific_data(person)['meets_slim'] is False
+
+
+def test_slim_ignores_an_impossible_marrow_percentage():
+    """A negative percentage is no evidence, so it cannot assess Sixty (#2876)."""
+    person = PersonFactory()
+    _measure(person, '11118-7', -5.0)
+
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_converts_mg_dl_before_applying_the_threshold():
@@ -431,7 +455,7 @@ def test_slim_is_unproven_when_the_involved_chain_unit_is_unknown():
     _measure(person, '36916-5', 300.0, unit=None)
     _measure(person, '33944-0', 2.0, unit=None)
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_is_unproven_on_a_bare_ratio_with_no_chain_results():
@@ -439,7 +463,7 @@ def test_slim_is_unproven_on_a_bare_ratio_with_no_chain_results():
     person = PersonFactory()
     _measure(person, '48378-4', 140.0)
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_fires_on_an_inverse_ratio_when_lambda_is_involved():
@@ -457,7 +481,7 @@ def test_slim_does_not_fire_on_a_normal_ratio():
     _measure(person, '36916-5', 300.0, unit='mg/L')
     _measure(person, '33944-0', 250.0, unit='mg/L')
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_falls_back_to_dividing_two_separate_results():
@@ -478,13 +502,17 @@ def test_slim_uses_decimal_arithmetic_at_the_ratio_boundary():
 
 
 def test_slim_preserves_a_reported_ratio_from_the_same_event():
-    """A rounded reported ratio is more authoritative than dividing the chains."""
+    """A rounded reported ratio is more authoritative than dividing the chains.
+
+    The light criterion is judged on the reported 99.9 and is negative; with no
+    marrow result the verdict stays unknown (#2876).
+    """
     person = PersonFactory()
     _measure(person, '36916-5', 150.0, date='2024-06-01', unit='mg/L')
     _measure(person, '33944-0', 1.5, date='2024-06-01', unit='mg/L')
     _measure(person, '48378-4', 99.9, date='2024-06-01', unit=None)
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_flc_pair_does_not_cross_unrelated_event_domains():
@@ -516,7 +544,7 @@ def test_slim_does_not_combine_flc_from_different_lab_events():
     _measure(person, '36916-5', 300.0, date='2023-01-01', unit='mg/L')
     _measure(person, '33944-0', 1.0, date='2024-06-01', unit='mg/L')
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_uses_the_latest_flc_pair_not_an_arbitrary_row():
@@ -526,7 +554,7 @@ def test_slim_uses_the_latest_flc_pair_not_an_arbitrary_row():
     _measure(person, '36916-5', 2.0, date='2024-06-01', unit='mg/L')
     _measure(person, '33944-0', 1.5, date='2024-06-01', unit='mg/L')
 
-    assert _get_mm_specific_data(person)['meets_slim'] is False
+    assert _get_mm_specific_data(person)['meets_slim'] is None
 
 
 def test_slim_still_reads_generator_display_names():
