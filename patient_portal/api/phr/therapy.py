@@ -226,7 +226,9 @@ def _dated(day, precision) -> dict[str, Any] | None:
 def _line_detail(detail, entry: dict) -> dict[str, Any]:
     """What the patient said about the line beyond its dates and regimen
     (TherapyLineDetail): each date's precision, when it came back, whether it
-    is still received, a clinical trial, maintenance and the expected end."""
+    is still received, whether its response had been assessed (false: "not
+    assessed yet"; true with no outcome: it worked, the response type unknown),
+    a clinical trial, maintenance and the expected end."""
     if detail is None:
         came = _dated(entry.get('progression_date'), None)
         return {'came_back': came} if came else {}
@@ -244,6 +246,7 @@ def _line_detail(detail, entry: dict) -> dict[str, Any]:
         'precision': precision or None,
         'came_back': _dated(entry.get('progression_date'), detail.progression_date_precision),
         'ongoing': detail.ongoing,
+        'response_assessed': detail.response_assessed,
         'clinical_trial': detail.clinical_trial,
         'maintenance': maintenance or None,
         'expected_end': _dated(detail.expected_end_date, detail.expected_end_date_precision),
