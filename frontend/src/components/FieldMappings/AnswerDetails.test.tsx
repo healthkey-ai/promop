@@ -420,7 +420,7 @@ describe("lookup options in the editor", () => {
   it("says an enforced lookup wins over answers added here", async () => {
     serve(lookup({ enforced: true }));
     render(<FieldChoiceEditor fieldName="her2_status" onClose={() => {}} />);
-    expect(await screen.findByText(/answers added below are not offered/)).toBeInTheDocument();
+    expect(await screen.findByText(/only these entries are offered and answers added below are not/)).toBeInTheDocument();
   });
 
   it("says when answers added here replace the tab's lookup", async () => {
