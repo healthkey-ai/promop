@@ -414,6 +414,7 @@ class Applied:
     response_id: str
     fields: list[str] = field(default_factory=list)
     lines: list[int] = field(default_factory=list)
+    retracted: list[int] = field(default_factory=list)
 
 
 def apply_response(response) -> Applied | None:
@@ -501,11 +502,56 @@ def apply_response(response) -> Applied | None:
                     if result.episode is not None:
                         applied.lines.append(write['line_number'])
             refresh_patient_record(person)
+        if getattr(response, 'revises_id', None):
+            # An update (PROlog's revisable surveys) started from the record as it
+            # stood (survey_record_revision): a numbered treatment it no longer
+            # gives is one the patient took out, so their own line is retracted.
+            applied.retracted = _retract_removed_lines(person, mapping, lines)
+            if applied.retracted:
+                refresh_patient_record(person)
     logger.info(
-        'survey_record_mapping: response %s wrote fields %s and lines %s',
-        applied.response_id, applied.fields, applied.lines,
+        'survey_record_mapping: response %s wrote fields %s and lines %s; retracted lines %s',
+        applied.response_id, applied.fields, applied.lines, applied.retracted,
     )
     return applied
+
+
+def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str, Any]]) -> list[int]:
+    """Retract the patient's own lines that the mapping numbers (for the cancer
+    each rule names) and an update did not give. A line from the EHR or a
+    clinician is never touched (_writable_line), nor a check-in's later line
+    (only the numbers the mapping writes). Retracting keeps the row for audit."""
+    from omop_core.services.episode_service import retract_therapy_line
+    from omop_core.signals import suppress_patient_record_refresh
+
+    from omop_core.services.therapy_errors import TherapyLineValidationError
+
+    # By the rule that gave each line: apply_response may drop a line's cancer
+    # (a record naming none yet), so the line's own fields cannot say which rule.
+    kept = {line['index'] for line in given}
+    removed = [(rule.get('disease'), rule['line']) for index, rule in enumerate(mapping.get('therapy_lines', []))
+               if isinstance(rule.get('line'), int) and index not in kept]
+    from omop_core.services.disease_episodes import primary_disease_slug
+
+    if not primary_disease_slug(person):
+        # As the lines were written: a record naming no cancer yet files them all
+        # under the primary cancer, whichever it becomes.
+        removed = [(None, number) for _, number in removed]
+    existing: dict[str | None, dict[int, Any]] = {}
+    retracted = []
+    with suppress_patient_record_refresh():
+        for disease, number in removed:
+            if disease not in existing:
+                try:
+                    existing[disease] = _existing_lines(person, disease)
+                except TherapyLineValidationError:
+                    existing[disease] = {}  # a cancer the record does not have: nothing to take out
+            episode = existing[disease].get(number)
+            if episode is None or not _writable_line(person, {'line_number': number, 'disease': disease}):
+                continue
+            retract_therapy_line(person, episode)
+            retracted.append(number)
+    return retracted
 
 
 def _write_detail(episode, detail: dict[str, Any], reference: str) -> None:

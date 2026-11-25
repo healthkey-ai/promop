@@ -1022,6 +1022,10 @@ PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person
 # as a fact and show a question by (PROlog DEF-14, RUN-23): the catalogue in
 # patient_portal.prolog_facts.
 PROLOG_FACTS_PROVIDER = 'patient_portal.prolog_facts.facts_for'
+# An update of a revisable questionnaire starts from the patient's record as it
+# stands now, read back through its record mapping, not from answers check-ins
+# have since overtaken (PROlog RUN-4; patient_portal/survey_record_revision.py).
+PROLOG_REVISION_ANSWERS_PROVIDER = 'patient_portal.survey_record_revision.revision_answers'
 
 # Deployment-supplied content, mounted read-only. Empty by default: a PRomop
 # that offers no surveys loads none.

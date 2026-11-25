@@ -94,6 +94,34 @@ is offered. Loading refuses a mapping that is not readable JSON, names a field
 check `patient_portal.E007` runs the load at startup, so a broken file fails
 `check` and the deploy rather than every submission.
 
+## Updating answers (revisable questionnaires)
+
+PROlog's revisable questionnaires (RUN-4) let a patient update what they
+submitted: a new response, which this mapping applies like any other. Two
+things keep an update from undoing what has happened since:
+
+- **It starts from the record as it stands now**
+  (`survey_record_revision.revision_answers`, PROlog's
+  `PROLOG_REVISION_ANSWERS_PROVIDER`). The mapping is read backwards: each
+  record field a rule took from an answer becomes that answer again (an
+  option, a date at its stored precision, a number or text), and each numbered
+  line becomes its treatment's answers (the regimen and the names after it,
+  its dates, outcome and details). A later questionnaire's change (a check-in
+  finishing a treatment) is therefore what the patient sees and resubmits,
+  not their older answer. Where the record says nothing, the last answer
+  stays; where it contradicts the last answer and no answer says what it
+  says now, that answer is left out and asked again. An answer from the
+  record that its question's conditions would hide sets the earlier answers
+  that show it (the questionnaire's own `visible_if`). PROlog checks every
+  answer as one given now. With the record's permission withdrawn, the update
+  starts from the last answers.
+- **What an update takes out goes.** Submitting an update (a response with
+  `revises`) retracts the patient's own lines that the mapping numbers and the
+  update no longer gives: they took the treatment out. A line from the EHR or
+  a clinician is never retracted, nor a check-in's later line (a number the
+  mapping does not write). Retracting keeps the row for audit. A record field
+  an update no longer gives is not cleared.
+
 ## Not yet
 
 - Fields with no `PatientRecord` column yet; their answers stay in the survey
