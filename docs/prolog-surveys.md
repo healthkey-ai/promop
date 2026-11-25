@@ -179,6 +179,26 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.9.0 added
+
+`prolog_surveys` migration `0005` (a nullable `revises` column on the
+response), and two opt-in features, both off until a deployment's content asks
+for them:
+
+- **Revisable surveys** (`participation.revisable`, RUN-4): a questionnaire a
+  patient keeps up to date, such as a profile. Once they have submitted it,
+  starting it again (from the intro's or completion page's **Update my
+  answers**, on any device) gives them a new response holding their last
+  answers that are still valid in the active version; the submitted one never
+  changes, and the new one names it in `revises` (also an export column). The
+  record mappings apply the update like any submitted response.
+  `withdraw_consent … --erase-response` erases an erased response's updates
+  too. A revisable survey needs signed-in participants (`anonymous: false`,
+  `resume: "account"`).
+- **The theme's `exit_url`**: the deployment's home page. Every question then
+  offers **Save and exit**, and the completion page **Back to home**. A path on
+  the same site (`/…`) or an http(s) URL.
+
 ### What v0.8.0 added
 
 One setting, no migration:
