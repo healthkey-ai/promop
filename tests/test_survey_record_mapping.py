@@ -182,6 +182,19 @@ def test_the_patient_sees_a_response_not_assessed_yet(mapped, patient, django_ca
     assert 'outcome' not in line and line['response_assessed'] is False
 
 
+def test_a_response_the_patient_did_not_describe_is_left_out(mapped, patient, django_capture_on_commit_callbacks):
+    from rest_framework.test import APIClient
+
+    record, identity = patient
+    submit(mapped, record, {**ANSWERS, 'response': {'option': 'unsure'}}, django_capture_on_commit_callbacks)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    [line] = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
+
+    assert 'response_assessed' not in line
+
+
 def test_only_what_an_answer_gives_is_written(mapped, patient, django_capture_on_commit_callbacks):
     record, _ = patient
     PatientRecord.objects.filter(pk=record.pk).update(stage='II')
