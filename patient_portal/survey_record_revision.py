@@ -17,6 +17,11 @@ the patient answered it:
   not meet, and a field the last answers give nothing for unless its question
   was left unanswered (the mapping never clears a value, so the record's may
   be one the patient has since taken back);
+- a treatment's date answered without one ("Not sure") is kept the same way,
+  unless another questionnaire wrote that date to the line (a check-in's date
+  that it came back: newer, so taken), or the line has changed what that
+  answer did say (a treatment still received, since finished, takes its end
+  date from the record);
 - each numbered line differing from what the last answers give: its regimen
   (and the names after it), dates, outcome and details, each read from the
   line itself (its own outcome and progression, not the record's summary of
@@ -66,7 +71,7 @@ def revision_answers(participant_id, definition: dict[str, Any], previous: dict[
     written = record_patch(mapping, previous, today)
     written_lines = {line['index']: line for line in therapy_lines(mapping, previous, today)}
     found = _changed_record_fields(mapping, record, previous, written, questions)
-    found.update(_changed_lines(mapping, person, record, previous, written_lines, questions))
+    found.update(_changed_lines(mapping, person, record, previous, written_lines, questions, definition['slug']))
     answers = dict(previous)
     for key, answer in found.items():
         if answer is ASK_AGAIN:
@@ -231,8 +236,65 @@ def _lines_now(person, disease: str | None) -> dict[int, dict]:
     return lines
 
 
-def _changed_lines(mapping: dict, person, record, previous: dict, written_lines: dict, questions: dict) -> dict[str, dict]:
+_LINE_DATES = ('start_date', 'end_date', 'progression_date')
+
+
+def _dates_written_elsewhere(detail, own: set[str]) -> set[str]:
+    """The line dates another questionnaire may have written to this line:
+    from each source reference not this questionnaire's own
+    (``<response id>:<target>``), the dates its mapping's rule for that target
+    writes. A writer that cannot be told may have written any of them."""
+    from django.core.exceptions import ValidationError
+    from prolog_surveys.models import SurveyResponse
+
+    from patient_portal.survey_record_mapping import mapping_for
+
+    written: set[str] = set()
+    for reference in getattr(detail, 'source_references', None) or []:
+        response_id, _, target = str(reference).partition(':')
+        if response_id in own:
+            continue
+        try:
+            response = SurveyResponse.objects.select_related('survey_version__survey').filter(pk=response_id).first()
+        except (ValidationError, ValueError):
+            response = None
+        mapping = mapping_for(response.survey_version.survey.slug, response.survey_version.version) if response else None
+        if mapping is None:
+            return set(_LINE_DATES)
+        for rule in mapping.get('therapy_lines', []):
+            line = rule.get('line')
+            if (f'line-{line}' if isinstance(line, int) else line) == target:
+                written |= {key for key in _LINE_DATES if rule.get(key)}
+    return written
+
+
+def _kept_escape(line_rule: dict, key: str, question_key: str, previous: dict, given_detail: dict, detail,
+                 own: set[str]) -> bool:
+    """Whether a date question the patient answered without a date ("Not
+    sure") keeps that answer. It wrote no date, so one in the record is either
+    an older answer's to this questionnaire, never cleared (kept, as for a
+    record field), or another questionnaire's (a check-in's date that it came
+    back: newer, so taken). And what the answer did write may have changed
+    since: "I am still receiving this treatment" wrote ``ongoing``, so a line
+    a check-in has since finished takes its end date from the record."""
+    if not _answered(previous.get(question_key)) or key in _dates_written_elsewhere(detail, own):
+        return False
+    return not any(
+        rule.get('answer') == question_key and rule['field'] in given_detail
+        and not _same(given_detail[rule['field']], getattr(detail, rule['field'], None))
+        for rule in line_rule.get('details', [])
+    )
+
+
+def _changed_lines(mapping: dict, person, record, previous: dict, written_lines: dict, questions: dict,
+                   slug: str) -> dict[str, dict]:
+    from prolog_surveys.models import SurveyResponse
+
     from omop_core.api.serializers import outcome_aliases
+
+    # This questionnaire's own responses, to tell its writes on a line from another's.
+    own = {str(pk) for pk in SurveyResponse.objects.filter(
+        participant_id=person.person_id, survey_version__survey__slug=slug).values_list('pk', flat=True)}
 
     aliases = outcome_aliases(record.disease)
     by_disease: dict[str | None, dict[int, dict]] = {}
@@ -264,6 +326,9 @@ def _changed_lines(mapping: dict, person, record, previous: dict, written_lines:
                 continue
             precision = getattr(detail, f'{key}_precision', None)
             if given and _same(kwargs.get(key), value) and given_detail.get(f'{key}_precision') in (None, precision):
+                continue
+            if given and key not in kwargs and _kept_escape(line_rule, key, question_key, previous, given_detail,
+                                                             detail, own):
                 continue
             answer = _date_answer(value, precision, questions.get(question_key))
             if answer is not None:

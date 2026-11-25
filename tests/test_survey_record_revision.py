@@ -169,12 +169,12 @@ def _profile_definition():
         t = f't{n}_'
         questions = [
             _q(t + 'treat', 'Treatment?', list(LABELS)),
-            _date(t + 'start', 'Started?'),
+            _date(t + 'start', 'Started?', ['not_sure']),
             _date(t + 'end', 'Ended?', ['ongoing']),
             _q(t + 'resp', 'Response?', ['complete', 'partial', 'stable', 'worked_type_unknown', 'not_assessed'],
                visible_if=[{'question': t + 'end', 'op': 'neq', 'value': 'ongoing'}]),
             _q(t + 'back', 'Came back?', ['yes_once', 'yes_more', 'no']),
-            _date(t + 'back_date', 'When?', visible_if=[{'question': t + 'back', 'op': 'in', 'values': ['yes_once', 'yes_more']}]),
+            _date(t + 'back_date', 'When?', ['not_sure'], visible_if=[{'question': t + 'back', 'op': 'in', 'values': ['yes_once', 'yes_more']}]),
             _q(t + 'times', 'How many times?', ['twice', 'three'],
                visible_if=[{'question': t + 'back', 'op': 'eq', 'value': 'yes_more'}]),
         ]
@@ -359,3 +359,86 @@ def test_an_update_retracts_a_later_line_it_took_out(profile, patient, django_ca
                   .values_list('episode__episode_number', 'state'))
     assert states[4] == TherapyLineAssertion.RETRACTED
     assert {states[n] for n in (1, 2, 3)} == {TherapyLineAssertion.ASSERTED}
+
+
+def test_a_date_answered_not_sure_is_kept_over_an_older_one(profile, patient, django_capture_on_commit_callbacks):
+    """An earlier profile gave the start date; the last one said "Not sure",
+    which writes nothing, so the record still holds the older date."""
+    record, _ = patient
+    submit(profile, record, FOUR_LINES, django_capture_on_commit_callbacks)
+    not_sure = {**FOUR_LINES, 't1_start': {'option': 'not_sure'}}
+    submit(profile, record, not_sure, django_capture_on_commit_callbacks)
+    assert _line(record).episode_start_date == dt.date(2019, 6, 1)  # never cleared
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(not_sure))
+
+    assert answers['t1_start'] == {'option': 'not_sure'}
+    assert answers == not_sure
+
+
+def test_a_treatment_still_received_since_finished_takes_its_end_date(
+    profile, patient, django_capture_on_commit_callbacks,
+):
+    record, _ = patient
+    still = {**FOUR_LINES, 't4_end': {'option': 'ongoing'}}
+    still.pop('t4_resp')
+    submit(profile, record, still, django_capture_on_commit_callbacks)
+    # A check-in: it finished in March 2023.
+    line = _line(record, 4)
+    Episode.objects.filter(pk=line.pk).update(episode_end_date=dt.date(2023, 3, 1))
+    TherapyLineDetail.objects.filter(episode=line).update(ongoing=False, end_date_precision='month')
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(still))
+
+    assert answers['t4_end'] == {'date': '2023-03'}
+
+
+CHECKIN = 'checkin-example'
+
+
+@pytest.fixture
+def checkin(profile, settings):
+    """A second questionnaire whose mapping writes when the cancer came back to
+    the patient's latest line, as a deployment's check-in does."""
+    from pathlib import Path
+
+    mapping = {'mapping_version': 1, 'survey': CHECKIN, 'versions': ['1.0'], 'record': [],
+               'therapy_lines': [{'line': 'latest', 'progression_date': 'came_back'}]}
+    (Path(settings.PROLOG_RECORD_MAPPING_DIRS[0]) / 'checkin.json').write_text(json.dumps(mapping))
+    srm.reset_cache()
+    definition = {
+        'schema_version': 1, 'slug': CHECKIN, 'version': '1.0', 'status': 'draft', 'default_language': 'en',
+        'languages': ['en'], 'title': {'en': 'Check-in'},
+        'participation': {'anonymous': False, 'resume': 'account', 'repeatable': True},
+        'sections': [{'key': 's', 'title': {'en': 'Since'}, 'questions': [_date('came_back', 'When did it come back?')]}],
+    }
+    return load_definition(definition, activate=True).version
+
+
+NOT_SURE_WHEN = {**FOUR_LINES, 't4_back': {'option': 'yes_once'}, 't4_back_date': {'option': 'not_sure'}}
+
+
+def test_a_date_another_questionnaire_wrote_since_replaces_not_sure(
+    profile, checkin, patient, django_capture_on_commit_callbacks,
+):
+    record, _ = patient
+    submit(profile, record, NOT_SURE_WHEN, django_capture_on_commit_callbacks)
+    submit(checkin, record, {'came_back': {'date': '2024-05'}}, django_capture_on_commit_callbacks)
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(NOT_SURE_WHEN))
+
+    assert answers['t4_back_date'] == {'date': '2024-05'}
+
+
+def test_a_date_from_a_writer_that_cannot_be_told_replaces_not_sure(
+    profile, patient, django_capture_on_commit_callbacks,
+):
+    record, _ = patient
+    submit(profile, record, FOUR_LINES, django_capture_on_commit_callbacks)
+    not_sure = {**FOUR_LINES, 't1_start': {'option': 'not_sure'}}
+    submit(profile, record, not_sure, django_capture_on_commit_callbacks)
+    srm._write_detail(_line(record), {}, 'an-import:line-1')  # not a response of any questionnaire
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(not_sure))
+
+    assert answers['t1_start'] == {'date': '2019-06'}
