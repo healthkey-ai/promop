@@ -148,6 +148,12 @@ and never the model.
   `answer_coverage` (`choices`, `mapped`, `no_equivalent`, `proposed`,
   `unmapped`, over the choices still offered), kept apart from whether the
   field's question is mapped.
+  The Field Mappings list shows it as an **Answers** column ("3 of 5 decided":
+  a concept or a reviewed no-equivalent counts as decided; amber until all are,
+  the tooltip gives the four counts, a dash for a field with no curated
+  answers). It is the server's figure from the list's own response, so it is
+  not the editor's stricter client-side count; for a reader who can write
+  mappings it opens the field's answers.
 - **Target search for the editor** (#1225): `GET
   field-choices/<id>/value-mappings/targets/?q=&role=&question=&vocabulary_id=`
   (readers of the mapping pages). `q` is three characters or more and matches a
