@@ -39,6 +39,26 @@ MAX_MEMBERS = 200
 # Sleep sessions Oura marks as removed or as rest are not sleep.
 NOT_SLEEP = frozenset({'deleted', 'rest'})
 
+# What the parser refuses, by reason. The text shown to a patient is looked up
+# here and never taken from an exception, so nothing an exception carries (a
+# file name, a stack) can reach a response.
+REFUSALS = {
+    'not_zip': 'Uploaded file is not a valid ZIP archive.',
+    'too_many': 'The archive holds too many files.',
+    'too_large': 'The archive is too large once unpacked.',
+    'member_too_large': 'A file in the archive is too large once unpacked.',
+    'no_files': 'No Oura export files found (dailyactivity, sleepmodel, dailyspo2 or vo2max).',
+}
+
+
+class OuraExportRefused(ValueError):
+    """The upload is not an Oura export this parser can read; ``reason`` is a key of ``REFUSALS``."""
+
+    def __init__(self, reason: str):
+        super().__init__(REFUSALS[reason])
+        self.reason = reason
+
+
 _KINDS = {
     'dailyactivity': 'activity', 'sleepmodel': 'sleep', 'sleep': 'sleep_alt',
     'dailyspo2': 'spo2', 'vo2max': 'vo2',
@@ -135,22 +155,22 @@ def _members(file_bytes: bytes, filename: str) -> list[tuple[str, bytes]]:
     try:
         archive = zipfile.ZipFile(io.BytesIO(file_bytes))
     except zipfile.BadZipFile:
-        raise ValueError('Uploaded file is not a valid ZIP archive.')
+        raise OuraExportRefused('not_zip')
     infos = [info for info in archive.infolist() if not info.is_dir()]
     if len(infos) > MAX_MEMBERS:
-        raise ValueError('The archive holds too many files.')
+        raise OuraExportRefused('too_many')
     wanted = [info for info in infos if file_kind(info.filename)]
     # Zip bomb protection, on what the archive says and on what is read.
     if sum(info.file_size for info in wanted) > MAX_TOTAL_BYTES:
-        raise ValueError('The archive is too large once unpacked.')
+        raise OuraExportRefused('too_large')
     members = []
     for info in wanted:
         if info.file_size > MAX_MEMBER_BYTES:
-            raise ValueError(f'{info.filename} is too large once unpacked.')
+            raise OuraExportRefused('member_too_large')
         with archive.open(info) as handle:
             data = handle.read(MAX_MEMBER_BYTES + 1)
         if len(data) > MAX_MEMBER_BYTES:
-            raise ValueError(f'{info.filename} is too large once unpacked.')
+            raise OuraExportRefused('member_too_large')
         members.append((info.filename, data))
     return members
 
@@ -158,7 +178,7 @@ def _members(file_bytes: bytes, filename: str) -> list[tuple[str, bytes]]:
 def parse_oura_export(file_bytes: bytes, filename: str = '') -> list[WearableSample]:
     """Daily samples from an Oura export: the zip, or one of its CSV files.
 
-    Raises ``ValueError`` for a zip that is not one, or holds none of the
+    Raises ``OuraExportRefused`` (a ``ValueError``) for a zip that is not one, or holds none of the
     files read.
     """
     daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
@@ -176,7 +196,7 @@ def parse_oura_export(file_bytes: bytes, filename: str = '') -> list[WearableSam
         found += 1
         _collect(kind, _rows(data.decode('utf-8', errors='replace')), daily, sleep_sessions)
     if not found:
-        raise ValueError('No Oura export files found (dailyactivity, sleepmodel, dailyspo2 or vo2max).')
+        raise OuraExportRefused('no_files')
 
     for day, sessions in sleep_sessions.items():
         timed = [s for s in sessions if s['seconds'] and s['seconds'] > 0]

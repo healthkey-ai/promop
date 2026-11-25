@@ -5093,7 +5093,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
           - person_id: the record the page is showing; refused unless it is
             the caller's own
         """
-        from omop_core.services.oura_parser import parse_oura_export
+        from omop_core.services.oura_parser import (
+            REFUSALS as OURA_REFUSALS, OuraExportRefused, parse_oura_export)
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
 
         if 'file' not in request.FILES:
@@ -5158,11 +5159,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 samples = parse_apple_health_export(file_bytes)
         except Exception as e:
-            if device_type == 'oura' and isinstance(e, ValueError):
-                # The Oura parser's own refusals (not an archive, no export files,
-                # too large) say what is wrong and name nothing of the patient's.
-                logger.info('wearable_parse_refused device=oura reason=%s', e)
-                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            if isinstance(e, OuraExportRefused):
+                # The parser's own refusals (not an archive, no export files, too
+                # large): fixed wording looked up by reason, never the exception's text.
+                return Response({'error': OURA_REFUSALS[e.reason]},
+                                status=status.HTTP_400_BAD_REQUEST)
             logger.exception('wearable_parse_error device=%s', device_type)
             return Response(
                 {'error': 'Failed to parse file. Please ensure it is a valid '
