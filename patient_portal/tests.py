@@ -14712,7 +14712,9 @@ class AuthControlsTest(TestCase):
         from django.test import RequestFactory
         from patient_portal.admin import IdentityAdmin
         request = RequestFactory().post('/admin/')
-        request.user = self.identity
+        # The action is an administrator's: a superuser here, whom no staff
+        # role's organisation scope (STAFF_ORGANIZATIONS) limits.
+        request.user = Identity.objects.create_superuser(email='root-reset@test.com', password='Root-passw0rd-9021')
         setattr(request, 'session', 'session')
         setattr(request, '_messages', FallbackStorage(request))
         IdentityAdmin(Identity, site).require_password_change(
