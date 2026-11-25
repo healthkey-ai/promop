@@ -364,6 +364,23 @@ class EtlPatientCrudPermission(PatientCrudPermission):
         )
 
 
+class InteractiveSessionPermission(BasePermission):
+    """A signed-in person at the page: a session or partner (Firebase/PHR) sign-in.
+
+    Never a service credential, a client-credentials application or an OAuth2
+    token a user handed to an application: an action only a person may take
+    (confirming a patient's provisional values, #2870) must not be reachable by
+    anything that can be presented without them. Who the person is, and what
+    they may do to which patient, is the view's rule.
+    """
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and request.user.is_authenticated
+            and is_interactive_session(request) and not is_machine_request(request)
+        )
+
+
 class IsStaffPermission(BasePermission):
     """Allow access only to staff users (is_staff=True)."""
 

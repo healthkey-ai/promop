@@ -180,6 +180,17 @@ this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
 
+### What v0.10.1 added
+
+No migration, no setting. The runner no longer trusts the response id the
+browser kept on an account questionnaire: its intro and completion pages ask
+`GET /api/run/surveys/<slug>/status/` where the signed-in patient stands (the
+response a start resumes, their last submission, whether the active version
+offers "Update my answers") and rewrite the kept id from the answer. A
+patient whose answers were given on an older, non-revisable version is offered
+the update; a new browser or a second device finds their place. The endpoint
+sits under the runner's existing `/api/run/` mount.
+
 ### What v0.10.0 added
 
 No migration. One setting, which promop sets:

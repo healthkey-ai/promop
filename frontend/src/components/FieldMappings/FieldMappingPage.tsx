@@ -9,6 +9,7 @@ import { invalidateAllWritableFields } from "@/hooks/useWritableFields";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
+import { answerFigures, type AnswerCoverageFigures } from "./answerConcept";
 import { FormulaEditDialog } from "./FormulaEditDialog";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
 import { addFieldReturn, type AddFieldReturn } from "@/components/PatientInfo/fieldMappingLinks";
@@ -75,6 +76,9 @@ interface FieldDescriptor extends FieldScoped {
   } | null;
   explanation: string | null;
   derivation_error: string | null;
+  /** How many of the field's answers have a concept decision (#1224); null
+   *  when the field has no curated answers. */
+  answer_coverage?: AnswerCoverageFigures | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -610,6 +614,24 @@ export default function FieldMappingPage() {
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };
 
+  /** The answers' concept decisions: "3 of 5 decided", amber until each has one. */
+  const renderAnswersCell = (f: FieldDescriptor) => {
+    const figures = answerFigures(f.answer_coverage);
+    if (!figures) return <span className="text-xs text-gray-400">&mdash;</span>;
+    const text = (
+      <span className={`text-xs ${figures.complete ? "text-green-700" : "text-amber-700"}`} title={figures.detail}>
+        {figures.summary}
+      </span>
+    );
+    if (!canWrite) return text;
+    return (
+      <button type="button" onClick={() => setChoiceEditorField(f)}
+        aria-label={`Open the answers of ${f.field_name}`} className="cursor-pointer hover:underline">
+        {text}
+      </button>
+    );
+  };
+
   /** Render table (omop_table) cell. */
   const renderTableCell = (f: FieldDescriptor) => {
     if (f.locked_table) {
@@ -679,6 +701,7 @@ export default function FieldMappingPage() {
             </th>
             <th className="px-3 py-2">Coding</th>
             <th className="px-3 py-2">Table</th>
+            <th className="px-3 py-2">Answers</th>
             <th className="px-3 py-2">Synonyms</th>
           </tr>
         </thead>
@@ -755,6 +778,7 @@ export default function FieldMappingPage() {
                   renderTableCell(f)
                 )}
               </td>
+              <td className="px-3 py-2">{renderAnswersCell(f)}</td>
               <td className="px-3 py-2">{renderSynonyms(f)}</td>
             </tr>
             );

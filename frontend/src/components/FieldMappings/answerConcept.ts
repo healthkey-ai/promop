@@ -273,3 +273,27 @@ export function lookupCoverage(options: { value_mappings: ValueMapping[] }[]) {
   }
   return { total: options.length, decided, proposed, attention, undecided: options.length - decided - proposed - attention };
 }
+
+/** What the server counts for one field's curated answers (``coverage``). */
+export interface AnswerCoverageFigures {
+  choices: number;
+  mapped: number;
+  no_equivalent: number;
+  proposed: number;
+  unmapped: number;
+}
+
+/** The Field Mappings list's one-line figure for a field's answers: those with
+ *  a decision (a concept, or a reviewed "no equivalent") over those offered. */
+export function answerFigures(c: AnswerCoverageFigures | null | undefined):
+  { summary: string; detail: string; complete: boolean } | null {
+  if (!c || !c.choices) return null;
+  const decided = c.mapped + c.no_equivalent;
+  const parts = [`${c.mapped} with a concept`, `${c.no_equivalent} with no equivalent`,
+    `${c.proposed} waiting for approval`, `${c.unmapped} with no proposal`];
+  return {
+    summary: `${decided} of ${c.choices} decided`,
+    detail: parts.join(", "),
+    complete: decided === c.choices,
+  };
+}

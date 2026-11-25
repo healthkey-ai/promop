@@ -1,7 +1,16 @@
-import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
 import ProvisionalBadge, { AcceptedBadge, MarkedControl } from './ProvisionalBadge';
-import { ProvisionalContext } from './ProvisionalContext';
+import { ProvisionalContext, type ProvisionalValue } from './ProvisionalContext';
+
+/** The confirm part of the context a professional's page provides (#2870). */
+const confirmContext = (over: Partial<NonNullable<ProvisionalValue['confirm']>> = {}) => ({
+  confirmable: new Set(['bmi', 'hemoglobin_g_dl']),
+  busy: null,
+  errors: {},
+  onConfirm: vi.fn(),
+  ...over,
+});
 
 describe('ProvisionalBadge', () => {
   it('says provisional with the confidence, and a clinician is told how to confirm', () => {
@@ -147,5 +156,85 @@ describe('AcceptedBadge wording (#2835)', () => {
     const title = screen.getByTestId('accepted-median_daily_steps_30d').title;
     expect(title).toMatch(/your device readings/);
     expect(title).not.toMatch(/mapping/i);
+  });
+});
+
+describe('the Confirm control (#2870)', () => {
+  it('is an explicit button named for the field, and it confirms that field', () => {
+    const confirm = confirmContext();
+    render(
+      <ProvisionalContext.Provider value={{ marks: { hemoglobin_g_dl: 82 }, patientMode: false, confirm }}>
+        <ProvisionalBadge name="hemoglobin_g_dl" label="Hemoglobin (g/dL)" />
+      </ProvisionalContext.Provider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm Hemoglobin (g/dL)' }));
+
+    expect(confirm.onConfirm).toHaveBeenCalledWith('hemoglobin_g_dl');
+  });
+
+  it('is not shown to a patient', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { bmi: 74 }, patientMode: true, confirm: confirmContext() }}>
+        <ProvisionalBadge name="bmi" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByTestId('provisional-bmi')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('is not shown for a field the server did not list', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { weight: 70 }, patientMode: false, confirm: confirmContext() }}>
+        <ProvisionalBadge name="weight" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByTestId('provisional-weight')).toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('is not shown where the value is not provisional', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: {}, patientMode: false, confirm: confirmContext() }}>
+        <ProvisionalBadge name="bmi" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('is not shown on a device-reading summary, which its mapping settles', () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { bmi: 74 }, patientMode: false, confirm: confirmContext() }}>
+        <ProvisionalBadge name="bmi" fromDevice />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('is disabled while a confirmation runs and shows the last refusal for its field', () => {
+    render(
+      <ProvisionalContext.Provider
+        value={{ marks: { bmi: 74 }, patientMode: false, confirm: confirmContext({ busy: '*', errors: { bmi: 'Changed.' } }) }}
+      >
+        <ProvisionalBadge name="bmi" label="BMI" />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByRole('button', { name: 'Confirm BMI' })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Changed.');
+  });
+
+  it('is on a control outside Field too (the GELF checklist)', () => {
+    render(
+      <ProvisionalContext.Provider
+        value={{
+          marks: { gelf_criteria_options: 80 },
+          patientMode: false,
+          confirm: confirmContext({ confirmable: new Set(['gelf_criteria_options']) }),
+        }}
+      >
+        <MarkedControl name="gelf_criteria_options" label="GELF criteria"><input aria-label="gelf" /></MarkedControl>
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByRole('button', { name: 'Confirm GELF criteria' })).toBeInTheDocument();
   });
 });

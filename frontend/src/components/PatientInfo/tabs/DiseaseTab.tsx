@@ -169,7 +169,7 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
           <ClinicalField label="Ann Arbor Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Grade" name="tumor_grade" descriptor={descriptors.tumor_grade} type="select" value={formData?.tumor_grade} options={FL_TUMOR_GRADE_OPTIONS} onChange={onChange} vocabSource={flGradeSource} />
           <div className="sm:col-span-2">
-            <MarkedControl name="gelf_criteria_options">
+            <MarkedControl name="gelf_criteria_options" label="GELF criteria">
               <GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} />
             </MarkedControl>
           </div>

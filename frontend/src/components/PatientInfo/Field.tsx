@@ -156,7 +156,7 @@ export default function Field({
           {label}
           {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
         </label>
-        <ProvisionalBadge name={markName ?? name} fromDevice={showAccepted} />
+        <ProvisionalBadge name={markName ?? name} fromDevice={showAccepted} label={label} />
         {showAccepted && hasValue(value) && <AcceptedBadge name={markName ?? name} />}
         <FieldMappingLink name={name} label={label} />
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
