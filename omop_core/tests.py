@@ -8076,6 +8076,19 @@ class SeedHl7PhrSourceCodesTest(TestCase):
         call_command('seed_hl7_phr_mappings', verbosity=0)
         self.assertEqual(resolve_wearable_mappings('apple'), resolved)
 
+    def test_oura_rows_are_seeded_proposed_and_reach_no_adapter_until_approved(self):
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        oura = SourceCodeConceptMapping.objects.filter(source_vocabulary_id='Oura')
+        self.assertEqual(oura.count(), 9)
+        self.assertEqual(set(oura.values_list('status', flat=True)), {'proposed'})
+        # Oura's HRV is RMSSD, never SDNN.
+        self.assertEqual(oura.get(source_code='hrv_rmssd').metric_key, 'hrv_rmssd')
+        self.assertFalse(oura.filter(source_code='hrv_sdnn').exists())
+        self.assertEqual(resolve_wearable_mappings('oura'), {})
+        oura.filter(source_code='steps').update(status='approved')
+        self.assertEqual(set(resolve_wearable_mappings('oura')), {'steps'})
+
     # ── Existing rows, dry run, idempotence ─────────────────────────────
 
     def test_dry_run_writes_nothing_and_reports_each_vocabulary_and_a_total(self):

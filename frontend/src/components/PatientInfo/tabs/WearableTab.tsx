@@ -6,6 +6,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import OuraUpload from './OuraUpload';
 import UploadsList, { type UploadRecord } from './UploadsList';
 import { pendingClause } from './wearableResult';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
@@ -61,6 +62,7 @@ const DEVICE_LABELS: Record<string, string> = {
   garmin: 'Garmin',
   apple: 'Apple',
   android: 'Android',
+  oura: 'Oura',
 };
 
 /** A device type the list does not name is shown as the server sent it. */
@@ -120,6 +122,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const [syncing, setSyncing] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Which section's upload the result and error above belong to, so each is
+  // shown beside the button that was used.
+  const [messageAt, setMessageAt] = useState<'top' | 'oura'>('top');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragCounter = useRef(0);
@@ -170,6 +175,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const handleDelete = useCallback(async (uploadId: number) => {
     if (!confirm('Delete this upload and its associated measurements?')) return;
     setDeletingId(uploadId);
+    // A refusal is told in the section the upload is listed in.
+    setMessageAt(uploads.find(u => u.id === uploadId)?.device_type === 'oura' ? 'oura' : 'top');
     try {
       await clinicalClient().delete(clinicalUrl(`/v1/patient-records/wearable-uploads/${uploadId}/`));
       setUploads(prev => prev.filter(u => u.id !== uploadId));
@@ -180,11 +187,12 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     } finally {
       setDeletingId(null);
     }
-  }, [expandedUpload, onRefresh]);
+  }, [expandedUpload, onRefresh, uploads]);
 
   /** Upload a list of files with a given device type. Shared by file-picker and drag-and-drop. */
-  const uploadFiles = useCallback(async (files: File[], deviceType: string) => {
+  const uploadFiles = useCallback(async (files: File[], deviceType: string, at: 'top' | 'oura' = 'top') => {
     setUploading(true);
+    setMessageAt(at);
     setUploadResult(null);
     setUploadError(null);
 
@@ -346,7 +354,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const phoneUploads = canSyncOwnDevice && phonePanelShown
     ? uploads.filter(u => PHONE_DEVICES.includes(u.device_type))
     : [];
-  const placed = new Set([...garminUploads, ...phoneUploads].map(u => u.id));
+  // Oura's sit in the Oura section, which is offered wherever an upload is.
+  const ouraUploads = ownRecord ? uploads.filter(u => u.device_type === 'oura') : [];
+  const placed = new Set([...garminUploads, ...phoneUploads, ...ouraUploads].map(u => u.id));
   // The phone uploads wait while the panel has not said whether it is there,
   // rather than show here for a moment and then move.
   const waiting = canSyncOwnDevice && phonePanelShown === null;
@@ -411,10 +421,10 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
         <span className="text-xs text-gray-400">or drag &amp; drop files here</span>
 
-        {uploadResult && (
+        {messageAt === 'top' && uploadResult && (
           <span className="text-sm text-green-600">{uploadResult}</span>
         )}
-        {uploadError && (
+        {messageAt === 'top' && uploadError && (
           <span className="text-sm text-red-600">{uploadError}</span>
         )}
       </div>}
@@ -460,6 +470,19 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             {!uploadsLoading && <UploadsList {...uploadsProps} uploads={garminUploads} name="garmin" />}
           </div>
         </section>
+      )}
+
+      {/* An Oura Ring export (#2889): the file Oura's Membership Hub sends. */}
+      {ownRecord && (
+        <OuraUpload
+          disabled={uploading || syncing || deletingId !== null}
+          uploading={uploading && messageAt === 'oura'}
+          result={messageAt === 'oura' ? uploadResult : null}
+          error={messageAt === 'oura' ? uploadError : null}
+          onFiles={(files) => void uploadFiles(files, 'oura', 'oura')}
+        >
+          {!uploadsLoading && <UploadsList {...uploadsProps} uploads={ouraUploads} name="oura" />}
+        </OuraUpload>
       )}
 
       {/* A phone app built on Open Wearables, connected with a one-time code:

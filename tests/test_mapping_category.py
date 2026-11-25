@@ -327,8 +327,8 @@ def test_no_code_is_listed_under_two_values():
                          for code in group]
                 assert len(codes) == len(set(codes)), module.__name__
                 checked += 1
-    # A category and a measure class list for each of five metric lists.
-    assert checked == 10
+    # A category and a measure class list for each of six metric lists.
+    assert checked == 12
 
 
 # ── API: read ───────────────────────────────────────────────────────────

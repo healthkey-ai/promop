@@ -416,7 +416,7 @@ def resolve_wearable_mappings(device_type):
             ).select_related('target_concept').order_by('id')
         }
 
-    source_vocab = 'Apple' if device_type == 'apple' else 'Garmin'
+    source_vocab = {'apple': 'Apple', 'oura': 'Oura'}.get(device_type, 'Garmin')
 
     # Query all approved mappings for this device vocabulary.
     approved = SourceCodeConceptMapping.objects.filter(
@@ -437,7 +437,7 @@ def resolve_wearable_mappings(device_type):
             if metric_key and row.target_concept:
                 db_mappings[metric_key] = row.target_concept
     else:
-        # Garmin: source_code == metric_key
+        # Garmin and Oura: source_code == metric_key
         for row in approved:
             if row.target_concept:
                 db_mappings[row.source_code] = row.target_concept

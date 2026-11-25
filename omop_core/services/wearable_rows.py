@@ -43,10 +43,11 @@ from omop_core.services.source_vocabularies import WEARABLE_DEVICE_VOCABULARIES
 logger = logging.getLogger(__name__)
 
 # The source vocabulary each upload device's codes are mapped under.
-DEVICE_VOCABULARY = {'apple': 'Apple', 'garmin': 'Garmin', 'android': 'HealthConnect'}
+DEVICE_VOCABULARY = {'apple': 'Apple', 'garmin': 'Garmin', 'android': 'HealthConnect', 'oura': 'Oura'}
 VOCABULARY_DEVICE = {vocabulary: device for device, vocabulary in DEVICE_VOCABULARY.items()}
 DEVICE_VOCABULARIES = WEARABLE_DEVICE_VOCABULARIES
-SOURCE_LABELS = {'apple': 'Apple Health', 'garmin': 'Garmin', 'android': 'Health Connect'}
+SOURCE_LABELS = {'apple': 'Apple Health', 'garmin': 'Garmin', 'android': 'Health Connect',
+                 'oura': 'Oura Ring'}
 
 NO_MATCHING_CONCEPT_ID = 0
 ORIGIN_SYSTEM = 'wearable-import'
@@ -124,7 +125,8 @@ def device_codes(device_type, metric_keys) -> dict:
     if vocabulary is None:
         return {}
     metric_keys = list(dict.fromkeys(metric_keys))
-    if device_type == 'garmin':
+    if device_type in ('garmin', 'oura'):
+        # The metric key is the device's code.
         codes = {metric: metric for metric in metric_keys}
     elif device_type == 'apple':
         apple = _apple_codes()
@@ -320,7 +322,7 @@ def needs_resolving(person, codes) -> list:
 # ---- what the Source Codes tab says of a wearable code -------------------------------
 
 def _metric_of(vocabulary, source_code, apple, health_connect, mapping_metrics) -> str:
-    if vocabulary == 'Garmin':
+    if vocabulary in ('Garmin', 'Oura'):
         return source_code
     if vocabulary == 'Apple':
         return apple.get(source_code, '')

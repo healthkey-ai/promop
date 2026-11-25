@@ -1180,6 +1180,7 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
 |---|---|---|
 | `garmin` | `Garmin` | the metric key (`steps`) |
 | `apple` | `Apple` | the HealthKit identifier, cut to the 50-character column |
+| `oura` | `Oura` | the metric key (`hrv_rmssd`), as Garmin's; see [Oura Ring Export Upload](#wearables--oura-ring-export-upload) |
 | `android` | `HealthConnect` | the Health Connect record type (`HEALTH_CONNECT_CODES`; the code of an approved mapping that names the metric wins) |
 
 - **What an import stores.** The approved global mapping for exactly that
@@ -1351,6 +1352,56 @@ spelling), `PatientSourceCodesTab.wearables.test.tsx`,
 `PatientOmopTab.test.tsx`, `PatientWearableCodes.readings.test.tsx`.
 
 ---
+
+## Wearables — Oura Ring Export Upload
+
+A patient who wears an Oura Ring uploads the data export Oura's Membership
+Hub makes (Export data; Oura's cloud API needs OAuth, which is not built):
+the **Oura Ring** section of the Wearables tab, directly below Garmin (#2889).
+Parser `omop_core/services/oura_parser.py`; route `upload-wearable` with
+`device_type=oura`. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-ring-export).
+
+- **A zip of CSV files, or one of them** (`.zip` or `.csv`, several files at
+  once). The section has its own button because the top Upload button and the
+  drop zone read a `.zip` as Apple Health; a dropped Oura zip is filed as
+  Apple and fails to parse. The section is offered wherever an upload is
+  (`ownRecord`), and its uploads list collapsed in it (`UploadsList` named
+  `oura`), never in the leftovers.
+- **Ordinary source codes.** The code is the metric key under the new `Oura`
+  vocabulary (`steps`, `hrv_rmssd`), exactly as Garmin's, through
+  `wearable_rows.device_codes`: no Oura-only resolution path. `Oura` is in
+  `WEARABLE_DEVICE_VOCABULARIES`, so every device-code rule under
+  [Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)
+  covers it.
+- **Seeded proposed, not approved.** `seed_wearable_device_mappings` seeds nine
+  `Oura` rows (`origin_system` `hk-wearables-oura`) at the concepts Garmin's
+  use, `proposed`: nobody has reviewed them, so an Oura reading is provisional
+  (unscored proposals qualify at the floor) or unresolved until a curator
+  approves the mapping (not the one who proposed it, if
+  `MAPPING_SEPARATE_APPROVER`). Existing instances get the rows from the next
+  vocabulary load, or `manage.py seed_wearable_device_mappings`.
+- **What is read** (Oura API V2 names): `dailyactivity` (`steps`, high and
+  medium activity time as active minutes, `active_calories`), `sleepmodel`
+  (sessions of a day added for sleep duration; from the longest session
+  `average_hrv` as **RMSSD**, `lowest_heart_rate` as resting heart rate,
+  `average_breath`; `deleted` and `rest` sessions are not sleep, and a 0 is no
+  figure), `dailyspo2`, `vo2max`. Not read: scores, temperature, stress, the
+  heart-rate series, and `equivalent_walking_distance`, an estimate that is
+  not a distance walked.
+- **Not verified against a real export.** The file names and columns are
+  Oura's documented API V2 ones and the export's separator (`;` or `,`) is
+  sniffed; check a first real export's `samples_created` before relying on it.
+  A file or column that is absent is skipped, never guessed.
+- **Limits.** 200 files, 200 MB per CSV and 500 MB in all, uncompressed,
+  checked before reading (zip bombs). The upload goes through the shared
+  writer: an Oura day replaces nothing and stacks like a file does, and a
+  re-upload of the same file stores nothing new.
+
+Tests: `tests/test_oura_parser.py`,
+`patient_portal.tests.WearableUploadEndpointTest` (the `oura` cases),
+`omop_core.tests.SeedHl7PhrSourceCodesTest`, `OuraUpload` cases in
+`WearableTab.test.tsx`.
 
 ## Wearables — Garmin Connect Sync
 

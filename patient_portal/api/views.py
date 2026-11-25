@@ -5082,25 +5082,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     def upload_wearable(self, request):
         """POST /api/v1/patient-records/upload-wearable/
 
-        Accept a wearable data file (Garmin .fit or Apple Health .zip) and
+        Accept a wearable data file (Garmin .fit, Apple Health .zip or an Oura
+        Ring export .zip/.csv) and
         write parsed samples into OMOP Measurement/Observation rows, then
         refresh the PatientRecord 30-day summaries.
 
         Form fields:
           - file: the uploaded file
-          - device_type: 'garmin' | 'apple'
+          - device_type: 'garmin' | 'apple' | 'oura'
           - person_id: the record the page is showing; refused unless it is
             the caller's own
         """
+        from omop_core.services.oura_parser import parse_oura_export
         from omop_core.services.wearable_parsers import parse_garmin_fit, parse_apple_health_export
 
         if 'file' not in request.FILES:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
 
         device_type = request.data.get('device_type', '').strip().lower()
-        if device_type not in ('garmin', 'apple'):
+        if device_type not in ('garmin', 'apple', 'oura'):
             return Response(
-                {'error': "device_type must be 'garmin' or 'apple'"},
+                {'error': "device_type must be 'garmin', 'apple' or 'oura'"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -5112,6 +5114,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': 'Garmin uploads must be .fit files'}, status=status.HTTP_400_BAD_REQUEST)
         if device_type == 'apple' and not name.endswith('.zip'):
             return Response({'error': 'Apple Health uploads must be .zip files'}, status=status.HTTP_400_BAD_REQUEST)
+        if device_type == 'oura' and not name.endswith(('.zip', '.csv')):
+            return Response({'error': 'Oura uploads must be the export .zip or one of its .csv files'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
         MAX_WEARABLE_UPLOAD_BYTES = 200 * 1024 * 1024  # 200 MB
         if uploaded.size is not None and uploaded.size > MAX_WEARABLE_UPLOAD_BYTES:
@@ -5143,16 +5148,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
 
         # Parse the file
+        FILE_KINDS = {'garmin': 'Garmin .fit', 'apple': 'Apple Health export.zip',
+                      'oura': 'Oura Ring export'}
         try:
             if device_type == 'garmin':
                 samples = parse_garmin_fit(file_bytes)
+            elif device_type == 'oura':
+                samples = parse_oura_export(file_bytes, name)
             else:
                 samples = parse_apple_health_export(file_bytes)
         except Exception as e:
             logger.exception('wearable_parse_error device=%s', device_type)
             return Response(
                 {'error': 'Failed to parse file. Please ensure it is a valid '
-                          f'{"Garmin .fit" if device_type == "garmin" else "Apple Health export.zip"} file.'},
+                          f'{FILE_KINDS[device_type]} file.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

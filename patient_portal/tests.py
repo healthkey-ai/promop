@@ -19144,11 +19144,104 @@ class WearableUploadEndpointTest(TestCase):
         client = self._client_as(self.identity)
         resp = client.post(
             '/api/v1/patient-records/upload-wearable/',
-            data={'file': uploaded, 'device_type': 'oura'},
+            data={'file': uploaded, 'device_type': 'fitbit'},
             format='multipart',
         )
         self.assertEqual(resp.status_code, 400)
         self.assertIn('device_type', resp.data['error'])
+
+    # -- Oura Ring export (#2889) ---------------------------------------------
+
+    _OURA_ACTIVITY = (
+        'id;day;steps;high_activity_time;medium_activity_time;active_calories\n'
+        'a;2024-07-01;8200;600;1800;410\n')
+    _OURA_SLEEP = (
+        'id;day;type;total_sleep_duration;average_hrv;lowest_heart_rate;average_breath\n'
+        's;2024-07-01;long_sleep;27000;52;51;14.5\n')
+
+    def _post_oura(self, filename, content, identity=None, **fields):
+        import io
+        import zipfile
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        if filename.endswith('.zip'):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                for name, text in content.items():
+                    archive.writestr(name, text)
+            content = buffer.getvalue()
+        else:
+            content = content.encode()
+        uploaded = SimpleUploadedFile(filename, content)
+        return self._client_as(identity or self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'oura', **fields},
+            format='multipart',
+        )
+
+    def test_oura_export_is_stored_as_ordinary_source_codes(self):
+        """The zip's rows are filed under the Oura vocabulary, one code per metric."""
+        from omop_core.models import Observation, PatientSourceCode, SourceCodeConceptMapping, WearableUpload
+        resp = self._post_oura('oura.zip', {
+            'App Data/dailyactivity.csv': self._OURA_ACTIVITY,
+            'App Data/sleepmodel.csv': self._OURA_SLEEP,
+            'App Data/heartrate.csv': 'timestamp;bpm\n',
+        })
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 7)
+
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'oura')
+        # The device's own code, in the Oura vocabulary, in the patient's inventory.
+        held = set(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='Oura').values_list('source_value', flat=True))
+        self.assertEqual(held, {'steps', 'active_minutes', 'active_energy', 'sleep_duration',
+                                'hrv_rmssd', 'resting_hr', 'respiratory_rate'})
+        self.assertTrue(Observation.objects.filter(
+            person=self.person, observation_source_value='steps', value_as_number=8200).exists())
+        self.assertTrue(Measurement.objects.filter(
+            person=self.person, measurement_source_value='hrv_rmssd', value_as_number=52).exists())
+        # No Oura mapping is approved, so each code is queued for a curator.
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', status='approved').exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', source_code='steps').exists())
+
+    def test_oura_csv_alone_is_accepted(self):
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 3)
+
+    def test_oura_upload_twice_stores_each_reading_once(self):
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 0)
+        self.assertEqual(resp.data['duplicates_skipped'], 3)
+
+    def test_oura_upload_refuses_other_file_types_and_unreadable_files(self):
+        resp = self._post_oura('oura.fit', 'x')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('.zip', resp.data['error'])
+        resp = self._post_oura('oura.zip', {'notes.txt': 'nothing here'})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Oura Ring export', resp.data['error'])
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_oura_upload_started_from_another_record_is_refused(self):
+        other = Person.objects.create(person_id=99012, family_name='Other', given_name='Olive')
+        PatientRecord.objects.create(person=other)
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY, person_id=str(other.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_oura_upload_is_deleted_with_its_rows(self):
+        from omop_core.models import WearableUpload
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        upload = WearableUpload.objects.get(person=self.person)
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._wearable_rows(self.person)[0], 0)
 
     def test_upload_wrong_extension(self):
         """POST with wrong file extension returns 400."""

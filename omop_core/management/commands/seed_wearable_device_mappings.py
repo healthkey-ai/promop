@@ -1,8 +1,10 @@
-"""Seed SourceCodeConceptMapping rows for Apple HealthKit and Garmin FIT metrics.
+"""Seed SourceCodeConceptMapping rows for Apple HealthKit, Garmin FIT and Oura metrics.
 
-Creates one *approved* mapping per device-specific source code, derived from
+Creates one *approved* mapping per Apple or Garmin source code, derived from
 the existing hard-coded mapping tables in wearable_parsers.py and mappings.py.
 These mappings represent the code paths that are already proven in production.
+The Oura Ring codes (#2889) are seeded *proposed*: a curator approves them, and
+until then an Oura reading is provisional or unresolved, like any unreviewed code.
 
 Idempotent: uses get_or_create on (source_vocabulary_id, source_code). All it
 adds to a row that exists is the metric's source unit, its category, its
@@ -65,6 +67,21 @@ GARMIN_METRICS = [
     ('basal_energy', 'Basal energy expenditure', 'kcal', 'Measurement', 'HK-Wearable', 'HK-WEAR-BASAL-ENERGY', 'basal_energy'),
 ]
 
+# The metrics an Oura Ring export carries (``oura_parser``), mapped to the
+# concepts Garmin's are: Oura's HRV is RMSSD, its "lowest heart rate" is the
+# resting heart rate it reports, and its sleep duration is time asleep.
+OURA_METRICS = [
+    ('steps', 'Step count', 'count', 'Observation', 'LOINC', '55423-8', 'steps'),
+    ('active_minutes', 'Active minutes (high and medium activity)', 'min', 'Observation', 'LOINC', '55411-3', 'active_minutes'),
+    ('resting_hr', 'Resting heart rate (lowest heart rate of the night)', 'bpm', 'Measurement', 'LOINC', '40443-4', 'resting_hr'),
+    ('hrv_rmssd', 'Heart rate variability (RMSSD)', 'ms', 'Measurement', 'HK-Wearable', 'HK-WEAR-HRV-RMSSD', 'hrv_rmssd'),
+    ('spo2', 'Oxygen saturation (SpO2)', '%', 'Measurement', 'LOINC', '59408-5', 'spo2'),
+    ('respiratory_rate', 'Respiratory rate (average breathing rate in sleep)', 'breaths/min', 'Measurement', 'LOINC', '9279-1', 'respiratory_rate'),
+    ('sleep_duration', 'Sleep duration', 'h', 'Observation', 'LOINC', '93832-4', 'sleep_duration'),
+    ('vo2_max', 'VO2 max', 'mL/kg/min', 'Measurement', 'LOINC', '94122-9', 'vo2_max'),
+    ('active_energy', 'Active energy burned', 'kcal', 'Measurement', 'LOINC', '93819-1', 'active_energy'),
+]
+
 # Each metric's category in the wearable mapping proposal, as
 # OPENWEARABLES_CATEGORIES is for the OpenWearables metrics.
 APPLE_CATEGORIES = by_code({
@@ -93,6 +110,14 @@ APPLE_CATEGORIES = by_code({
 
 GARMIN_CATEGORIES = by_code({
     'Activity': ('steps', 'active_minutes', 'distance', 'active_energy', 'basal_energy'),
+    'Heart & Cardiovascular': ('resting_hr', 'hrv_rmssd'),
+    'Blood & Respiratory': ('spo2', 'respiratory_rate'),
+    'Fitness': ('vo2_max',),
+    'Sleep': ('sleep_duration',),
+})
+
+OURA_CATEGORIES = by_code({
+    'Activity': ('steps', 'active_minutes', 'active_energy'),
     'Heart & Cardiovascular': ('resting_hr', 'hrv_rmssd'),
     'Blood & Respiratory': ('spo2', 'respiratory_rate'),
     'Fitness': ('vo2_max',),
@@ -131,13 +156,22 @@ GARMIN_MEASURE_CLASSES = by_code({
     'Algorithmic estimate': ('vo2_max', 'active_energy', 'basal_energy'),
 })
 
+OURA_MEASURE_CLASSES = by_code({
+    'Direct measurement': ('spo2', 'respiratory_rate'),
+    'Aggregate over interval': (
+        'steps', 'active_minutes', 'resting_hr', 'sleep_duration', 'hrv_rmssd',
+    ),
+    'Algorithmic estimate': ('vo2_max', 'active_energy'),
+})
+
 # {source_code: metric_key}, from the last element of each metric's tuple.
 APPLE_METRIC_KEYS = {metric[0]: metric[6] for metric in APPLE_METRICS}
 GARMIN_METRIC_KEYS = {metric[0]: metric[6] for metric in GARMIN_METRICS}
+OURA_METRIC_KEYS = {metric[0]: metric[6] for metric in OURA_METRICS}
 
 
 class Command(BaseCommand):
-    help = 'Seed SourceCodeConceptMapping rows for Apple HealthKit and Garmin FIT metrics.'
+    help = 'Seed SourceCodeConceptMapping rows for Apple HealthKit, Garmin FIT and Oura Ring metrics.'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -150,7 +184,7 @@ class Command(BaseCommand):
 
         # Collect all target codes that need concept lookup.
         lookup_keys = set()
-        for metrics in (APPLE_METRICS, GARMIN_METRICS):
+        for metrics in (APPLE_METRICS, GARMIN_METRICS, OURA_METRICS):
             for _code, _name, _unit, _domain, d_vocab, d_code, _mkey in metrics:
                 lookup_keys.add((d_vocab, d_code))
 
@@ -169,9 +203,13 @@ class Command(BaseCommand):
 
         device_sets = [
             ('Apple', APPLE_METRICS, 'hk-wearables-apple',
-             APPLE_CATEGORIES, APPLE_MEASURE_CLASSES, APPLE_METRIC_KEYS),
+             APPLE_CATEGORIES, APPLE_MEASURE_CLASSES, APPLE_METRIC_KEYS, 'approved'),
             ('Garmin', GARMIN_METRICS, 'hk-wearables-garmin',
-             GARMIN_CATEGORIES, GARMIN_MEASURE_CLASSES, GARMIN_METRIC_KEYS),
+             GARMIN_CATEGORIES, GARMIN_MEASURE_CLASSES, GARMIN_METRIC_KEYS, 'approved'),
+            # Not yet reviewed by a curator: proposed, so an Oura reading is
+            # provisional until someone approves the mapping.
+            ('Oura', OURA_METRICS, 'hk-wearables-oura',
+             OURA_CATEGORIES, OURA_MEASURE_CLASSES, OURA_METRIC_KEYS, 'proposed'),
         ]
 
         total_created = total_existed = total_unresolved = source_units_filled = 0
@@ -179,7 +217,7 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             for (source_vocab, metrics, origin_system,
-                 categories, measure_classes, metric_keys) in device_sets:
+                 categories, measure_classes, metric_keys, seed_status) in device_sets:
                 created = existed = unresolved = 0
                 for src_code, display, unit, domain, d_vocab, d_code, _mkey in metrics:
                     target = concepts.get((d_vocab, d_code))
@@ -223,7 +261,7 @@ class Command(BaseCommand):
                             'omop_table': omop_table,
                             'source_unit_evidence': unit_evidence(unit),
                             **described,
-                            'status': 'approved',
+                            'status': seed_status,
                             'origin': 'import',
                             'origin_system': origin_system,
                             'source': 'HealthKey',
