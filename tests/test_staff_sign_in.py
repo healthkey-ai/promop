@@ -43,6 +43,7 @@ def provider(settings, monkeypatch):
         'address_claim': 'preferred_username',
     }]
     settings.STAFF_ROLES = ['Member support', 'Staff manager']
+    settings.STAFF_ORGANIZATIONS = ['flf-test']
     settings.APP_BASE_URL = 'http://testserver'
     monkeypatch.setenv('TEST_STAFF_SECRET', 'secret-1')
     monkeypatch.setattr(staff_sign_in, 'discovery', lambda p: CONFIG)
@@ -225,6 +226,19 @@ def provider_session(client, provider='work'):
     session.save()
 
 
+def make_member(email, person_id, org='flf-test'):
+    """A member: a sign-in, a person, their record in ``org`` and the link."""
+    from omop_core.models import Organization, PatientRecord, Person
+
+    member = Identity.objects.create_user(email=email, password='Member-passw0rd-long')
+    person = Person.objects.create(person_id=person_id, year_of_birth=1970, gender_source_value='female',
+                                   race_source_value='unknown', ethnicity_source_value='unknown')
+    organization, _ = Organization.objects.get_or_create(slug=org, defaults={'name': org})
+    PatientRecord.objects.create(person=person, organization=organization)
+    PatientUser.objects.create(identity=member, person=person)
+    return member, person
+
+
 def staff_client(*roles, email='staffer@example.test', full=False):
     identity = Identity.objects.create_user(email=email, password=None)
     identity.is_staff = full
@@ -295,11 +309,14 @@ def test_role_staff_get_no_patient_data_from_the_api():
 
 def test_member_support_acts_on_members_and_never_on_staff():
     client, _ = staff_client('Member support')
-    member = Identity.objects.create_user(email='member@example.test', password='Member-passw0rd-long')
+    member, _ = make_member('member@example.test', 990030)
+    elsewhere, _ = make_member('elsewhere@example.test', 990031, org='another-organisation')
     _, other_staff = staff_client('Staff manager', email='other@example.test')
 
     client.post('/admin/patient_portal/identity/', {
-        'action': 'require_password_change', '_selected_action': [member.pk, other_staff.pk]})
+        'action': 'require_password_change', '_selected_action': [member.pk, other_staff.pk, elsewhere.pk]})
+    elsewhere.refresh_from_db()
+    assert not elsewhere.must_change_password  # another organisation's member
 
     member.refresh_from_db()
     other_staff.refresh_from_db()
@@ -313,24 +330,36 @@ def test_member_support_withdraws_a_permission_for_a_member(monkeypatch):
     from omop_core.models import Person
 
     client, me = staff_client('Member support')
-    member = Identity.objects.create_user(email='member@example.test', password='Member-passw0rd-long')
-    person = Person.objects.create(person_id=990001, year_of_birth=1970, gender_source_value='female',
-                                   race_source_value='unknown', ethnicity_source_value='unknown')
-    PatientUser.objects.create(identity=member, person=person)
+    member, person = make_member('member@example.test', 990001)
     purpose = ConsentPurpose.objects.create(key='updates')
     ConsentText.objects.create(purpose=purpose, version='1', title='Updates from us', body='...',
                                published_at=timezone.now() - timezone.timedelta(days=1))
-    ConsentEvent.objects.create(person=person, purpose=purpose, version='1', decision=ConsentEvent.GRANTED)
+    ConsentEvent.objects.create(person=person, purpose=purpose, version='1', decision=ConsentEvent.GRANTED,
+                                recorded_at=timezone.now() - timezone.timedelta(days=10))
 
     asked = client.post('/admin/patient_portal/identity/', {
         'action': 'withdraw_permission', '_selected_action': [member.pk]})
     assert asked.status_code == 200 and b'Updates from us' in asked.content
 
+    asked = timezone.localdate() - timezone.timedelta(days=2)
+    tomorrow = timezone.localdate() + timezone.timedelta(days=1)
+    for missing_or_future in ('', tomorrow.isoformat()):
+        page = client.post('/admin/patient_portal/identity/', {
+            'action': 'withdraw_permission', '_selected_action': [member.pk], 'confirm': 'withdraw',
+            'purpose': 'updates', 'requested_on': missing_or_future})
+        assert b'today or earlier' in page.content
+    assert ConsentEvent.objects.filter(person=person).count() == 1  # nothing recorded yet
+
     client.post('/admin/patient_portal/identity/', {
         'action': 'withdraw_permission', '_selected_action': [member.pk], 'confirm': 'withdraw',
-        'purpose': 'updates'})
+        'purpose': 'updates', 'requested_on': asked.isoformat(), 'note': 'By email to the support address'})
     latest = ConsentEvent.objects.filter(person=person).order_by('-recorded_at', '-id').first()
     assert (latest.decision, latest.source, latest.recorded_by) == (ConsentEvent.WITHDRAWN, ConsentEvent.STAFF, me)
+    assert (latest.requested_on, latest.note, latest.version) == (asked, 'By email to the support address', '1')
+    from patient_portal.models import ConsentLedgerEntry
+
+    entry = ConsentLedgerEntry.objects.filter(key='updates').order_by('-recorded_at', '-id').first()
+    assert (entry.decision, entry.requested_on) == (ConsentEvent.WITHDRAWN, asked)
 
 
 def test_inviting_staff_needs_the_manager_permission_and_keeps_only_the_tokens_hash():
@@ -442,7 +471,7 @@ def test_sending_an_invitation_again_only_resends_the_latest_to_the_records_addr
     person = Person.objects.create(person_id=990003, year_of_birth=1970, gender_source_value='female',
                                    race_source_value='unknown', ethnicity_source_value='unknown',
                                    email='new@example.test')
-    PatientRecord.objects.create(person=person, organization=Organization.objects.create(name='O', slug='o'))
+    PatientRecord.objects.create(person=person, organization=Organization.objects.create(name='F', slug='flf-test'))
     soon = timezone.now() + timezone.timedelta(days=1)
     old = PatientInvitation.objects.create(person=person, email='old@example.test', token='b' * 64, expires_at=soon,
                                            cancelled_at=timezone.now())
@@ -629,7 +658,7 @@ def test_support_actions_are_in_the_admin_history():
     from django.contrib.admin.models import LogEntry
 
     client, me = staff_client('Member support')
-    member = Identity.objects.create_user(email='member@example.test', password='Member-passw0rd-long')
+    member, _ = make_member('member@example.test', 990032)
 
     client.post('/admin/patient_portal/identity/', {
         'action': 'require_password_change', '_selected_action': [member.pk]})
@@ -752,3 +781,129 @@ def test_settings_that_could_not_work_are_stopped(settings, monkeypatch):
 
     settings.STAFF_SIGN_IN_PROVIDERS = ['not an object']
     assert 'patient_portal.E016' in {e.id for e in staff_sign_in_check(None)}
+
+
+def test_closing_a_members_account_needs_its_permission_and_the_typed_address():
+    from django.contrib.admin.models import LogEntry
+    from omop_core.models import Organization, PatientRecord, Person
+
+    from patient_portal.models import PatientInvitation
+
+    member, person = make_member('leaving@example.test', 990020)
+    invitation = PatientInvitation.objects.create(person=person, email='leaving@example.test', token='g' * 64,
+                                                  expires_at=timezone.now() + timezone.timedelta(days=1),
+                                                  accepted_at=timezone.now())
+    _, other_staff = staff_client('Staff manager', email='other@example.test')
+
+    support, _ = staff_client('Member support')
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'require_password_change', '_selected_action': [member.pk]})  # leaves a history entry
+    from django.contrib.admin.models import CHANGE
+    LogEntry.objects.log_actions(  # as "Send the invitation again" would: its name carries the address
+        user_id=other_staff.pk, queryset=PatientInvitation.objects.filter(pk=invitation.pk), action_flag=CHANGE,
+        change_message='Sent again', single_object=True)
+    page = support.get('/admin/patient_portal/identity/').content
+    assert b'close_member_account' not in page  # not without its permission
+
+    Group.objects.get(name='Member support').permissions.add(Permission.objects.get(codename='close_member_accounts'))
+    asked = support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [member.pk]})
+    assert asked.status_code == 200 and b'Type the member' in asked.content
+
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [member.pk], 'confirm': 'close',
+        'confirm_email': 'someone.else@example.test'})
+    assert Person.objects.filter(person_id=990020).exists()
+
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [other_staff.pk], 'confirm': 'close',
+        'confirm_email': 'other@example.test'})
+    assert Identity.objects.filter(pk=other_staff.pk).exists()  # never a staff account
+
+    support.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [member.pk], 'confirm': 'close',
+        'confirm_email': 'Leaving@Example.test'})
+    assert not Person.objects.filter(person_id=990020).exists()
+    assert not Identity.objects.filter(pk=member.pk).exists()
+    names = set(LogEntry.objects.filter(object_id__in=[str(member.pk), str(invitation.pk)])
+                .values_list('object_repr', flat=True))
+    assert names == {'closed account (person 990020)'}  # the history stays, without the address
+    assert LogEntry.objects.filter(change_message="Closed the account on the member's behalf").exists()
+
+
+def test_a_withdrawal_asked_for_before_the_member_gave_it_again_is_refused():
+    client, _ = staff_client('Member support')
+    member, person = make_member('regranted@example.test', 990040)
+    purpose = ConsentPurpose.objects.create(key='updates')
+    ConsentText.objects.create(purpose=purpose, version='1', title='Updates from us', body='...',
+                               published_at=timezone.now() - timezone.timedelta(days=30))
+    ConsentEvent.objects.create(person=person, purpose=purpose, version='1', decision=ConsentEvent.GRANTED,
+                                recorded_at=timezone.now())
+
+    page = client.post('/admin/patient_portal/identity/', {
+        'action': 'withdraw_permission', '_selected_action': [member.pk], 'confirm': 'withdraw',
+        'purpose': 'updates', 'requested_on': (timezone.localdate() - timezone.timedelta(days=3)).isoformat()})
+
+    assert b'after the date they asked' in page.content
+    assert ConsentEvent.objects.filter(person=person).count() == 1
+
+
+def test_dates_are_in_staffs_own_time_zone(settings):
+    from patient_portal.admin import _staff_today
+    from zoneinfo import ZoneInfo
+
+    settings.STAFF_TIME_ZONE = 'Pacific/Kiritimati'  # UTC+14: often a day ahead of the server
+    assert _staff_today() == timezone.localdate(timezone=ZoneInfo('Pacific/Kiritimati'))
+
+
+def test_a_superuser_never_closes_a_staff_account_and_a_kept_sign_in_is_said():
+    from omop_core.models import GroupAccess, Organization
+    from patient_portal.erasure import sign_in_to_close
+
+    client, _ = superuser_client()
+    staff_member, staff_person = make_member('staff.member@example.test', 990041)
+    staff_member.groups.add(Group.objects.get(name='Member support'))
+    assert sign_in_to_close(staff_person) is None  # role staff keep their sign-in
+
+    client.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [staff_member.pk], 'confirm': 'close',
+        'confirm_email': 'staff.member@example.test'})
+    assert Identity.objects.filter(pk=staff_member.pk).exists()
+
+    provider, provider_person = make_member('doctor.member@example.test', 990042)
+    GroupAccess.objects.create(identity=provider, org=Organization.objects.get(slug='flf-test'), role='doctor')
+    page = client.post('/admin/patient_portal/identity/', {
+        'action': 'close_member_account', '_selected_action': [provider.pk], 'confirm': 'close',
+        'confirm_email': 'doctor.member@example.test'}, follow=True)
+    assert b'The sign-in stays' in page.content
+    assert Identity.objects.filter(pk=provider.pk).exists()
+
+
+def test_the_access_log_hides_addresses_of_machines_and_records_its_own_reading():
+    from patient_portal.models import AuditEvent
+
+    Group.objects.get(name='Staff manager').permissions.add(Permission.objects.get(codename='view_auditevent'))
+    client, _ = staff_client('Staff manager')
+    AuditEvent.objects.create(event_type=AuditEvent.EVENT_VIEW, method='GET', path='/api/v1/x/',
+                              ip_address='203.0.113.9', resource_id='990050')
+
+    page = client.get('/admin/patient_portal/auditevent/', {'q': '990050'})
+
+    assert page.status_code == 200 and b'990050' in page.content and b'203.0.113.9' not in page.content
+    review = AuditEvent.objects.filter(event_type=AuditEvent.EVENT_AUDIT_REVIEW).order_by('-timestamp').first()
+    assert review is not None and review.detail == {'audit_search': {'q': '990050'}}
+
+
+def test_a_staff_change_is_in_the_members_download():
+    from patient_portal.consent import consent_fhir_resources, record_consent
+
+    member, person = make_member('download@example.test', 990043)
+    purpose = ConsentPurpose.objects.create(key='updates')
+    ConsentText.objects.create(purpose=purpose, version='1', title='Updates', body='...',
+                               published_at=timezone.now() - timezone.timedelta(days=30))
+    record_consent(person, purpose, ConsentEvent.GRANTED, version='1')
+    record_consent(person, purpose, ConsentEvent.WITHDRAWN, source=ConsentEvent.STAFF,
+                   requested_on=timezone.localdate(), note='by email')
+
+    withdrawn = [r for r in consent_fhir_resources(person, 'Patient/1') if 'extension' in r]
+    assert [e['url'] for e in withdrawn[0]['extension']] == ['urn:promop:consent-requested-on', 'urn:promop:consent-note']

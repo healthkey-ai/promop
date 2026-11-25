@@ -65,6 +65,27 @@ KEPT_ON_WITHDRAWAL = frozenset({
 _MEMBERSHIP_FIELDS = ('organization',)
 
 
+def sign_in_to_close(person: Person) -> Identity | None:
+    """The member's sign-in that goes with their record when staff close it:
+    a purely-patient login. One that is staff or holds provider access stays,
+    so closing a record never revokes a provider. A `patient` grant (an
+    invitation's) is no reason to keep it: a sign-in left behind opens a new,
+    empty record on its next request (#2851)."""
+    from omop_core.models import GroupAccess
+    from patient_portal.models import PatientUser
+
+    from patient_portal.staff_sign_in import is_role_staff
+
+    account = PatientUser.objects.filter(person=person).select_related('identity').first()
+    if account is None:
+        return None
+    identity = account.identity
+    if identity.is_staff or identity.is_superuser or is_role_staff(identity) or \
+            GroupAccess.objects.filter(identity=identity).exclude(role='patient').exists():
+        return None
+    return identity
+
+
 def close_account(person: Person, identity: Identity | None = None, *, actor: Identity | None = None) -> None:
     """Delete the person, their record and every row about them, and
     ``identity`` (their sign-in) when given. ``actor`` is who asked: the
@@ -74,6 +95,7 @@ def close_account(person: Person, identity: Identity | None = None, *, actor: Id
     actor_id = _actor_id(actor)
     with transaction.atomic():
         files = _document_files(person)
+        _forget_admin_names(person, identity)
         # A linked Garmin account keeps sending until Garmin is told; the
         # token that can tell it is deleted with the person (#2802).
         _forget_garmin(person)
@@ -120,6 +142,30 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
         _remove_files_on_commit(files, person.person_id)
         _log('record', person.person_id, _actor_id(actor), purpose=purpose)
     return record
+
+
+def _forget_admin_names(person: Person, identity: Identity | None) -> None:
+    """Staff actions on the member stay in the admin's history (who did what,
+    when), but not the names it kept for them: an invitation's carries their
+    address, a person's their name. Every row that names the member is
+    rewritten: the person, their invitations and portal link, and the sign-in
+    going with them."""
+    from django.contrib.admin.models import LogEntry
+    from django.contrib.contenttypes.models import ContentType
+    from patient_portal.models import PatientInvitation, PatientUser
+
+    named = {
+        Person: [person.pk],
+        PatientInvitation: list(PatientInvitation.objects.filter(person=person).values_list('pk', flat=True)),
+        PatientUser: list(PatientUser.objects.filter(person=person).values_list('pk', flat=True)),
+    }
+    if identity is not None:
+        named[type(identity)] = [identity.pk]
+    for model, pks in named.items():
+        if pks:
+            LogEntry.objects.filter(
+                content_type=ContentType.objects.get_for_model(model), object_id__in=[str(pk) for pk in pks],
+            ).update(object_repr=f'closed account (person {person.pk})')
 
 
 def _forget_garmin(person: Person) -> None:
