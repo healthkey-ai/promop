@@ -43,7 +43,10 @@ requires-python = ">=3.12"
 # django-oauth-toolkit: omop_core.Organization (migration 0061) has a hard FK to
 # oauth2_provider.Application, so the host MUST also add 'oauth2_provider' to
 # INSTALLED_APPS. (patient_portal is NOT required — its 0071 edge is conditional.)
-dependencies = ["Django>=5.0", "django-oauth-toolkit>=3.0"]
+# pgvector: omop_core.models imports pgvector.django.VectorField at load time
+# (ConceptEmbedding), as does migration 0206. Only the Python package is required;
+# the database extension stays optional (migration 0204 skips the table without it).
+dependencies = ["Django>=5.0", "django-oauth-toolkit>=3.0", "pgvector>=0.3.6"]
 
 [project.optional-dependencies]
 # The packaged API (omop_core.api) imports DRF. Hosts that only use the models
