@@ -241,6 +241,7 @@ def offered(field_name: str, disease: str | None = None, *, context_key: str | N
     from omop_core.models import FieldChoice
 
     qs = (FieldChoice.objects.filter(field_name=field_name, retired_at__isnull=True)
+          .exclude(context_key__startswith='lookup:')  # decisions about lookup entries, not answers
           .prefetch_related('disease_scope'))
     if context_key is not None:
         qs = qs.filter(context_key=context_key)

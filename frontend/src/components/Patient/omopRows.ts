@@ -82,3 +82,11 @@ export function formatMoment(datetime: string | null | undefined, date: string |
   }
   return { text: date ?? DASH, dateOnly: Boolean(date) };
 }
+
+/** A group to open when the tab is entered from elsewhere (a 30-day wearable value's link to its rows, #2887). */
+export interface OmopFocus {
+  table: string;
+  concept_id: number;
+  source_value: string | null;
+  wearable: boolean;
+}

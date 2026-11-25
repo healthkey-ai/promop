@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
-import ClinicalField from '../ClinicalField';
+import { MetricField } from './WearableMetricTools';
+import { WearableMetricProvider } from './wearableMetricContext';
+import type { OmopFocus } from '@/components/Patient/omopRows';
 import ProvisionalBadge from '../ProvisionalBadge';
 import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
@@ -26,6 +28,12 @@ interface Props {
    * embed.
    */
   canSyncOwnDevice?: boolean;
+  /**
+   * Opens the OMOP tab at a concept group. Passed only where that tab is
+   * offered (staff and org admins outside patient mode); without it a 30-day
+   * value has its chart and no link to rows (#2887).
+   */
+  onOpenOmopRows?: (focus: OmopFocus) => void;
   /**
    * True when the page is the signed-in person's own record. A file upload,
    * the upload history and its deletes all act on the caller's own record,
@@ -109,7 +117,7 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false }: Props) {
+export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false, onOpenOmopRows }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -392,6 +400,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   };
 
   return (
+    <WearableMetricProvider value={{ personId, onOpenOmopRows }}>
     <div
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
@@ -574,7 +583,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Activity (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Median Daily Steps"
             name="median_daily_steps_30d"
             descriptor={descriptors.median_daily_steps_30d}
@@ -584,7 +593,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.median_daily_steps_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Active Minutes / Day"
             name="active_minutes_per_day_30d"
             descriptor={descriptors.active_minutes_per_day_30d}
@@ -594,7 +603,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.active_minutes_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Activity Trend"
             name="activity_trend_30d"
             descriptor={descriptors.activity_trend_30d}
@@ -611,7 +620,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Cardiovascular (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Resting Heart Rate (bpm)"
             name="resting_heart_rate_avg_30d"
             descriptor={descriptors.resting_heart_rate_avg_30d}
@@ -624,7 +633,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           {/* SDNN and RMSSD are distinct statistics and are shown as
               distinct fields. A patient normally has one or the other
               depending on their device, not both. */}
-          <ClinicalField
+          <MetricField
             label="HRV SDNN (ms)"
             name="hrv_sdnn_avg_30d"
             descriptor={descriptors.hrv_sdnn_avg_30d}
@@ -634,7 +643,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.hrv_sdnn_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="HRV RMSSD (ms)"
             name="hrv_rmssd_avg_30d"
             descriptor={descriptors.hrv_rmssd_avg_30d}
@@ -649,7 +658,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Respiratory (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Min SpO&#8322; (%)"
             name="oxygen_saturation_min_30d"
             descriptor={descriptors.oxygen_saturation_min_30d}
@@ -659,7 +668,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.oxygen_saturation_min_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Avg SpO&#8322; (%)"
             name="oxygen_saturation_avg_30d"
             descriptor={descriptors.oxygen_saturation_avg_30d}
@@ -669,7 +678,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.oxygen_saturation_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Respiratory Rate (breaths/min)"
             name="respiratory_rate_avg_30d"
             descriptor={descriptors.respiratory_rate_avg_30d}
@@ -684,7 +693,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Sleep (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Avg Sleep Duration (hours)"
             name="sleep_duration_hours_avg_30d"
             descriptor={descriptors.sleep_duration_hours_avg_30d}
@@ -699,7 +708,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Fitness (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="VO&#8322; Max (mL/kg/min)"
             name="vo2_max_avg_30d"
             descriptor={descriptors.vo2_max_avg_30d}
@@ -709,7 +718,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.vo2_max_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Distance (km/day)"
             name="distance_km_per_day_30d"
             descriptor={descriptors.distance_km_per_day_30d}
@@ -719,7 +728,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.distance_km_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Flights Climbed / Day"
             name="flights_climbed_per_day_30d"
             descriptor={descriptors.flights_climbed_per_day_30d}
@@ -734,7 +743,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Gait & Mobility (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Walking Speed (km/hr)"
             name="walking_speed_avg_30d"
             descriptor={descriptors.walking_speed_avg_30d}
@@ -744,7 +753,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.walking_speed_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Step Length (cm)"
             name="walking_step_length_avg_30d"
             descriptor={descriptors.walking_step_length_avg_30d}
@@ -754,7 +763,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.walking_step_length_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Double Support (%)"
             name="walking_double_support_pct_avg_30d"
             descriptor={descriptors.walking_double_support_pct_avg_30d}
@@ -764,7 +773,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.walking_double_support_pct_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Walking Heart Rate (bpm)"
             name="walking_hr_avg_30d"
             descriptor={descriptors.walking_hr_avg_30d}
@@ -779,7 +788,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
       <Section title="Energy & Body (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Active Energy (kcal/day)"
             name="active_energy_per_day_30d"
             descriptor={descriptors.active_energy_per_day_30d}
@@ -789,7 +798,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.active_energy_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Basal Energy (kcal/day)"
             name="basal_energy_per_day_30d"
             descriptor={descriptors.basal_energy_per_day_30d}
@@ -799,7 +808,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             value={formData?.basal_energy_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Body Mass (kg)"
             name="body_mass_avg_30d"
             descriptor={descriptors.body_mass_avg_30d}
@@ -812,5 +821,6 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         </div>
       </Section>
     </div>
+    </WearableMetricProvider>
   );
 }

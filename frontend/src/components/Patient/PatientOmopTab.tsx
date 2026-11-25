@@ -1,8 +1,8 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, Database, Watch } from "lucide-react";
 import api from "@/api/axios";
 import ReadingsTable, { Moment } from "./OmopReadings";
-import { OPEN_BY_DEFAULT, WEARABLE_LABEL, orderTables, type OmopGroup, type OmopTable } from "./omopRows";
+import { OPEN_BY_DEFAULT, WEARABLE_LABEL, orderTables, type OmopFocus, type OmopGroup, type OmopTable } from "./omopRows";
 
 interface OmopPayload {
   person_id: number;
@@ -15,6 +15,14 @@ function formatValue(value: unknown) {
   return String(value);
 }
 
+/** Whether a group is the one a 30-day wearable value pointed at. */
+function isFocused(focus: OmopFocus | null | undefined, tableKey: string, group: OmopGroup) {
+  if (!focus || focus.table !== tableKey || focus.concept_id !== group.concept_id) return false;
+  // At concept 0 a group is one source value, and a device's and a hospital's of one spelling are two.
+  return group.concept_id !== 0
+    || ((focus.source_value ?? "") === (group.source_value ?? "") && focus.wearable === group.wearable);
+}
+
 function WearableMark() {
   return (
     <span role="img" aria-label={WEARABLE_LABEL} title={WEARABLE_LABEL} data-testid="wearable-mark" className="inline-flex">
@@ -23,9 +31,17 @@ function WearableMark() {
   );
 }
 
-function GroupRow({ group, table, personId }: { group: OmopGroup; table: OmopTable; personId: string }) {
-  const [open, setOpen] = useState(false);
+function GroupRow({ group, table, personId, focus }: {
+  group: OmopGroup; table: OmopTable; personId: string; focus?: OmopFocus | null;
+}) {
   const unresolved = group.concept_id === 0;
+  const focused = isFocused(focus, table.key, group);
+  // A group opened from a 30-day wearable value starts open, and is scrolled to.
+  const [open, setOpen] = useState(focused);
+  const rowRef = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (focused) rowRef.current?.scrollIntoView?.({ block: "center" });
+  }, [focused]);
   const name = unresolved
     ? (group.source_value || "(no source value)")
     : (group.concept_name || `Concept ${group.concept_id}`);
@@ -39,7 +55,7 @@ function GroupRow({ group, table, personId }: { group: OmopGroup; table: OmopTab
   }
   const bodyId = useId();
   return (
-    <li className="border-b border-border last:border-b-0" data-testid="omop-group">
+    <li ref={rowRef} className="border-b border-border last:border-b-0" data-testid="omop-group">
       <button
         type="button"
         aria-expanded={open}
@@ -76,7 +92,7 @@ function GroupRow({ group, table, personId }: { group: OmopGroup; table: OmopTab
   );
 }
 
-function GroupedRows({ table, personId }: { table: OmopTable; personId: string }) {
+function GroupedRows({ table, personId, focus }: { table: OmopTable; personId: string; focus?: OmopFocus | null }) {
   const groups = table.groups ?? [];
   const unresolved = table.unresolved_groups ?? [];
   if (groups.length === 0 && unresolved.length === 0) {
@@ -100,6 +116,7 @@ function GroupedRows({ table, personId }: { table: OmopTable; personId: string }
               group={group}
               table={table}
               personId={personId}
+              focus={focus}
             />
           ))}
         </ul>
@@ -119,6 +136,7 @@ function GroupedRows({ table, personId }: { table: OmopTable; personId: string }
                 group={group}
                 table={table}
                 personId={personId}
+                focus={focus}
               />
             ))}
           </ul>
@@ -188,8 +206,8 @@ function RawRows({ table }: { table: OmopTable }) {
   );
 }
 
-function OmopTableView({ table, personId }: { table: OmopTable; personId: string }) {
-  const [open, setOpen] = useState(OPEN_BY_DEFAULT.has(table.key));
+function OmopTableView({ table, personId, focus }: { table: OmopTable; personId: string; focus?: OmopFocus | null }) {
+  const [open, setOpen] = useState(OPEN_BY_DEFAULT.has(table.key) || focus?.table === table.key);
   const bodyId = useId();
 
   return (
@@ -215,7 +233,7 @@ function OmopTableView({ table, personId }: { table: OmopTable; personId: string
       {open && (
         <div id={bodyId} className="mt-3">
           {table.grouped
-            ? <GroupedRows table={table} personId={personId} />
+            ? <GroupedRows table={table} personId={personId} focus={focus} />
             : <RawRows table={table} />}
         </div>
       )}
@@ -223,7 +241,7 @@ function OmopTableView({ table, personId }: { table: OmopTable; personId: string
   );
 }
 
-export default function PatientOmopTab({ personId }: { personId: string }) {
+export default function PatientOmopTab({ personId, focus }: { personId: string; focus?: OmopFocus | null }) {
   const [payload, setPayload] = useState<OmopPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -287,7 +305,7 @@ export default function PatientOmopTab({ personId }: { personId: string }) {
         </div>
       </div>
       {tables.map((table) => (
-        <OmopTableView key={table.key} table={table} personId={personId} />
+        <OmopTableView key={table.key} table={table} personId={personId} focus={focus} />
       ))}
     </div>
   );

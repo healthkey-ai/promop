@@ -214,7 +214,7 @@ export function FieldChoiceEditor({
           <>
             {/* Existing choices */}
             {/* The editor is opened only by a mapping curator, who may read the lookup. */}
-            <LookupOptions fieldName={fieldName} answers={choices.length} />
+            <LookupOptions fieldName={fieldName} answers={choices.length} canApprove={canApprove} />
             {reviewing && choices.length > 0 && (
               <AnswerCoverage coverage={coverage} filter={filter} onFilter={chooseFilter} />
             )}

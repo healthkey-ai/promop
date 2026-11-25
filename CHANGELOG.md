@@ -18,6 +18,15 @@ All notable changes to PRomop are documented here.
   file layout is Oura's documented API V2 one and has not been checked against
   a real export (#2889). See
   [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-ring-export).
+- **Wearables: each 30-day value links to its OMOP rows and charts its history** —
+  every 30-day aggregate on the Wearables tab has a chart icon to its right that
+  opens a popup chart of the metric's daily values over time, with the 30 days
+  the aggregate covers shaded and accepted and provisional days told apart. For
+  staff and org admins a second icon opens the OMOP tab at the concept group the
+  rows are in (a list in the popup when they are in several). New
+  `GET /api/v1/patient-records/<id>/wearable-metric/?field=`; the chart is for
+  anyone who may read the record, the groups only for those who see the OMOP tab
+  (#2887).
 - **Wearables: each device's uploads sit in its own section, collapsed** — the
   Wearables tab's one "Upload History" block is gone. Garmin's uploads are an
   "Uploads (N)" row at the bottom of the Garmin section, Apple Health's and
