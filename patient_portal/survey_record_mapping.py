@@ -70,6 +70,12 @@ the disease came back after it (``"clears": {"progression_date":
 start and end dates cannot be cleared, since a line needs a start and a line
 with no end is one still received. A ``sum`` totals what the response itself
 answers: it suits a questionnaire that restates the whole history each time.
+A term may map an option to ``null``, an answer that leaves the total unknown:
+then nothing is written. A line's ``clears_when`` clears a date when PROlog
+conditions hold (``{"progression_date": [{"question": "q_back", "op": "eq",
+"value": "no"}]}``: the patient now says it never came back). A clear never
+empties what was written after the response was submitted, so applying an
+older response again (a retry, a backfill) leaves newer answers alone.
 
 A line's ``line`` is its number, ``"next"`` (a new line after the person's
 last one: a treatment reported later) or ``"latest"`` (their last line: a
@@ -89,6 +95,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -206,6 +213,13 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
                 key not in _LINE_CLEARABLE or not line.get(key) or not _option_list(options)
                 for key, options in clears.items()):
             fail(f'{where}: clears maps a mapped {" or ".join(_LINE_CLEARABLE)} to the options that clear it')
+        clears_when = line.get('clears_when', {})
+        if not isinstance(clears_when, dict) or any(
+                key not in _LINE_CLEARABLE or not line.get(key) or not isinstance(conds, list) or not conds
+                for key, conds in clears_when.items()):
+            fail(f'{where}: clears_when maps a mapped {" or ".join(_LINE_CLEARABLE)} to the conditions that clear it')
+        for key, conds in clears_when.items():
+            _check_when({'when': conds}, f'{where}.clears_when.{key}', fail)
         _check_when(line, where, fail)
 
 
@@ -221,9 +235,9 @@ def _check_value_rule(rule: dict, where: str, fail) -> None:
         terms = rule['sum']
         if not isinstance(terms, list) or not terms or not all(
                 isinstance(t, dict) and isinstance(t.get('answer'), str) and isinstance(t.get('values'), dict)
-                and all(isinstance(v, int) and not isinstance(v, bool) for v in t['values'].values())
+                and all(v is None or (isinstance(v, int) and not isinstance(v, bool)) for v in t['values'].values())
                 for t in terms):
-            fail(f'{where}: sum is a list of terms, each an answer and the whole number each option counts')
+            fail(f'{where}: sum is a list of terms, each an answer and the whole number (or null: unknown) each option counts')
         for k, term in enumerate(terms):
             _check_when(term, f'{where}.sum[{k}]', fail)
     _check_when(rule, where, fail)
@@ -291,6 +305,8 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
                 question(line[key], f'{where}.{key}')
         for key, cleared_by in line.get('clears', {}).items():
             options(line[key], cleared_by, f'{where}.clears.{key}')
+        for key, conds in line.get('clears_when', {}).items():
+            conditions({'when': conds}, f'{where}.clears_when.{key}')
         conditions(line, where)
     return problems
 
@@ -356,7 +372,7 @@ def _values(rules: list[dict], answers: dict[str, dict], submitted_on: dt.date) 
         elif 'sum' in rule:
             counted = [term['values'][option] for term in rule['sum']
                        if _holds(term, answers) and (option := _option(answers, term['answer'])) in term['values']]
-            if counted:
+            if counted and None not in counted:  # an unknown term leaves the total unknown
                 patch[field_name] = sum(counted)
         elif _option(answers, rule['answer']) in rule.get('clears', ()):
             patch[field_name] = None
@@ -406,7 +422,8 @@ def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
         for key in _LINE_DATES:
             if line.get(key) and (dated := answer_date(answers.get(line[key]))) is not None:
                 kwargs[key], detail[f'{key}_precision'] = dated
-            elif _option(answers, line.get(key) or '') in line.get('clears', {}).get(key, ()):
+            elif (_option(answers, line.get(key) or '') in line.get('clears', {}).get(key, ())
+                  or (key in line.get('clears_when', {}) and _holds({'when': line['clears_when'][key]}, answers))):
                 # The patient no longer gives the date: what they had said is
                 # removed after the line is written (_clear_own_progression).
                 detail[f'{key}_precision'] = None
@@ -522,7 +539,7 @@ def apply_response(response) -> Applied | None:
     submitted_on = response.submitted_at.date()
     patch = record_patch(mapping, answers, submitted_on)
     record = PatientRecord.objects.filter(person=person).first()
-    patch = _own_clears_only(mapping, patch, record, account.identity)
+    patch = _own_clears_only(mapping, patch, record, account.identity, response.submitted_at)
     lines = therapy_lines(mapping, answers, submitted_on)
     applied = Applied(str(response.pk), sorted(patch))
     with transaction.atomic():
@@ -560,7 +577,7 @@ def apply_response(response) -> Applied | None:
                             if result.episode is not None:
                                 _write_detail(result.episode, write['detail'], write['reference'])
                                 if 'progression_date' in write.get('clears', ()):
-                                    _clear_own_progression(person, write['line_number'], result.episode)
+                                    _clear_own_progression(person, write['line_number'], result.episode, response)
                     except TherapyLineValidationError as exc:
                         # A line the writer refuses (no start date, a future one, an
                         # end before the start, a cancer the record does not have) is
@@ -585,10 +602,12 @@ def apply_response(response) -> Applied | None:
     return applied
 
 
-def _own_clears_only(mapping: dict[str, Any], patch: dict[str, Any], record, identity) -> dict[str, Any]:
+def _own_clears_only(mapping: dict[str, Any], patch: dict[str, Any], record, identity, submitted_at) -> dict[str, Any]:
     """``patch`` with each field it clears kept only where the record's value is
-    the patient's own: the last change to it was theirs, to what it holds now.
-    A value from anyone else (a clinician, an import) stays, with its precision."""
+    the patient's own and older than the response: the last change to it was
+    theirs, to what it holds now, before ``submitted_at``. A value from anyone
+    else (a clinician, an import) stays, with its precision, and so does one
+    written since (a later questionnaire, when an older response is applied again)."""
     from omop_core.models import RecordRevision
 
     precision_of = {r['field']: r['precision_field'] for r in mapping.get('record', []) if r.get('precision_field')}
@@ -600,19 +619,33 @@ def _own_clears_only(mapping: dict[str, Any], patch: dict[str, Any], record, ide
         if now is None or now == '':
             continue  # nothing to clear
         last = RecordRevision.objects.filter(patient_record=record, field=field_name).order_by('-changed_at', '-pk').first()
-        if last is None or last.changed_by != str(identity.pk) or last.new_value != str(now):
+        if (last is None or last.changed_by != str(identity.pk) or last.new_value != str(now)
+                or last.changed_at > submitted_at):
             kept.pop(field_name)
             if field_name in precision_of:
                 kept.pop(precision_of[field_name], None)
     return kept
 
 
-def _clear_own_progression(person, line_number: int, episode) -> None:
+def _clear_own_progression(person, line_number: int, episode, response) -> None:
     """Remove when the disease came back after this line, as the patient had
-    said it (typed patient self-report); a clinical progression stays."""
+    said it (typed patient self-report); a clinical progression stays, and so
+    does the line's whole progression when a response submitted after this one
+    has written the line (this one is being applied again)."""
     from omop_core.services.episode_service import _line_observations
     from omop_core.services.omop_projection import PATIENT_SELF_REPORT_TYPE
+    from prolog_surveys.models import SurveyResponse
 
+    detail = getattr(episode, 'detail', None)
+    writers = set()
+    for ref in getattr(detail, 'source_references', None) or []:
+        try:
+            writers.add(uuid.UUID(ref.split(':', 1)[0]))
+        except ValueError:
+            continue  # not a response's reference
+    writers.discard(response.pk)
+    if writers and SurveyResponse.objects.filter(pk__in=writers, submitted_at__gt=response.submitted_at).exists():
+        return
     _line_observations(person, f'LOT-{line_number}-progression', episode, False).filter(
         observation_type_concept_id=PATIENT_SELF_REPORT_TYPE).delete()
 

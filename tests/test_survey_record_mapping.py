@@ -49,7 +49,7 @@ DEFINITION = {
         {'key': 'progressed', 'type': 'date', 'text': {'en': 'When did it come back?'}, 'required': False,
          'config': {'precision': ['month', 'year']}, 'options': [_option('not_sure')]},
         {'key': 'came_back', 'type': 'single', 'text': {'en': 'Came back after the first?'}, 'required': False,
-         'options': [_option('yes_once'), _option('no')]},
+         'options': [_option('yes_once'), _option('no'), _option('not_sure')]},
         {'key': 'came_back_2', 'type': 'single', 'text': {'en': 'Came back after the second?'}, 'required': False,
          'options': [_option('yes_once'), _option('twice'), _option('no')]},
     ]}],
@@ -510,12 +510,13 @@ CLEARING = {
         {'field': 'diagnosis_date', 'answer': 'diagnosed', 'precision_field': 'diagnosis_date_precision',
          'clears': ['not_sure']},
         {'field': 'relapse_count', 'sum': [
-            {'answer': 'came_back', 'values': {'yes_once': 1, 'no': 0}},
+            {'answer': 'came_back', 'values': {'yes_once': 1, 'no': 0, 'not_sure': None}},
             {'answer': 'came_back_2', 'values': {'yes_once': 1, 'twice': 2, 'no': 0}},
         ]},
     ],
     'therapy_lines': [{**MAPPING['therapy_lines'][0], 'progression_date': 'progressed',
-                       'clears': {'progression_date': ['not_sure']}}],
+                       'clears': {'progression_date': ['not_sure']},
+                       'clears_when': {'progression_date': [{'question': 'came_back', 'op': 'eq', 'value': 'no'}]}}],
 }
 
 
@@ -601,6 +602,7 @@ def test_a_sum_adds_up_each_answer_that_counts(clearing, patient, django_capture
     lambda m: m['therapy_lines'][0].update(clears={'progression_date': []}),
     lambda m: m['record'][1].update(sum=[{'answer': 'came_back', 'values': {'yes_once': 'one'}}]),
     lambda m: m['record'][1].update(sum=[{'answer': 'came_back', 'values': {'yes_once': 0.5}}]),  # a count is whole
+    lambda m: m['therapy_lines'][0].update(clears_when={'end_date': [{'question': 'came_back', 'op': 'eq', 'value': 'no'}]}),
 ])
 def test_a_mapping_that_clears_or_adds_up_what_it_cannot_is_refused(change):
     mapping = json.loads(json.dumps(CLEARING))
@@ -628,3 +630,33 @@ def test_clears_is_for_a_date_question():
     problems = srm.check_against_definition(mapping, DEFINITION)
 
     assert any("'treatment_names' is not a date question" in p for p in problems)
+
+
+def test_an_unknown_term_leaves_the_total_unwritten():
+    answers = {'came_back': {'option': 'not_sure'}, 'came_back_2': {'option': 'twice'}}
+
+    assert 'relapse_count' not in srm.record_patch(CLEARING, answers, dt.date(2026, 1, 1))
+
+
+def test_a_line_clears_when_the_patient_now_says_it_never_came_back(
+        clearing, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    submit(clearing, record, {**ANSWERS, 'progressed': {'date': '2021-01'}}, django_capture_on_commit_callbacks)
+
+    submit(clearing, record, {**ANSWERS, 'came_back': {'option': 'no'}}, django_capture_on_commit_callbacks)
+
+    assert PatientRecord.objects.get(pk=record.pk).first_line_progression_date is None
+
+
+def test_applying_an_older_response_again_clears_nothing_written_since(
+        clearing, patient, django_capture_on_commit_callbacks):
+    record, _ = patient
+    older = submit(clearing, record, {**ANSWERS, 'diagnosed': {'option': 'not_sure'},
+                                      'progressed': {'option': 'not_sure'}}, django_capture_on_commit_callbacks)
+    submit(clearing, record, {**ANSWERS, 'progressed': {'date': '2021-01'}}, django_capture_on_commit_callbacks)
+
+    srm.apply_response(older)  # a retry or a backfill
+
+    record = PatientRecord.objects.get(pk=record.pk)
+    assert record.diagnosis_date == dt.date(2019, 3, 1)
+    assert record.first_line_progression_date == dt.date(2021, 1, 1)

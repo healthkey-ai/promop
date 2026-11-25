@@ -73,7 +73,14 @@ clear when the disease came back after it, `"clears": {"progression_date":
 ["not_sure"]}`, which removes only the progression the patient reported (typed
 patient self-report); a clinical one stays. Its start and end dates cannot be
 cleared: a line needs its start, and a line with no end is one still received.
-`clears` is checked to sit on a date question.
+`clears` is checked to sit on a date question. A date can also be cleared by
+another answer: a record or detail rule with `"value": null` and a `when` (the
+patient now says it was never transformed), or a line's `clears_when`, PROlog
+conditions that clear its progression (`{"progression_date": [{"question":
+"q_back", "op": "eq", "value": "no"}]}`). Either way only the patient's own
+value is emptied. A clear never empties what was written after the response
+was submitted, so applying an older response again (a retry, a backfill)
+leaves newer answers alone.
 
 **Adding up.** A numeric field may be the sum of several answers:
 `{"field": "relapse_count", "sum": [{"answer": "q_after_first", "values":
@@ -83,7 +90,8 @@ questionnaire that asks the same thing after each treatment gives the total
 this way, where separate rules would let the last one win. A sum totals what
 the response itself answers, so it suits a questionnaire that restates the
 whole history each time (an FL profile), not one that asks about part of it.
-Each term counts a whole number.
+Each term counts a whole number, or `null` for an answer that leaves the total
+unknown ("not sure how many"): then the field is not written.
 
 ## Lines
 
