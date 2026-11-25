@@ -43,7 +43,7 @@ DEFINITION = {
         {'key': 'ended', 'type': 'date', 'text': {'en': 'Ended?'}, 'required': False,
          'config': {'precision': ['month', 'year']}, 'options': [_option('ongoing')]},
         {'key': 'response', 'type': 'single', 'text': {'en': 'Response?'}, 'required': False,
-         'options': [_option('complete'), _option('unsure')]},
+         'options': [_option('complete'), _option('unsure'), _option('not_assessed')]},
         {'key': 'trial', 'type': 'single', 'text': {'en': 'In a trial?'}, 'required': False,
          'options': [_option('yes'), _option('no')]},
     ]}],
@@ -65,6 +65,7 @@ MAPPING = {
          'details': [
              {'field': 'clinical_trial', 'answer': 'trial', 'values': {'yes': 'yes', 'no': 'no'}},
              {'field': 'ongoing', 'answer': 'ended', 'values': {'ongoing': True}},
+             {'field': 'response_assessed', 'answer': 'response', 'values': {'complete': True, 'not_assessed': False}},
          ]},
     ],
 }
@@ -164,6 +165,34 @@ def test_the_patient_sees_the_line_as_theirs(mapped, patient, django_capture_on_
     # What the patient said about it beyond the Episode's dates.
     assert lines[0]['precision'] == {'start': 'month', 'end': 'month'}
     assert lines[0]['clinical_trial'] == 'no'
+    assert lines[0]['response_assessed'] is True
+
+
+def test_the_patient_sees_a_response_not_assessed_yet(mapped, patient, django_capture_on_commit_callbacks):
+    from rest_framework.test import APIClient
+
+    record, identity = patient
+    submit(mapped, record, {**ANSWERS, 'response': {'option': 'not_assessed'}}, django_capture_on_commit_callbacks)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    [line] = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
+
+    # No outcome to show, and what the patient said instead.
+    assert 'outcome' not in line and line['response_assessed'] is False
+
+
+def test_a_response_the_patient_did_not_describe_is_left_out(mapped, patient, django_capture_on_commit_callbacks):
+    from rest_framework.test import APIClient
+
+    record, identity = patient
+    submit(mapped, record, {**ANSWERS, 'response': {'option': 'unsure'}}, django_capture_on_commit_callbacks)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    [line] = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
+
+    assert 'response_assessed' not in line
 
 
 def test_only_what_an_answer_gives_is_written(mapped, patient, django_capture_on_commit_callbacks):

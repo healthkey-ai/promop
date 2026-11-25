@@ -8,6 +8,13 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **PHR therapy: whether a line's response had been assessed** —
+  `GET /api/v1/phr/therapy/` returns `response_assessed` beside each line's
+  other detail: false when the patient said their response had not been
+  assessed yet, true when they gave one (its type is the line's `outcome` when
+  known), absent otherwise or on a line from the record. A patient app can now
+  show "not assessed yet" instead of a blank response (#2894).
+
 - **Wearables: each 30-day value links to its OMOP rows and charts its history** —
   every 30-day aggregate on the Wearables tab has a chart icon to its right that
   opens a popup chart of the metric's daily values over time, with the 30 days
