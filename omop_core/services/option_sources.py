@@ -202,6 +202,8 @@ def ensure_answer(field_name: str, code: str, *, user=None):
     entry = binding.model.objects.filter(code=str(code)).first()
     if entry is None:
         raise NoLookup('The lookup has no such entry.')
+    if len(entry.title) > 200:
+        raise NoLookup('This entry\'s title is too long to hold a decision.')
     context = lookup_context(binding.slug or binding.name)
     found = FieldChoice.objects.filter(field_name=field_name, context_key=context, display=entry.title).first()
     if found is not None:
@@ -214,5 +216,10 @@ def ensure_answer(field_name: str, code: str, *, user=None):
                 value='' if stored == entry.title else stored, created_by=user,
             )
     except IntegrityError:
-        # Two curators asked at once: the second reads the first's row.
-        return FieldChoice.objects.get(field_name=field_name, context_key=context, display=entry.title)
+        # Two curators asked at once: the second reads the first's row. Another
+        # constraint (two entries whose titles slug alike, made at once) is not
+        # that row's, and is left to the caller to retry.
+        again = FieldChoice.objects.filter(field_name=field_name, context_key=context, display=entry.title).first()
+        if again is None:
+            raise
+        return again

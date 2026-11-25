@@ -256,7 +256,16 @@ and never the model.
   returns each entry's `choice_id` and `value_mappings` (null and empty for an
   entry nobody has decided anything for, so reading makes nothing) and
   `orphaned`: decisions about a title the lookup no longer has (a renamed
-  entry starts afresh and its old decision stays, listed there). The tab says
+  entry starts afresh and its old decision stays, listed there). A row holding
+  decisions cannot be deleted either (400, even for an approver): a decision is
+  withdrawn or rejected, so its history stays. **A curated answer speaks over
+  a lookup entry**: in both `answer_concept_ids` and `answer_values_by_concept`
+  a lookup row fills only the spellings (and concepts) no curated answer of the
+  field uses, so a decision about an entry can neither void nor override an
+  answer the field has of its own. The response says whether the field's
+  approved mapping stores a concept (`writes_concepts`): where it stores text
+  (`value_kind` other than `concept`, as `her2_status` does today) a decision is
+  recorded and reviewed but not written, and the section says so. The tab says
   how many entries have a concept decided. Not here: therapy catalogs, which
   are lookups of the same kind (`therapy-regimen`, `-component`, `-class`) but
   carry their own mappings, and reconciling a renamed entry with its old

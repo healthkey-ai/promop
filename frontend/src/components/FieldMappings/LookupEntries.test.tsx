@@ -22,7 +22,7 @@ const mapping = (over: Partial<ValueMapping> = {}): ValueMapping => ({
   rationale: "", vocabulary_release: "2026-09", proposed_by: null, reviewer: null, ...over,
 });
 
-const source = { kind: "vocabulary", name: "her2-status", label: "Her2Status", enforced: false, source_name: "", source_url: "" };
+const source = { kind: "vocabulary", name: "her2-status", label: "Her2Status", enforced: false, source_name: "", source_url: "", writes_concepts: true };
 let body: Record<string, unknown>;
 
 beforeEach(() => {
@@ -79,14 +79,14 @@ describe("a lookup's entries in the choice editor", () => {
 
   it("opens the panel of an entry that already has a decision without making anything", async () => {
     const section = await open();
-    fireEvent.click(within(section).getByRole("button", { name: "Concept for Positive" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Decide the concept of Positive" }));
     expect(await within(section).findByRole("group", { name: "Concept for Positive" })).toBeInTheDocument();
     expect(mockPost).not.toHaveBeenCalled();
   });
 
   it("makes the row the first time a curator decides something for an entry, then offers the panel", async () => {
     const section = await open();
-    fireEvent.click(within(section).getByRole("button", { name: "Concept for Negative" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Decide the concept of Negative" }));
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
       "/v1/field-choices/lookup/answer/", { field_name: "her2_status", code: "neg" }));
     expect(await within(section).findByRole("group", { name: "Concept for Negative" })).toBeInTheDocument();
@@ -100,7 +100,7 @@ describe("a lookup's entries in the choice editor", () => {
       return { data: [] };
     });
     const section = await open();
-    fireEvent.click(within(section).getByRole("button", { name: "Concept for Negative" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Decide the concept of Negative" }));
     const panel = await within(section).findByRole("group", { name: "Concept for Negative" });
     fireEvent.click(within(panel).getByRole("button", { name: "Map Negative to a concept" }));
     fireEvent.change(within(panel).getByLabelText("Concept search"), { target: { value: "active" } });
@@ -113,9 +113,20 @@ describe("a lookup's entries in the choice editor", () => {
   it("says when an entry could not be started, and shows no panel", async () => {
     mockPost.mockRejectedValue({ response: { data: { detail: "The lookup has no such entry." } } });
     const section = await open();
-    fireEvent.click(within(section).getByRole("button", { name: "Concept for Negative" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Decide the concept of Negative" }));
     expect(await within(section).findByRole("alert")).toHaveTextContent("The lookup has no such entry.");
     expect(within(section).queryByRole("group", { name: "Concept for Negative" })).not.toBeInTheDocument();
+  });
+
+  it("says when a field stores text, so a decision here is not written", async () => {
+    body = { ...body, source: { ...source, writes_concepts: false } };
+    const section = await open();
+    expect(within(section).getByText(/stores text, not a concept/)).toBeInTheDocument();
+  });
+
+  it("does not say it for a field that stores a concept", async () => {
+    const section = await open();
+    expect(within(section).queryByText(/stores text, not a concept/)).not.toBeInTheDocument();
   });
 
   it("lists a decision about an entry the lookup no longer has", async () => {
@@ -126,12 +137,12 @@ describe("a lookup's entries in the choice editor", () => {
 
   it("only an approver sees Approve on a proposal here", async () => {
     let section = await open(false);
-    fireEvent.click(within(section).getByRole("button", { name: "Concept for Equivocal" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Decide the concept of Equivocal" }));
     await within(section).findByRole("group", { name: "Concept for Equivocal" });
     expect(screen.queryByRole("button", { name: /Approve proposal for Equivocal/ })).not.toBeInTheDocument();
     document.body.innerHTML = "";
     section = await open(true);
-    fireEvent.click(within(section).getByRole("button", { name: "Concept for Equivocal" }));
+    fireEvent.click(within(section).getByRole("button", { name: "Decide the concept of Equivocal" }));
     expect(await screen.findByRole("button", { name: "Approve proposal for Equivocal" })).toBeInTheDocument();
   });
 });

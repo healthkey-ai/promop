@@ -17813,6 +17813,12 @@ def field_choice_detail(request, pk):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
+        if choice.context_key.startswith(_LOOKUP_CONTEXT_PREFIX):
+            # Deleting would take the decision and its history with it; a decision is
+            # withdrawn or rejected through its own endpoints.
+            return Response({'detail': 'This holds decisions about a lookup entry. Withdraw or reject '
+                                       'the decision instead of deleting it.'},
+                            status=status.HTTP_400_BAD_REQUEST)
         if not _can_approve_mappings(request.user):
             # Deleting takes the answer's codes, spellings, scope and decisions
             # with it, which is what a curator may not change, and an answer
@@ -18061,7 +18067,7 @@ def field_choice_lookup(request):
     list returns; the rest carry null. ``orphaned`` lists such rows whose entry
     is no longer in the lookup.
     """
-    from omop_core.models import FieldChoice
+    from omop_core.models import FieldChoice, FieldConceptMapping
     from omop_core.services import option_sources
 
     if not _can_view_mappings(request.user):
@@ -18078,6 +18084,10 @@ def field_choice_lookup(request):
     order = 'title' if binding.enforced else ('sort_key' if has_sort_key else 'title')
     rows = list(model.objects.values('code', 'title', 'source_name', 'source_url').order_by(order))
     first = rows[0] if rows else {}
+    # Whether the field's approved mapping stores a concept: only then does a
+    # decision about an entry change what is written.
+    kind = (FieldConceptMapping.objects.filter(field_name=field_name, status='approved')
+            .values_list('value_kind', flat=True).first())
 
     from .serializers import value_mapping_data
     from omop_core.services import field_value_mappings as fvm
@@ -18101,13 +18111,17 @@ def field_choice_lookup(request):
             'choice_id': answer.pk if answer else None,
             'value_mappings': decisions(answer) if answer else [],
         })
-    orphaned = [{'choice_id': a.pk, 'title': a.display, 'value_mappings': decisions(a)}
-                for a in by_title.values() if decisions(a)]
+    orphaned = []
+    for a in by_title.values():
+        held = decisions(a)
+        if held:
+            orphaned.append({'choice_id': a.pk, 'title': a.display, 'value_mappings': held})
     return Response({
         'field_name': field_name,
         'source': {
             'kind': 'vocabulary', 'name': binding.slug, 'label': binding.name, 'enforced': binding.enforced,
             'source_name': first.get('source_name') or '', 'source_url': first.get('source_url') or '',
+            'writes_concepts': kind == 'concept',
         },
         'options': options,
         'orphaned': orphaned,
@@ -18138,6 +18152,9 @@ def field_choice_lookup_answer(request):
         answer = option_sources.ensure_answer(field_name, code, user=request.user)
     except option_sources.NoLookup as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_404_NOT_FOUND)
+    except IntegrityError:
+        return Response({'detail': "Another change to this field's answers was saved first; try again."},
+                        status=status.HTTP_409_CONFLICT)
     return Response({'choice_id': answer.pk, 'title': answer.display}, status=status.HTTP_200_OK)
 
 

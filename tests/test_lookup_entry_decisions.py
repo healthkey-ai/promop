@@ -225,3 +225,69 @@ def test_a_decision_about_an_entry_travels_with_the_curation_payload(her2):
     assert back.value_mappings.get(role='value_as_concept').status == 'approved'
     # and it is still not an answer on the instance it arrived at
     assert [c['display'] for c in as_role('staff').get(CHOICES, {'field_name': 'her2_status'}).json()] == []
+
+
+# ── A curated answer speaks over a lookup entry ────────────────────────────
+
+def _decided_answer(field, display, code):
+    row = FieldChoice.objects.create(field_name=field, display=display)
+    fvm.approve(fvm.propose(row, vocabulary_id='SNOMED', concept_code=code))
+    return row
+
+
+def test_a_lookup_decision_does_not_void_or_override_a_curated_answer_with_the_same_spelling(her2):
+    x, y = concept('100'), concept('200')
+    _decided_answer('her2_status', 'Positive', '100')
+    decide(make(), '200')
+    assert fvm.answer_concept_ids(['her2_status'])['her2_status']['Positive'] == x.pk
+    assert y.pk not in fvm.answer_concept_ids(['her2_status'])['her2_status'].values()
+
+
+def test_a_lookup_decision_fills_the_spellings_no_curated_answer_uses(her2):
+    concept('100')
+    _decided_answer('her2_status', 'Equivocal', '100')
+    y = concept('200')
+    decide(make(), '200')
+    ids = fvm.answer_concept_ids(['her2_status'])['her2_status']
+    assert ids['Positive'] == y.pk and 'Equivocal' in ids
+
+
+def test_a_curated_answer_keeps_the_readback_of_a_concept_a_lookup_entry_shares(her2):
+    x = concept('100')
+    _decided_answer('her2_status', 'HER2 positive', '100')
+    decide(make(), '100')
+    assert fvm.answer_values_by_concept(['her2_status'])['her2_status'][x.pk] == 'HER2 positive'
+
+
+def test_an_undecided_lookup_row_changes_neither_direction(her2):
+    x = concept('100')
+    _decided_answer('her2_status', 'Positive', '100')
+    before = (fvm.answer_concept_ids(['her2_status']), fvm.answer_values_by_concept(['her2_status']))
+    make(code='neg')
+    assert (fvm.answer_concept_ids(['her2_status']), fvm.answer_values_by_concept(['her2_status'])) == before
+    assert before[0]['her2_status'] == {'Positive': x.pk}
+
+
+# ── Other review findings ──────────────────────────────────────────────────
+
+def test_a_row_that_holds_decisions_cannot_be_deleted_even_by_an_approver(her2):
+    row = make()
+    decide(row)
+    response = as_role('org_admin').delete(f'{CHOICES}{row.pk}/')
+    assert response.status_code == 400 and 'Withdraw or reject' in response.data['detail']
+    assert FieldChoice.objects.filter(pk=row.pk).exists() and row.value_mappings.count() == 1
+
+
+def test_an_entry_whose_title_cannot_fit_makes_nothing():
+    Her2Status.objects.create(code='long', title='x' * 201)
+    response = as_role('analyst').post(ANSWER, {'field_name': 'her2_status', 'code': 'long'}, format='json')
+    assert response.status_code == 404 and 'too long' in response.data['detail']
+    assert FieldChoice.objects.count() == 0
+
+
+@pytest.mark.parametrize('kind,expected', (('concept', True), ('string', False)))
+def test_the_listing_says_whether_the_fields_mapping_writes_a_concept(her2, kind, expected):
+    FieldConceptMapping.objects.update_or_create(
+        field_name='her2_status', defaults={'status': 'approved', 'value_kind': kind})
+    source = as_role('doctor').get(LOOKUP, {'field_name': 'her2_status'}).json()['source']
+    assert source['writes_concepts'] is expected

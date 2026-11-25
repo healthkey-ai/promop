@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api from "@/api/axios";
 import { AnswerConceptPanel } from "./AnswerConceptPanel";
 import { entryStatus, errorText, lookupCoverage, type ValueMapping } from "./answerConcept";
@@ -13,6 +13,8 @@ interface LookupSource {
   enforced: boolean;
   source_name: string;
   source_url: string;
+  /** The field's approved mapping stores a concept, so a decision here changes what is written. */
+  writes_concepts?: boolean;
 }
 
 interface Entry {
@@ -53,12 +55,15 @@ export function LookupOptions({ fieldName, answers, canApprove = false }: Props)
   const [panels, setPanels] = useState<Record<string, number | "making">>({});
   const [entryError, setEntryError] = useState("");
 
+  // A reply that arrives after a newer read began, or after the field changed, is dropped.
+  const latest = useRef(0);
   const load = useCallback(async (): Promise<void> => {
+    const mine = ++latest.current;
     try {
       const resp = await api.get("/v1/field-choices/lookup/", { params: { field_name: fieldName } });
-      setData(resp.data);
+      if (mine === latest.current) setData(resp.data);
     } catch (e) {
-      setError(errorText(e, "The lookup could not be loaded."));
+      if (mine === latest.current) setError(errorText(e, "The lookup could not be loaded."));
     }
   }, [fieldName]);
 
@@ -116,6 +121,12 @@ export function LookupOptions({ fieldName, answers, canApprove = false }: Props)
           : "The tab draws its dropdown from this lookup. Once the field has an approved concept mapping and answers below, those are offered instead of these."}
         {!source.enforced && answers > 0 && " This field has answers below."}
       </div>
+      {source.writes_concepts === false && (
+        <div className="mt-1 text-amber-700">
+          This field stores text, not a concept, so a concept decided for an entry is recorded and reviewed here but
+          is not written until the field's mapping stores a concept.
+        </div>
+      )}
       {options.length > 0 && (
         <div role="status" className="mt-1">
           {coverage.decided} of {options.length} {options.length === 1 ? "entry has" : "entries have"} a concept decided
@@ -143,7 +154,7 @@ export function LookupOptions({ fieldName, answers, canApprove = false }: Props)
                       <span className="block text-gray-500">{entryStatus(o.value_mappings)}</span>
                     </span>
                     <button type="button" aria-expanded={panel !== undefined} disabled={panel === "making"}
-                      onClick={() => togglePanel(o)} aria-label={`Concept for ${o.title}`}
+                      onClick={() => togglePanel(o)} aria-label={`Decide the concept of ${o.title}`}
                       className="shrink-0 rounded border border-gray-300 px-2 py-0.5 text-gray-700 disabled:opacity-50">
                       {panel === undefined ? "Concept" : panel === "making" ? "Starting..." : "Close"}
                     </button>
