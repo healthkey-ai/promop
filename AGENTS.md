@@ -1180,7 +1180,7 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
 |---|---|---|
 | `garmin` | `Garmin` | the metric key (`steps`) |
 | `apple` | `Apple` | the HealthKit identifier, cut to the 50-character column |
-| `oura` | `Oura` | the metric key (`hrv_rmssd`), as Garmin's; see [Oura Ring Export Upload](#wearables--oura-ring-export-upload) |
+| `oura` | `Oura` | the metric key behind `oura_` (`oura_hrv_rmssd`), never Garmin's bare spelling; see [Oura Ring Export Upload](#wearables--oura-ring-export-upload) |
 | `android` | `HealthConnect` | the Health Connect record type (`HEALTH_CONNECT_CODES`; the code of an approved mapping that names the metric wins) |
 
 - **What an import stores.** The approved global mapping for exactly that
@@ -1369,8 +1369,12 @@ Parser `omop_core/services/oura_parser.py`; route `upload-wearable` with
   (`ownRecord`), and its uploads list collapsed in it (`UploadsList` named
   `oura`), never in the leftovers.
 - **Ordinary source codes.** The code is the metric key under the new `Oura`
-  vocabulary (`steps`, `hrv_rmssd`), exactly as Garmin's, through
-  `wearable_rows.device_codes`: no Oura-only resolution path. `Oura` is in
+  vocabulary behind an `oura_` prefix (`oura_steps`, `oura_hrv_rmssd`), through
+  `wearable_rows.device_codes`: no Oura-only resolution path. The prefix is
+  deliberate: Garmin's code is the bare metric key, and a person holding one
+  spelling under two device vocabularies would have one device's mapping
+  answer for, and sweep, the other's rows. The mappings' `metric_key` stays
+  plain (`steps`). `Oura` is in
   `WEARABLE_DEVICE_VOCABULARIES`, so every device-code rule under
   [Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)
   covers it.
@@ -1380,7 +1384,9 @@ Parser `omop_core/services/oura_parser.py`; route `upload-wearable` with
   (unscored proposals qualify at the floor) or unresolved until a curator
   approves the mapping (not the one who proposed it, if
   `MAPPING_SEPARATE_APPROVER`). Existing instances get the rows from the next
-  vocabulary load, or `manage.py seed_wearable_device_mappings`.
+  vocabulary load, or `manage.py seed_wearable_device_mappings`, which also
+  fills the destination of an Oura code an upload queued before the seed ran
+  (still proposed, and only where no destination was chosen).
 - **What is read** (Oura API V2 names): `dailyactivity` (`steps`, high and
   medium activity time as active minutes, `active_calories`), `sleepmodel`
   (sessions of a day added for sleep duration; from the longest session
@@ -1393,10 +1399,19 @@ Parser `omop_core/services/oura_parser.py`; route `upload-wearable` with
   Oura's documented API V2 ones and the export's separator (`;` or `,`) is
   sniffed; check a first real export's `samples_created` before relying on it.
   A file or column that is absent is skipped, never guessed.
-- **Limits.** 200 files, 200 MB per CSV and 500 MB in all, uncompressed,
-  checked before reading (zip bombs). The upload goes through the shared
-  writer: an Oura day replaces nothing and stacks like a file does, and a
-  re-upload of the same file stores nothing new.
+- **A day's total replaces.** An export holds one total per day and Oura
+  revises recent days, so `upload_wearable` writes an Oura upload with
+  `replace_daily=True`: a later export replaces the days an earlier one wrote
+  (the Garmin sync's rule), where `.fit` and Apple Health files stack. A day
+  with nothing in it (0 steps, no activity, no calories) is not stored, a day
+  repeated in a file is the later row, and a plain `sleep` file is read only
+  when there is no `sleepmodel`.
+- **Limits.** 200 files, 50 MB per CSV and 150 MB in all, uncompressed,
+  checked before reading (zip bombs): a real export is a few MB, and the
+  archive is read into memory in the request. A refusal by the parser (not an
+  archive, no export files, too large) is returned as its own text.
+- **Seeded proposals are votable.** The nine `Oura` proposals carry a metric
+  key, so a public vote link that covers every source system lists them.
 
 Tests: `tests/test_oura_parser.py`,
 `patient_portal.tests.WearableUploadEndpointTest` (the `oura` cases),

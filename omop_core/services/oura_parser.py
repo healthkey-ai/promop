@@ -32,14 +32,15 @@ from omop_core.services.wearable_parsers import CUMULATIVE_METRICS, WearableSamp
 
 logger = logging.getLogger(__name__)
 
-MAX_MEMBER_BYTES = 200 * 1024 * 1024    # one CSV, uncompressed
-MAX_TOTAL_BYTES = 500 * 1024 * 1024     # every CSV of one upload
+# A real export is a few MB; the whole archive is read into memory in a request.
+MAX_MEMBER_BYTES = 50 * 1024 * 1024    # one CSV, uncompressed
+MAX_TOTAL_BYTES = 150 * 1024 * 1024    # every CSV of one upload
 MAX_MEMBERS = 200
 # Sleep sessions Oura marks as removed or as rest are not sleep.
 NOT_SLEEP = frozenset({'deleted', 'rest'})
 
 _KINDS = {
-    'dailyactivity': 'activity', 'sleepmodel': 'sleep', 'sleep': 'sleep',
+    'dailyactivity': 'activity', 'sleepmodel': 'sleep', 'sleep': 'sleep_alt',
     'dailyspo2': 'spo2', 'vo2max': 'vo2',
 }
 
@@ -50,7 +51,8 @@ def file_kind(filename: str) -> str | None:
     base = filename.replace('\\', '/').rsplit('/', 1)[-1].lower()
     if not base.endswith('.csv') or base.startswith('.'):
         return None
-    return _KINDS.get(''.join(ch for ch in base[:-4] if ch.isalnum()))
+    stem = re.sub(r'\s*\(\d+\)$', '', base[:-4])      # "dailyactivity (1)"
+    return _KINDS.get(''.join(ch for ch in stem if ch.isalnum()))
 
 
 def _rows(text: str):
@@ -96,14 +98,17 @@ def _collect(kind: str, rows, daily, sleep_sessions) -> None:
             continue
         if kind == 'activity':
             steps = _number(row.get('steps'))
-            if steps is not None:
-                daily['steps'][day].append(steps)
             seconds = [_number(row.get(name)) for name in ('high_activity_time', 'medium_activity_time')]
-            if any(value is not None for value in seconds):
-                daily['active_minutes'][day].append(sum(v for v in seconds if v) / 60.0)
+            minutes = sum(v for v in seconds if v) / 60.0 if any(v is not None for v in seconds) else None
             calories = _number(row.get('active_calories'))
-            if calories is not None:
-                daily['active_energy'][day].append(calories)
+            # A day with nothing in it (the ring not worn, today not yet synced)
+            # is no reading: stored as 0 it would pull every average down.
+            if not any(value for value in (steps, minutes, calories)):
+                continue
+            # One row per day: a repeated day is the later row, not a second total.
+            for metric, value in (('steps', steps), ('active_minutes', minutes), ('active_energy', calories)):
+                if value is not None:
+                    daily[metric][day] = [value]
         elif kind == 'sleep':
             if row.get('type', '').lower() in NOT_SLEEP:
                 continue
@@ -116,11 +121,11 @@ def _collect(kind: str, rows, daily, sleep_sessions) -> None:
         elif kind == 'spo2':
             value = _spo2(row.get('spo2_percentage') or row.get('spo2_percentage.average'))
             if value is not None:
-                daily['spo2'][day].append(value)
+                daily['spo2'][day] = [value]
         elif kind == 'vo2':
             value = _number(row.get('vo2_max'))
             if value is not None:
-                daily['vo2_max'][day].append(value)
+                daily['vo2_max'][day] = [value]
 
 
 def _members(file_bytes: bytes, filename: str) -> list[tuple[str, bytes]]:
@@ -158,11 +163,16 @@ def parse_oura_export(file_bytes: bytes, filename: str = '') -> list[WearableSam
     """
     daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
     sleep_sessions: dict[date, list[dict]] = defaultdict(list)
+    members = [(name, data) for name, data in _members(file_bytes, filename) if file_kind(name)]
+    # ``sleepmodel`` is the sleep file; a plain ``sleep`` file is read only when
+    # it is the only one, never added to it.
+    if any(file_kind(name) == 'sleep' for name, _data in members):
+        members = [(name, data) for name, data in members if file_kind(name) != 'sleep_alt']
     found = 0
-    for name, data in _members(file_bytes, filename):
+    for name, data in members:
         kind = file_kind(name)
-        if kind is None:
-            continue
+        if kind == 'sleep_alt':
+            kind = 'sleep'
         found += 1
         _collect(kind, _rows(data.decode('utf-8', errors='replace')), daily, sleep_sessions)
     if not found:

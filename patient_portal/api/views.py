@@ -5158,6 +5158,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 samples = parse_apple_health_export(file_bytes)
         except Exception as e:
+            if device_type == 'oura' and isinstance(e, ValueError):
+                # The Oura parser's own refusals (not an archive, no export files,
+                # too large) say what is wrong and name nothing of the patient's.
+                logger.info('wearable_parse_refused device=oura reason=%s', e)
+                return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             logger.exception('wearable_parse_error device=%s', device_type)
             return Response(
                 {'error': 'Failed to parse file. Please ensure it is a valid '
@@ -5165,8 +5170,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # An Oura export holds one total per day, and Oura revises recent days,
+        # so a later export replaces the days an earlier one wrote (as a Garmin
+        # sync does); .fit and Apple Health files are pieces of a day and stack.
         return self._store_wearable_samples(
-            request, person, device_type, samples, uploaded.name or 'unknown')
+            request, person, device_type, samples, uploaded.name or 'unknown',
+            replace_daily=device_type == 'oura')
 
     def _store_wearable_samples(self, request, person, device_type, samples, filename,
                                 replace_daily=False):

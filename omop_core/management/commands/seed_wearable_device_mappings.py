@@ -71,15 +71,15 @@ GARMIN_METRICS = [
 # concepts Garmin's are: Oura's HRV is RMSSD, its "lowest heart rate" is the
 # resting heart rate it reports, and its sleep duration is time asleep.
 OURA_METRICS = [
-    ('steps', 'Step count', 'count', 'Observation', 'LOINC', '55423-8', 'steps'),
-    ('active_minutes', 'Active minutes (high and medium activity)', 'min', 'Observation', 'LOINC', '55411-3', 'active_minutes'),
-    ('resting_hr', 'Resting heart rate (lowest heart rate of the night)', 'bpm', 'Measurement', 'LOINC', '40443-4', 'resting_hr'),
-    ('hrv_rmssd', 'Heart rate variability (RMSSD)', 'ms', 'Measurement', 'HK-Wearable', 'HK-WEAR-HRV-RMSSD', 'hrv_rmssd'),
-    ('spo2', 'Oxygen saturation (SpO2)', '%', 'Measurement', 'LOINC', '59408-5', 'spo2'),
-    ('respiratory_rate', 'Respiratory rate (average breathing rate in sleep)', 'breaths/min', 'Measurement', 'LOINC', '9279-1', 'respiratory_rate'),
-    ('sleep_duration', 'Sleep duration', 'h', 'Observation', 'LOINC', '93832-4', 'sleep_duration'),
-    ('vo2_max', 'VO2 max', 'mL/kg/min', 'Measurement', 'LOINC', '94122-9', 'vo2_max'),
-    ('active_energy', 'Active energy burned', 'kcal', 'Measurement', 'LOINC', '93819-1', 'active_energy'),
+    ('oura_steps', 'Step count', 'count', 'Observation', 'LOINC', '55423-8', 'steps'),
+    ('oura_active_minutes', 'Active minutes (high and medium activity)', 'min', 'Observation', 'LOINC', '55411-3', 'active_minutes'),
+    ('oura_resting_hr', 'Resting heart rate (lowest heart rate of the night)', 'bpm', 'Measurement', 'LOINC', '40443-4', 'resting_hr'),
+    ('oura_hrv_rmssd', 'Heart rate variability (RMSSD)', 'ms', 'Measurement', 'HK-Wearable', 'HK-WEAR-HRV-RMSSD', 'hrv_rmssd'),
+    ('oura_spo2', 'Oxygen saturation (SpO2)', '%', 'Measurement', 'LOINC', '59408-5', 'spo2'),
+    ('oura_respiratory_rate', 'Respiratory rate (average breathing rate in sleep)', 'breaths/min', 'Measurement', 'LOINC', '9279-1', 'respiratory_rate'),
+    ('oura_sleep_duration', 'Sleep duration', 'h', 'Observation', 'LOINC', '93832-4', 'sleep_duration'),
+    ('oura_vo2_max', 'VO2 max', 'mL/kg/min', 'Measurement', 'LOINC', '94122-9', 'vo2_max'),
+    ('oura_active_energy', 'Active energy burned', 'kcal', 'Measurement', 'LOINC', '93819-1', 'active_energy'),
 ]
 
 # Each metric's category in the wearable mapping proposal, as
@@ -117,11 +117,11 @@ GARMIN_CATEGORIES = by_code({
 })
 
 OURA_CATEGORIES = by_code({
-    'Activity': ('steps', 'active_minutes', 'active_energy'),
-    'Heart & Cardiovascular': ('resting_hr', 'hrv_rmssd'),
-    'Blood & Respiratory': ('spo2', 'respiratory_rate'),
-    'Fitness': ('vo2_max',),
-    'Sleep': ('sleep_duration',),
+    'Activity': ('oura_steps', 'oura_active_minutes', 'oura_active_energy'),
+    'Heart & Cardiovascular': ('oura_resting_hr', 'oura_hrv_rmssd'),
+    'Blood & Respiratory': ('oura_spo2', 'oura_respiratory_rate'),
+    'Fitness': ('oura_vo2_max',),
+    'Sleep': ('oura_sleep_duration',),
 })
 
 # How each adapter produces the metric's value, as
@@ -157,11 +157,11 @@ GARMIN_MEASURE_CLASSES = by_code({
 })
 
 OURA_MEASURE_CLASSES = by_code({
-    'Direct measurement': ('spo2', 'respiratory_rate'),
+    'Direct measurement': ('oura_spo2', 'oura_respiratory_rate'),
     'Aggregate over interval': (
-        'steps', 'active_minutes', 'resting_hr', 'sleep_duration', 'hrv_rmssd',
+        'oura_steps', 'oura_active_minutes', 'oura_resting_hr', 'oura_sleep_duration', 'oura_hrv_rmssd',
     ),
-    'Algorithmic estimate': ('vo2_max', 'active_energy'),
+    'Algorithmic estimate': ('oura_vo2_max', 'oura_active_energy'),
 })
 
 # {source_code: metric_key}, from the last element of each metric's tuple.
@@ -272,6 +272,18 @@ class Command(BaseCommand):
                         created += 1
                     else:
                         existed += 1
+                        if seed_status == 'proposed':
+                            # A code an upload queued before this seed ran has no
+                            # destination and never would: fill it, still proposed,
+                            # and only where nobody has chosen one.
+                            queued = SourceCodeConceptMapping.objects.filter(
+                                organization=None, source_vocabulary_id=source_vocab,
+                                source_code=src_code, status='proposed', target_concept__isnull=True)
+                            queued.update(
+                                target_concept=target, destination_vocabulary_id=d_vocab,
+                                omop_table=omop_table, domain_id=domain, updated_at=timezone.now())
+                            queued.filter(source_code_description='').update(
+                                source_code_description=desc[:255])
                         # The unit the adapter reports in, on a row seeded before
                         # units were recorded. Fills a blank and nothing else.
                         source_units_filled += SourceCodeConceptMapping.objects.filter(
@@ -305,7 +317,7 @@ class Command(BaseCommand):
                         f'{unresolved} without target concept (of {count} total).'
                     ))
 
-        total = len(APPLE_METRICS) + len(GARMIN_METRICS)
+        total = len(APPLE_METRICS) + len(GARMIN_METRICS) + len(OURA_METRICS)
         if dry_run:
             self.stdout.write(self.style.WARNING(
                 f'\nDRY RUN total: {total} metrics, '

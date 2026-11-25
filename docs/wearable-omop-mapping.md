@@ -474,8 +474,8 @@ Upload button and drop zone is read as Apple Health.
 `POST /api/v1/patient-records/upload-wearable/` takes `device_type=oura` and a
 `.zip` or a single `.csv`; `parse_oura_export` (`oura_parser.py`) returns the
 same `WearableSample`s as the other parsers, and everything after that is the
-shared writer: the device's own code (the metric key) under the `Oura`
-vocabulary, the patient's inventory entry, and the resolver.
+shared writer: the device's own code (the metric key behind `oura_`, so a bare
+`steps` stays Garmin's) under the `Oura` vocabulary, the patient's inventory entry, and the resolver.
 
 | File (any folder, any case, `_` ignored) | Columns | Metric |
 |---|---|---|
@@ -505,8 +505,13 @@ vocabulary, the patient's inventory entry, and the resolver.
   mapping. `Oura` is one of `WEARABLE_DEVICE_VOCABULARIES`, so the device-code
   rules under [Row shape written today](#row-shape-written-today) hold for it,
   and the Code Mapping Wearables tab lists its rows.
-- Zip limits: 200 files, 200 MB per CSV, 500 MB in all uncompressed, checked
+- Zip limits: 200 files, 50 MB per CSV, 150 MB in all uncompressed, checked
   before anything is read.
+- An Oura day is a total that Oura revises, so the upload is written with
+  `replace_daily=True` (a later export replaces the days an earlier one wrote,
+  as a Garmin sync does). A day with no steps, activity or calories is not
+  stored; a day repeated in a file is the later row; a plain `sleep` file is
+  read only when there is no `sleepmodel`.
 
 ## Garmin Connect sync
 

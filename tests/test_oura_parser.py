@@ -36,7 +36,7 @@ def by_metric(samples):
 
 @pytest.mark.parametrize('name, kind', [
     ('dailyactivity.csv', 'activity'), ('App Data/DailyActivity.csv', 'activity'),
-    ('daily_activity.csv', 'activity'), ('sleepmodel.csv', 'sleep'), ('dailyspo2.csv', 'spo2'),
+    ('dailyactivity (1).csv', 'activity'), ('daily_activity.csv', 'activity'), ('sleepmodel.csv', 'sleep'), ('sleep.csv', 'sleep_alt'), ('dailyspo2.csv', 'spo2'),
     ('vo2max.csv', 'vo2'), ('heartrate.csv', None), ('dailyactivity.json', None),
     ('__MACOSX/._dailyactivity.csv', None),
 ])
@@ -113,3 +113,22 @@ def test_too_many_files_are_refused(monkeypatch):
     monkeypatch.setattr(oura_parser, 'MAX_MEMBERS', 1)
     with pytest.raises(ValueError, match='too many'):
         parse_oura_export(zip_of({'a.csv': 'x', 'b.csv': 'y'}), 'oura.zip')
+
+
+def test_a_day_with_nothing_in_it_is_no_reading():
+    text = 'day;steps;high_activity_time;medium_activity_time;active_calories\n2024-07-01;0;0;0;0\n2024-07-02;;;;\n'
+    assert parse_oura_export(text.encode(), 'dailyactivity.csv') == []
+
+
+def test_a_repeated_day_is_the_later_row_not_a_second_total():
+    text = 'day;steps\n2024-07-01;100\n2024-07-01;250\n'
+    assert by_metric(parse_oura_export(text.encode(), 'dailyactivity.csv')) == {
+        ('steps', date(2024, 7, 1)): 250.0}
+
+
+def test_a_plain_sleep_file_is_not_added_to_sleepmodel():
+    archive = zip_of({'sleepmodel.csv': SLEEP, 'sleep.csv': SLEEP})
+    values = by_metric(parse_oura_export(archive, 'oura.zip'))
+    assert values[('sleep_duration', date(2024, 7, 1))] == 8.0
+    alone = by_metric(parse_oura_export(zip_of({'sleep.csv': SLEEP}), 'oura.zip'))
+    assert alone[('sleep_duration', date(2024, 7, 1))] == 8.0

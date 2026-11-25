@@ -175,14 +175,15 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const handleDelete = useCallback(async (uploadId: number) => {
     if (!confirm('Delete this upload and its associated measurements?')) return;
     setDeletingId(uploadId);
-    // A refusal is told in the section the upload is listed in.
-    setMessageAt(uploads.find(u => u.id === uploadId)?.device_type === 'oura' ? 'oura' : 'top');
     try {
       await clinicalClient().delete(clinicalUrl(`/v1/patient-records/wearable-uploads/${uploadId}/`));
       setUploads(prev => prev.filter(u => u.id !== uploadId));
       if (expandedUpload === uploadId) setExpandedUpload(null);
       if (onRefresh) onRefresh();
     } catch {
+      // A refusal is told in the section the upload is listed in.
+      setMessageAt(uploads.find(u => u.id === uploadId)?.device_type === 'oura' ? 'oura' : 'top');
+      setUploadResult(null);
       setUploadError('Failed to delete upload. Please try again.');
     } finally {
       setDeletingId(null);
@@ -201,6 +202,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     let totalProvisional = 0;
     let totalUnresolved = 0;
     let totalSettled = 0;
+    let storedFiles = 0;
 
     try {
       for (const file of files) {
@@ -220,6 +222,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         totalProvisional += res.data.provisional_samples || 0;
         totalUnresolved += res.data.unresolved_samples || 0;
         totalSettled += res.data.settled_rows || 0;
+        storedFiles += 1;
       }
 
       const pending = pendingClause({
@@ -241,7 +244,12 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
         || 'Upload failed. Please try again.';
-      setUploadError(msg);
+      setUploadError(storedFiles > 0
+        ? `${msg} ${storedFiles} of ${files.length} files were stored before it failed.` : msg);
+      if (storedFiles > 0) {
+        fetchUploads();
+        if (onRefresh) onRefresh();
+      }
     } finally {
       setUploading(false);
     }
@@ -261,11 +269,15 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     // Auto-detect device type from file extensions
     const types = new Set(fileList.map(f => detectDeviceType(f.name)));
     if (types.has(null)) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Unsupported file type. Please select .fit (Garmin) or .zip (Apple Health) files.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     if (types.size > 1) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Please upload one type at a time (.fit or .zip).');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
@@ -320,6 +332,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       const html = e.dataTransfer.getData('text/html');
 
       if (uriList || html) {
+        setMessageAt('top');
+        setUploadResult(null);
         setUploadError(
           'Files dragged from the Garmin MTP device cannot be read directly by the browser. ' +
           'Please copy the files to a local folder first (e.g. Desktop), then drag them from there.'
@@ -332,11 +346,15 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     const types = new Set(files.map(f => detectDeviceType(f.name)));
 
     if (types.has(null)) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Unsupported file type. Please drop .fit (Garmin) or .zip (Apple Health) files.');
       return;
     }
 
     if (types.size > 1) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Please drop files of one type at a time (.fit or .zip, not both).');
       return;
     }

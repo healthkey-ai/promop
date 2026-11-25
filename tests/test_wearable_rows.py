@@ -427,3 +427,15 @@ def test_the_sweeps_index_holds_a_long_device_code_as_a_row_holds_it(provisional
     entries = build_qualifying_index()['entries']['measurement']
     assert set(entries) == {code.upper(), code[:50].upper()}
     assert entries[code[:50].upper()] == entries[code.upper()]
+
+
+@pytest.mark.django_db
+def test_oura_files_its_codes_under_its_own_spelling_not_garmins():
+    """A person holding both devices must not have one's mapping answer for the other's rows."""
+    from omop_core.services import wearable_rows
+
+    garmin = wearable_rows.device_codes('garmin', ['steps', 'hrv_rmssd'])
+    oura = wearable_rows.device_codes('oura', ['steps', 'hrv_rmssd'])
+    assert {c.source_code for c in garmin.values()} == {'steps', 'hrv_rmssd'}
+    assert {c.source_code for c in oura.values()} == {'oura_steps', 'oura_hrv_rmssd'}
+    assert {c.vocabulary for c in oura.values()} == {'Oura'}

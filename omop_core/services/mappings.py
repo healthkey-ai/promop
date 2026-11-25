@@ -437,10 +437,11 @@ def resolve_wearable_mappings(device_type):
             if metric_key and row.target_concept:
                 db_mappings[metric_key] = row.target_concept
     else:
-        # Garmin and Oura: source_code == metric_key
+        # Garmin: source_code == metric_key; Oura's is the key behind a prefix.
         for row in approved:
             if row.target_concept:
-                db_mappings[row.source_code] = row.target_concept
+                db_mappings[row.source_code.removeprefix('oura_') if device_type == 'oura'
+                            else row.source_code] = row.target_concept
 
     return db_mappings
 

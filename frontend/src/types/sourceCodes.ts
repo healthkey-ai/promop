@@ -5,8 +5,8 @@
  * mapping). Counts and dates only.
  */
 export interface SourceCodeWearable {
-  device: "garmin" | "apple" | "android";
-  /** "Garmin", "Apple Health" or "Health Connect". */
+  device: "garmin" | "apple" | "android" | "oura";
+  /** "Garmin", "Apple Health", "Health Connect" or "Oura Ring". */
   source: string;
   /** The vendor-neutral metric, e.g. "steps"; '' when unknown. */
   metric_key: string;

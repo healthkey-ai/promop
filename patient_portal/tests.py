@@ -19194,17 +19194,19 @@ class WearableUploadEndpointTest(TestCase):
         # The device's own code, in the Oura vocabulary, in the patient's inventory.
         held = set(PatientSourceCode.objects.filter(
             person=self.person, source_vocabulary_id='Oura').values_list('source_value', flat=True))
-        self.assertEqual(held, {'steps', 'active_minutes', 'active_energy', 'sleep_duration',
-                                'hrv_rmssd', 'resting_hr', 'respiratory_rate'})
+        # Under Oura's own spelling: a bare ``steps`` is Garmin's.
+        self.assertEqual(held, {'oura_steps', 'oura_active_minutes', 'oura_active_energy',
+                                'oura_sleep_duration', 'oura_hrv_rmssd', 'oura_resting_hr',
+                                'oura_respiratory_rate'})
         self.assertTrue(Observation.objects.filter(
-            person=self.person, observation_source_value='steps', value_as_number=8200).exists())
+            person=self.person, observation_source_value='oura_steps', value_as_number=8200).exists())
         self.assertTrue(Measurement.objects.filter(
-            person=self.person, measurement_source_value='hrv_rmssd', value_as_number=52).exists())
+            person=self.person, measurement_source_value='oura_hrv_rmssd', value_as_number=52).exists())
         # No Oura mapping is approved, so each code is queued for a curator.
         self.assertFalse(SourceCodeConceptMapping.objects.filter(
             source_vocabulary_id='Oura', status='approved').exists())
         self.assertTrue(SourceCodeConceptMapping.objects.filter(
-            source_vocabulary_id='Oura', source_code='steps').exists())
+            source_vocabulary_id='Oura', source_code='oura_steps').exists())
 
     def test_oura_csv_alone_is_accepted(self):
         resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
@@ -19217,6 +19219,7 @@ class WearableUploadEndpointTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertEqual(resp.data['samples_created'], 0)
         self.assertEqual(resp.data['duplicates_skipped'], 3)
+        self.assertEqual(self._wearable_rows(self.person)[0], 3)
 
     def test_oura_upload_refuses_other_file_types_and_unreadable_files(self):
         resp = self._post_oura('oura.fit', 'x')
@@ -19224,8 +19227,27 @@ class WearableUploadEndpointTest(TestCase):
         self.assertIn('.zip', resp.data['error'])
         resp = self._post_oura('oura.zip', {'notes.txt': 'nothing here'})
         self.assertEqual(resp.status_code, 400)
-        self.assertIn('Oura Ring export', resp.data['error'])
+        self.assertIn('No Oura export files found', resp.data['error'])
         self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_a_later_oura_export_replaces_the_days_an_earlier_one_wrote(self):
+        """Oura revises recent days: the corrected total replaces, never stacks."""
+        from omop_core.models import Observation
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        revised = self._OURA_ACTIVITY.replace(';8200;', ';9100;')
+        resp = self._post_oura('dailyactivity.csv', revised)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        steps = Observation.objects.filter(person=self.person, observation_source_value='oura_steps')
+        self.assertEqual(list(steps.values_list('value_as_number', flat=True)), [9100])
+
+    def test_a_parse_refusal_of_another_device_is_still_the_generic_answer(self):
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': __import__('django.core.files.uploadedfile', fromlist=['x']).SimpleUploadedFile(
+                'export.zip', b'not a zip'), 'device_type': 'apple'},
+            format='multipart')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Failed to parse file', resp.data['error'])
 
     def test_oura_upload_started_from_another_record_is_refused(self):
         other = Person.objects.create(person_id=99012, family_name='Other', given_name='Olive')

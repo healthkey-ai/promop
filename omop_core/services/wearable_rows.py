@@ -49,6 +49,11 @@ DEVICE_VOCABULARIES = WEARABLE_DEVICE_VOCABULARIES
 SOURCE_LABELS = {'apple': 'Apple Health', 'garmin': 'Garmin', 'android': 'Health Connect',
                  'oura': 'Oura Ring'}
 
+# Oura's codes are the metric key behind a prefix. A bare ``steps`` is Garmin's,
+# and a person who held one spelling under two device vocabularies would have
+# one device's mapping answer for, and sweep, the other's rows.
+OURA_CODE_PREFIX = 'oura_'
+
 NO_MATCHING_CONCEPT_ID = 0
 ORIGIN_SYSTEM = 'wearable-import'
 
@@ -125,9 +130,10 @@ def device_codes(device_type, metric_keys) -> dict:
     if vocabulary is None:
         return {}
     metric_keys = list(dict.fromkeys(metric_keys))
-    if device_type in ('garmin', 'oura'):
-        # The metric key is the device's code.
+    if device_type == 'garmin':
         codes = {metric: metric for metric in metric_keys}
+    elif device_type == 'oura':
+        codes = {metric: OURA_CODE_PREFIX + metric for metric in metric_keys}
     elif device_type == 'apple':
         apple = _apple_codes()
         codes = {metric: apple[metric] for metric in metric_keys if metric in apple}
@@ -322,8 +328,10 @@ def needs_resolving(person, codes) -> list:
 # ---- what the Source Codes tab says of a wearable code -------------------------------
 
 def _metric_of(vocabulary, source_code, apple, health_connect, mapping_metrics) -> str:
-    if vocabulary in ('Garmin', 'Oura'):
+    if vocabulary == 'Garmin':
         return source_code
+    if vocabulary == 'Oura':
+        return source_code.removeprefix(OURA_CODE_PREFIX)
     if vocabulary == 'Apple':
         return apple.get(source_code, '')
     return mapping_metrics.get(source_code) or health_connect.get(source_code, '')

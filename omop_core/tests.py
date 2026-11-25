@@ -8083,11 +8083,31 @@ class SeedHl7PhrSourceCodesTest(TestCase):
         self.assertEqual(oura.count(), 9)
         self.assertEqual(set(oura.values_list('status', flat=True)), {'proposed'})
         # Oura's HRV is RMSSD, never SDNN.
-        self.assertEqual(oura.get(source_code='hrv_rmssd').metric_key, 'hrv_rmssd')
-        self.assertFalse(oura.filter(source_code='hrv_sdnn').exists())
+        self.assertEqual(oura.get(source_code='oura_hrv_rmssd').metric_key, 'hrv_rmssd')
+        self.assertFalse(oura.filter(source_code__contains='sdnn').exists())
+        # Oura's codes are not Garmin's spellings.
+        self.assertFalse(oura.filter(source_code='steps').exists())
         self.assertEqual(resolve_wearable_mappings('oura'), {})
-        oura.filter(source_code='steps').update(status='approved')
+        oura.filter(source_code='oura_steps').update(status='approved')
         self.assertEqual(set(resolve_wearable_mappings('oura')), {'steps'})
+        self.assertEqual(set(resolve_wearable_mappings('garmin')) & {'steps'}, {'steps'})
+
+    def test_an_oura_code_queued_before_the_seed_gets_its_destination_still_proposed(self):
+        queued = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='Oura', source_code='oura_steps', status='proposed',
+            origin_system='wearable-import', organization=None)
+        chosen = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='Oura', source_code='oura_spo2', status='proposed',
+            origin_system='wearable-import', organization=None, source_code_description='mine')
+        call_command('seed_wearable_device_mappings', verbosity=0)
+        queued.refresh_from_db()
+        self.assertEqual(queued.status, 'proposed')
+        self.assertEqual(queued.target_concept.concept_code, '55423-8')
+        self.assertEqual(queued.omop_table, 'observation')
+        chosen.refresh_from_db()
+        self.assertEqual(chosen.source_code_description, 'mine')
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', source_code='oura_steps').count(), 1)
 
     # ── Existing rows, dry run, idempotence ─────────────────────────────
 

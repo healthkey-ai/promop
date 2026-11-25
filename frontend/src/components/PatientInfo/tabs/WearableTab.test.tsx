@@ -1281,6 +1281,33 @@ describe('WearableTab — Oura Ring export (#2889)', () => {
     await waitFor(() => expect(screen.queryByTestId('uploads-oura')).not.toBeInTheDocument());
   });
 
+  it('tells a refusal of the top upload at the top, after an Oura upload', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 1, duplicates_skipped: 0 } });
+    renderTab();
+    fireEvent.change(ouraInput(), { target: { files: [createFile('oura.zip')] } });
+    await within(ouraSection()).findByText(/uploaded 1 sample/i);
+
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('data.csv')]));
+
+    expect(await screen.findByText(/unsupported file type/i)).toBeInTheDocument();
+    expect(within(ouraSection()).queryByText(/unsupported file type/i)).not.toBeInTheDocument();
+    expect(within(ouraSection()).queryByText(/uploaded 1 sample/i)).not.toBeInTheDocument();
+  });
+
+  it('says how many files were stored when a later one fails, and re-reads the record', async () => {
+    mockPost
+      .mockResolvedValueOnce({ data: { samples_created: 2, duplicates_skipped: 0 } })
+      .mockRejectedValueOnce({ response: { data: { error: 'No Oura export files found.' } } });
+    const onRefresh = vi.fn();
+    renderTab({ onRefresh });
+    fireEvent.change(ouraInput(), { target: { files: [createFile('a.csv'), createFile('b.csv')] } });
+
+    expect(await within(ouraSection()).findByRole('alert'))
+      .toHaveTextContent('No Oura export files found. 1 of 2 files were stored before it failed.');
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
   it('is disabled while its own upload is running', async () => {
     let finish: (value: unknown) => void = () => {};
     mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
