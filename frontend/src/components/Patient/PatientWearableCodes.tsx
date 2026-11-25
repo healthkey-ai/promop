@@ -1,4 +1,6 @@
+import { Fragment } from "react";
 import type { PatientSourceCode, WearableSourceCode } from "../../types/sourceCodes";
+import { SourceCodeReadingsRow } from "./OmopReadings";
 
 const DASH = "—";
 
@@ -116,8 +118,11 @@ function StatusBadges({ code }: { code: WearableSourceCode }) {
 export default function PatientWearableCodes({
   codes,
   onRowClick,
+  personId,
 }: {
   codes: WearableSourceCode[];
+  /** The patient, for reading a code's stored rows. Absent: no arrow. */
+  personId?: string;
   /** The tab's own row handler. Absent for a reader: the row opens nothing (#2416). */
   onRowClick?: (code: PatientSourceCode) => void;
 }) {
@@ -148,17 +153,21 @@ export default function PatientWearableCodes({
               <th scope="col" className="px-3 py-2 text-left font-medium">30-day metrics</th>
             </tr>
           </thead>
-          <tbody className="divide-y">
+          <tbody>
             {codes.map((code, i) => {
               const { wearable } = code;
               const id = `${wearable.device}-${codeOf(code)}`;
               const note = mappingNote(code);
               const fields = (wearable.fields ?? []).map((field) => field.label);
+              const readings = personId != null && wearable.rows > 0;
               return (
+                <Fragment key={`${code.omop_table}-${id}-${i}`}>
                 <tr
-                  key={`${code.omop_table}-${id}-${i}`}
                   data-testid={`wearable-code-${id}`}
-                  className={onRowClick ? "cursor-pointer align-top hover:bg-muted/30" : "align-top"}
+                  className={[
+                    onRowClick ? "cursor-pointer align-top hover:bg-muted/30" : "align-top",
+                    readings ? "" : "border-b",
+                  ].join(" ")}
                   onClick={onRowClick ? () => onRowClick(code) : undefined}
                 >
                   <td className="px-3 py-2">
@@ -194,6 +203,18 @@ export default function PatientWearableCodes({
                   </td>
                   <td className="px-3 py-2 text-xs">{fields.length ? fields.join(", ") : DASH}</td>
                 </tr>
+                {readings && (
+                  <SourceCodeReadingsRow
+                    personId={personId}
+                    table={code.omop_table}
+                    code={code.source_value}
+                    vocabulary={code.source_vocabulary_id ?? ""}
+                    count={wearable.rows}
+                    colSpan={7}
+                    testId={`wearable-readings-${wearable.device}-${codeOf(code)}`}
+                  />
+                )}
+                </Fragment>
               );
             })}
           </tbody>

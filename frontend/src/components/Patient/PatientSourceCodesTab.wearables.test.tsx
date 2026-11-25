@@ -143,7 +143,8 @@ describe("PatientSourceCodesTab wearables (#2835)", () => {
     }
     // Each status section holds its one hospital code and counts only that.
     expect(statusSection("Unmapped")).toHaveTextContent("Unmapped(1)");
-    expect(within(statusSection("Unmapped")).getAllByRole("row")).toHaveLength(2);
+    // The header, the code, and the arrow row that opens its readings (#2863).
+    expect(within(statusSection("Unmapped")).getAllByRole("row")).toHaveLength(3);
     expect(within(statusSection("Unmapped")).getByText("Blood Pressure")).toBeInTheDocument();
     expect(statusSection("Proposed")).toHaveTextContent("Proposed(1)");
     expect(within(statusSection("Proposed")).getByText("Respirations")).toBeInTheDocument();

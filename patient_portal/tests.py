@@ -7873,6 +7873,17 @@ class PatientRecordOmopActionTest(TestCase):
         c.force_authenticate(user=identity)
         return c
 
+    def client_rows(self, person_id, **params):
+        resp = self._client_as(self.admin).get(
+            f'/api/v1/patient-records/{person_id}/omop-rows/', {'table': 'measurements', **params})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.data['rows']
+
+    def test_the_legacy_path_keeps_the_raw_rows(self):
+        resp = self._client_as(self.admin).get(f'/api/patient-info/{self.person.person_id}/omop/')
+        tables = {table['key']: table for table in resp.data['tables']}
+        self.assertEqual(tables['measurements']['rows'][0]['measurement_id'], self.measurement.measurement_id)
+
     def test_org_admin_can_view_consolidated_omop_rows(self):
         resp = self._client_as(self.admin).get(
             f'/api/v1/patient-records/{self.person.person_id}/omop/'
@@ -7880,8 +7891,12 @@ class PatientRecordOmopActionTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         tables = {table['key']: table for table in resp.data['tables']}
         self.assertEqual(resp.data['person_id'], self.person.person_id)
+        # Measurements come grouped by concept (#2863): the rows are read per group.
         self.assertEqual(tables['measurements']['count'], 1)
-        self.assertEqual(tables['measurements']['rows'][0]['measurement_id'], self.measurement.measurement_id)
+        self.assertTrue(tables['measurements']['grouped'])
+        self.assertEqual(tables['measurements']['unresolved_groups'][0]['count'], 1)
+        rows = self.client_rows(self.person.person_id, concept=0, source_value='')
+        self.assertEqual(rows[0]['id'], self.measurement.measurement_id)
         self.assertEqual(tables['condition_occurrences']['count'], 1)
         self.assertEqual(
             tables['condition_occurrences']['rows'][0]['condition_occurrence_id'],

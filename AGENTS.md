@@ -1279,6 +1279,60 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
   `none`) and the 30-day fields it feeds. Counts and dates only. The tab
   shows these in a Wearables section above the other codes
   (`PatientWearableCodes.tsx`); a row opens the same Edit Mapping dialog.
+- **Reading the rows back (#2863).** Three admin-only, v1-only reads, on
+  `omop_core/services/omop_row_pages.py`; each answers like the list it sits
+  beside (`_resolve_patient_with_auth`, then `_is_admin_actor`: a doctor of the
+  patient gets 403, an analyst 404, a patient 403 on her own record), and
+  none logs a value:
+  - `GET patient-records/<id>/omop/` on **v1** (the legacy
+    `/api/patient-info/` registration keeps the raw dump: `omop_grouped`)
+    returns Measurements and Observations *grouped*: `groups` (one per
+    non-zero concept: name, code, vocabulary, `count`, `provisional_rows`,
+    latest and earliest date and datetime) and `unresolved_groups` (concept 0,
+    one per source value), with `rows: []`. Three queries per table plus one
+    for the concept names, whatever the number of rows; at most `MAX_GROUPS`
+    (500) per list, most recent first, `truncated` says when more exist.
+    `wearable` is the server's: the importer's rows (type concept 32865) under
+    a code the patient's inventory holds under Garmin, Apple or HealthConnect
+    (`device_codes_held`, the rule `describe` counts by). A device's rows and a
+    hospital's of the same spelling are **two** unresolved groups, only one
+    marked, and a hospital row filed under a device's spelling does not mark
+    its concept.
+  - `GET patient-records/<id>/omop-rows/?table=measurements|observations&concept=<id>`
+    (`&source_value=` and `&wearable=true|false` at concept 0) is one group's
+    rows, `limit` 1-200 (50), a keyset `cursor` (`next_cursor`, opaque,
+    anything else a 400). Entered-in-error rows are listed and flagged here,
+    as in the dump.
+  - `GET patient-records/<id>/source-code-rows/?table=&code=[&vocabulary=]`
+    is **any source code's** rows, what the arrow under each row of the Source
+    Codes tab opens (the Wearables section and the Unmapped, Proposed and
+    Approved sections alike; closed, and nothing is read until it is opened).
+    `table` is a `CLINICAL_TABLES` key (`measurement`, `observation`,
+    `condition`, `drug_exposure`, `procedure`). Only a measurement and an
+    observation have a number and a unit; a drug shows `quantity` and its dose
+    unit, a procedure `quantity`, a condition no value (its day and status).
+    Scoping is `omop_row_pages.code_rows`, the resolver's own rule
+    (`_scope_to_holders`) in both directions: a code given under a **device
+    vocabulary** lists only the importer's rows (type concept 32865) filed
+    under exactly that code, and is a **404** unless the patient's inventory
+    holds it under that vocabulary and table (so it cannot read rows by
+    arbitrary source value); **any other code** lists the rows filed under it as
+    a row holds it (cut to the column, case-insensitive, as `_resolve_groups`
+    matches) and, for a patient who also holds the spelling under a device,
+    leaves that device's wearable rows out. A hospital row of type 32865 is
+    listed for a patient who holds no such device code. **Entered-in-error rows
+    are listed and flagged** (`is_erroneous`), never hidden, so a wearable
+    code's list can hold more rows than the `Readings (N)` beside it, which
+    counts the accepted, provisional and unresolved ones as `describe` does.
+    Two hospital vocabularies using one spelling share a list: a row stores no
+    vocabulary. Two queries beyond the patient lookup, whatever the number of
+    rows.
+  - **Order is date, then datetime (datetimes before a day-only row of the
+    same day), then id, all descending.** A row's date is always set and its
+    datetime often is not: a wearable stores only the day (Gap D), and the UI
+    shows "date only" for it rather than a time of day.
+    The group's latest and earliest datetime are shown only when the extreme
+    moment falls on the extreme day.
 - **Not done.** The phone sync writes a day only when it grows, so a day
   stored unresolved is resolved by the mapping's approval through the API
   (its re-point), by Generate OMOP, or by the phone's next record for a
@@ -1293,7 +1347,8 @@ Tests: `tests/test_wearable_rows.py`,
 touch a device's inventory or rows from outside: the ETL upload, the
 clinical-table fallback, a relocation, a hospital mapping of the same
 spelling), `PatientSourceCodesTab.wearables.test.tsx`,
-`PatientWearableCodes.test.tsx`.
+`PatientWearableCodes.test.tsx`, `tests/test_omop_rows_by_concept.py`,
+`PatientOmopTab.test.tsx`, `PatientWearableCodes.readings.test.tsx`.
 
 ---
 

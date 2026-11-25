@@ -28,6 +28,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
+from omop_core.services import omop_row_pages
 from omop_core.services.source_descriptions import source_metadata_description
 from omop_core.services.source_fhir_context import based_on_labels as _source_based_on
 from omop_core.services.provisional import is_real_row as _is_real_row
@@ -1881,6 +1882,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         results = get_fields_provenance(person, field_names)
         return Response(results)
 
+    # The v1 surface groups measurements and observations by concept; the
+    # legacy registration of this viewset keeps the raw dump (frozen).
+    omop_grouped = False
+
     @action(detail=True, methods=['get'], url_path='omop',
             permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def omop(self, request, pk=None):
@@ -1920,7 +1925,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         tables = []
         tables_data = []   # (key, rows) pairs for concept name resolution
+        grouped_tables = []
+        held_codes = omop_row_pages.device_codes_held(person) if self.omop_grouped else {}
         for key, label, qs in table_specs:
+            if self.omop_grouped and key in omop_row_pages.SPECS:
+                # A concept's rows are read when it is opened (``omop-rows``):
+                # a wearable adds one a day, so a patient holds thousands.
+                table = {'key': key, 'label': label, 'rows': [], 'grouped': True,
+                         'page_size': omop_row_pages.PAGE_SIZE,
+                         **omop_row_pages.grouped(person, omop_row_pages.SPECS[key], held_codes[key])}
+                grouped_tables.append(table)
+                tables.append(table)
+                continue
             include = _OMOP_COLUMNS.get(key)
             rows = [_serialize_omop_row(obj, include=include) for obj in qs]
             tables_data.append((key, rows))
@@ -1932,6 +1948,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             })
 
         _resolve_concept_names(tables_data)
+        omop_row_pages.name_groups(grouped_tables)
 
         return Response({
             'person_id': person.person_id,
@@ -6745,6 +6762,124 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             'source_codes': source_codes,
             'summary': summary,
         })
+
+    omop_grouped = True
+
+    @staticmethod
+    def _row_page_params(request: Request):
+        """``(cursor, limit)`` from the query string, or a 400 Response."""
+        raw_limit = request.query_params.get('limit')
+        limit = omop_row_pages.PAGE_SIZE
+        if raw_limit not in (None, ''):
+            try:
+                limit = int(raw_limit)
+            except ValueError:
+                limit = 0
+            if not 1 <= limit <= omop_row_pages.MAX_PAGE_SIZE:
+                return None, None, Response(
+                    {'limit': f'limit must be a whole number from 1 to {omop_row_pages.MAX_PAGE_SIZE}.'},
+                    status=status.HTTP_400_BAD_REQUEST)
+        cursor = None
+        if request.query_params.get('cursor'):
+            try:
+                cursor = omop_row_pages.decode_cursor(request.query_params['cursor'])
+            except ValueError:
+                return None, None, Response({'cursor': 'The cursor is not valid.'},
+                                            status=status.HTTP_400_BAD_REQUEST)
+        return cursor, limit, None
+
+    @action(detail=True, methods=['get'], url_path='omop-rows',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def omop_rows(self, request: Request, pk: str | None = None) -> Response:
+        """GET .../omop-rows/?table=&concept=[&source_value=&wearable=][&cursor=&limit=]
+
+        The rows of one group of the OMOP tab, newest first, a page at a time:
+        the patient's rows of a measurement or observation concept, or, for
+        ``concept=0`` (nothing has answered for their code yet), the rows of
+        one source value. Admin only, as ``omop/`` is; the same access to the
+        patient. No row is read for a patient the caller could not open.
+        """
+        person, _patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+        if not _is_admin_actor(request):
+            return Response({'detail': 'Only administrators can view raw OMOP rows.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        spec = omop_row_pages.SPECS.get(request.query_params.get('table', ''))
+        if spec is None:
+            return Response({'table': 'table must be measurements or observations.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            concept_id = int(request.query_params.get('concept', ''))
+        except ValueError:
+            return Response({'concept': 'concept must be a concept id.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        source_value = request.query_params.get('source_value')
+        if concept_id == omop_row_pages.NO_MATCHING_CONCEPT_ID and source_value is None:
+            return Response({'source_value': 'Rows at concept 0 are read by source value.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        cursor, limit, err = self._row_page_params(request)
+        if err:
+            return err
+
+        wearable = request.query_params.get('wearable')
+        if wearable not in (None, '', 'true', 'false'):
+            return Response({'wearable': 'wearable must be true or false.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        held = ()
+        if concept_id == omop_row_pages.NO_MATCHING_CONCEPT_ID and wearable:
+            held = omop_row_pages.device_codes_held(person)[request.query_params['table']]
+        qs = omop_row_pages.group_rows(
+            person, spec, concept_id, source_value,
+            wearable=None if not wearable else wearable == 'true', held=held)
+        return Response(omop_row_pages.read_page(qs, spec, cursor, limit))
+
+    @action(detail=True, methods=['get'], url_path='source-code-rows',
+            permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
+    def source_code_rows(self, request: Request, pk: str | None = None) -> Response:
+        """GET .../source-code-rows/?table=&code=[&vocabulary=][&cursor=&limit=]
+
+        The rows stored for one source code of this patient, newest first, a
+        page at a time (#2863): what the Source Codes tab opens under any code
+        of its list. Admin only, as the Source Codes list is, and nothing is
+        read until a code is opened.
+
+        ``table`` is the clinical table the list files the code under
+        (``measurement``, ``observation``, ``condition``, ``drug_exposure``,
+        ``procedure``). Only a measurement and an observation have a number and
+        a unit; a drug and a procedure show their quantity, a condition no
+        value. Scoping is ``omop_row_pages.code_rows``: the code as a row holds
+        it, a device's code only its wearable rows, a hospital's code never a
+        device holder's wearable rows. A device code the patient's inventory
+        does not hold is a 404, so the endpoint is not a way to read rows of a
+        device by arbitrary source value. Entered-in-error rows are listed and
+        flagged.
+        """
+        person, _patient_info, err = self._resolve_patient_with_auth(request, pk)
+        if err:
+            return err
+        if not _is_admin_actor(request):
+            return Response({'detail': 'Only administrators can view source codes.'},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        table = request.query_params.get('table', '')
+        code = request.query_params.get('code', '')
+        vocabulary = request.query_params.get('vocabulary', '')
+        if table not in omop_row_pages.CODE_SPECS:
+            return Response(
+                {'table': 'table must be one of ' + ', '.join(omop_row_pages.CODE_SPECS) + '.'},
+                status=status.HTTP_400_BAD_REQUEST)
+        if not code:
+            return Response({'code': 'code is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        cursor, limit, err = self._row_page_params(request)
+        if err:
+            return err
+
+        qs = omop_row_pages.code_rows(person, table, code, vocabulary)
+        if qs is None:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(omop_row_pages.read_page(qs, omop_row_pages.CODE_SPECS[table], cursor, limit))
 
     def _patch_source_code(self, request: Request, person: Person) -> Response:
         """Correct displayed source context without rewriting ETL evidence."""
