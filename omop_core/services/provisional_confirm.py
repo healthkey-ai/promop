@@ -31,7 +31,7 @@ from django.conf import settings
 from django.db import transaction
 
 from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
-from omop_core.models import PatientRecord, ProposalRejection
+from omop_core.models import PatientRecord, ProposalRejection, RecordRevision
 from omop_core.services.provisional_record import (
     COMPUTED_INPUTS, REJECTION_FOLLOWERS, _PRECISION, _date_of, overlay,
 )
@@ -343,7 +343,8 @@ def confirm(person, record, actor, fields=None, *, all_fields=False, expected=No
                     continue
                 try:
                     with transaction.atomic():      # a savepoint: a group nothing acknowledged is taken back
-                        apply_patient_record_patch(person, locked, patch, actor=actor, as_of=when)
+                        apply_patient_record_patch(person, locked, patch, actor=actor, as_of=when,
+                                                  revision_source=RecordRevision.SOURCE_CONFIRMED_FROM_PROPOSAL)
                         locked.refresh_from_db()
                         pinned = {m for m in patch if m in (locked.user_edited_fields or [])}
                         if pinned:

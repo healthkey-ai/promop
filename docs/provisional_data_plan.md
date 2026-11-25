@@ -1259,9 +1259,13 @@ attestation.
 - **A confirmation lifts the patient's attestation block for that field.** A confirmed value is no longer
   marked, so `attestation_blockers` no longer counts it and a patient whose "Confirm my record" was refused for
   it can now confirm. That is the intended reading (the value is approved data now) but it means a patient
-  attests a value a professional approved, not one they entered. The patient's rule is unchanged.
+  attests a value a professional approved, not one they entered. The patient's rule is unchanged, and the
+  revision source records it: the revision of a confirmed value says `confirmed_from_proposal` (below), so
+  the history still tells it from the patient's own entry.
 - **Who did it.** The editor's own history names the author: each field written leaves a `RecordRevision`
-  (`changed_by` is the confirming Identity's id, `old_value` null, `new_value` the value), which is not the
+  (`changed_by` is the confirming Identity's id, `old_value` null, `new_value` the value, and `source`
+  `confirmed_from_proposal`: `RecordRevision.source`, migration `0375`, blank for a typed edit, read-only on the
+  `revisions/` endpoint and the admin, carried by `copy_patient` with the rest of the row), which is not the
   patient's id; the projected fact is typed as the recipe says for anyone who is not the patient (a patient's
   own entry is also typed self-report and carries PATIENT_SELF provenance); and the request is one
   `AuditEvent` (`POST .../confirm-provisional/`, classified `record_update`, the caller, the person as

@@ -2649,7 +2649,7 @@ them, not a mapping approval and not the record attestation: the record is locke
 is the **server's current proposal** (never one from the body), and all of them are saved in
 one `apply_patient_record_patch` call, so the result is an approved edit by the caller
 (`user_edited_fields`, OMOP projection, mark dropped, a `RecordRevision` whose `changed_by` is
-the caller), dated when the reading was taken, not today (`as_of`). "Confirm all" covers only what
+the caller and whose `source` is `confirmed_from_proposal`, blank for a typed edit), dated when the reading was taken, not today (`as_of`). "Confirm all" covers only what
 the person sees: scalar fields a tab shows (the `attestation_blockers` on-screen rule), the editor can
 write and an OMOP projection acknowledges (`not_shown` and `no_projection` are skipped: a field nothing
 acknowledges would stay pinned in `user_edited_fields`, and the disease is one). Fields that are one

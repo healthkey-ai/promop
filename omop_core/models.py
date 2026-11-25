@@ -5645,6 +5645,15 @@ class RecordRevision(models.Model):
     field = models.CharField(max_length=100)
     old_value = models.TextField(null=True, blank=True)
     new_value = models.TextField(null=True, blank=True)
+    SOURCE_CONFIRMED_FROM_PROPOSAL = 'confirmed_from_proposal'
+    source = models.CharField(
+        max_length=30, blank=True, default='', db_default='',
+        help_text=(
+            "How the value came to be written when that is not a plain edit: "
+            "'confirmed_from_proposal' is a professional confirming a provisional value "
+            "the record showed (#2870), as against the patient entering it. Blank for a typed edit."
+        ),
+    )
 
     class Meta:
         db_table = 'record_revision'

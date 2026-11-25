@@ -809,6 +809,21 @@ def test_the_revision_history_names_who_confirmed_and_it_is_not_the_patient(snom
     assert len(revisions) == 1
     assert revisions[0].changed_by == str(doctor.pk) != str(patient.pk)
     assert revisions[0].old_value is None and float(revisions[0].new_value) == 11.5
+    # The history says it was a confirmation of a proposal, as against a typed edit.
+    assert revisions[0].source == 'confirmed_from_proposal'
+    listed = client.get(f'{url(person)}revisions/').json()
+    assert [r['source'] for r in listed if r['field'] == 'hemoglobin_g_dl'] == ['confirmed_from_proposal']
+
+
+def test_a_typed_edit_leaves_the_revision_source_blank(snomed, org):
+    made = PatientRecordFactory(organization=org, disease=None)
+    propose_hemoglobin(made.person)
+    client, _ = as_role('doctor', org)
+
+    assert client.patch(url(made.person), {'hemoglobin_g_dl': '11.5'}, format='json').status_code == 200
+
+    revisions = RecordRevision.objects.filter(patient_record__person=made.person)
+    assert revisions.exists() and set(revisions.values_list('source', flat=True)) == {''}
 
 
 def test_the_audit_trail_records_the_confirmation_as_an_update_with_no_field_names(person, org):

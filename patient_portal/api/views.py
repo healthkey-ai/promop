@@ -245,7 +245,8 @@ def _drop_proposed_list_items(patient_info, patch_data):
     return stripped
 
 
-def apply_patient_record_patch(person, patient_info, data, *, actor, allow_reject=False, as_of=None):
+def apply_patient_record_patch(person, patient_info, data, *, actor, allow_reject=False, as_of=None,
+                               revision_source=''):
     """Apply a partial update to a person's PatientRecord, as ``actor`` writes it.
 
     The save path of ``PATCH /api/v1/patient-records/<id>/`` and ``/me/``,
@@ -265,6 +266,8 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
     ``as_of`` maps a field to ``(date, datetime or None)``, when the reading behind its
     value was taken. Only a professional's confirmation of a proposal passes it (#2870):
     the projected fact is then dated that day instead of today (``project_single_value``).
+    ``revision_source`` is stored on each revision row it writes (a confirmation passes
+    ``confirmed_from_proposal``, so the history tells it from a typed edit).
     """
     # patient_name targets Person, not PatientRecord, so it is handled by hand
     # here exactly as /patient-info/me/ handles it — through the same pair of
@@ -438,7 +441,7 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
             edited = set(patient_info.user_edited_fields or []) | clinical_fields
             patient_info.user_edited_fields = sorted(edited)
             patient_info.save(update_fields=['user_edited_fields'])
-        _write_record_revisions(patient_info, previous_values, actor)
+        _write_record_revisions(patient_info, previous_values, actor, revision_source)
 
         # Handle language skills (PersonLanguageSkill rows).
         touched_languages = False
@@ -1185,13 +1188,16 @@ def _changed_fields(patient_record, previous_values, prev_val):
     }
 
 
-def _write_record_revisions(patient_record, previous_values, user):
+def _write_record_revisions(patient_record, previous_values, user, source=''):
     """Persist field-level revision-history rows for a PatientRecord update.
 
     PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
     update (as captured by the PATCH path). We compare against the freshly saved
     instance and write one RecordRevision per field whose value actually
     changed, so a record's contents can be reconstructed over time.
+
+    ``source`` marks how the values were written when it is not a plain edit
+    (``RecordRevision.SOURCE_CONFIRMED_FROM_PROPOSAL``, #2870).
 
     Returns the list of created RecordRevision instances.
     """
@@ -1222,6 +1228,7 @@ def _write_record_revisions(patient_record, previous_values, user):
             field=field,
             old_value=old_s,
             new_value=new_s,
+            source=source,
         ))
     if rows:
         RecordRevision.objects.bulk_create(rows)
@@ -1832,6 +1839,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'new_value': r.new_value,
                 'changed_by': r.changed_by,
                 'changed_at': r.changed_at,
+                'source': r.source,
             }
             for r in revisions
         ]
