@@ -506,7 +506,7 @@ def apply_response(response) -> Applied | None:
             # An update (PROlog's revisable surveys) started from the record as it
             # stood (survey_record_revision): a numbered treatment it no longer
             # gives is one the patient took out, so their own line is retracted.
-            applied.retracted = _retract_removed_lines(person, mapping, lines)
+            applied.retracted = _retract_removed_lines(person, mapping, lines, response)
             if applied.retracted:
                 refresh_patient_record(person)
     logger.info(
@@ -516,11 +516,15 @@ def apply_response(response) -> Applied | None:
     return applied
 
 
-def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str, Any]]) -> list[int]:
+def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str, Any]], response) -> list[int]:
     """Retract the patient's own lines that the mapping numbers (for the cancer
-    each rule names) and an update did not give. A line from the EHR or a
-    clinician is never touched (_writable_line), nor a check-in's later line
-    (only the numbers the mapping writes). Retracting keeps the row for audit."""
+    each rule names) and an update did not give, and that this questionnaire
+    wrote (one of the patient's responses to it is among the line's sources).
+    A line another questionnaire added (a check-in's next line, perhaps after
+    the update started) is not this update's to take out; nor is a line from
+    the EHR or a clinician (_writable_line). Retracting keeps the row for audit."""
+    from prolog_surveys.models import SurveyResponse
+
     from omop_core.services.episode_service import retract_therapy_line
     from omop_core.signals import suppress_patient_record_refresh
 
@@ -538,6 +542,7 @@ def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str
         # under the primary cancer, whichever it becomes.
         removed = [(None, number) for _, number in removed]
     existing: dict[str | None, dict[int, Any]] = {}
+    mine: set[str] | None = None
     retracted = []
     with suppress_patient_record_refresh():
         for disease, number in removed:
@@ -548,6 +553,13 @@ def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str
                     existing[disease] = {}  # a cancer the record does not have: nothing to take out
             episode = existing[disease].get(number)
             if episode is None or not _writable_line(person, {'line_number': number, 'disease': disease}):
+                continue
+            if mine is None:
+                mine = {str(pk) for pk in SurveyResponse.objects.filter(
+                    participant_id=person.person_id, survey_version__survey=response.survey_version.survey,
+                ).values_list('pk', flat=True)}
+            sources = getattr(getattr(episode, 'detail', None), 'source_references', None) or []
+            if not any(reference.split(':', 1)[0] in mine for reference in sources):
                 continue
             retract_therapy_line(person, episode)
             retracted.append(number)
