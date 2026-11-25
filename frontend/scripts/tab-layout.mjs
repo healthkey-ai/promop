@@ -97,7 +97,7 @@ export function extractTabLayout(source) {
         return;
       }
     }
-    if (node.type === 'JSXOpeningElement' && node.name.name === 'ClinicalField') {
+    if (node.type === 'JSXOpeningElement' && (node.name.name === 'ClinicalField' || node.name.name === 'MetricField')) {
       add(current, attr(node, 'label'), attr(node, 'name'));
     }
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier') {

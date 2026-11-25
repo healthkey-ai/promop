@@ -1270,6 +1270,15 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
   importer's metrics to it. The Wearables tab marks each value Accepted or
   Provisional. The fields are not writable, so a provisional one never
   blocks "Confirm my record".
+- **Tracing a 30-day value (#2887).** Each value on the Wearables tab has a chart
+  icon, and a link to its rows where the OMOP tab is offered.
+  `GET patient-records/<id>/wearable-metric/?field=<30-day field>`
+  (`omop_core/services/wearable_metric_series.py`) reads the rows the derivation
+  reads (same concept-code or source-value match, bounds, entered-in-error left
+  out) plus provisional ones, as daily values with the window the aggregate
+  covers; `groups` (the OMOP tab's concept groups) only for an administrator.
+  A new 30-day field needs an entry in `WEARABLE_METRIC_FIELDS`; the series reads
+  it from there, and `tests/test_wearable_metric_series.py` holds the two.
 - **Source Codes tab.** `wearable_rows.describe` adds a `wearable` block to
   each device code the patient's inventory lists (never to a code aggregated
   from the clinical tables, which has no vocabulary of its own) of

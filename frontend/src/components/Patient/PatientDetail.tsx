@@ -28,6 +28,7 @@ import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
+import type { OmopFocus } from "./omopRows";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
@@ -393,6 +394,7 @@ export default function PatientDetail({
   const [editedName, setEditedName] = useState("");
   const [chosenTab, setChosenTab] = useState(0);
   const [sourceCodesOpened, setSourceCodesOpened] = useState(false);
+  const [omopFocus, setOmopFocus] = useState<OmopFocus | null>(null);
   // Coming back from Field Concept Mapping after Add field (#721): the tab
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
@@ -977,6 +979,11 @@ export default function PatientDetail({
     setReturnTab(null);
     setChosenTab(index);
   };
+  // A 30-day wearable value's link to its rows opens the OMOP tab at that group (#2887).
+  const openOmopRows = (focus: OmopFocus) => {
+    setOmopFocus(focus);
+    setActiveTab(omopIdx);
+  };
   const fieldTab = fieldTabs[activeTab];
   // The record's Disease Category, which scopes a field added from the
   // disease tab and decides which disease-specific added fields it shows.
@@ -1227,10 +1234,10 @@ export default function PatientDetail({
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
-                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
+                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} focus={omopFocus} />}
                 {/* Fields added through Field Concept Mapping render last on
                     their tab, then the tab's second Add Field (#721). */}
                 {fieldTab && (

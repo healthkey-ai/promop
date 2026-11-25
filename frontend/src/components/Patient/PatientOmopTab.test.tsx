@@ -265,3 +265,32 @@ describe("PatientOmopTab", () => {
     expect(await screen.findByText("Only administrators can view raw OMOP rows.")).toBeInTheDocument();
   });
 });
+
+describe("PatientOmopTab opened at a group (#2887)", () => {
+  beforeEach(() => {
+    get.mockReset();
+  });
+
+  it("opens the group a 30-day wearable value pointed at, and reads only its rows", async () => {
+    mockApi();
+    render(<PatientOmopTab personId="7" focus={{ table: "measurements", concept_id: 3027018, source_value: null, wearable: true }} />);
+    const rows = await screen.findAllByTestId("omop-group");
+    const heart = rows.find((row) => within(row).queryByText("Heart rate"));
+    expect(heart).toBeTruthy();
+    await waitFor(() => expect(within(heart as HTMLElement).getByRole("button", { expanded: true })).toBeInTheDocument());
+    const reads = get.mock.calls.filter(([url]) => String(url).includes("omop-rows"));
+    expect(reads).toHaveLength(1);
+    expect(reads[0][1]).toMatchObject({ params: { table: "measurements", concept: 3027018 } });
+  });
+
+  it("opens the device's group of an unresolved spelling, not the hospital's", async () => {
+    mockApi();
+    render(<PatientOmopTab personId="7" focus={{ table: "measurements", concept_id: 0, source_value: "spo2", wearable: true }} />);
+    await screen.findAllByTestId("omop-group");
+    await waitFor(() => {
+      const reads = get.mock.calls.filter(([url]) => String(url).includes("omop-rows"));
+      expect(reads).toHaveLength(1);
+      expect(reads[0][1]).toMatchObject({ params: { source_value: "spo2", wearable: "true" } });
+    });
+  });
+});
