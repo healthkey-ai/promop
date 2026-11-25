@@ -1,10 +1,17 @@
-{% extends "admin/base_site.html" %}
+{% extends "admin/login.html" %}
+{% comment %}
+A refused staff sign-in (patient_portal.staff_sign_in._refused). It extends the
+admin's sign-in page rather than its base page: the visitor is not signed in,
+and every admin theme renders the sign-in page for that (a base page may draw
+the signed-in user's name and menu), with the deployment's header around it.
+{% endcomment %}
 
-{% block title %}Sign-in not completed{% endblock %}
-{% block nav-breadcrumbs %}{% endblock %}
+{% block title %}Sign-in not completed | {{ site_title|default:"Django site admin" }}{% endblock %}
 
 {% block content %}
-<h1>Sign-in not completed</h1>
-<p>{{ message }}</p>
-<p><a href="{% url 'admin:login' %}">Back to sign in</a></p>
+<div id="content-main">
+  <h1>Sign-in not completed</h1>
+  <p>{{ message }}</p>
+  <p><a href="{% url 'admin:login' %}">Back to sign in</a></p>
+</div>
 {% endblock %}
