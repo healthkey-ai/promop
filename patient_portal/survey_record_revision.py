@@ -17,6 +17,9 @@ the patient answered it:
   not meet, and a field the last answers give nothing for unless its question
   was left unanswered (the mapping never clears a value, so the record's may
   be one the patient has since taken back);
+- a treatment's date answered without one ("Not sure") is kept the same way,
+  unless the line has changed what that answer did say (a treatment still
+  received, since finished, takes its end date from the record);
 - each numbered line differing from what the last answers give: its regimen
   (and the names after it), dates, outcome and details, each read from the
   line itself (its own outcome and progression, not the record's summary of
@@ -231,6 +234,22 @@ def _lines_now(person, disease: str | None) -> dict[int, dict]:
     return lines
 
 
+def _kept_escape(line_rule: dict, question_key: str, previous: dict, given_detail: dict, detail) -> bool:
+    """Whether a date question the patient answered without a date ("Not
+    sure") keeps that answer: it wrote no date, so one in the record may be an
+    older answer's, never cleared (as for a record field). Unless what that
+    answer did write has changed since: "I am still receiving this treatment"
+    wrote ``ongoing``, and a line a check-in has since finished takes its end
+    date from the record."""
+    if not _answered(previous.get(question_key)):
+        return False
+    return not any(
+        rule.get('answer') == question_key and rule['field'] in given_detail
+        and not _same(given_detail[rule['field']], getattr(detail, rule['field'], None))
+        for rule in line_rule.get('details', [])
+    )
+
+
 def _changed_lines(mapping: dict, person, record, previous: dict, written_lines: dict, questions: dict) -> dict[str, dict]:
     from omop_core.api.serializers import outcome_aliases
 
@@ -264,6 +283,8 @@ def _changed_lines(mapping: dict, person, record, previous: dict, written_lines:
                 continue
             precision = getattr(detail, f'{key}_precision', None)
             if given and _same(kwargs.get(key), value) and given_detail.get(f'{key}_precision') in (None, precision):
+                continue
+            if given and key not in kwargs and _kept_escape(line_rule, question_key, previous, given_detail, detail):
                 continue
             answer = _date_answer(value, precision, questions.get(question_key))
             if answer is not None:

@@ -169,7 +169,7 @@ def _profile_definition():
         t = f't{n}_'
         questions = [
             _q(t + 'treat', 'Treatment?', list(LABELS)),
-            _date(t + 'start', 'Started?'),
+            _date(t + 'start', 'Started?', ['not_sure']),
             _date(t + 'end', 'Ended?', ['ongoing']),
             _q(t + 'resp', 'Response?', ['complete', 'partial', 'stable', 'worked_type_unknown', 'not_assessed'],
                visible_if=[{'question': t + 'end', 'op': 'neq', 'value': 'ongoing'}]),
@@ -359,3 +359,35 @@ def test_an_update_retracts_a_later_line_it_took_out(profile, patient, django_ca
                   .values_list('episode__episode_number', 'state'))
     assert states[4] == TherapyLineAssertion.RETRACTED
     assert {states[n] for n in (1, 2, 3)} == {TherapyLineAssertion.ASSERTED}
+
+
+def test_a_date_answered_not_sure_is_kept_over_an_older_one(profile, patient, django_capture_on_commit_callbacks):
+    """An earlier profile gave the start date; the last one said "Not sure",
+    which writes nothing, so the record still holds the older date."""
+    record, _ = patient
+    submit(profile, record, FOUR_LINES, django_capture_on_commit_callbacks)
+    not_sure = {**FOUR_LINES, 't1_start': {'option': 'not_sure'}}
+    submit(profile, record, not_sure, django_capture_on_commit_callbacks)
+    assert _line(record).episode_start_date == dt.date(2019, 6, 1)  # never cleared
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(not_sure))
+
+    assert answers['t1_start'] == {'option': 'not_sure'}
+    assert answers == not_sure
+
+
+def test_a_treatment_still_received_since_finished_takes_its_end_date(
+    profile, patient, django_capture_on_commit_callbacks,
+):
+    record, _ = patient
+    still = {**FOUR_LINES, 't4_end': {'option': 'ongoing'}}
+    still.pop('t4_resp')
+    submit(profile, record, still, django_capture_on_commit_callbacks)
+    # A check-in: it finished in March 2023.
+    line = _line(record, 4)
+    Episode.objects.filter(pk=line.pk).update(episode_end_date=dt.date(2023, 3, 1))
+    TherapyLineDetail.objects.filter(episode=line).update(ongoing=False, end_date_precision='month')
+
+    answers = revision_answers(record.person_id, profile.cached_definition, dict(still))
+
+    assert answers['t4_end'] == {'date': '2023-03'}
