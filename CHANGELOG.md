@@ -15,7 +15,6 @@ All notable changes to PRomop are documented here.
   opened and each upload still opening to its samples and deleting as before.
   An upload with no section on the page stays reachable in a closed block of
   its own (#2861).
-=======
 - **OMOP tab: measurements and observations by concept; a wearable code opens to its readings** —
   the OMOP tab lists Measurements and Observations right after Person, one
   collapsed entry per concept (name, code, vocabulary, rows, latest and
@@ -29,7 +28,6 @@ All notable changes to PRomop are documented here.
   it, closed until asked (`GET /api/v1/patient-records/<id>/source-code-rows/`).
   Wearable rows store only a date, and are shown as such (#2863). See
   [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#reading-the-rows-back).
->>>>>>> f77fd29c (OMOP tab: group measurements and observations by concept; Source Codes: open a wearable code to its readings (#2863))
 
 - **A closed account's partner token no longer opens a new account** — a
   Firebase or PHR-host token stays valid after the account it opened is
