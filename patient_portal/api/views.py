@@ -17945,6 +17945,52 @@ def field_choice_value_mapping_targets(request, choice_pk):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def field_choice_lookup(request):
+    """GET the controlled lookup a field's options come from, read only (#1225).
+
+    ``?field_name=`` -> ``{field_name, source, options}``. ``source`` is null when
+    the field offers no lookup. Otherwise it names the lookup (``name`` is the slug
+    of ``/vocabularies/<name>/``, ``label`` its table) and says whether the
+    binding is ``enforced`` (the field's approved mapping names it in
+    ``value_vocabulary``: ingest keeps only its titles and the field's own
+    answers are not offered) or only what the tab offers. The entries are the
+    lookup's own, never copied into choices.
+    """
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.option_sources import LOOKUP_FIELDS
+
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Mapping access required.'}, status=status.HTTP_403_FORBIDDEN)
+    field_name = (request.query_params.get('field_name') or '').strip()
+    if not field_name:
+        return Response({'field_name': 'Required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    by_class = {model.__name__: slug for slug, model in _VOCABULARY_REGISTRY.items()}
+    bound = (FieldConceptMapping.objects.filter(field_name=field_name, status='approved')
+             .exclude(value_vocabulary='').values_list('value_vocabulary', flat=True).first())
+    slug = by_class.get(bound) if bound else None
+    enforced = slug is not None
+    if slug is None:
+        slug = LOOKUP_FIELDS.get(field_name)
+    model = _VOCABULARY_REGISTRY.get(slug) if slug else None
+    if model is None:
+        return Response({'field_name': field_name, 'source': None, 'options': []})
+    has_sort_key = any(f.name == 'sort_key' for f in model._meta.get_fields())
+    rows = list(model.objects.values('code', 'title', 'source_name', 'source_url')
+                .order_by('sort_key' if has_sort_key else 'title'))
+    first = rows[0] if rows else {}
+    return Response({
+        'field_name': field_name,
+        'source': {
+            'kind': 'vocabulary', 'name': slug, 'label': model.__name__, 'enforced': enforced,
+            'source_name': first.get('source_name') or '', 'source_url': first.get('source_url') or '',
+        },
+        'options': [{'code': r['code'], 'title': r['title']} for r in rows],
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def field_choice_answer_coverage(request):
     """GET how many of each field's answers are mapped, apart from its question."""
     from omop_core.services import field_value_mappings as fvm

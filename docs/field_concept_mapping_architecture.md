@@ -218,7 +218,25 @@ and never the model.
   answer returns to the whole list. The summary sticks to the top of the
   scrolling editor. Still not here: the typed `value` in the
   editor (what a patient's save stores for an answer, label or value, is its own
-  decision), and lookup-backed (therapy catalog) choices.
+  decision), and concept mapping for the options of a lookup.
+  **Lookup options** (#1225, `LookupOptions.tsx`, `GET field-choices/lookup/
+  ?field_name=`, `omop_core/services/option_sources.py`): nineteen fields draw
+  their dropdown from a `VocabularyLookup` table, which until now only the
+  frontend knew (`useVocabulary('her2-status')` beside the field). The editor
+  now lists that lookup, read only and never copied into choices (so there is
+  no second list to drift), with its source and a Show entries control. The
+  binding is **enforced** when the field's approved mapping names the lookup in
+  `value_vocabulary` (five fields today: ingest keeps only those titles and the
+  write descriptor offers only them, so answers added in the editor are not
+  offered), otherwise **offered**: the tab draws its dropdown from the lookup,
+  and a field with an approved concept mapping and answers offers those
+  instead, which the section says. `LOOKUP_FIELDS` must match the tabs;
+  `tests/test_option_sources.py` fails when a `useVocabulary` call names a
+  lookup no field uses, or an enforced seed names one it does not map. Not
+  here: concept mapping for a lookup's entries (a mapping keyed by provider and
+  code rather than by a choice row, with its migration), and the therapy
+  catalogs, which are lookups of the same kind (`therapy-regimen`,
+  `-component`, `-class`) but carry their own mappings.
 - **Transfer** carries the decision in force and the open proposal as
   vocabulary and code, re-resolved here. A concept this instance has not
   loaded, or that is not a valid target here, cannot be approved here: the
