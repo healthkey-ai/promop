@@ -4350,6 +4350,13 @@ Run generator:
 
 ### Environment conventions
 
+- **The GitHub repository is `phrame-org/promop`** (it was `healthkey-ai/promop`; the
+  organization changed). Use `phrame-org/promop` for `--repo`, `gh api repos/...` and
+  the `origin` remote (`git@github.com:phrame-org/promop.git`). Old
+  `healthkey-ai/promop` links in the docs are stale; GitHub no longer resolves the old
+  name for this account, so a "repository not found" from `git` or `gh` means a stale
+  remote, not lost access.
+
 - Staging always means Render: https://promop-staging.onrender.com.
 - The staging web service is `promop-staging`; its worker is `promop-staging-worker`.
 - Do not use the old Google Cloud / Cloud Run staging deployment to investigate or verify staging unless the user explicitly asks for it.
