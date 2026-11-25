@@ -916,6 +916,15 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
 def _get_custom_patient_field_data(snapshot: OmopSnapshot, person: Person = None) -> dict[str, object]:
     """Project approved editable custom mappings from the latest OMOP facts.
 
+    The values of ``custom_field_answers``, which also says which row answered
+    each field (the provisional pass reads that row's confidence).
+    """
+    return {name: value for name, (value, _row) in custom_field_answers(snapshot, person).items()}
+
+
+def custom_field_answers(snapshot: OmopSnapshot, person: Person = None) -> dict[str, tuple[object, object]]:
+    """``{name: (value, row)}`` for each approved editable custom field a fact answers.
+
     A selected concept is sufficient for imported data; the field's own source
     key (``custom:<name>``) marks a value entered in the record editor, which
     is read back as entered (``custom_field_values.read_value``). The latest
@@ -927,7 +936,7 @@ def _get_custom_patient_field_data(snapshot: OmopSnapshot, person: Person = None
     from omop_core.models import CustomPatientField
     from omop_core.services import custom_field_values
 
-    values: dict[str, object] = {}
+    values: dict[str, tuple[object, object]] = {}
     fields = list(CustomPatientField.objects.filter(
         mode='editable', mapping__status='approved',
     ).select_related('mapping__concept'))
@@ -961,7 +970,7 @@ def _get_custom_patient_field_data(snapshot: OmopSnapshot, person: Person = None
             continue
         value = custom_field_values.read_value(field.field_type, row, entered=was_entered)
         if value is not None:
-            values[field.field_name] = value
+            values[field.field_name] = (value, row)
     return values
 
 

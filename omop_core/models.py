@@ -4848,8 +4848,12 @@ def _provisional_columns():
 def confidence_field_names():
     """The PatientRecord fields that carry a confidence: every derived field
     that is a real column, except a JSON one with no reader that can run over
-    provisional rows alone (``PROVISIONAL_JSON_FIELDS`` lists the JSON ones that do)."""
-    from omop_core.derived_fields import _OMOP_DERIVED_FIELDS, PROVISIONAL_JSON_FIELDS
+    provisional rows alone (``PROVISIONAL_JSON_FIELDS`` lists the JSON ones that do),
+    and the JSON objects whose keys carry a confidence each
+    (``PROVISIONAL_OBJECT_FIELDS``: ``custom_fields``, whose confidence is JSON too)."""
+    from omop_core.derived_fields import (
+        _OMOP_DERIVED_FIELDS, PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS,
+    )
     names = []
     for name in dict.fromkeys(_OMOP_DERIVED_FIELDS):
         try:
@@ -4860,7 +4864,17 @@ def confidence_field_names():
             continue
         if not isinstance(field, models.JSONField) or name in PROVISIONAL_JSON_FIELDS:
             names.append(name)
+    names.extend(name for name in PROVISIONAL_OBJECT_FIELDS if name not in names)
     return names
+
+
+def _confidence_column(name):
+    """The confidence column of PatientRecord field *name*: a percentage, or for a
+    JSON object field (``custom_fields``) an object of percentages by key."""
+    from omop_core.derived_fields import PROVISIONAL_OBJECT_FIELDS
+    if name in PROVISIONAL_OBJECT_FIELDS:
+        return models.JSONField(null=True, blank=True)
+    return models.PositiveSmallIntegerField(null=True, blank=True)
 
 
 class PatientRecordProvisional(models.Model):
@@ -4877,13 +4891,15 @@ class PatientRecordProvisional(models.Model):
 
 class PatientRecordConfidence(models.Model):
     """The confidence (0-100) of each provisional value in PatientRecordProvisional,
-    under the same column name. Null means the value is approved, or absent."""
+    under the same column name. Null means the value is approved, or absent.
+
+    ``custom_fields`` is the one JSON column: ``{field_name: percent}`` for the
+    created fields (``CustomPatientField``) whose value in
+    ``PatientRecordProvisional.custom_fields`` is a proposal (#2857)."""
     person = models.OneToOneField(
         Person, on_delete=models.CASCADE, primary_key=True, related_name='patient_record_confidence',
     )
-    locals().update({
-        name: models.PositiveSmallIntegerField(null=True, blank=True) for name in confidence_field_names()
-    })
+    locals().update({name: _confidence_column(name) for name in confidence_field_names()})
 
     class Meta:
         db_table = 'patient_record_confidence'
@@ -4913,7 +4929,8 @@ class ProposalRejection(models.Model):
     (``copy_patient`` clears ``rejected_by``).
     """
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='proposal_rejections')
-    field_name = models.CharField(max_length=100)
+    # A column's name, or ``custom_fields.<name>`` for a created field (a name is up to 100).
+    field_name = models.CharField(max_length=120)
     origins = models.JSONField(default=list)
     rejected_by = models.CharField(max_length=120, blank=True, default='')
     rejected_at = models.DateTimeField(default=timezone.now)

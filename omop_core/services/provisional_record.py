@@ -43,6 +43,11 @@ already hold some of the items: real items are never replaced, a provisional ite
 is added when no real item says the same, and the provisional column stores only
 the added items (see ``list_proposals`` and ``overlay``).
 
+The created fields (``custom_fields``, one value per ``CustomPatientField``) follow the
+scalar rule key by key (#2857): a provisional row answers a created field the approved
+record leaves empty and nobody typed, and ``patient_record_confidence.custom_fields`` is
+``{field_name: percent}``. See ``custom_proposals`` and ``custom_field_values.PENDING_PREFIX``.
+
 A user can reject a proposal on a scalar field by clearing it (#2671): the pass
 then leaves the field empty while every row that decides it is one that was
 rejected (``ProposalRejection``, ``proposal_clears``, ``reject_proposals``,
@@ -58,7 +63,8 @@ from collections import defaultdict
 from django.conf import settings
 from django.db import transaction
 
-from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
+from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS
+from omop_core.services import custom_field_values
 from omop_core.models import (
     Measurement, Observation, PatientRecord, PatientRecordConfidence, PatientRecordProvisional,
     ProposalRejection,
@@ -702,6 +708,87 @@ def list_proposals(person, record, snapshot, blocked=(), shared=None) -> tuple[d
     return values, confidences
 
 
+# --- Created fields (#2857) ----------------------------------------------------------
+#
+# A created field (``CustomPatientField``) has no column, so its confidence cannot
+# be one either: ``patient_record_confidence.custom_fields`` is an object,
+# ``{field_name: percent}``, for the person's provisional created values, and
+# ``patient_record_provisional.custom_fields`` is the picture of the values (the
+# approved ones, and a proposal's value where only a proposal answers). A created
+# field is a scalar, so it follows the scalar rule key by key: a proposal fills a
+# field the approved record leaves empty and nobody typed (``user_edited_fields``
+# ``custom_fields.<name>``, an explicit clear included), real beats provisional, and
+# the newest fact answers (``patient_record_service.custom_field_answers``, the
+# reader the approved record uses, run over provisional rows only). A computed field
+# is its formula's result, and a field whose mapping is not approved has no reader,
+# so neither is proposed. The record read reports a created field's mark in
+# ``provisional_fields`` as ``custom_fields.<name>``, the name a pending edit has in
+# ``user_edited_fields``. A user rejects such a proposal as they reject a column's
+# (#2671): the rejection is kept under the same name (``ProposalRejection.field_name``
+# ``custom_fields.<name>``), with the origin of the row that answered, and held by
+# ``custom_proposals`` until a different code or concept answers.
+
+
+def _object_marks(value) -> dict:
+    """A stored confidence object (``custom_fields``) as a dict; anything else is no marks."""
+    return value if isinstance(value, dict) else {}
+
+
+def _row_origin(row) -> tuple:
+    """``_origin`` of any provisional clinical row: its table, source code and concept."""
+    for table, source, concept in (
+            ('measurement', 'measurement_source_value', 'measurement_concept_id'),
+            ('observation', 'observation_source_value', 'observation_concept_id'),
+            ('condition_occurrence', 'condition_source_value', 'condition_concept_id'),
+            ('drug_exposure', 'drug_source_value', 'drug_concept_id'),
+            ('procedure_occurrence', 'procedure_source_value', 'procedure_concept_id')):
+        if hasattr(row, concept):
+            return _origin(table, getattr(row, source, None), getattr(row, concept))
+    return _origin('', None, None)
+
+
+def custom_proposals(person, record, snapshot, blocked=(), measurements=None, observations=None,
+                     rejections=None, origins=None):
+    """(values, confidences) of the created fields the provisional rows answer.
+
+    ``values`` is ``{'custom_fields': {name: value}}`` and ``confidences`` is
+    ``{'custom_fields': {name: percent}}``: only the proposals, never a copy of the
+    approved values (the caller lays them over the record's own). A name is
+    proposed only when the approved record has no value for it, nobody has typed one
+    or cleared it (*blocked* holds the pending edits, ``custom_fields.<name>``), and
+    a provisional row answers it; its confidence is that row's.
+
+    *rejections* maps ``custom_fields.<name>`` to the ``_origin`` triples a user
+    rejected it against (``ProposalRejection``): a name is left out while the row that
+    answers it now is one of them. *origins*, when a dict, is filled with the answering
+    row's origin per ``custom_fields.<name>``, which is what a rejection is made against.
+    """
+    from omop_core.services.patient_record_service import custom_field_answers
+    if measurements is None:
+        measurements = _after_clears(snapshot, snapshot.provisional_measurements, 'measurement')
+    if observations is None:
+        observations = _after_clears(snapshot, snapshot.provisional_observations, 'observation')
+    answers = custom_field_answers(_view(snapshot, measurements, observations), person)
+    approved = record.custom_fields or {}
+    values, confidences = {}, {}
+    for name, (value, row) in answers.items():
+        if (custom_field_values.pending_key(name) in blocked
+                or not custom_field_values.is_empty(approved.get(name))
+                or custom_field_values.is_empty(value) or row.confidence is None):
+            continue
+        mark = custom_field_values.pending_key(name)
+        origin = _row_origin(row)
+        if origins is not None:
+            origins[mark] = {origin}
+        if rejections and mark in rejections and origin in rejections[mark]:
+            continue
+        values[name], confidences[name] = value, row.confidence
+    if not values:
+        return {}, {}
+    container = custom_field_values.CONTAINER
+    return {container: values}, {container: confidences}
+
+
 def provisional_values(person, record, snapshot, user_edited=(), origins=None,
                        hold_rejections=True, origin_fields=()) -> tuple[dict, dict]:
     """(values, confidences) the provisional rows add to *record*, by field name.
@@ -842,15 +929,23 @@ def _provisional_values(person, record, snapshot, user_edited=(), origins=None,
                 marks.pop(field, None)
         blocked = blocked | held
     listed, listed_marks = list_proposals(person, record, snapshot, blocked, shared)
-    if not (kept or composite or listed):
+    try:
+        with transaction.atomic():
+            created, created_marks = custom_proposals(
+                person, record, snapshot, blocked, measurements, observations,
+                rejections=rejections, origins=origins)
+    except Exception:  # noqa: BLE001 -- the created fields must not cost the person's other proposals
+        logger.exception('Provisional created-field reader failed for person_id=%s.', person.person_id)
+        created, created_marks = {}, {}
+    if not (kept or composite or listed or created):
         return {}, {}
     try:
         computed, computed_marks = computed_proposals(record, kept, confidences, blocked)
     except Exception:  # noqa: BLE001 -- a calculation must not cost the person's other proposals
         logger.exception('Provisional calculation failed for person_id=%s.', person.person_id)
         computed, computed_marks = {}, {}
-    return ({**kept, **composite, **computed, **listed},
-            {**confidences, **composite_marks, **computed_marks, **listed_marks})
+    return ({**kept, **composite, **computed, **listed, **created},
+            {**confidences, **composite_marks, **computed_marks, **listed_marks, **created_marks})
 
 
 def _has_provisional_rows(snapshot) -> bool:
@@ -876,7 +971,13 @@ def write_provisional_pair(person, snapshot, record, user_edited=()) -> None:
             if not has_rows and not PatientRecordProvisional.objects.filter(person=person).exists():
                 return
             row = {f.attname: getattr(record, f.attname) for f in _cloned_fields()}
-            row.update(values)
+            row.update({field: value for field, value in values.items()
+                        if field not in PROVISIONAL_OBJECT_FIELDS})
+            for field in PROVISIONAL_OBJECT_FIELDS:
+                # The picture of an object field is the approved object with the
+                # proposed keys added; the confidence says which keys those are.
+                if field in values:
+                    row[field] = {**(getattr(record, field, None) or {}), **values[field]}
             marks = {name: confidences.get(name) for name in _confidence_names()}
             for model, fields in ((PatientRecordProvisional, row), (PatientRecordConfidence, marks)):
                 if not model.objects.filter(person=person).update(**fields):
@@ -917,6 +1018,10 @@ def mirror_user_edit(record, edited_fields) -> None:
             cleared = []
             for field in _cloned_fields():
                 mark = getattr(confidence, field.name, None) if confidence is not None else None
+                if field.name in PROVISIONAL_OBJECT_FIELDS:
+                    if _mirror_created_fields(record, provisional, confidence, field.name, edited):
+                        cleared.append(field.name)
+                    continue
                 if mark is not None and field.name in PROVISIONAL_JSON_FIELDS and field.name not in edited:
                     # The added items stay until the field is edited; the reader
                     # drops any the record now holds (``overlay``).
@@ -940,6 +1045,35 @@ def mirror_user_edit(record, edited_fields) -> None:
                 confidence.save(update_fields=cleared)
     except Exception:  # noqa: BLE001 -- the user's edit is already saved; this is the side picture
         logger.exception('Provisional mirror failed for person_id=%s; the edit is saved.', record.person_id)
+
+
+def _mirror_created_fields(record, provisional, confidence, name, edited) -> bool:
+    """Carry the record's created-field values into the provisional pair after an edit.
+
+    The picture is the approved object, with a proposal's value kept for each key
+    that still waits on one: the record has no value for it and the edit did not name
+    it (``custom_fields.<key>`` in *edited*, which is how a PATCH of that key arrives).
+    An edited key takes the record's value, which is the person's own answer, and
+    loses its mark. Returns whether the confidence object changed.
+    """
+    from omop_core.services import custom_field_values
+    live = getattr(record, name, None)
+    live = live if isinstance(live, dict) else {}
+    marks = _object_marks(getattr(confidence, name, None)) if confidence is not None else {}
+    stored = getattr(provisional, name, None)
+    stored = stored if isinstance(stored, dict) else {}
+    picture, kept = dict(live), {}
+    for key, percent in marks.items():
+        if (custom_field_values.pending_key(key) in edited
+                or not custom_field_values.is_empty(live.get(key))
+                or custom_field_values.is_empty(stored.get(key))):
+            continue
+        picture[key], kept[key] = stored[key], percent
+    setattr(provisional, name, picture)
+    if confidence is None or kept == marks:
+        return False
+    setattr(confidence, name, kept or None)
+    return True
 
 
 def _is_blank(value) -> bool:
@@ -999,6 +1133,34 @@ def proposal_clears(record, patch_data, declared) -> list[str]:
     )
 
 
+def created_proposal_clears(record, custom_payload, declared) -> list[str]:
+    """The created fields a PATCH explicitly rejects the proposal of (#2857): ``custom_fields.<name>``.
+
+    The rule of ``proposal_clears``, for the keys of ``custom_fields``: the client
+    *declared* the name in ``rejected_proposals``, sent a blank for that key (null, or
+    text with nothing in it; ``false`` and ``0`` are values, so flipping a boolean is an
+    edit), and the record read shows a proposal there (the overlay marks it, so the
+    approved record has no value and no pending edit). The field must also be defined,
+    approved and editable, as a field a patient can write. A name that is none of these is
+    ignored, as an undeclared or unmarked column is.
+    """
+    prefix = custom_field_values.PENDING_PREFIX
+    if not isinstance(custom_payload, dict):
+        return []
+    candidates = [name for name in declared if name.startswith(prefix)
+                  and name[len(prefix):] in custom_payload
+                  and _is_blank(custom_payload[name[len(prefix):]])]
+    if not candidates:
+        return []
+    marks = overlay(record, lists=False)[1]
+    candidates = [name for name in set(candidates) if name in marks]
+    if not candidates:
+        return []
+    editable = custom_field_values.definitions([name[len(prefix):] for name in candidates])
+    return sorted(name for name in candidates
+                  if name[len(prefix):] in editable and custom_field_values.is_editable(editable[name[len(prefix):]]))
+
+
 def reject_proposals(person, record, fields, actor=None) -> set[str]:
     """Keep the user's rejection of the proposals now on *fields*; every field to take out of view.
 
@@ -1041,7 +1203,7 @@ def _settle_computed(record, provisional, confidence, edited) -> list[str]:
         return []
     proposals = {f: getattr(provisional, f) for f in names
                  if f not in COMPUTED_INPUTS and f not in PROVISIONAL_JSON_FIELDS
-                 and getattr(confidence, f) is not None}
+                 and f not in PROVISIONAL_OBJECT_FIELDS and getattr(confidence, f) is not None}
     marks = {f: getattr(confidence, f) for f in proposals}
     blocked = set(record.user_edited_fields or []) | edited
     values, level = computed_proposals(record, proposals, marks, blocked)
@@ -1073,7 +1235,7 @@ NEVER_OVERLAID = frozenset({
 })
 
 
-def overlay(record, lists=True):
+def overlay(record, lists=True, custom=True):
     """The record as a reader sees it: ``(record, marks)``.
 
     With ``PROVISIONAL_DATA_ENABLED`` on, a field the live record leaves empty
@@ -1089,6 +1251,11 @@ def overlay(record, lists=True):
     ``view.provisional_items`` only with ``lists=True``, the record read. A reader
     that shows a summary or a section from the real rows (the patient list, the
     PHR) passes ``lists=False`` and sees the real list.
+
+    The created fields (``custom_fields``, #2857) are scalars: each proposed value
+    is laid in the object's key the live record leaves empty and has no pending
+    edit on, and is marked ``custom_fields.<name>``. ``custom=False`` leaves them
+    out, for a reader (the patient list) that shows none.
 
     Access is the real record's: whoever may read this patient may read what is
     proposed for them, so this adds no check of its own.
@@ -1110,6 +1277,10 @@ def overlay(record, lists=True):
             continue
         mark = getattr(confidence, field.name)
         if mark is None:
+            continue
+        if field.name in PROVISIONAL_OBJECT_FIELDS:
+            if custom:
+                _overlay_created_fields(view, record, provisional, mark, marks, field.name)
             continue
         live = getattr(record, field.attname, None)
         if field.name in PROVISIONAL_JSON_FIELDS:
@@ -1136,6 +1307,54 @@ def overlay(record, lists=True):
     return view, marks
 
 
+def _overlay_created_fields(view, record, provisional, stored_marks, marks,
+                            container=custom_field_values.CONTAINER) -> None:
+    """Lay the proposed created-field values on *view*, marking each in *marks*.
+
+    A key is shown from a proposal only while the live record has no value for it
+    and no pending edit (a clear included) on it, so a stale mark never overrides
+    approved data or a user's answer.
+    """
+    live = getattr(record, container, None)
+    live = live if isinstance(live, dict) else {}
+    stored = getattr(provisional, container, None)
+    stored = stored if isinstance(stored, dict) else {}
+    pending = set(record.user_edited_fields or [])
+    shown = dict(live)
+    for name, percent in _object_marks(stored_marks).items():
+        if (not custom_field_values.is_empty(live.get(name))
+                or custom_field_values.is_empty(stored.get(name))
+                or custom_field_values.pending_key(name) in pending):
+            continue
+        shown[name] = stored[name]
+        marks[custom_field_values.pending_key(name)] = percent
+    if shown != live:
+        setattr(view, container, shown)
+
+
+def _custom_blockers(shown_record, marks) -> list[str]:
+    """The created fields' marks that stop a patient attesting: ``custom_fields.<name>``.
+
+    Created fields are runtime data, so no generated file can list the ones a patient
+    tab shows; their definitions decide (``custom_field_values.shown_to_patient``),
+    and ``attestationBlockers`` in ``PatientInfo/provisional.ts`` applies the same
+    rule to the definitions the page loaded. A mark blocks when the field is defined,
+    an approved editable field (a computed one is its formula's result, and a
+    patient's PATCH cannot write it), placed on a tab a patient sees, part of the
+    record's Disease Category, and on a disease tab the record has. A field placed on
+    no tab (``UNPLACED_TAB``) or one the patient cannot edit never blocks: it could
+    not be lifted.
+    """
+    prefix = custom_field_values.PENDING_PREFIX
+    names = [key[len(prefix):] for key in marks if key.startswith(prefix)]
+    if not names:
+        return []
+    return sorted(
+        custom_field_values.pending_key(name) for name in custom_field_values.shown_to_patient(
+            names, getattr(shown_record, 'disease', None))
+    )
+
+
 def attestation_blockers(record) -> list[str]:
     """The fields that stop a patient attesting their record (#2761).
 
@@ -1153,20 +1372,24 @@ def attestation_blockers(record) -> list[str]:
     field it follows, so it does not block either; a displayed field the write
     descriptor does not know does.
 
+    A created field (``custom_fields.<name>``) blocks by the rule in
+    ``_custom_blockers``, from its definition.
+
     Empty with ``PROVISIONAL_DATA_ENABLED`` off, or no proposal on display. The
     frontend applies the same rule to the marks it holds
     (``attestationBlockers`` in ``PatientInfo/provisional.ts``), so the banner and
     the endpoint agree.
     """
     shown_record, marks = overlay(record, lists=False)
+    created = _custom_blockers(shown_record, marks)
     from omop_core.services.patient_visible_fields import on_screen
     on_page = on_screen(getattr(shown_record, 'disease', None))
     shown = [field for field in marks if field in on_page]
     if not shown:
-        return []
+        return created
     from omop_core.services.write_descriptor import build_writable_field_descriptor
     descriptor = build_writable_field_descriptor()
-    return sorted(
+    return sorted(created + [
         field for field in shown
         if field not in descriptor or descriptor[field].get('writable')
-    )
+    ])

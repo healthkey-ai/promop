@@ -27,3 +27,6 @@ export function pickAddedFields(values: unknown, names: Iterable<string>): Recor
 export function mergeAddedFields(base: unknown, over: unknown): Record<string, unknown> {
   return { ...asValues(base), ...asValues(over) };
 }
+
+/** The names of the keys an added-fields object holds. */
+export const addedFieldNames = (values: unknown): string[] => Object.keys(asValues(values));

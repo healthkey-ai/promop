@@ -56,8 +56,8 @@ def test_provisional_adds_no_index_or_unique_of_its_own():
     assert PatientRecordProvisional._meta.get_field('organization').remote_field.related_name == '+'
 
 
-def test_confidence_is_exactly_the_derived_non_json_columns_and_the_covered_json_lists():
-    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS
+def test_confidence_is_exactly_the_derived_non_json_columns_and_the_covered_json_fields():
+    from omop_core.derived_fields import PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS
     expected = set()
     for name in _OMOP_DERIVED_FIELDS:
         try:
@@ -66,16 +66,24 @@ def test_confidence_is_exactly_the_derived_non_json_columns_and_the_covered_json
             continue
         if not isinstance(field, models.JSONField) or name in PROVISIONAL_JSON_FIELDS:
             expected.add(name)
+    # The JSON objects whose keys carry a confidence each (custom_fields, #2857).
+    expected |= set(PROVISIONAL_OBJECT_FIELDS)
     assert set(_columns(PatientRecordConfidence)) - {'person'} == expected
+    assert 'custom_fields' in expected
     assert len(expected) > 250  # the plan counts 274 today; a collapse to a few is a bug
     assert {'prior_procedures', 'genetic_mutations', 'active_malignancies', 'disease_slugs'} <= expected
 
 
 def test_confidence_columns_are_nullable_percentages_named_like_the_field():
+    from omop_core.derived_fields import PROVISIONAL_OBJECT_FIELDS
     for name, field in _columns(PatientRecordConfidence).items():
         if name == 'person':
             continue
-        assert isinstance(field, models.PositiveSmallIntegerField) and field.null, name
+        if name in PROVISIONAL_OBJECT_FIELDS:
+            # One percentage per key of the object: custom_fields -> {name: percent}.
+            assert isinstance(field, models.JSONField) and field.null, name
+        else:
+            assert isinstance(field, models.PositiveSmallIntegerField) and field.null, name
         assert name in _columns(PatientRecordProvisional), name
 
 

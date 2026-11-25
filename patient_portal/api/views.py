@@ -230,7 +230,7 @@ def _drop_proposed_list_items(patient_info, patch_data):
     if not present:
         return patch_data
     from omop_core.services.provisional_record import overlay, without_proposed
-    proposed = getattr(overlay(patient_info)[0], 'provisional_items', None) or {}
+    proposed = getattr(overlay(patient_info, custom=False)[0], 'provisional_items', None) or {}
     stripped = dict(patch_data)
     for field in present:
         if field not in proposed:
@@ -329,10 +329,18 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
         # rejecting that proposal (#2671). The record holds nothing to clear, so it
         # is not written as an edit: it is remembered below, and the field leaves
         # the provisional picture.
-        from omop_core.services.provisional_record import proposal_clears
+        from omop_core.services.provisional_record import created_proposal_clears, proposal_clears
         rejected = proposal_clears(patient_info, patch_data, declared_rejections)
         if rejected:
             patch_data = {key: value for key, value in patch_data.items() if key not in rejected}
+        # The same for a created field, named ``custom_fields.<name>`` (#2857): the
+        # blank is a rejection, not an edit, so its key leaves the values to write.
+        rejected_created = created_proposal_clears(patient_info, custom_payload, declared_rejections)
+        if rejected_created:
+            prefix = custom_field_values.PENDING_PREFIX
+            custom_payload = {key: value for key, value in custom_payload.items()
+                              if prefix + key not in rejected_created}
+            rejected = [*rejected, *rejected_created]
         serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
         serializer.is_valid(raise_exception=True)
         # Read against the locked row: only a key whose value moved is an edit.
@@ -481,7 +489,10 @@ def apply_patient_record_patch(person, patient_info, data, *, actor, allow_rejec
             direct_fields = direct_fields | reject_proposals(person, patient_info, rejected, actor)
         if direct_fields or custom_edits:
             from omop_core.services.provisional_record import mirror_user_edit
-            mirror_user_edit(patient_info, direct_fields | ({'custom_fields'} if custom_edits else set()))
+            # A created field is named as a pending edit is, ``custom_fields.<name>``.
+            mirror_user_edit(patient_info, direct_fields | (
+                {'custom_fields', *map(custom_field_values.pending_key, custom_edits)}
+                if custom_edits else set()))
 
     return patient_info, previous_values
 

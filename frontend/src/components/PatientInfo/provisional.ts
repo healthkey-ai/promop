@@ -36,6 +36,49 @@ function onScreen(info: Record<string, unknown> | null | undefined, category?: s
   return new Set([...VISIBLE, ...(byDisease[type] ?? [])]);
 }
 
+/** How a created field (``CustomPatientField``, #2857) is named in the marks: the key of
+ *  `custom_fields` it lives under, prefixed as a pending edit of it is in
+ *  `user_edited_fields`. The server reports `provisional_fields["custom_fields.<name>"]`. */
+export const ADDED_MARK_PREFIX = 'custom_fields.';
+
+/** The mark name of the created field `name`. */
+export const addedMark = (name: string): string => ADDED_MARK_PREFIX + name;
+
+/** The mark names of several created fields. */
+export const addedMarks = (names: Iterable<string>): string[] => [...names].map(addedMark);
+
+/** What a created field's definition says about where a patient sees it. */
+export interface CreatedFieldScope {
+  field_name: string;
+  tab: string;
+  mode: string;
+  diseases?: string[];
+}
+
+/** Whether a patient's page shows created field `field`, by the rule the server applies in
+ *  `custom_field_values.shown_to_patient`: placed on a tab a patient page has
+ *  (`custom_field_tabs` in the generated file: every tab but the unplaced one), part of the
+ *  record (no scope, or the record's Disease Category), and on the disease tab only when
+ *  the record has one (a Disease Category with a hand-authored section, or a field placed
+ *  there for it). `fields` is every definition, which says whether the disease tab exists.
+ *  A computed field is its formula's result, so it is not an editable field. */
+export function createdFieldShown(
+  field: CreatedFieldScope,
+  category: string,
+  fields: readonly CreatedFieldScope[],
+): boolean {
+  if (field.mode !== 'editable' || !(patientVisibleFields.custom_field_tabs as string[]).includes(field.tab)) {
+    return false;
+  }
+  const diseases = field.diseases ?? [];
+  if (diseases.length > 0 && !diseases.includes(category)) return false;
+  if (field.tab !== 'disease') return true;
+  return category !== '' && (
+    diseaseTypeOfCategory(category) !== 'other'
+    || fields.some((f) => f.tab === 'disease' && (f.diseases ?? []).includes(category))
+  );
+}
+
 /** The record's proposal marks (field to confidence), or none. */
 export function marksOf(info: Record<string, unknown> | null | undefined): Record<string, number> {
   const raw = info?.provisional_fields;
@@ -81,14 +124,36 @@ export function attestationBlockers(
   info: Record<string, unknown> | null | undefined,
   descriptors?: Record<string, { writable?: boolean }> | null,
   category?: string,
+  createdFields?: readonly CreatedFieldScope[] | null,
 ): string[] {
   const items = (info?.provisional_items ?? {}) as Record<string, unknown[]>;
   const known = descriptors && Object.keys(descriptors).length > 0 ? descriptors : null;
   const shown = onScreen(info, category);
-  return Object.keys(marksOf(info))
+  const marked = Object.keys(marksOf(info));
+  const columns = marked
+    .filter((field) => !field.startsWith(ADDED_MARK_PREFIX))
     .filter((field) => !(field in items) && shown.has(field))
-    .filter((field) => !known || !(field in known) || !!known[field].writable)
-    .sort();
+    .filter((field) => !known || !(field in known) || !!known[field].writable);
+  // A created field is runtime data, so the generated file cannot list it: its definition
+  // decides (`createdFieldShown`), with the page's own category, and a field the page has
+  // no definition of is not on screen. The record's Disease Category is what scopes it.
+  const defined = createdFields ?? [];
+  const recordCategory = category === undefined ? diseaseCategoryOfInfo(info) : category;
+  const created = marked
+    .filter((field) => field.startsWith(ADDED_MARK_PREFIX))
+    .filter((field) => {
+      const name = field.slice(ADDED_MARK_PREFIX.length);
+      const definition = defined.find((f) => f.field_name === name);
+      return !!definition && createdFieldShown(definition, recordCategory, defined)
+        && (!known || !(name in known) || !!known[name].writable);
+    });
+  return [...columns, ...created].sort();
+}
+
+/** The Disease Category the disease text names, when the caller gave none: the page always does. */
+function diseaseCategoryOfInfo(info: Record<string, unknown> | null | undefined): string {
+  const byType = patientVisibleFields.disease_categories as Record<string, string>;
+  return byType[diseaseTypeOf(info?.disease)] ?? '';
 }
 
 /** The proposals the user rejected in this save (#2671): the fields of `patch` that the
@@ -100,8 +165,28 @@ export function rejectedProposals(
   patch: Record<string, unknown>,
   proposed: Record<string, number>,
 ): string[] {
-  return Object.entries(patch)
-    .filter(([field, value]) => field in proposed && (value === null || value === ''))
-    .map(([field]) => field)
-    .sort();
+  const blank = (value: unknown) => value === null || value === '';
+  const columns = Object.entries(patch)
+    .filter(([field, value]) => field in proposed && blank(value))
+    .map(([field]) => field);
+  // A created field (#2857) travels as a key of `custom_fields`, and its proposal is marked
+  // `custom_fields.<name>`: a blank for a key the page showed a proposal on is the rejection,
+  // named by that mark. A boolean's `false` is an answer, so only null counts for it.
+  const added = patch.custom_fields;
+  const created = added && typeof added === 'object' && !Array.isArray(added)
+    ? Object.entries(added as Record<string, unknown>)
+      .filter(([name, value]) => addedMark(name) in proposed && blank(value))
+      .map(([name]) => addedMark(name))
+    : [];
+  return [...columns, ...created].sort();
+}
+
+/** The marks an edit of the created fields `names` settles at once. A blank is not among them:
+ *  clearing a proposed value is a rejection the save sends (`rejectedProposals`), and its mark
+ *  goes with the save, not with the keystroke. */
+export function settledAddedMarks(values: unknown, names: Iterable<string>): string[] {
+  const held = values && typeof values === 'object' && !Array.isArray(values)
+    ? values as Record<string, unknown> : {};
+  return [...names].filter((name) => held[name] !== null && held[name] !== undefined && held[name] !== '')
+    .map(addedMark);
 }

@@ -329,11 +329,16 @@ def _spread(record) -> str | None:
     return None
 
 
-def _primary_fields(stage_field, risk) -> tuple[str, ...]:
+def _primary_fields(stage_field, risk, slug='') -> tuple[str, ...]:
     """The record fields the primary cancer entry is built from."""
     return ('disease', 'histologic_type', stage_field, *([risk[0]] if risk else []),
             'metastasis_status', 'bone_only_metastasis_status', 'metastatic_status',
-            *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status')
+            *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status',
+            # The created field the spread is read from, for a blood cancer only
+            # (``_spread``): a proposal is marked by its name in the object (#2857), as
+            # a pending edit of it is named. A solid tumour's spread is its metastasis
+            # fields, so a proposed hematologic_spread there says nothing shown.
+            *(['custom_fields.hematologic_spread'] if slug in HEMATOLOGIC_CANCERS else []))
 
 
 def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, Any] | None:
@@ -359,7 +364,7 @@ def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, 
         'transitions': transitions,
         'source': source(kind, record.facility_name if kind == RECORD else None, record.diagnosis_date),
         # The lowest confidence among the fields shown here that are proposals.
-        'confidence': _confidence(record, _primary_fields(stage_field, risk)),
+        'confidence': _confidence(record, _primary_fields(stage_field, risk, slug)),
     }
     return {k: v for k, v in item.items() if v not in (None, [], '')}
 

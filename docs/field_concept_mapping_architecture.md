@@ -419,6 +419,13 @@ field's concept (`_get_custom_patient_field_data`) appears when the record
 is next derived, so a field added just now is empty on a record until then;
 `manage.py backfill_patient_records --all` derives every record.
 
+With provisional data on (#2857), the same reader runs over rows from proposed
+mappings (`custom_field_answers`, `provisional_record.custom_proposals`): a proposal
+fills a created field the record leaves empty, marked with its confidence in
+`patient_record_confidence.custom_fields` (`{name: percent}`) and in the record read as
+`provisional_fields["custom_fields.<name>"]`. A computed field is not proposed. The
+[plan](provisional_data_plan.md#created-fields-as-built-2857) has the rules.
+
 ### Whose record a field is part of: `FieldDiseaseMembership`
 
 A patient's record is a **profile**: the base record every patient has, plus

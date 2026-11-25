@@ -737,6 +737,84 @@ the cancer names of the provisional conditions are canonicalized with one
 row. The migration adds columns to `patient_record_confidence`, so it waits
 behind a running derivation that holds a lock on the table.
 
+### Created fields as built (#2857)
+
+A field an administrator created (`CustomPatientField`) has no column: its value is a
+key of `PatientRecord.custom_fields`, derived from OMOP rows through its approved
+mapping (`custom_field_values`, `patient_record_service.custom_field_answers`). It takes
+part in provisional data as a **scalar, key by key**: a proposal-based row (confidence
+not null) answers it, marked with the row's confidence.
+
+- **Storage.** `patient_record_confidence.custom_fields` is a nullable JSON object,
+  `{field_name: percent}`, holding the proposals only (`PROVISIONAL_OBJECT_FIELDS` names
+  the one object field; the parity test and `confidence_field_names()` cover it).
+  `patient_record_provisional.custom_fields` (the existing clone) is the picture: the
+  approved values with the proposed ones added. `patient_record.custom_fields` stays
+  approved-only.
+- **The pass.** `provisional_record.custom_proposals` runs the approved reader
+  (`custom_field_answers`, the same `latest_row` rule, so a value entered under
+  `custom:<name>` and one at the mapping's concept are both read) over the provisional
+  rows only, and keeps a value for a name when the approved record has no value for it
+  and nobody typed or cleared one (`user_edited_fields` `custom_fields.<name>`, the
+  set before and after the refresh). The newest fact answers and its percent is the
+  mark. Only an approved, editable field has a reader: a computed field is its formula's
+  result and is never proposed (a later phase could propose it from provisional inputs, as
+  the built-in calculated fields are), and a field whose mapping is not approved is
+  ignored. The floor and the switch act where they do for every field: rows are written
+  provisional only at or above `PROVISIONAL_CONFIDENCE_FLOOR`, and with
+  `PROVISIONAL_DATA_ENABLED` off nothing is stored, mirrored or overlaid. The reader runs
+  in its own savepoint, once per pass whatever the number of created fields.
+- **The read.** `overlay` lays a proposal into the key the live record leaves empty and has
+  no pending edit on, and reports the mark in `provisional_fields` as
+  `custom_fields.<name>`, the name a pending edit has in `user_edited_fields` (a created
+  field is a scalar, so it is not in `provisional_items`). The patient list does not
+  carry them (`overlay(custom=False)`: its rows hold no created values). The PHR owner
+  reads see them through the same overlay: the primary cancer's spread is read from the
+  created field `hematologic_spread`, and its `confidence` includes that field's mark.
+  An approved-only consumer sees none: the FHIR export, the CSV export, the PHR
+  record export and sharing read approved rows or the stored record.
+- **Writes.** A PATCH of `custom_fields: {name: value}` is an approval of that key exactly
+  as for a column: the value lands on the record, and `mirror_user_edit` (told
+  `custom_fields.<name>` for each edited key) drops that key's mark and keeps the others.
+  **A client must send only the keys the user changed.** The in-repo editors do (the
+  page and the federated view keep the real record as the baseline and send the dirty keys
+  of `custom_fields`). A client that PATCHes the whole `custom_fields` object it read
+  approves every proposal in it, as a client that echoes a whole record approves its
+  scalar proposals; no server guard is added.
+- **Rejecting a created proposal (#2857).** A patient clears a marked created field (text,
+  number, date, or a boolean's null) and the page declares it, as for a column
+  ([Rejecting a proposal](#approval-rejection-and-a-moved-proposal) below, #2671): the
+  body names `custom_fields.<name>` in `rejected_proposals` and sends a blank for that key
+  (`created_proposal_clears`). The rejection is kept in `ProposalRejection` under the same
+  name (`field_name` is 120 characters, `custom_fields.` plus a 100-character name) with
+  the origin triple (table, source code, concept) of the row that answered the field, by
+  the same rules: only a signed-in person's session (`allow_reject`), not a machine
+  credential or the survey mapping; nothing is written to the record and no row or mapping
+  changes; `custom_proposals` leaves the field out while the row that answers it is one it
+  was made against, so a new reading of the same code stays rejected and a different code
+  shows again; typing a value approves it and the rejection is then ignored; the mark and
+  shown value go in the same request (`mirror_user_edit`). A name that is not a marked,
+  defined, approved, editable created field is ignored (as an unmarked column is), a
+  malformed `rejected_proposals` is a 400, and `false` or `0` is an answer, not a
+  blank. The page declares the mark of a key it showed a proposal on and the patient
+  cleared (`rejectedProposals` in `provisional.ts`); the federated view also keeps a
+  blank key's mark until the save sends it.
+- **Confirm my record.** Created fields are runtime data, so no generated file can list
+  the ones a patient tab shows. A mark blocks when the field's definition says the patient
+  sees and can edit it (`custom_field_values.shown_to_patient` on the server,
+  `attestationBlockers(info, descriptors, category, customFields)` on the page, the same
+  rule): defined, approved and editable; placed on a tab a patient page has
+  (`custom_field_tabs` in `patientVisibleFields.json`: every tab but the unplaced
+  one); part of the record (no scope, or the record's Disease Category); and on the disease
+  tab only when the record has one. A field placed on no tab, a computed or unapproved
+  one, or one of another disease never blocks, since the block could not be lifted.
+  `createdFieldAttestationCases.json` is one list of cases run by both sides' tests.
+  Until the page has loaded the definitions it counts no created field and offers the
+  button; the server's 409 decides.
+- **Instances.** Both tables stay derived (`instance_data`): not copied, rebuilt after
+  `copy_patient`. `backfill_patient_records --all` fills the new column; there is no data
+  migration (`0374` adds the column and widens `ProposalRejection.field_name` to 120 characters; its reverse drops the marks, and would fail on a rejection whose name is longer than 100).
+
 ### Computed fields
 
 `recompute_patient_record_fields` computes BMI, scores and aliases from stored
@@ -771,7 +849,7 @@ calculated fields, not the edit's own mirror. Left for later: fields calculated 
 a JSON input (`no_other_active_malignancies`, FLIPI, GELF), the free light chain
 ratio and `measurable_disease_imwg` (they read one lab event's pair), age,
 `last_treatment`, and fields owned by a formula.
-Custom fields (`custom_fields` JSON) are phase 3.
+Custom fields (`custom_fields` JSON) are covered: see [Created fields as built](#created-fields-as-built-2857).
 
 Decision (2026-11-17): with the switch on, computed fields use provisional
 inputs, so a patient with a proposed weight and height sees a BMI. The
@@ -833,12 +911,16 @@ migration, three `AddField` operations instead of one.
 **`patient_record_confidence`.** One row per person, primary key `person`.
 One nullable `PositiveSmallIntegerField` per non-JSON field in
 `_OMOP_DERIVED_FIELDS`, 274 at first, named exactly as the field is, plus one
-per covered JSON list (`PROVISIONAL_JSON_FIELDS`, #2534). Generated the same
+per covered JSON list (`PROVISIONAL_JSON_FIELDS`, #2534), plus **one JSON column,
+`custom_fields`** (`PROVISIONAL_OBJECT_FIELDS`, #2857), which holds
+`{field_name: percent}` for the person's provisional created-field values, since a
+created field has no column of its own to carry a confidence. Generated the same
 way.
 
 A parity test fails the build when the three tables drift: the provisional
 table must have every cloned column of `patient_record`, and the confidence
-table must have exactly the derived non-JSON fields and the covered JSON lists. The model pair is
+table must have exactly the derived non-JSON fields, the covered JSON lists and the
+created-fields object. The model pair is
 classified in `omop_core/services/instance_data.py` like `PatientRecord`:
 derived and re-derived after `copy_patient`, not copied
 ([Copying data between instances](../AGENTS.md#copying-data-between-instances)).
@@ -1016,7 +1098,7 @@ What follows from it:
 - **What is not a rejection.** A value (including the echo of the displayed one); a blank
   for a field that shows no proposal; clearing a real value (the ordinary clear); a
   calculated field (it goes when its inputs do), a list field (their proposed items are not
-  the user's to write) and a unit (it goes with its value). With `PROVISIONAL_DATA_ENABLED`
+  the user's to write) and a unit (it goes with its value). A created field is rejected the same way, as `custom_fields.<name>` (see [Created fields as built](#created-fields-as-built-2857)). With `PROVISIONAL_DATA_ENABLED`
   off nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
   (`RECORDED_EMPTY_FIELDS`) are the exception to "`''` is blank": their `''` is a recorded
   answer ("Record no GELF criteria" is Not Met, "Record no risk factors" a FLIPI of 0), so
@@ -1165,7 +1247,7 @@ lookup contract below remains for a caller that does want to write rows itself.
 
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
-- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table.
+- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table (done, #2857: [Created fields as built](#created-fields-as-built-2857), rejection included; computed created fields are left).
 - ~~FHIR sync opt-in per organization~~ dropped (2026-11-20): a patient decides
   whether to import their FHIR data, and an export never carries provisional data
   (see "Provisional data is never exported").
@@ -1207,6 +1289,7 @@ without a click:
 | A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0364`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
 | The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display, the disease tab's section for the record's disease and the GELF checklist included; a patient lifts a block by entering a value or by rejecting the proposal (#2671); see "Confirming a record that shows proposals" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
+| Created fields (`custom_fields`) in the confidence table | [#2857](https://github.com/healthkey-ai/promop/issues/2857) | done: `patient_record_confidence.custom_fields` is `{name: percent}`; marked `custom_fields.<name>`, rejectable like a column; computed created fields are left; see "Created fields as built" |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |
 
 The rule for all of them: with the switch off, no provisional data is computed,

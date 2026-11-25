@@ -112,6 +112,11 @@ the same path (#2669, `omop_core/services/custom_field_values.py`):
   entries are added at the endpoint, not in `build_writable_field_descriptor`,
   which the save path calls on every PATCH.
 
+- **Provisional values (#2857).** With provisional data on, a proposal-based row also
+  answers a created field the record leaves empty, marked
+  `provisional_fields["custom_fields.<name>"]`; the PATCH of that key is an approval
+  and drops the mark (`mirror_user_edit`). See [the plan](provisional_data_plan.md#created-fields-as-built-2857).
+
 `recompute_formula_field`, which runs when a formula changes, writes only
 the computed keys of `custom_fields`, under the record's lock, so it cannot
 put an entered value back to what it was.

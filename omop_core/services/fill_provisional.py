@@ -413,10 +413,22 @@ def rederive(person):
     if marks is not None:
         for name in confidence_field_names():
             value = getattr(marks, name, None)
-            if value is not None and name not in NEVER_OVERLAID:
+            if isinstance(value, dict):
+                # An object field (created fields): one entry per key, as the record read names them.
+                fields.update({f'{name}.{key}': percent for key, percent in value.items()})
+            elif value is not None and name not in NEVER_OVERLAID:
                 fields[name] = value
     return {'provisional_fields': fields, 'changed': changed,
             'provisional': PatientRecordProvisional.objects.filter(person=person).first()}
+
+
+def _shown_value(provisional, name):
+    """The provisional value of a mark, a created field's (``custom_fields.<key>``) included."""
+    container, _, key = name.partition('.')
+    if key:
+        values = getattr(provisional, container, None)
+        return values.get(key, '') if isinstance(values, dict) else ''
+    return getattr(provisional, name, '')
 
 
 def person_state(person) -> dict:
@@ -664,6 +676,6 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
         + (f': {", ".join(changed[:25])}{" ..." if len(changed) > 25 else ""}' if changed else '') + '.')
     log(f'  patient_record_provisional: {len(fields)} provisional field(s) on the record.')
     for name, percent in sorted(fields.items(), key=lambda item: -item[1])[:12]:
-        value = f' = {str(getattr(provisional, name, ""))[:40]}' if show_values and provisional else ''
+        value = f' = {str(_shown_value(provisional, name))[:40]}' if show_values and provisional else ''
         log(f'    {name}: {percent}%{value}')
     return summary

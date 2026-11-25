@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { CustomPatientFields } from "./CustomPatientFields";
 import { FieldMappingLinksProvider } from "./fieldMappingLinks";
+import { ProvisionalContext } from "./ProvisionalContext";
 import type { CustomPatientField } from "@/hooks/useCustomPatientFields";
 import type { FieldDescriptors } from "@/hooks/useWritableFields";
 
@@ -125,5 +126,26 @@ describe("CustomPatientFields editing", () => {
     unmount();
     render(<CustomPatientFields fields={FIELDS} tabs={["disease"]} diseases={["MM"]} formData={{}} descriptors={DESCRIPTORS} />);
     expect(box("tumor note")).toBeDisabled();
+  });
+
+  it("marks a proposed value Provisional with its confidence, by the name the server reports", () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { "custom_fields.tumor_note": 82 }, patientMode: true }}>
+        <CustomPatientFields fields={FIELDS} tabs={["disease"]} diseases={["MM"]}
+          formData={{ custom_fields: { tumor_note: "Stable" } }} descriptors={DESCRIPTORS} onChange={vi.fn()} />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.getByTestId("provisional-custom_fields.tumor_note")).toHaveTextContent("Provisional 82%");
+    expect(box("tumor note")).toHaveValue("Stable");
+  });
+
+  it("marks nothing for a value that is not a proposal, and a bare column name is not its mark", () => {
+    render(
+      <ProvisionalContext.Provider value={{ marks: { tumor_note: 82 }, patientMode: false }}>
+        <CustomPatientFields fields={FIELDS} tabs={["disease"]} diseases={["MM"]}
+          formData={{ custom_fields: { tumor_note: "Stable" } }} descriptors={DESCRIPTORS} onChange={vi.fn()} />
+      </ProvisionalContext.Provider>,
+    );
+    expect(screen.queryByText(/Provisional/)).not.toBeInTheDocument();
   });
 });

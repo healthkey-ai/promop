@@ -444,3 +444,51 @@ def descriptor_entries() -> dict:
             entry['reason'] = 'Written to the patient record. Its mapping has no OMOP writer.'
         entries[name] = entry
     return entries
+
+
+def shown_to_patient(names, disease) -> list[str]:
+    """Which of the created fields *names* a patient can see on their page and edit (#2857).
+
+    The rule the patient editor applies to render a created field
+    (``CustomPatientFields``), run from the definitions, since created fields are
+    runtime data and no generated file can list them. The frontend applies the same
+    rule to the definitions the page loaded (``attestationBlockers`` in
+    ``PatientInfo/provisional.ts``); ``custom_field_tabs`` in
+    ``patientVisibleFields.json`` is the one list of placeable tabs they share. A
+    field is shown when it is
+
+    - defined, approved and editable (a computed field is its formula's result and a
+      patient's PATCH cannot write it; a field without an approved mapping is read-only);
+    - placed on a tab a patient page has, which is every tab but ``UNPLACED_TAB``;
+    - part of the record: no scope (base), or a Disease Category that is the record's;
+    - on the disease tab only when the record has one: a Disease Category, with a
+      hand-authored section or a field placed on the disease tab for that category.
+    """
+    from omop_core.models import CustomPatientField
+    from omop_core.services import disease_profiles
+    from omop_core.services import patient_visible_fields as visible
+
+    editable = {name: field for name, field in definitions(names).items() if is_editable(field)}
+    if not editable:
+        return []
+    tabs = visible.custom_field_tabs()
+    category = disease_profiles.record_category(disease)
+    scopes = disease_profiles.memberships()
+    disease_tab = None
+    shown = []
+    for name, field in editable.items():
+        diseases = scopes.get(name, ())
+        if field.tab not in tabs or (diseases and category not in diseases):
+            continue
+        if field.tab == 'disease':
+            if disease_tab is None:
+                disease_tab = bool(category) and (
+                    category in visible.DISEASE_TYPE_CATEGORY.values()
+                    or CustomPatientField.objects.filter(
+                        tab='disease', mapping__status='approved',
+                        field_name__in=[n for n, codes in scopes.items() if category in codes],
+                    ).exists())
+            if not disease_tab:
+                continue
+        shown.append(name)
+    return sorted(shown)

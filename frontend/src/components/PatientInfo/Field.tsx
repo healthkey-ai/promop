@@ -25,6 +25,9 @@ interface FieldProps {
   /** Say "Accepted" beside the label when the field holds a value that is not a
    *  proposal. Opt-in: the Wearables tab, where every value is one or the other. */
   showAccepted?: boolean;
+  /** The name the field's proposal mark has in `provisional_fields`, when it is not `name`:
+   *  a created field's is `custom_fields.<name>` (#2857). */
+  markName?: string;
 }
 
 /** 0 and false are values; null, undefined, '' and an empty list are none. */
@@ -44,6 +47,7 @@ export default function Field({
   vocabSource,
   precision,
   showAccepted,
+  markName,
 }: FieldProps) {
   const isDisabled = disabled || readOnly;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
@@ -152,8 +156,8 @@ export default function Field({
           {label}
           {readOnly && <span className="ml-1 text-xs font-normal text-portal-text-secondary">(computed)</span>}
         </label>
-        <ProvisionalBadge name={name} fromDevice={showAccepted} />
-        {showAccepted && hasValue(value) && <AcceptedBadge name={name} />}
+        <ProvisionalBadge name={markName ?? name} fromDevice={showAccepted} />
+        {showAccepted && hasValue(value) && <AcceptedBadge name={markName ?? name} />}
         <FieldMappingLink name={name} label={label} />
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>

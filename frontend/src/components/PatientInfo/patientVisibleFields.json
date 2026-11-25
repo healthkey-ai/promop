@@ -275,6 +275,16 @@
     "white_blood_cell_count",
     "white_blood_cell_count_units"
   ],
+  "custom_field_tabs": [
+    "general",
+    "disease",
+    "treatment",
+    "blood",
+    "labs",
+    "genomics",
+    "behavior",
+    "wearable"
+  ],
   "not_for_patients": [
     "validated",
     "validated_by",

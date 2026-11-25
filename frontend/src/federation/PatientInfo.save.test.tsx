@@ -330,4 +330,50 @@ describe('federated PatientInfo added fields (#721)', () => {
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0][1]).toEqual({ custom_fields: { frailty_index: 'Frail' } });
   });
+
+  it('rejects a proposed added field by clearing it, and keeps its mark until the save (#2857)', async () => {
+    const original = (client.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) {
+        return Promise.resolve({ data: { ...DESCRIPTORS, frailty_index: {
+          kind: 'direct', writable: true, target: 'patient_record', custom: true,
+        } } });
+      }
+      if (url.includes('custom-patient-fields')) {
+        return Promise.resolve({ data: [{
+          id: 1, field_name: 'frailty_index', display_name: 'Frailty index', tab: 'labs',
+          field_type: 'text', mode: 'editable', unit: '', scope: 'base', diseases: [],
+        }] });
+      }
+      if (url.includes('/patient-info/me/')) {
+        return Promise.resolve({ data: {
+          patient_info: {
+            ...PATIENT_INFO, custom_fields: { frailty_index: 'Fit' },
+            provisional_fields: { 'custom_fields.frailty_index': 82 },
+          },
+          user: { name: 'Alishia Howell', email: 'howell@example.org' },
+          patient_name: 'Alishia Tawny Howell',
+        } });
+      }
+      return original(url);
+    });
+
+    await renderAndLoad();
+    await openLabsTab();
+    const input = await screen.findByDisplayValue('Fit');
+    await waitFor(() => expect(input).toBeEnabled());
+    expect(screen.getByTestId('provisional-custom_fields.frailty_index')).toBeInTheDocument();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(input, { target: { value: '' } });
+    // A blank is no answer until the save sends it as a rejection: the mark stays.
+    expect(screen.getByTestId('provisional-custom_fields.frailty_index')).toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0][1]).toEqual({
+      custom_fields: { frailty_index: null },
+      rejected_proposals: ['custom_fields.frailty_index'],
+    });
+  });
 });

@@ -5,7 +5,10 @@ import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
 import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals, withoutMarks } from "@/components/PatientInfo/provisional";
+import {
+  addedMark, addedMarks, attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals,
+  withoutMarks,
+} from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -34,7 +37,7 @@ import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientField
 import { addedFieldTabs, fieldDiseases, recordDiseaseCategory } from "@/utils/fieldScope";
 import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
-import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
+import { ADDED_FIELDS, addedFieldNames, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
 import { isOwnRecord } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
@@ -456,7 +459,10 @@ export default function PatientDetail({
     } else {
       // A confirmed write is approved data, whatever an older read says: its
       // proposal mark must not come back with the stale record.
-      fresh = withoutMarks(fresh, Object.keys(confirmedWritesRef.current));
+      fresh = withoutMarks(fresh, [
+        ...Object.keys(confirmedWritesRef.current),
+        ...addedMarks(addedFieldNames(confirmedWritesRef.current[ADDED_FIELDS])),
+      ]);
       for (const [field, value] of Object.entries(confirmedWritesRef.current)) {
         // For added fields the confirmed write is the keys this editor saved;
         // every other key is the server's.
@@ -482,7 +488,10 @@ export default function PatientDetail({
         }
       }
     }
-    const edited = withoutMarks({ ...fresh, ...unsaved }, Object.keys(unsaved));
+    const edited = withoutMarks({ ...fresh, ...unsaved }, [
+      ...Object.keys(unsaved),
+      ...(ADDED_FIELDS in unsaved ? addedMarks(dirtyAddedFieldsRef.current) : []),
+    ]);
 
     patientInfoRef.current = { ...fresh };
     setPatientInfo(fresh);
@@ -597,7 +606,8 @@ export default function PatientDetail({
         );
         saveRevisionRef.current += 1;
         if (patientInfoRef.current) {
-          patientInfoRef.current = withoutMarks(patientInfoRef.current, Object.keys(patchFields));
+          patientInfoRef.current = withoutMarks(
+            patientInfoRef.current, [...Object.keys(patchFields), ...addedMarks(Object.keys(addedSent))]);
         }
         for (const f of Object.keys(patchFields)) {
           if (f === ADDED_FIELDS) {
@@ -621,7 +631,8 @@ export default function PatientDetail({
         // again so the page and the confirmation banner follow it (#2761). The
         // save waits for the read, so a confirmation that follows it cannot be
         // overwritten by a read that began before it.
-        if (Object.keys(patchFields).some((f) => f in proposed)) await reloadRef.current();
+        if (Object.keys(patchFields).some((f) => f in proposed)
+            || addedMarks(Object.keys(addedSent)).some((mark) => mark in proposed)) await reloadRef.current();
       }
       // Derived/read-only fields may change in the editor as a side effect of
       // an actual edit (for example tnbc_status). They were not sent, so they
@@ -740,12 +751,14 @@ export default function PatientDetail({
 
   reloadRef.current = reloadPatientInfo;
 
-  const handleFieldChange = useCallback((field: string, value: unknown) => {
+  const handleFieldChange = useCallback((field: string, value: unknown, alsoApproved: string[] = []) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     // Touching a proposed field makes it the user's answer, so its indicator goes
     // and it is sent as an edit even if they end up on the proposed value.
+    // `alsoApproved` names marks the edit settles beyond the field itself: an added
+    // field's value is a key of custom_fields, marked `custom_fields.<name>`.
     const proposed = field in marksOf(patientInfoRef.current);
-    const updated = withoutMarks({ ...base, [field]: value }, [field]);
+    const updated = withoutMarks({ ...base, [field]: value }, [field, ...alsoApproved]);
     if (value === patientInfoRef.current?.[field] && !proposed) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
@@ -769,7 +782,8 @@ export default function PatientDetail({
   const handleAddedFieldChange = useCallback((fieldName: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     dirtyAddedFieldsRef.current.add(fieldName);
-    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }));
+    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }),
+      [addedMark(fieldName)]);
   }, [handleFieldChange]);
 
   const handleNameChange = useCallback((name: string) => {
@@ -873,9 +887,10 @@ export default function PatientDetail({
     // server does not count, and the banner would flash a number that then falls. So it
     // counts none, offers the button, and the server's 409 decides.
     () => (patientMode && !writableFields.error && !writableFields.loading
-      ? attestationBlockers(editedInfo, writableFields.descriptors, recordCategory).length
+      ? attestationBlockers(editedInfo, writableFields.descriptors, recordCategory, addedFields).length
       : 0),
-    [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors, recordCategory],
+    [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors,
+      recordCategory, addedFields],
   );
 
   // Until the mappings are in, the record's category is a guess, and a tab that
