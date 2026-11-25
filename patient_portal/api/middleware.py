@@ -117,6 +117,10 @@ def _classify_event_type(request):
         return AuditEvent.EVENT_AUTH
     if 'consent' in path:
         return AuditEvent.EVENT_CONSENT
+    # A professional confirming a patient's provisional values writes the record: an update
+    # of it, though it is a POST (#2870).
+    if path.endswith('/confirm-provisional/'):
+        return AuditEvent.EVENT_UPDATE
     if method == 'GET':
         return AuditEvent.EVENT_VIEW
     if method == 'POST':

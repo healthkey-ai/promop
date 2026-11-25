@@ -70,6 +70,22 @@ Patient name uses the same PATCH and updates Person's name columns; its response
 field is not a stored PatientRecord column. Clinician validation fields retain
 their staff access checks.
 
+### Confirming a proposal
+
+A value the record shows as Provisional (from a mapping not yet approved) is not on
+`PatientRecord`. A patient approves one by entering it, which is this PATCH. A professional
+who may write the patient approves it with
+`POST /api/v1/patient-records/{person_id}/confirm-provisional/`
+(`omop_core/services/provisional_confirm.py`), which is the same write with the value taken from
+the server's current proposal instead of the client: it locks the record, reads the overlay, and
+calls `apply_patient_record_patch` once with every confirmed field, so the value lands on
+`PatientRecord` first, is tracked in `user_edited_fields` until OMOP holds it, projects through the
+field's descriptor, and drops its mark, exactly as an equivalent PATCH does (a revision row names the
+caller). The projected fact is dated when the reading was taken (`as_of`), not today as a typed edit's is.
+Only fields an OMOP projection (or a Person/Location column) acknowledges are confirmable: any other would stay
+pinned in `user_edited_fields`. It writes no clinical row of its own beyond that projection, approves no
+mapping, and never sets `validated`. See the provisional data plan, "Staff confirm provisional values".
+
 ### Created fields
 
 A field added through Field Concept Mapping (`CustomPatientField`) has no

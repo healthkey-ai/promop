@@ -177,6 +177,17 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
         return record_permitted(target_person_id)
 
     # Professional access: only doctor / org_admin roles may write
+    return has_professional_write(actor_identity, target_person_id)
+
+
+def has_professional_write(actor_identity, target_person_id: int) -> bool:
+    """Whether the actor writes this patient *as a professional*: a doctor or org_admin
+    grant that reaches them, or an admin of their organization (a trust included).
+
+    The third path of ``can_write_patient``, on its own: a caller that has already
+    excluded the account's own and its represented records (one that must not treat
+    them as the professional's) asks only this.
+    """
     return _professional_grants(
         actor_identity, target_person_id, _WRITE_ROLES,
     ).exists() or _administers_patient(actor_identity, target_person_id)

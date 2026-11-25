@@ -266,7 +266,8 @@ def project_field_to_omop(mapping) -> int:
 
 
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
-                         after_pk=None, type_concept_id=None, patient_user_id=None):
+                         after_pk=None, type_concept_id=None, patient_user_id=None,
+                         as_of=None, as_of_datetime=None):
     """Update a matching non-erroneous fact today, or create today's fact.
 
     Matching includes the concept and source key. Earlier dates are history and
@@ -287,6 +288,12 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     identical existing fact too, so it is not mistaken for a failed projection.
     Collection edits can supply after_pk to keep corrections newer than an
     aggregate import that superseded earlier individual rows on the same day.
+
+    *as_of* dates the fact when it was observed instead of today, and *as_of_datetime*
+    its time when the table has one. Only a professional confirming a proposed reading
+    passes them (#2870): the approved fact keeps the date the reading was taken, so
+    "latest wins" and every trend see it when it was measured. A typed edit passes
+    neither and is today's fact, as before.
     """
     from omop_core.services.clinical_input_contract import uses_dedicated_writer
     if uses_dedicated_writer(field_name):
@@ -314,15 +321,18 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     if val_num is None and (_is_empty(value) or value is False):
         return False
 
-    today = timezone.localdate()
+    today = as_of or timezone.localdate()
     fact_type = type_concept_id or projection.get('type_concept_id') or 32817
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
             from omop_core.services.cancer_details import projection_scope
             scope = projection_scope(person, field_name, model)
+            # A proposal's row (confidence set) is never the fact this writes: updating it in
+            # place would leave the value a proposal. Reachable once a fact is dated when it
+            # was observed (as_of) and the reading is a proposal of that very day.
             candidates = model.objects.filter(
-                person=person, is_erroneous=False,
+                person=person, is_erroneous=False, confidence__isnull=True,
                 **{concept_field: concept_id, src_field: source_value, date_field: today}, **scope,
             )
             if type_concept_id is not None:
@@ -373,6 +383,10 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 return acknowledge_existing
             if scope and any(value is not None for value in scope.values()):
                 setattr(instance, f'{target}_datetime', timezone.now())
+            elif as_of_datetime is not None:
+                datetime_field = date_field.replace('_date', '_datetime')
+                if hasattr(model, datetime_field) and getattr(instance, datetime_field, None) is None:
+                    setattr(instance, datetime_field, as_of_datetime)
             instance._skip_patient_record_refresh = True
             instance.save()
             if patient_user_id:

@@ -2704,6 +2704,31 @@ page holds: change one and change the other. With `PROVISIONAL_DATA_ENABLED` off
 blocks. See [the plan](docs/provisional_data_plan.md), "Confirming a record that shows
 proposals".
 
+### Staff confirm a patient's provisional values (#2870)
+
+Staff, an org admin or a doctor who reaches the patient confirm what the record shows
+as Provisional in one step: `POST /api/v1/patient-records/<person_id>/confirm-provisional/`
+with `{"fields": [...]}` or `{"all": true}` and an `expected` map of what the page showed (required
+with `all`; `omop_core/services/provisional_confirm.py`). It is the patient's own entry done for
+them, not a mapping approval and not the record attestation: the record is locked, each value
+is the **server's current proposal** (never one from the body), and all of them are saved in
+one `apply_patient_record_patch` call, so the result is an approved edit by the caller
+(`user_edited_fields`, OMOP projection, mark dropped, a `RecordRevision` whose `changed_by` is
+the caller and whose `source` is `confirmed_from_proposal`, blank for a typed edit), dated when the reading was taken, not today (`as_of`). "Confirm all" covers only what
+the person sees: scalar fields a tab shows (the `attestation_blockers` on-screen rule), the editor can
+write and an OMOP projection acknowledges (`not_shown` and `no_projection` are skipped: a field nothing
+acknowledges would stay pinned in `user_edited_fields`, and the disease is one). Fields that are one
+answer (a date and its precision) are confirmed whole or not at all. The response lists `confirmed` and
+`skipped` (`list_field`, `calculated`, `changed`, `not_seen`, ...; the plan has the table) and a 409 means
+nothing was confirmed because the proposals changed. Only a person at the page may use it
+(`InteractiveSessionPermission`), not a credential, an analyst, or an account that is this patient or
+represents them (staff included; their path is entering a value and "Confirm my record"), and never
+`validated`. A confirmed value is no longer marked, so it lifts the patient's attestation block for that
+field. List fields are not confirmable. The v1 record read carries
+`provisional_confirm: {confirmable, skipped, groups}` for a reader who may confirm, and the editor offers
+"Confirm <field>" and "Confirm all N provisional values" (which names the N fields) only from it. See
+[the plan](docs/provisional_data_plan.md), "Staff confirm provisional values".
+
 ### One patient's full provisional view: `fill_provisional_record`
 
 `manage.py fill_provisional_record <person_id>` (#2696) gives one patient as much

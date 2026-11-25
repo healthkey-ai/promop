@@ -1,5 +1,5 @@
-import { useContext, type ReactNode } from 'react';
-import { ProvisionalContext, useProvisionalMark } from './ProvisionalContext';
+import { useContext, useEffect, type ReactNode } from 'react';
+import { ProvisionalContext, useConfirmControl, useProvisionalMark } from './ProvisionalContext';
 
 /** "Provisional 82%" after a field's label when its value is a proposal. `via` names
  *  what the reader edits instead when the value is not typed in directly (the FLIPI
@@ -8,9 +8,14 @@ import { ProvisionalContext, useProvisionalMark } from './ProvisionalContext';
  *  is settled by approving the readings' code mapping, so the tooltip says that and
  *  does not tell the reader to edit the field. */
 export default function ProvisionalBadge(
-  { name, via, fromDevice }: { name: string; via?: string; fromDevice?: boolean },
+  { name, via, fromDevice, label }: { name: string; via?: string; fromDevice?: boolean; label?: string },
 ) {
   const mark = useProvisionalMark(name);
+  const control = useConfirmControl(name);
+  const registerLabel = control?.registerLabel;
+  useEffect(() => {
+    if (registerLabel && label) registerLabel(name, label);
+  }, [registerLabel, name, label]);
   if (!mark) return null;
   const confidence = ` (${mark.confidence}% confidence)`;
   let title: string;
@@ -27,7 +32,7 @@ export default function ProvisionalBadge(
       : `From a code mapping that is not approved yet${confidence}. `
         + (via ? `Edit ${via} to confirm it as approved data.` : 'Edit the field to confirm it as approved data.');
   }
-  return (
+  const badge = (
     <span
       className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800"
       title={title}
@@ -35,6 +40,32 @@ export default function ProvisionalBadge(
     >
       Provisional {mark.confidence}%
     </span>
+  );
+  // A professional the server allowed confirms the proposal in one step (#2870): it is
+  // saved as approved data, as if the patient had entered it. Not for a value that comes
+  // from device readings, which is settled by approving their mapping.
+  if (!control || fromDevice) return badge;
+  const what = label ?? name.replace(/_/g, ' ');
+  return (
+    <>
+      {badge}
+      <button
+        type="button"
+        className="rounded border border-amber-300 bg-white px-1.5 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+        aria-label={`Confirm ${what}`}
+        title="Save this proposed value as approved data for this patient."
+        disabled={control.busy !== null}
+        onClick={control.onConfirm}
+        data-testid={`confirm-${name}`}
+      >
+        Confirm
+      </button>
+      {control.error && (
+        <span role="alert" className="text-xs text-red-700" data-testid={`confirm-error-${name}`}>
+          {control.error}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -70,11 +101,13 @@ export function AcceptedBadge({ name }: { name: string }) {
  * patient confirming their record (#2761). `via` says what to edit when the shown value
  * is calculated from other inputs.
  */
-export function MarkedControl({ name, via, children }: { name: string; via?: string; children: ReactNode }) {
+export function MarkedControl(
+  { name, via, label, children }: { name: string; via?: string; label?: string; children: ReactNode },
+) {
   const mark = useProvisionalMark(name);
   return (
     <>
-      {mark && <div className="mb-1"><ProvisionalBadge name={name} via={via} /></div>}
+      {mark && <div className="mb-1 flex items-center gap-1.5"><ProvisionalBadge name={name} via={via} label={label} /></div>}
       {children}
     </>
   );
