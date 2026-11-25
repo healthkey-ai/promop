@@ -8731,7 +8731,8 @@ class SeedWearableDeviceSourceUnitsTest(TestCase):
                      .values_list('source_vocabulary_id', 'source_code'))
         self.assertEqual(shared, {
             ('Apple', 'HKQuantityTypeIdentifierRestingHeartRate'),
-            ('Garmin', 'resting_hr'), ('OpenWearables', 'resting_heart_rate')})
+            ('Garmin', 'resting_hr'), ('Oura', 'oura_resting_hr'),
+            ('OpenWearables', 'resting_heart_rate')})
 
     def test_rerun_fills_the_blank_described_fields_on_an_approved_row(self):
         call_command('seed_wearable_device_mappings', verbosity=0)
