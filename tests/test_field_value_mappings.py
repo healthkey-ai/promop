@@ -365,6 +365,21 @@ def test_answer_coverage_endpoint_and_descriptor(staff, choice):
     assert d['answer_coverage']['mapped'] == 1
 
 
+def test_list_response_carries_the_figures_the_answers_column_shows(staff, choice):
+    """The Field Mappings list reads ``answer_coverage`` from its own response:
+    counted over the answers still offered, null for a field with none."""
+    from django.utils import timezone
+    concept('351')
+    fvm.approve(fvm.propose(choice, vocabulary_id='SNOMED', concept_code='351'))
+    FieldChoice.objects.create(field_name=choice.field_name, display='Open one')
+    FieldChoice.objects.create(field_name=choice.field_name, display='Gone', retired_at=timezone.now())
+    body = staff.get('/api/v1/field-mappings/').json()
+    by_name = {d['field_name']: d for d in body}
+    assert by_name[choice.field_name]['answer_coverage'] == {
+        'choices': 2, 'mapped': 1, 'no_equivalent': 0, 'proposed': 0, 'unmapped': 1}
+    assert by_name['weight']['answer_coverage'] is None
+
+
 def test_list_query_count_does_not_grow_with_the_choices(staff):
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
