@@ -403,10 +403,10 @@ export default function PatientDetail({
   // Coming back from Field Concept Mapping after Add field (#721): the tab
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
-  // Coming back from Garmin's consent page (#2802) lands on the Wearables
-  // tab, where the outcome is shown.
+  // Coming back from Garmin's or Oura's consent page (#2802, #2900) lands on
+  // the Wearables tab, where the outcome is shown.
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state)
-    ?? (new URLSearchParams(location.search).has("garmin") ? "wearable" : null));
+    ?? (["garmin", "oura"].some((name) => new URLSearchParams(location.search).has(name)) ? "wearable" : null));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
   const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();

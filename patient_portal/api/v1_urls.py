@@ -7,7 +7,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
-from . import garmin_oauth, open_wearables
+from . import garmin_oauth, open_wearables, oura_oauth
 from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
@@ -254,6 +254,12 @@ urlpatterns = [
     # the other spelling with the app's page.
     re_path(r'^garmin/oauth/callback/?$', garmin_oauth.oauth_callback, name='v1-garmin-oauth-callback'),
     re_path(r'^garmin/webhooks/(?P<secret>[^/]+)/?$', garmin_oauth.webhook, name='v1-garmin-webhook'),
+    # An Oura account linked by OAuth, read on demand (#2900). The callback
+    # answers with or without the final slash, as Oura is registered with one.
+    path('oura/connection/', oura_oauth.connection, name='v1-oura-connection'),
+    path('oura/oauth/start/', oura_oauth.oauth_start, name='v1-oura-oauth-start'),
+    re_path(r'^oura/oauth/callback/?$', oura_oauth.oauth_callback, name='v1-oura-oauth-callback'),
+    path('oura/sync/', oura_oauth.sync, name='v1-oura-sync'),
     # A phone app built on the Open Wearables SDK (#2810). The first two are
     # the signed-in patient's. The rest are the paths the SDK itself calls
     # under {host}/api/v1/, with no final slash, so both spellings answer: a

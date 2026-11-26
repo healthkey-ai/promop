@@ -1366,7 +1366,8 @@ spelling), `PatientSourceCodesTab.wearables.test.tsx`,
 ## Wearables — Oura Ring Export Upload
 
 A patient who wears an Oura Ring uploads the data export Oura's Membership
-Hub makes (Export data; Oura's cloud API needs OAuth, which is not built):
+Hub makes (Export data; the linked account that reads Oura's API is the
+[next section](#wearables--oura-account-by-oauth)):
 the **Oura Ring** section of the Wearables tab, directly below Garmin (#2889).
 Parser `omop_core/services/oura_parser.py`; route `upload-wearable` with
 `device_type=oura`. Full description:
@@ -1427,6 +1428,103 @@ Tests: `tests/test_oura_parser.py`,
 `patient_portal.tests.WearableUploadEndpointTest` (the `oura` cases),
 `omop_core.tests.SeedHl7PhrSourceCodesTest`, `OuraUpload` cases in
 `WearableTab.test.tsx`.
+
+## Wearables — Oura Account by OAuth
+
+A patient links their Oura account once and this server **pulls** their days from
+Oura's API V2 (#2900). Oura's API is OAuth2 only (personal access tokens are
+deprecated) and, unlike Garmin's Starter tier, can be read on demand with
+history, so there is no webhook and nothing arrives while the tab is closed.
+It sits above the export upload in the **Oura Ring** section of the Wearables
+tab. Rules in `omop_core/services/oura_oauth.py`, routes in
+`patient_portal/api/oura_oauth.py`, on `/api/v1/` only. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-account-by-oauth).
+
+| Route | Who | What |
+|---|---|---|
+| `GET oura/connection/` | a signed-in patient | `{configured, connected, connected_at, last_sync_at, synced_through}`; never a token |
+| `DELETE oura/connection/` | a signed-in patient | disconnect: the token is revoked at Oura, the row removed; `{disconnected, oura_notified}` |
+| `POST oura/oauth/start/` | a patient signed in to this site | `{authorize_url}`, Oura's consent page |
+| `GET oura/oauth/callback/` | the same browser, back from Oura | stores the connection, redirects to `/?oura=connected\|denied\|error` |
+| `POST oura/sync/` | a signed-in patient | reads their days from Oura and stores them |
+
+- **Configuration, per deployment, on the web service** (a worker needs none):
+  `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, and the token key, which is
+  `GARMIN_TOKEN_KEY` (the wearable token key, named for Garmin, which came
+  first; `GARMIN_TOKEN_KEY_FALLBACKS` applies). All three or the tab offers
+  nothing (`configured()`). Register the app at
+  `https://cloud.ouraring.com/oauth/applications` with the redirect URL
+  `<APP_BASE_URL>/api/v1/oura/oauth/callback/` (`OURA_REDIRECT_URI`
+  overrides it; Oura matches it exactly). **Oura caps an unapproved app at ten
+  users**, so only ten patients can connect until Oura approves the app.
+- **The callback finishes only in the browser that started**, as Garmin's:
+  `start` wants this site's own session and leaves the consent's nonce in it;
+  the callback wants the same account signed in, active, holding that nonce,
+  and spends it on the first return. The state has its own signing salt, so a
+  Garmin state is no Oura state. PKCE (S256), the verifier derived from the
+  nonce. A token Oura issued for a connection that is then refused is revoked.
+- **Scopes asked: `daily spo2 heart_health`** (`SCOPES`); not `personal`, since
+  nothing here needs age, weight or e-mail. Oura lets the patient switch a box
+  off, so each document type is read on its own and one Oura answers 403 to is
+  reported in `unavailable` and left out; refused for all four is a 409.
+  **Which scope gates which endpoint is not documented** in the spec the code
+  was checked against (openapi 1.43): `sleep` and the daily summaries are
+  presumed `daily`, `vO2_max` `heart_health`, `daily_spo2` `spo2`.
+- **`OuraConnection`** (system data, one per person, no Oura user id: Oura pushes
+  nothing, so nothing routes by it): tokens, `connected_at`, `last_sync_at`,
+  `synced_through`. `copy_patient --replace` refuses a person who has one.
+- **Tokens are encrypted under the wearable token key**, in no database. **Oura's
+  refresh tokens are single use**: every refresh returns a new pair and retires
+  the old, so both are saved in the same write, under the row's lock, in a
+  transaction of its own that commits before the read (`fresh_access_token`): the
+  new pair must not be lost to a rollback of anything else. A refresh Oura refuses
+  (400, 401, 403), tokens that cannot be decrypted, or a 401 on a read mean
+  **connecting again** (409, `reconnect: true`; the row is kept, never deleted
+  behind the patient). Disconnect and erasure revoke the token at Oura first, best
+  effort, and the row goes whatever Oura answers (`_forget_oura`).
+- **What a sync reads.** `daily_activity`, `sleep`, `daily_spo2`, `vO2_max`
+  (`ENDPOINTS`), page by page by `next_token`, for `start_date` to the day
+  after `end_date` (Oura's end date may be exclusive). The documents go through
+  the **export parser's own day rules** (`samples_from_documents`, `_collect`):
+  a day's sleep sessions added, HRV (RMSSD), resting heart rate and breathing
+  rate from the longest, no day of zero movement. So a day reads the same
+  whichever way it arrived, under the same `Oura` source codes
+  ([Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)),
+  seeded *proposed*, so readings are provisional until a curator approves them.
+- **Which days.** The first sync reads the last 90 days (`INITIAL_DAYS`); a later
+  one starts three days before where the last ended (`OVERLAP_DAYS`: Oura revises
+  recent days) and runs to today. A sync that runs out of its 20-second budget
+  (`BUDGET_SECONDS`), or pages past `MAX_PAGES_PER_ENDPOINT`, answers
+  `incomplete: true` and does **not** move `synced_through`, so the next one
+  re-reads the range. The sync runs inside the request (a patient pressed the
+  button), with no call started after the budget.
+- **A second sync within five minutes reads nothing** (`MIN_SYNC_INTERVAL`,
+  answer `skipped: "recent"`): Oura's limit is 5,000 requests per five minutes
+  for the whole application, shared by every patient. A throttle of 20 syncs an
+  hour per user sits on top.
+- **A day's total replaces.** Written with `replace_daily=True` as device `oura`,
+  the export's rule: a later sync replaces the days an earlier sync or export
+  wrote, never stacking. History is one "Oura Ring sync <YYYY-MM>" upload per
+  patient per month (`_fold_history`, shared with the Garmin push); the record is
+  re-derived in the request, as the Garmin sync does.
+- **The person, signed in, on their own record**: `is_interactive_session`, never
+  a service credential or a delegated token, and `person_id` in a sync body is
+  refused unless it is the caller's own. The tab renders the section's account
+  part only with `canSyncOwnDevice`.
+- **The tab** (`OuraAccountLink.tsx`) reads the days by itself right after
+  connecting (`?oura=connected`) and when it opens with a last sync older than 12
+  hours; otherwise "Sync now". **Nothing syncs while the tab is closed**: a
+  scheduled or webhook-driven sync is not built (Oura offers webhook
+  subscriptions: `/v2/webhook/subscription`, with the app's id and secret; the
+  patient would have to be matched by Oura's user id, which needs the `personal`
+  scope).
+- **Not verified against a live account.** The field names are checked against
+  Oura's published OpenAPI spec (1.43), not against a response. Check a first real
+  sync's `unavailable`, and whether a day's `sleep` documents arrive (the `sleep`
+  endpoint's `end_date` handling in particular).
+
+Tests: `tests/test_oura_oauth.py`, `patient_portal.tests.OuraOAuthEndpointTest`,
+`OuraAccountLink.test.tsx`.
 
 ## Wearables — Garmin Connect Sync
 

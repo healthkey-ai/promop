@@ -95,18 +95,27 @@ def _number(raw) -> float | None:
 
 
 def _day(raw) -> date | None:
+    if not isinstance(raw, str):
+        return None
     try:
-        return datetime.strptime((raw or '')[:10], '%Y-%m-%d').date()
+        return datetime.strptime(raw[:10], '%Y-%m-%d').date()
     except ValueError:
         return None
 
 
 def _spo2(raw) -> float | None:
     """A day's average SpO2: a plain number, or the ``average`` of the object
-    API V2 nests it in (``spo2_percentage``)."""
+    API V2 nests it in (``spo2_percentage``), as JSON from the API or as text
+    in a CSV cell."""
+    if isinstance(raw, dict):
+        raw = raw.get('average')
+    if isinstance(raw, bool):
+        return None
     number = _number(raw)
     if number is not None:
         return number
+    if not isinstance(raw, str):
+        return None
     match = re.search(r'average["\']?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)', raw or '')
     return float(match.group(1)) if match else None
 
@@ -130,7 +139,7 @@ def _collect(kind: str, rows, daily, sleep_sessions) -> None:
                 if value is not None:
                     daily[metric][day] = [value]
         elif kind == 'sleep':
-            if row.get('type', '').lower() in NOT_SLEEP:
+            if str(row.get('type') or '').lower() in NOT_SLEEP:
                 continue
             sleep_sessions[day].append({
                 'seconds': _number(row.get('total_sleep_duration')),
@@ -175,6 +184,44 @@ def _members(file_bytes: bytes, filename: str) -> list[tuple[str, bytes]]:
     return members
 
 
+def _samples(daily, sleep_sessions) -> list[WearableSample]:
+    """The day values of what :func:`_collect` gathered: the sleep sessions of a
+    day added up, the HRV, resting heart rate and breathing rate of its longest,
+    and every other metric as one value per day. Shared by the export and the
+    API, so a day reads the same whichever way it arrived."""
+    for day, sessions in sleep_sessions.items():
+        timed = [s for s in sessions if s['seconds'] and s['seconds'] > 0]
+        if not timed:
+            continue
+        daily['sleep_duration'][day].append(sum(s['seconds'] for s in timed) / 3600.0)
+        main = max(timed, key=lambda s: s['seconds'])
+        # Oura writes 0 where it has no figure.
+        for metric, key in (('hrv_rmssd', 'hrv'), ('resting_hr', 'heart_rate'),
+                            ('respiratory_rate', 'breath')):
+            if main[key]:
+                daily[metric][day].append(main[key])
+    return [
+        WearableSample(metric_key=metric, date=d,
+                       value=round(sum(values) if metric in CUMULATIVE_METRICS
+                                   else sum(values) / len(values), 2))
+        for metric, by_day in daily.items() for d, values in by_day.items()
+    ]
+
+
+def samples_from_documents(documents: dict[str, list]) -> list[WearableSample]:
+    """Daily samples from what Oura's API returned, by document kind
+    (``activity``, ``sleep``, ``spo2``, ``vo2``): the JSON objects of
+    ``daily_activity``, ``sleep``, ``daily_spo2`` and ``vO2_max``. They are
+    read as the export's rows are, since the export follows the same data
+    models. A document that is not an object is skipped."""
+    daily: dict[str, dict[date, list[float]]] = defaultdict(lambda: defaultdict(list))
+    sleep_sessions: dict[date, list[dict]] = defaultdict(list)
+    for kind, items in documents.items():
+        if kind in ('activity', 'sleep', 'spo2', 'vo2'):
+            _collect(kind, (item for item in items if isinstance(item, dict)), daily, sleep_sessions)
+    return _samples(daily, sleep_sessions)
+
+
 def parse_oura_export(file_bytes: bytes, filename: str = '') -> list[WearableSample]:
     """Daily samples from an Oura export: the zip, or one of its CSV files.
 
@@ -198,23 +245,6 @@ def parse_oura_export(file_bytes: bytes, filename: str = '') -> list[WearableSam
     if not found:
         raise OuraExportRefused('no_files')
 
-    for day, sessions in sleep_sessions.items():
-        timed = [s for s in sessions if s['seconds'] and s['seconds'] > 0]
-        if not timed:
-            continue
-        daily['sleep_duration'][day].append(sum(s['seconds'] for s in timed) / 3600.0)
-        main = max(timed, key=lambda s: s['seconds'])
-        # Oura writes 0 where it has no figure.
-        for metric, key in (('hrv_rmssd', 'hrv'), ('resting_hr', 'heart_rate'),
-                            ('respiratory_rate', 'breath')):
-            if main[key]:
-                daily[metric][day].append(main[key])
-
-    samples = [
-        WearableSample(metric_key=metric, date=d,
-                       value=round(sum(values) if metric in CUMULATIVE_METRICS
-                                   else sum(values) / len(values), 2))
-        for metric, by_day in daily.items() for d, values in by_day.items()
-    ]
+    samples = _samples(daily, sleep_sessions)
     logger.info('oura_parsed samples=%d metrics=%s', len(samples), sorted(daily))
     return samples

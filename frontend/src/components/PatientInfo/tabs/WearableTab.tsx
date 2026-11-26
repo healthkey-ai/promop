@@ -8,6 +8,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import OuraAccountLink from './OuraAccountLink';
 import OuraUpload from './OuraUpload';
 import UploadsList, { type UploadRecord } from './UploadsList';
 import { pendingClause } from './wearableResult';
@@ -499,7 +500,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         </section>
       )}
 
-      {/* An Oura Ring export (#2889): the file Oura's Membership Hub sends. */}
+      {/* Oura Ring: the account linked once (#2900), whose days this site reads,
+          and under it the export file Oura's Membership Hub sends (#2889). */}
       {ownRecord && (
         <OuraUpload
           disabled={uploading || syncing || deletingId !== null}
@@ -507,6 +509,17 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           result={messageAt === 'oura' ? uploadResult : null}
           error={messageAt === 'oura' ? uploadError : null}
           onFiles={(files) => void uploadFiles(files, 'oura', 'oura')}
+          account={canSyncOwnDevice ? (
+            <OuraAccountLink
+              personId={personId}
+              disabled={uploading || deletingId !== null}
+              onBusyChange={setSyncing}
+              onSynced={(changed) => {
+                fetchUploads();
+                if (changed && onRefresh) onRefresh();
+              }}
+            />
+          ) : null}
         >
           {!uploadsLoading && <UploadsList {...uploadsProps} uploads={ouraUploads} name="oura" />}
         </OuraUpload>

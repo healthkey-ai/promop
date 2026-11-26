@@ -8,6 +8,20 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: link an Oura account** — the Oura Ring section of the Wearables
+  tab gains Connect Oura, Sync now and Disconnect. A patient approves this
+  site's Oura app once on Oura's own page (OAuth2, PKCE) and the site reads
+  their steps, active minutes and energy, sleep, HRV, resting heart rate,
+  breathing rate, blood oxygen and VO2 max from Oura's API: the last 90 days
+  at first, then from a few days before the last sync, right after connecting
+  and when the tab opens with a sync older than 12 hours. The days go through
+  the same rules and `Oura` source codes as the export upload, and a later day
+  from either replaces the same day from the other. Needs `OURA_CLIENT_ID`,
+  `OURA_CLIENT_SECRET` and `GARMIN_TOKEN_KEY` on the web service and an Oura app
+  registered with the redirect URL `<APP_BASE_URL>/api/v1/oura/oauth/callback/`;
+  Oura caps an unapproved app at ten users. Nothing syncs while the tab is
+  closed (#2900). See
+  [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-account-by-oauth).
 - **Wearables: upload an Oura Ring export** — an "Oura Ring" section on the
   Wearables tab, directly below Garmin, takes the data export Oura's Membership
   Hub sends (the zip, or any of its CSV files). Steps, active minutes and
