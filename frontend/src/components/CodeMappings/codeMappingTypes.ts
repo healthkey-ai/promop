@@ -415,8 +415,9 @@ export function retirementDetail(row: CodeMappingRow | null): string {
  */
 export function approvalNote(row: CodeMappingRow): string {
   if (row.status !== "approved") return "";
-  if (!row.reviewer && !row.reviewed_at) return "";
-  const who = row.reviewer ? ` by ${row.reviewer}` : "";
+  if (!row.reviewer && !row.reviewer_email && !row.reviewed_at) return "";
+  const approver = row.reviewer_email || row.reviewer;
+  const who = approver ? ` by ${approver}` : "";
   const when = row.reviewed_at
     ? ` on ${new Date(row.reviewed_at).toLocaleDateString()}`
     : "";

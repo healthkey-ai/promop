@@ -1882,11 +1882,6 @@ export default function EditMappingDialog({
                   {" \u00b7 proposed by "}{selectedRow.proposer_email}
                 </span>
               )}
-              {selectedRow?.status === "approved" && (selectedRow.reviewer_email || selectedRow.reviewer) && (
-                <span className="break-words text-slate-600" data-testid="mapping-approver">
-                  {" \u00b7 approved by "}{selectedRow.reviewer_email || selectedRow.reviewer}
-                </span>
-              )}
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
