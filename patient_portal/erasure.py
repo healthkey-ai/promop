@@ -99,6 +99,7 @@ def close_account(person: Person, identity: Identity | None = None, *, actor: Id
         # A linked Garmin account keeps sending until Garmin is told; the
         # token that can tell it is deleted with the person (#2802).
         _forget_garmin(person)
+        _forget_oura(person)
         _forget_open_wearables(person)
         # Survey responses PROTECT the person and EpisodeEvent has a bare
         # integer key, so both go first; then the person's cascade does the rest.
@@ -122,6 +123,7 @@ def erase_record(person: Person, *, actor: Identity | None = None, purpose: str 
     with transaction.atomic():
         files = _document_files(person)
         _forget_garmin(person)
+        _forget_oura(person)
         _forget_open_wearables(person)
         # One derivation at the end, not one per deleted row (AGENTS.md, Bulk OMOP Row Deletes).
         with suppress_patient_record_refresh():
@@ -172,6 +174,14 @@ def _forget_garmin(person: Person) -> None:
     from omop_core.services import garmin_oauth
 
     garmin_oauth.forget(person)
+
+
+def _forget_oura(person: Person) -> None:
+    """Revoke a linked Oura account's token: the connection goes with the
+    person, and an unrevoked token would stay good at Oura (#2900)."""
+    from omop_core.services import oura_oauth
+
+    oura_oauth.forget(person)
 
 
 def _forget_open_wearables(person: Person) -> None:

@@ -10,6 +10,8 @@ interface Props {
   error: string | null;
   /** The chosen files, already checked to be an Oura export (.zip) or its CSV files. */
   onFiles: (files: File[]) => void;
+  /** The linked account (`OuraAccountLink`), above the upload; absent where it is not offered. */
+  account?: ReactNode;
   /** The section's uploads (a collapsed `UploadsList`). */
   children?: ReactNode;
 }
@@ -18,12 +20,13 @@ interface Props {
 const OURA_EXTENSIONS = ['.zip', '.csv'];
 
 /**
- * Oura Ring (#2889): uploads the data export Oura's Membership Hub makes. It
+ * Oura Ring (#2889): uploads the data export Oura's Membership Hub makes, under
+ * the linked account (#2900) where this deployment has one. It
  * has its own button because a `.zip` here is Oura's, where the Upload button
  * above reads a `.zip` as Apple Health. Offered only on the patient's own
  * record, as every upload is (#2819).
  */
-export default function OuraUpload({ disabled, uploading, result, error, onFiles, children }: Props) {
+export default function OuraUpload({ disabled, uploading, result, error, onFiles, account, children }: Props) {
   const headingId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [refused, setRefused] = useState<string | null>(null);
@@ -47,6 +50,7 @@ export default function OuraUpload({ disabled, uploading, result, error, onFiles
     <section aria-labelledby={headingId} className="mb-4 rounded-md border border-gray-200 px-4 pt-3 pb-2">
       <h3 id={headingId} className="text-sm font-medium text-portal-text-primary">Oura Ring</h3>
       <div className="divide-y divide-gray-200">
+        {account}
         <div className="py-3 last:pb-1">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Upload your Oura data</h4>
           <p className="mt-1 text-xs text-gray-500">
