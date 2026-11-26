@@ -4596,6 +4596,31 @@ so a stale green check does not catch it.
   migrations, merge one, then rebase the next onto the new `dev`, check it, and
   let CI pass before merging it.
 
+- **Before `gh pr merge` of any PR that adds or changes a migration, re-check the
+  number against `dev` as it is now.** This is a rule for agents and people
+  alike, and it applies even when every check on the PR is green, because that
+  result describes `dev` at the time CI ran. Every time, immediately before the
+  merge:
+  ```bash
+  git fetch origin dev
+  git diff --name-only <pr-base-sha-or-last-ci-sha>..origin/dev -- omop_core/migrations/
+  ```
+  If that prints anything, `dev` gained a migration since the PR's last CI run:
+  rebase onto `origin/dev`, renumber your migration to the next free number
+  (see "Regenerate an unmerged migration"), run `makemigrations --check
+  --dry-run`, push, and wait for CI on the new head. Do not merge on the older
+  green result. #2902 and #2905 both took 0376 on 2026-11-26 because the second
+  merged on a result that predated the first.
+- **Several agents or sessions can have migration PRs open at once, on one
+  account.** Treat any open PR that touches `omop_core/migrations/` as a claim
+  on the next number: before choosing one, run `gh pr list --search
+  "omop_core/migrations in:files" --state open` and take the number after the
+  highest one used there or on `dev`. Merge them one at a time, in number order.
+- **`dev`'s ruleset should require branches to be up to date before merging**
+  (`strict_required_status_checks_policy: true` on ruleset 8217318), so GitHub
+  enforces the two rules above instead of anyone remembering them. If it is
+  off, the first rule is the only protection.
+
 #### Documentation naming and ownership
 
 - Use `_architecture.md` for implemented architecture and `_plan.md` for future
