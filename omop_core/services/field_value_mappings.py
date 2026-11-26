@@ -554,9 +554,8 @@ def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
     concept that two answers of one field share (a mapping the curators
     allowed to be many-to-one, or the same concept in two contexts) reads as
     nothing rather than as a guess, and a live answer speaks over a retired one.
-    The value is the choice's label: what the editor offers for the field and
-    what the projection stores, so the record holds an answer its select can
-    show (the typed ``value`` follows when the editor offers it, #1225).
+    The value is what a save stores for the choice, its ``stored_value``: the
+    label renamed since is another spelling of it, never a different answer.
     """
     choices, meanings, _, NONE = _answer_meanings(field_names)
 
@@ -568,10 +567,10 @@ def answer_values_by_concept(field_names) -> dict[str, dict[int, str]]:
             if meaning is None or meaning is NONE:
                 continue
             target = retired if choice['retired_at'] else live
-            # What a lookup's tab stores is the entry's own value (its code for
-            # ECOG); an answer's label is what its select shows.
-            shown = (choice['value'] or choice['display']
-                     if choice['context_key'].startswith('lookup:') else choice['display'])
+            # What a save stores for an answer, a lookup's entry included (its
+            # code for ECOG): its value, or its label while it has none. The
+            # label can change after the data was saved; the value does not.
+            shown = choice['value'] or choice['display']
             target.setdefault(choice['field_name'], {}).setdefault(meaning, set()).add(shown)
         merged: dict[str, dict[int, set]] = {}
         for field in {*live, *retired}:

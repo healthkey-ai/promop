@@ -2103,12 +2103,15 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
     created_by = serializers.CharField(
         source='created_by.username', read_only=True, default=None,
     )
+    # What a save writes for this answer: its value, or its label while it has
+    # none. Read only, so the editor shows the rule instead of repeating it.
+    stored_value = serializers.CharField(read_only=True)
 
     class Meta:
         model = FieldChoice
         fields = [
             'id', 'field_name', 'display', 'sort_order',
-            'code', 'context_key', 'value', 'value_type', 'retired',
+            'code', 'context_key', 'value', 'stored_value', 'value_type', 'retired',
             'aliases', 'diseases',
             'codes', 'created_by', 'created_at',
         ]
@@ -2240,6 +2243,10 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         retired = validated_data.pop('retired', None)
         display = validated_data.pop('display', None)
         validated_data.pop('code', None)
+        if 'value' not in getattr(self, 'initial_data', {}) and not validated_data.get('value'):
+            # ``validate`` fills ``value`` from the row; the label's freeze
+            # below must not be written back over by that stale blank.
+            validated_data.pop('value', None)
         try:
             if display is not None:
                 field_choices.rename(instance, display)

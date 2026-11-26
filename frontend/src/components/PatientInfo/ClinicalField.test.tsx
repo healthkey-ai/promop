@@ -49,6 +49,37 @@ describe('ClinicalField choices', () => {
     expect(await openSelect()).toEqual(['Female', 'Male']);
   });
 
+  it('shows a renamed answer by its new label and saves the value it was stored as', async () => {
+    const renamed = {
+      ...CURATED,
+      options: [{ value: 'Stage IV', label: 'Stage 4' }, { value: 'Stage V' }],
+    } as unknown as FieldDescriptor;
+    const onChange = vi.fn();
+    render(
+      <ClinicalField label="Stage" name="stage" type="select" value="Stage IV"
+        descriptor={renamed} onChange={onChange} />,
+    );
+    expect(screen.getByRole('combobox')).toHaveTextContent('Stage 4');
+    expect(await openSelect()).toEqual(['Stage 4', 'Stage V']);
+    fireEvent.click(screen.getByRole('option', { name: 'Stage V' }));
+    expect(onChange).toHaveBeenCalledWith('stage', 'Stage V');
+  });
+
+  it('saves the old text when the renamed answer is picked', async () => {
+    const renamed = {
+      ...CURATED,
+      options: [{ value: 'Stage IV', label: 'Stage 4' }, { value: 'Stage V' }],
+    } as unknown as FieldDescriptor;
+    const onChange = vi.fn();
+    render(
+      <ClinicalField label="Stage" name="stage" type="select" value="Stage V"
+        descriptor={renamed} onChange={onChange} />,
+    );
+    await openSelect();
+    fireEvent.click(screen.getByRole('option', { name: 'Stage 4' }));
+    expect(onChange).toHaveBeenCalledWith('stage', 'Stage IV');
+  });
+
   it('falls back to the local list when the descriptor carries none', async () => {
     // Country is writable on Person but has no curated set, so the tab's own
     // list is the only source.

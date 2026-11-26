@@ -138,20 +138,26 @@ def _unmapped_group(field):
     return GROUP_NEEDS_CONCEPT
 
 
-def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
-    """Return curator-managed displays and their preferred code for every field."""
-    result: dict[str, list[tuple[str, str | None]]] = {}
+def _field_choice_options() -> dict[str, list[tuple[str, str | None, str]]]:
+    """Return curator-managed answers as ``(stored value, preferred code, label)`` per field.
+
+    A save stores the answer's value, which is its label until one is set and
+    stays what it was when the label is renamed (#1225), so a rename changes
+    what a person reads and not what is stored.
+    """
+    result: dict[str, list[tuple[str, str | None, str]]] = {}
     seen: set[tuple[str, str]] = set()
     # A row holding decisions about a lookup's entries is not offered (option_sources).
     for choice in FieldChoice.objects.prefetch_related('codes').exclude(context_key__startswith='lookup:'):
         # One answer offered in several contexts (stage I in two staging
         # systems) is one text to accept here; which meaning a record means
         # is the scope's business, not this list's.
-        if (choice.field_name, choice.display) in seen:
+        stored = choice.stored_value
+        if (choice.field_name, stored) in seen:
             continue
-        seen.add((choice.field_name, choice.display))
+        seen.add((choice.field_name, stored))
         primary = next((code.code for code in choice.codes.all() if code.is_primary), None)
-        result.setdefault(choice.field_name, []).append((choice.display, primary))
+        result.setdefault(choice.field_name, []).append((stored, primary, choice.display))
     return result
 
 # PatientRecord field → the Person field the persons endpoint accepts.
@@ -586,8 +592,10 @@ def build_writable_field_descriptor():
 
     choice_options = {
         field_name: [
-            {'value': display, 'code': primary_code}
-            for display, primary_code in choices
+            # ``label`` only where it differs from what is stored: the shape a
+            # client that ignores it has always seen is unchanged.
+            {'value': stored, 'code': primary_code, **({'label': label} if label != stored else {})}
+            for stored, primary_code, label in choices
         ]
         for field_name, choices in _field_choice_options().items()
     }

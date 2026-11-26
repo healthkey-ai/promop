@@ -319,6 +319,18 @@ describe("FieldChoiceEditor with answer details", () => {
     expect(await screen.findByText("Retired")).toBeInTheDocument();
   });
 
+  it("shows what a save stores, read only, after the label has been renamed", async () => {
+    mockGet.mockResolvedValue({ data: choices({
+      display: "In remission", value: "Finished treatment and in remission",
+      stored_value: "Finished treatment and in remission",
+    }) });
+    render(<FieldChoiceEditor fieldName="disease_activity" onClose={() => {}} canApprove />);
+    const saved = await screen.findByText("Saved as");
+    expect(saved).toHaveTextContent("Saved as Finished treatment and in remission");
+    fireEvent.click(screen.getByRole("button", { name: /Edit details of/ }));
+    expect(screen.queryByLabelText(/stored value|saved as/i)).not.toBeInTheDocument();
+  });
+
   it("keeps the editor open when Escape is pressed in the spellings box", async () => {
     mockGet.mockResolvedValue({ data: choices() });
     const onClose = vi.fn();

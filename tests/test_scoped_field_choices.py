@@ -56,6 +56,31 @@ def test_rename_keeps_the_code_and_the_old_label_resolves():
     assert choice.aliases.get().source == 'label'
 
 
+def test_rename_freezes_the_label_as_the_stored_value_so_saves_do_not_change():
+    choice = make('Stage IV')
+    assert choice.value == '' and choice.stored_value == 'Stage IV'
+    field_choices.rename(choice, 'Stage 4')
+    choice.refresh_from_db()
+    assert (choice.display, choice.value, choice.stored_value) == ('Stage 4', 'Stage IV', 'Stage IV')
+    field_choices.rename(choice, 'Fourth stage')          # a second rename leaves it
+    choice.refresh_from_db()
+    assert choice.stored_value == 'Stage IV'
+
+
+def test_rename_leaves_a_typed_value_alone():
+    choice = make('Four', value_type='integer', value='4')
+    field_choices.rename(choice, 'IV')
+    choice.refresh_from_db()
+    assert (choice.value, choice.stored_value) == ('4', '4')
+
+
+def test_a_case_only_rename_still_freezes():
+    choice = make('stage iv')
+    field_choices.rename(choice, 'Stage IV')
+    choice.refresh_from_db()
+    assert choice.stored_value == 'stage iv'
+
+
 def test_rename_to_another_choices_label_is_refused():
     make('Stage IV')
     other = make('Stage 4')
@@ -302,6 +327,28 @@ def test_patch_renames_keeping_code_and_alias_and_refuses_code_changes(staff):
     assert r.status_code == 400
 
 
+def test_patch_rename_keeps_the_stored_value_and_reports_it(staff):
+    choice = make('Stage IV')
+    assert staff.get(f'/api/v1/field-choices/{choice.pk}/').json()['stored_value'] == 'Stage IV'
+    r = staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'display': 'Stage 4'}, format='json')
+    assert r.status_code == 200, r.data
+    assert (r.json()['display'], r.json()['value'], r.json()['stored_value']) == ('Stage 4', 'Stage IV', 'Stage IV')
+    choice.refresh_from_db()
+    assert choice.value == 'Stage IV'
+    # an unrelated edit afterwards leaves it, and a value sent on purpose wins
+    r = staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'sort_order': 3}, format='json')
+    assert r.json()['stored_value'] == 'Stage IV'
+    r = staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'value': 'IV'}, format='json')
+    assert r.json()['stored_value'] == 'IV'
+
+
+def test_stored_value_cannot_be_written_through_the_field_choice_api(staff):
+    choice = make('Stage IV')
+    staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'stored_value': 'x'}, format='json')
+    choice.refresh_from_db()
+    assert choice.value == ''
+
+
 def test_patch_scope_retire_and_unrelated_edit_leaves_them(staff):
     choice = make('I', context_key='iss')
     r = staff.patch(f'/api/v1/field-choices/{choice.pk}/',
@@ -351,7 +398,26 @@ def test_write_options_list_an_answer_once_across_contexts():
     from omop_core.services.write_descriptor import _field_choice_options
     make('I', context_key='iss')
     make('I', context_key='ann_arbor')
-    assert [d for d, _ in _field_choice_options()['stage']] == ['I']
+    assert [d for d, *_ in _field_choice_options()['stage']] == ['I']
+
+
+def test_write_option_after_a_rename_stores_the_old_value_and_shows_the_new_label():
+    from omop_core.services.write_descriptor import _field_choice_options
+    choice = make('Stage IV')
+    make('Stage V')
+    field_choices.rename(choice, 'Stage 4')
+    options = {stored: label for stored, _, label in _field_choice_options()['stage']}
+    assert options == {'Stage IV': 'Stage 4', 'Stage V': 'Stage V'}
+
+
+def test_write_descriptor_carries_a_label_only_where_it_differs():
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    field = 'planned_therapies'
+    renamed = FieldChoice.objects.create(field_name=field, display='Option A')
+    FieldChoice.objects.create(field_name=field, display='Option B')
+    field_choices.rename(renamed, 'Option Alpha')
+    options = build_writable_field_descriptor()[field]['options']
+    assert {o['value']: o.get('label') for o in options} == {'Option A': 'Option Alpha', 'Option B': None}
 
 
 # ── Curation transfer ──────────────────────────────────────────────────────
