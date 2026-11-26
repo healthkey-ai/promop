@@ -60,6 +60,17 @@ rather than the models.
 - **`value` / `value_type`** are the canonical storage value and how it is read
   (`text`, `integer`, `decimal`, `boolean`); blank `value` means the label,
   which is what every seeded row stored. A value the type cannot hold is a 400.
+  **A save always stores the value** (`stored_value`, the value or the label while
+  there is none), never the label as it reads now: `rename` freezes the label
+  being replaced into a blank `value` at the first rename (lazily, so an answer
+  nobody renames is untouched and no migration rewrites rows), and a later rename
+  leaves it. The write descriptor's options therefore carry `value` (what is
+  stored) and, only when it differs, `label` (what a person reads); the patient
+  select shows the label and saves the value, derivation reads a concept-only
+  fact back as the value, and the projection already matched the value, the
+  label and every alias. The editor shows the value read only ("Saved as"); a
+  `value` sent through the API on purpose still wins. A curation transfer copies
+  the source's `value`, so a source that has frozen one gives the target the same.
 - **Aliases.** A rename keeps the old label as an alias (`source='label'`), so
   stored data that still reads it resolves; `set_aliases` replaces the curator's
   own spellings and keeps those. A spelling another choice of the field and
@@ -222,9 +233,9 @@ and never the model.
   it listed when it was chosen stay listed (with their new state) until the
   filter changes, so a decision does not take its row away, and adding an
   answer returns to the whole list. The summary sticks to the top of the
-  scrolling editor. Still not here: the typed `value` in the
-  editor (what a patient's save stores for an answer, label or value, is its own
-  decision), and concept mapping for the options of a lookup.
+  scrolling editor. The stored value is shown read only in the
+  editor, frozen at the first rename (see `value` above); typing one is not
+  offered. Still not here: concept mapping for the options of a therapy catalog.
   **Lookup options** (#1225, `LookupOptions.tsx`, `GET field-choices/lookup/
   ?field_name=`, `omop_core/services/option_sources.py`): nineteen fields draw
   their dropdown from a `VocabularyLookup` table, which until now only the

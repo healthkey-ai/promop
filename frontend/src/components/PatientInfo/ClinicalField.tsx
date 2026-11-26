@@ -4,6 +4,7 @@ import { today } from '@/api/clinicalFacts';
 import type { VocabSource } from '@/hooks/useVocabulary';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 import { useFieldMembership } from './DiseaseProfile';
+import type { OptionInput } from './utils';
 
 interface Props {
   label: string;
@@ -13,7 +14,7 @@ interface Props {
   /** Choices for a select. The descriptor's own `options` win when it has them:
    *  those are the curated set the server resolves a concept from, so a local
    *  list could offer a value the write would then fail to code. */
-  options?: string[];
+  options?: OptionInput[];
   vocabSource?: VocabSource | null;
   /** Mark a control the API has no field for at all — distinct from one it
    *  refuses to write. See #646. */
@@ -73,7 +74,8 @@ export default function ClinicalField({
   const [ownDate, setOwnDate] = useState(today());
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
-  const curated = descriptor?.options?.map((o) => o.value);
+  // The stored text is the option's value; a renamed answer shows its new label.
+  const curated = descriptor?.options?.map((o) => (o.label && o.label !== o.value ? { value: o.value, label: o.label } : o.value));
   const choices = curated ?? options;
   // `multiple` is the descriptor saying several answers are stored at once,
   // comma-joined — SCT history is "autologous SCT,tandem SCT". Rendering that as

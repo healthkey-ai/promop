@@ -27,6 +27,8 @@ interface Choice {
   codes: ChoiceCode[];
   /** The stable identity, other spellings and standing (#1224). */
   code?: string;
+  /** What a save writes for the answer (read only). */
+  stored_value?: string;
   aliases?: string[];
   retired?: boolean;
   context_key?: string;
@@ -247,6 +249,7 @@ export function FieldChoiceEditor({
                         choiceId={choice.id}
                         label={choice.display}
                         code={choice.code}
+                        storedValue={choice.stored_value}
                         aliases={choice.aliases}
                         retired={choice.retired}
                         diseases={choice.diseases}

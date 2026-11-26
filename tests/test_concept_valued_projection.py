@@ -418,11 +418,22 @@ class TestConceptOnlyFactsRead:
         self._fact(person, 1617595)        # the question concept itself
         assert self._derived(person) in (None, '')
 
-    def test_the_answer_read_is_the_label_the_editor_offers(
+    def test_the_answer_read_is_the_stored_value_the_select_saves(
         self, disease_activity_mapping, disease_activity_choices,
     ):
         FieldChoice.objects.filter(display='Finished treatment and in remission').update(
             value='remission')
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        self._fact(person, 4014046)
+        assert self._derived(person) == 'remission'
+
+    def test_a_renamed_answer_is_still_read_as_the_value_it_was_saved_as(
+        self, disease_activity_mapping, disease_activity_choices,
+    ):
+        from omop_core.services import field_choices
+        choice = FieldChoice.objects.get(display='Finished treatment and in remission')
+        field_choices.rename(choice, 'In remission')
         person = PersonFactory()
         PatientRecordFactory(person=person)
         self._fact(person, 4014046)

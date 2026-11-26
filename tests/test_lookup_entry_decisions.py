@@ -98,7 +98,7 @@ def test_it_is_not_listed_offered_or_counted(her2):
     assert listed == ['Equivocal']
     assert [c['display'] for c in staff.get(CHOICES, {'field_name': 'her2_status', 'disease': 'Other'}).json()] \
         == ['Equivocal']
-    assert list(_field_choice_options().get('her2_status', [])) == [('Equivocal', None)]
+    assert list(_field_choice_options().get('her2_status', [])) == [('Equivocal', None, 'Equivocal')]
     descriptor = next(d for d in get_all_field_descriptors() if d['field_name'] == 'her2_status')
     assert [c['display'] for c in descriptor['choices']] == ['Equivocal']
     assert fvm.coverage('her2_status')['her2_status']['choices'] == 1
