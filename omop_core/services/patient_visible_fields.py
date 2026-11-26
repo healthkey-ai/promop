@@ -97,7 +97,7 @@ DISEASE_TYPE_CATEGORY = {
 }
 
 # Functions of DiseaseTab.tsx that render no disease fields of their own.
-NOT_SECTIONS = ('DatePrecisionPicker', 'DiseaseTab')
+NOT_SECTIONS = ('DatePrecisionPicker', 'DiseaseTab', 'DiseaseSections')
 
 # Columns a scanned tab names only to show them as text, never as a control the
 # patient can edit: the disease tab's legacy cytogenetic summary.
@@ -153,8 +153,8 @@ def function_blocks(source: str) -> dict[str, str]:
 
 
 def switch_sections(source: str) -> dict[str, set[str]]:
-    """The sections ``DiseaseTab`` renders for each disease type, read from its switch."""
-    body = function_blocks(source)['DiseaseTab']
+    """The sections ``DiseaseTab`` renders for each disease type, read from its switch (in ``DiseaseSections``)."""
+    body = function_blocks(source)['DiseaseSections']
     found: dict[str, set[str]] = {}
     for kind, section in _SWITCH_CASE.findall(body) + _AND_SECTION.findall(body):
         found.setdefault(kind, set()).add(section)

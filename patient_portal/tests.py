@@ -19144,11 +19144,126 @@ class WearableUploadEndpointTest(TestCase):
         client = self._client_as(self.identity)
         resp = client.post(
             '/api/v1/patient-records/upload-wearable/',
-            data={'file': uploaded, 'device_type': 'oura'},
+            data={'file': uploaded, 'device_type': 'fitbit'},
             format='multipart',
         )
         self.assertEqual(resp.status_code, 400)
         self.assertIn('device_type', resp.data['error'])
+
+    # -- Oura Ring export (#2889) ---------------------------------------------
+
+    _OURA_ACTIVITY = (
+        'id;day;steps;high_activity_time;medium_activity_time;active_calories\n'
+        'a;2024-07-01;8200;600;1800;410\n')
+    _OURA_SLEEP = (
+        'id;day;type;total_sleep_duration;average_hrv;lowest_heart_rate;average_breath\n'
+        's;2024-07-01;long_sleep;27000;52;51;14.5\n')
+
+    def _post_oura(self, filename, content, identity=None, **fields):
+        import io
+        import zipfile
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        if filename.endswith('.zip'):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                for name, text in content.items():
+                    archive.writestr(name, text)
+            content = buffer.getvalue()
+        else:
+            content = content.encode()
+        uploaded = SimpleUploadedFile(filename, content)
+        return self._client_as(identity or self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'oura', **fields},
+            format='multipart',
+        )
+
+    def test_oura_export_is_stored_as_ordinary_source_codes(self):
+        """The zip's rows are filed under the Oura vocabulary, one code per metric."""
+        from omop_core.models import Observation, PatientSourceCode, SourceCodeConceptMapping, WearableUpload
+        resp = self._post_oura('oura.zip', {
+            'App Data/dailyactivity.csv': self._OURA_ACTIVITY,
+            'App Data/sleepmodel.csv': self._OURA_SLEEP,
+            'App Data/heartrate.csv': 'timestamp;bpm\n',
+        })
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 7)
+
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'oura')
+        # The device's own code, in the Oura vocabulary, in the patient's inventory.
+        held = set(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='Oura').values_list('source_value', flat=True))
+        # Under Oura's own spelling: a bare ``steps`` is Garmin's.
+        self.assertEqual(held, {'oura_steps', 'oura_active_minutes', 'oura_active_energy',
+                                'oura_sleep_duration', 'oura_hrv_rmssd', 'oura_resting_hr',
+                                'oura_respiratory_rate'})
+        self.assertTrue(Observation.objects.filter(
+            person=self.person, observation_source_value='oura_steps', value_as_number=8200).exists())
+        self.assertTrue(Measurement.objects.filter(
+            person=self.person, measurement_source_value='oura_hrv_rmssd', value_as_number=52).exists())
+        # No Oura mapping is approved, so each code is queued for a curator.
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', status='approved').exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', source_code='oura_steps').exists())
+
+    def test_oura_csv_alone_is_accepted(self):
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 3)
+
+    def test_oura_upload_twice_stores_each_reading_once(self):
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 0)
+        self.assertEqual(resp.data['duplicates_skipped'], 3)
+        self.assertEqual(self._wearable_rows(self.person)[0], 3)
+
+    def test_oura_upload_refuses_other_file_types_and_unreadable_files(self):
+        resp = self._post_oura('oura.fit', 'x')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('.zip', resp.data['error'])
+        resp = self._post_oura('oura.zip', {'notes.txt': 'nothing here'})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('No Oura export files found', resp.data['error'])
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_a_later_oura_export_replaces_the_days_an_earlier_one_wrote(self):
+        """Oura revises recent days: the corrected total replaces, never stacks."""
+        from omop_core.models import Observation
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        revised = self._OURA_ACTIVITY.replace(';8200;', ';9100;')
+        resp = self._post_oura('dailyactivity.csv', revised)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        steps = Observation.objects.filter(person=self.person, observation_source_value='oura_steps')
+        self.assertEqual(list(steps.values_list('value_as_number', flat=True)), [9100])
+
+    def test_a_parse_refusal_of_another_device_is_still_the_generic_answer(self):
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': __import__('django.core.files.uploadedfile', fromlist=['x']).SimpleUploadedFile(
+                'export.zip', b'not a zip'), 'device_type': 'apple'},
+            format='multipart')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Failed to parse file', resp.data['error'])
+
+    def test_oura_upload_started_from_another_record_is_refused(self):
+        other = Person.objects.create(person_id=99012, family_name='Other', given_name='Olive')
+        PatientRecord.objects.create(person=other)
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY, person_id=str(other.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_oura_upload_is_deleted_with_its_rows(self):
+        from omop_core.models import WearableUpload
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        upload = WearableUpload.objects.get(person=self.person)
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._wearable_rows(self.person)[0], 0)
 
     def test_upload_wrong_extension(self):
         """POST with wrong file extension returns 400."""
@@ -37713,3 +37828,495 @@ class WearableCodesBesideOtherCodesTest(RunsRepointJobsMixin, TestCase):
         record = self._record()
         self.assertIn(record['activity_trend_30d'], ('improving', 'stable', 'declining'))
         self.assertEqual(record['provisional_fields'].get('activity_trend_30d'), 85)
+
+
+@override_settings(
+    OURA_CLIENT_ID='oura-client-id', OURA_CLIENT_SECRET='oura-secret-NOT-REAL', OURA_REDIRECT_URI='',
+    GARMIN_TOKEN_KEY=_GARMIN_TOKEN_KEY, GARMIN_TOKEN_KEY_FALLBACKS=[],
+    APP_BASE_URL='https://promop.example.test',
+)
+class OuraOAuthEndpointTest(TestCase):
+    """An Oura account linked by OAuth, and the sync from Oura's API (#2900).
+
+    Oura's own endpoints are patched: tests/test_oura_oauth.py covers what is
+    sent to them. These cover who may connect, what a callback stores, what a
+    sync writes and to whom, and disconnecting.
+    """
+
+    STATUS = '/api/v1/oura/connection/'
+    START = '/api/v1/oura/oauth/start/'
+    CALLBACK = '/api/v1/oura/oauth/callback/'
+    SYNC = '/api/v1/oura/sync/'
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+        cls.day = timezone.now().date() - timedelta(days=2)
+        cls.other_person = Person.objects.create(person_id=99003, family_name='Other', given_name='Ola')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_identity = Identity.objects.create_user(email='ola-other@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_identity, person=cls.other_person)
+        cls.provider = Identity.objects.create_user(email='oura-provider@test.com', password='pw')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _as(self, identity):
+        c = APIClient()
+        c.force_login(identity)
+        return c
+
+    def _tokens(self, access='oura-access-AAAA', refresh='oura-refresh-RRRR', hours=24):
+        from omop_core.services.oura_oauth import Tokens
+        return Tokens(access_token=access, refresh_token=refresh,
+                      access_expires_at=timezone.now() + timedelta(hours=hours))
+
+    def _start(self, client):
+        from urllib.parse import parse_qs, urlsplit
+        response = client.post(self.START)
+        self.assertEqual(response.status_code, 200, getattr(response, 'data', None))
+        return parse_qs(urlsplit(response.data['authorize_url']).query)['state'][0]
+
+    def _return(self, client, **query):
+        from unittest import mock
+        with mock.patch('omop_core.services.oura_oauth.exchange_code', return_value=self._tokens()) as exchange:
+            response = client.get(self.CALLBACK, query)
+        return response, exchange
+
+    def _consent(self, identity=None):
+        client = self._as(identity or self.identity)
+        return self._return(client, code='the-code', state=self._start(client))
+
+    def _connect(self, person=None, **fields):
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        row = OuraConnection(person=person or self.person)
+        oura_oauth.store_tokens(row, self._tokens())
+        for name, value in fields.items():
+            setattr(row, name, value)
+        row.save()
+        return row
+
+    def _days(self, steps=8200, sleep=True):
+        day = self.day.isoformat()
+        documents = {'activity': [{'day': day, 'steps': steps, 'high_activity_time': 600,
+                                   'medium_activity_time': 1200, 'active_calories': 410}],
+                     'sleep': [], 'spo2': [], 'vo2': []}
+        if sleep:
+            documents['sleep'] = [{'day': day, 'type': 'long_sleep', 'total_sleep_duration': 25200,
+                                   'average_hrv': 52, 'lowest_heart_rate': 48, 'average_breath': 14.5}]
+        return documents
+
+    def _sync(self, documents=None, identity=None, body=None, **fetched):
+        from unittest import mock
+        from omop_core.services import oura_oauth
+        result = oura_oauth.Fetched(documents=documents if documents is not None else self._days(), **fetched)
+        with mock.patch('omop_core.services.oura_oauth.fetch_days', return_value=result) as fetch:
+            response = self._as(identity or self.identity).post(self.SYNC, body or {}, format='json')
+        return response, fetch
+
+    def _steps(self):
+        from omop_core.models import Observation
+        return sorted(float(v) for v in Observation.objects.filter(
+            person=self.person, observation_source_value='oura_steps').values_list('value_as_number', flat=True))
+
+    # ── Status and start ────────────────────────────────────────────────────
+
+    def test_status_says_whether_it_is_set_up_and_whether_the_patient_is_connected(self):
+        response = self._as(self.identity).get(self.STATUS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'configured': True, 'connected': False, 'connected_at': None,
+                                         'last_sync_at': None, 'synced_through': None})
+        self._connect()
+        data = self._as(self.identity).get(self.STATUS).data
+        self.assertTrue(data['connected'])
+        # Never a token.
+        self.assertEqual(set(data), {'configured', 'connected', 'connected_at', 'last_sync_at', 'synced_through'})
+        with override_settings(OURA_CLIENT_SECRET=''):
+            self.assertFalse(self._as(self.identity).get(self.STATUS).data['configured'])
+            self.assertEqual(self._as(self.identity).post(self.START).status_code, 503)
+        with override_settings(GARMIN_TOKEN_KEY=''):
+            self.assertFalse(self._as(self.identity).get(self.STATUS).data['configured'])
+
+    def test_start_returns_ouras_consent_page_and_leaves_its_nonce_in_the_session(self):
+        from urllib.parse import parse_qs, urlsplit
+        from omop_core.services import oura_oauth
+        client = self._as(self.identity)
+        response = client.post(self.START)
+        self.assertEqual(response.status_code, 200, response.data)
+        url = urlsplit(response.data['authorize_url'])
+        self.assertEqual((url.netloc, url.path), ('cloud.ouraring.com', '/oauth/authorize'))
+        params = {key: values[0] for key, values in parse_qs(url.query).items()}
+        self.assertEqual(params['client_id'], 'oura-client-id')
+        self.assertEqual(params['redirect_uri'], 'https://promop.example.test/api/v1/oura/oauth/callback/')
+        read = oura_oauth.read_state(params['state'])
+        self.assertEqual((read.person_id, read.identity_id), (self.person.person_id, self.identity.pk))
+        self.assertEqual(client.session['oura_oauth_nonce'], read.nonce)
+        self.assertNotIn('oura-secret-NOT-REAL', response.data['authorize_url'])
+
+    def test_only_a_signed_in_patient_may_start_read_end_or_sync(self):
+        for method, url in (('get', self.STATUS), ('delete', self.STATUS), ('post', self.START),
+                            ('post', self.SYNC)):
+            self.assertIn(getattr(APIClient(), method)(url).status_code, (401, 403), (method, url))
+            self.assertEqual(getattr(self._as(self.provider), method)(url).status_code, 403, (method, url))
+            delegated = APIClient()
+            delegated.force_authenticate(user=self.identity)
+            self.assertEqual(getattr(delegated, method)(url).status_code, 403, (method, url))
+
+    def test_start_is_refused_when_the_record_is_off(self):
+        from unittest import mock
+        with mock.patch('patient_portal.api.oura_oauth.record_permitted', return_value=False):
+            self.assertEqual(self._as(self.identity).post(self.START).status_code, 403)
+
+    # ── Callback ────────────────────────────────────────────────────────────
+
+    def test_the_callback_stores_the_connection_with_encrypted_tokens(self):
+        from omop_core.models import OuraConnection
+        from omop_core.services import garmin_oauth, oura_oauth
+        client = self._as(self.identity)
+        state = self._start(client)
+        response, exchange = self._return(client, code='the-code', state=state)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/?oura=connected')
+        self.assertEqual(response['Referrer-Policy'], 'no-referrer')
+        exchange.assert_called_once_with('the-code', oura_oauth.read_state(state).verifier)
+        row = OuraConnection.objects.get(person=self.person)
+        self.assertEqual(row.connected_by_id, self.identity.pk)
+        self.assertNotIn('oura-access-AAAA', row.access_token)
+        self.assertEqual(garmin_oauth.decrypt(row.access_token), 'oura-access-AAAA')
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'oura-refresh-RRRR')
+        self.assertIsNone(row.last_sync_at)
+        # The nonce is spent: the same state is good once.
+        again, _ = self._return(client, code='the-code', state=state)
+        self.assertEqual(again['Location'], '/?oura=error')
+
+    def test_the_callback_finishes_only_for_the_browser_that_started(self):
+        from omop_core.models import OuraConnection
+        state = self._start(self._as(self.identity))
+        # Another browser, signed in as the same account but holding no nonce.
+        other_browser, exchange = self._return(self._as(self.identity), code='c', state=state)
+        self.assertEqual(other_browser['Location'], '/?oura=error')
+        # Another account, whatever it holds.
+        client = self._as(self.other_identity)
+        self._start(client)
+        other_account, exchange = self._return(client, code='c', state=state)
+        self.assertEqual(other_account['Location'], '/?oura=error')
+        # Signed out.
+        out, _ = self._return(APIClient(), code='c', state=state)
+        self.assertEqual(out['Location'], '/?oura=error')
+        exchange.assert_not_called()
+        self.assertFalse(OuraConnection.objects.exists())
+
+    def test_a_state_for_another_record_is_refused(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        client = self._as(self.identity)
+        self._start(client)
+        # A genuine nonce, but a state naming somebody else's record.
+        nonce = client.session['oura_oauth_nonce']
+        forged = oura_oauth.new_state(self.other_person.person_id, self.identity.pk)
+        with mock.patch('omop_core.services.oura_oauth.new_state', return_value=forged):
+            session = client.session
+            session['oura_oauth_nonce'] = oura_oauth.read_state(forged).nonce
+            session.save()
+        with mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            response, _ = self._return(client, code='c', state=forged)
+        self.assertEqual(response['Location'], '/?oura=error')
+        self.assertNotEqual(nonce, '')
+        revoke.assert_called_once_with('oura-access-AAAA')
+        self.assertFalse(OuraConnection.objects.exists())
+
+    def test_declining_on_ourcs_page_is_reported_and_stores_nothing(self):
+        from omop_core.models import OuraConnection
+        client = self._as(self.identity)
+        response, exchange = self._return(client, state=self._start(client), error='access_denied')
+        self.assertEqual(response['Location'], '/?oura=denied')
+        exchange.assert_not_called()
+        self.assertFalse(OuraConnection.objects.exists())
+
+    def test_a_failed_exchange_is_an_error_and_stores_nothing(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        client = self._as(self.identity)
+        state = self._start(client)
+        with mock.patch('omop_core.services.oura_oauth.exchange_code',
+                        side_effect=oura_oauth.OuraOAuthError(oura_oauth.DENIED, 400)):
+            response = client.get(self.CALLBACK, {'code': 'c', 'state': state})
+        self.assertEqual(response['Location'], '/?oura=error')
+        self.assertFalse(OuraConnection.objects.exists())
+
+    def test_a_record_switched_off_while_on_ouras_page_is_not_connected_and_the_token_is_revoked(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        client = self._as(self.identity)
+        state = self._start(client)
+        with mock.patch('patient_portal.api.oura_oauth.record_permitted', return_value=False), \
+                mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            response, _ = self._return(client, code='c', state=state)
+        self.assertEqual(response['Location'], '/?oura=error')
+        revoke.assert_called_once_with('oura-access-AAAA')
+        self.assertFalse(OuraConnection.objects.exists())
+
+    def test_connecting_again_revokes_the_earlier_token_and_starts_the_reading_afresh(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        self._connect(last_sync_at=timezone.now(), synced_through=self.day)
+        with mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            response, _ = self._consent()
+        self.assertEqual(response['Location'], '/?oura=connected')
+        revoke.assert_called_once_with('oura-access-AAAA')
+        row = OuraConnection.objects.get()
+        self.assertIsNone(row.last_sync_at)
+        self.assertIsNone(row.synced_through)
+
+    # ── Sync ────────────────────────────────────────────────────────────────
+
+    def test_a_sync_stores_the_days_under_ouras_own_codes(self):
+        from omop_core.models import Measurement, OuraConnection, WearableUpload
+        self._connect()
+        response, fetch = self._sync()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertGreater(response.data['samples_created'], 0)
+        self.assertEqual(self._steps(), [8200.0])
+        self.assertTrue(Measurement.objects.filter(
+            person=self.person, measurement_source_value='oura_hrv_rmssd', value_as_number=52).exists())
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'oura')
+        self.assertTrue(upload.filename.startswith('Oura Ring sync '))
+        # The first sync reads ninety days; what it read is remembered.
+        start, end = fetch.call_args.args[1:3]
+        self.assertEqual((end - start).days, 90)
+        self.assertEqual(response.data['start_date'], start.isoformat())
+        row = OuraConnection.objects.get()
+        self.assertEqual(row.synced_through, end)
+        self.assertIsNotNone(row.last_sync_at)
+        self.assertEqual((response.data['unavailable'], response.data['incomplete']), ([], False))
+
+    def test_a_later_sync_replaces_the_day_and_reads_from_a_few_days_back(self):
+        from omop_core.models import OuraConnection, WearableUpload
+        self._connect()
+        self._sync()
+        OuraConnection.objects.update(last_sync_at=timezone.now() - timedelta(hours=1))
+        response, fetch = self._sync(self._days(steps=9100))
+        self.assertEqual(response.status_code, 200, response.data)
+        # The corrected total replaces the first; it never stacks.
+        self.assertEqual(self._steps(), [9100.0])
+        start, end = fetch.call_args.args[1:3]
+        self.assertEqual((end - start).days, 7)
+        # One history row per month, not one per press.
+        self.assertEqual(WearableUpload.objects.filter(person=self.person, device_type='oura').count(), 1)
+
+    def test_an_api_sync_replaces_the_days_an_export_wrote(self):
+        from omop_core.models import Observation
+        self._connect()
+        Observation.objects.all().delete()
+        self._sync(self._days(steps=7000))
+        self.assertEqual(self._steps(), [7000.0])
+
+    def test_a_second_sync_within_minutes_reads_nothing(self):
+        self._connect()
+        self._sync()
+        response, fetch = self._sync()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['skipped'], 'recent')
+        fetch.assert_not_called()
+
+    def test_a_sync_that_ran_out_of_time_does_not_move_the_days_it_has_read_to(self):
+        from omop_core.models import OuraConnection
+        self._connect()
+        response, _ = self._sync(incomplete=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['incomplete'])
+        row = OuraConnection.objects.get()
+        self.assertIsNone(row.synced_through)
+        # Not a finished sync: the next press reads again, not "up to date".
+        self.assertIsNone(row.last_sync_at)
+        again, fetch = self._sync()
+        self.assertNotIn('skipped', again.data)
+        fetch.assert_called_once()
+
+    def test_what_ouras_scopes_withheld_is_said_and_those_days_stay_to_be_read(self):
+        from omop_core.models import OuraConnection
+        self._connect()
+        response, _ = self._sync(self._days(sleep=False), unavailable=['spo2', 'vo2'])
+        self.assertEqual(response.data['unavailable'], ['spo2', 'vo2'])
+        self.assertEqual(self._steps(), [8200.0])
+        row = OuraConnection.objects.get()
+        self.assertIsNotNone(row.last_sync_at)
+        self.assertIsNone(row.synced_through)
+
+    def test_a_sync_whose_connection_ended_while_oura_was_read_writes_nothing(self):
+        """The patient disconnected between the read and the write."""
+        from unittest import mock
+        from omop_core.models import OuraConnection, WearableUpload
+        from omop_core.services import oura_oauth
+        self._connect()
+
+        def disconnect_meanwhile(*args, **kwargs):
+            OuraConnection.objects.all().delete()
+            return oura_oauth.Fetched(documents=self._days())
+
+        with mock.patch('omop_core.services.oura_oauth.fetch_days', side_effect=disconnect_meanwhile):
+            response = self._as(self.identity).post(self.SYNC, {}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['error'], oura_oauth.CHANGED)
+        self.assertFalse(response.data['reconnect'])
+        self.assertEqual(self._steps(), [])
+        self.assertFalse(WearableUpload.objects.filter(person=self.person).exists())
+
+    def test_a_sync_whose_account_was_replaced_while_oura_was_read_does_not_mark_the_new_one(self):
+        """A reconnect reuses the row: the pk is the same, the connection is not."""
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        self._connect()
+
+        def reconnect_meanwhile(*args, **kwargs):
+            OuraConnection.objects.update(connected_at=timezone.now() + timedelta(seconds=5),
+                                          last_sync_at=None, synced_through=None)
+            return oura_oauth.Fetched(documents=self._days())
+
+        with mock.patch('omop_core.services.oura_oauth.fetch_days', side_effect=reconnect_meanwhile):
+            response = self._as(self.identity).post(self.SYNC, {}, format='json')
+        self.assertEqual(response.status_code, 409)
+        row = OuraConnection.objects.get()
+        # The new account's first read is still to come.
+        self.assertIsNone(row.synced_through)
+        self.assertIsNone(row.last_sync_at)
+        self.assertEqual(self._steps(), [])
+
+    def test_the_refresh_and_the_read_share_one_deadline(self):
+        from omop_core.models import OuraConnection
+        self._connect()
+        response, fetch = self._sync()
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(fetch.call_args.kwargs['deadline'], float)
+        OuraConnection.objects.update(last_sync_at=None)
+
+    def test_a_sync_with_no_connection_says_so(self):
+        response, fetch = self._sync()
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(response.data['connected'])
+        fetch.assert_not_called()
+
+    def test_a_sync_started_from_another_record_is_refused(self):
+        self._connect()
+        response, fetch = self._sync(body={'person_id': str(self.other_person.person_id)})
+        self.assertEqual(response.status_code, 403)
+        fetch.assert_not_called()
+        ok, _ = self._sync(body={'person_id': str(self.person.person_id)})
+        self.assertEqual(ok.status_code, 200)
+
+    def test_a_sync_never_writes_to_anyone_elses_record(self):
+        from omop_core.models import Observation
+        self._connect()
+        self._connect(person=self.other_person)
+        self._sync()
+        self.assertEqual(Observation.objects.filter(
+            person=self.other_person, observation_source_value='oura_steps').count(), 0)
+
+    def test_a_sync_is_refused_while_the_record_is_off(self):
+        from unittest import mock
+        self._connect()
+        with mock.patch('patient_portal.api.oura_oauth.record_permitted', return_value=False):
+            response, fetch = self._sync()
+        self.assertEqual(response.status_code, 403)
+        fetch.assert_not_called()
+
+    def test_a_token_oura_no_longer_accepts_means_connecting_again(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        self._connect()
+        with mock.patch('omop_core.services.oura_oauth.fetch_days',
+                        side_effect=oura_oauth.OuraOAuthError(oura_oauth.RECONNECT, 409, 401)):
+            response = self._as(self.identity).post(self.SYNC, {}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(response.data['reconnect'])
+        self.assertEqual(response.data['error'], oura_oauth.RECONNECT)
+        # Kept: the patient disconnects or connects again; nothing is deleted behind them.
+        self.assertTrue(OuraConnection.objects.exists())
+
+    def test_oura_being_down_or_limiting_is_reported_in_fixed_words(self):
+        from unittest import mock
+        from omop_core.services import oura_oauth
+        self._connect()
+        for status_code, message in ((502, oura_oauth.UNREACHABLE), (429, oura_oauth.RATE_LIMITED)):
+            with mock.patch('omop_core.services.oura_oauth.fetch_days',
+                            side_effect=oura_oauth.OuraOAuthError(message, status_code)):
+                response = self._as(self.identity).post(self.SYNC, {}, format='json')
+            self.assertEqual((response.status_code, response.data['error']), (status_code, message))
+            self.assertFalse(response.data['reconnect'])
+
+    def test_an_expired_access_token_is_refreshed_before_the_read_and_saved(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import garmin_oauth
+        self._connect(access_expires_at=timezone.now() - timedelta(minutes=1))
+        fresh = self._tokens(access='oura-access-NEW', refresh='oura-refresh-NEW')
+        with mock.patch('omop_core.services.oura_oauth.refresh_tokens', return_value=fresh) as refresh:
+            response, fetch = self._sync()
+        self.assertEqual(response.status_code, 200, response.data)
+        refresh.assert_called_once()
+        self.assertEqual(refresh.call_args.args[0], 'oura-refresh-RRRR')
+        self.assertEqual(fetch.call_args.args[0], 'oura-access-NEW')
+        row = OuraConnection.objects.get()
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'oura-refresh-NEW')
+
+    # ── Disconnect ──────────────────────────────────────────────────────────
+
+    def test_disconnecting_revokes_the_token_and_removes_the_connection(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        self._connect()
+        with mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.data, {'disconnected': True, 'oura_notified': True})
+        revoke.assert_called_once_with('oura-access-AAAA')
+        self.assertFalse(OuraConnection.objects.exists())
+        with mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            again = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(again.data, {'disconnected': True, 'oura_notified': False})
+        revoke.assert_not_called()
+
+    def test_disconnecting_happens_here_even_when_oura_cannot_be_told(self):
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        self._connect()
+        self._connect(person=self.other_person)
+        with mock.patch('omop_core.services.oura_oauth.revoke',
+                        side_effect=oura_oauth.OuraOAuthError(oura_oauth.UNREACHABLE)):
+            response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.data, {'disconnected': True, 'oura_notified': False})
+        # Only the caller's own.
+        self.assertEqual(list(OuraConnection.objects.values_list('person_id', flat=True)),
+                         [self.other_person.pk])
+
+    def test_erasing_a_record_revokes_the_token_first_and_never_fails_for_it(self):
+        from unittest import mock
+        from omop_core.services import oura_oauth
+        self._connect()
+        with mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            oura_oauth.forget(self.person)
+        revoke.assert_called_once_with('oura-access-AAAA')
+        for failure in (oura_oauth.OuraOAuthError(oura_oauth.UNREACHABLE), RuntimeError('boom')):
+            with mock.patch('omop_core.services.oura_oauth.revoke', side_effect=failure):
+                oura_oauth.forget(self.person)          # logged, not raised
+        with mock.patch('omop_core.services.oura_oauth.revoke') as revoke:
+            oura_oauth.forget(self.other_person)        # no connection: nothing to tell
+        revoke.assert_not_called()
+        import inspect
+        from patient_portal import erasure
+        for path in (erasure.close_account, erasure.erase_record):
+            self.assertIn('_forget_oura(person)', inspect.getsource(path), path.__name__)
+
+    def test_copy_patient_replace_refuses_a_person_with_an_oura_connection(self):
+        from omop_core.models import OuraConnection
+        from omop_core.services import patient_transfer
+        self.assertIn((OuraConnection, 'person_id'), patient_transfer._SYSTEM_LINKS)

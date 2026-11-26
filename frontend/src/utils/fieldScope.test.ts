@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BASE_FILTER, canHaveScope, inDiseaseView, resolveDiseaseFilter } from "./fieldScope";
+import { BASE_FILTER, canHaveScope, inDiseaseView, recordDiseaseCategories, resolveDiseaseFilter } from "./fieldScope";
 
 const BASE = { scope: "base" as const, diseases: [] };
 const MM = { scope: "disease" as const, diseases: ["MM"] };
@@ -53,5 +53,14 @@ describe("canHaveScope", () => {
   it("refuses only the fields that decide a record's profile", () => {
     expect(["disease", "disease_slug", "disease_slugs"].map(canHaveScope)).toEqual([false, false, false]);
     expect(["stage", "disease_status", "genetic_mutations.origin"].map(canHaveScope)).toEqual([true, true, true]);
+  });
+});
+
+describe('recordDiseaseCategories', () => {
+  it('lists the primary first, then the others, without repeats, Other or blanks', () => {
+    expect(recordDiseaseCategories('MM', ['PC', 'MM', 'Other', ''])).toEqual(['MM', 'PC']);
+    expect(recordDiseaseCategories('', ['PC'])).toEqual(['PC']);
+    expect(recordDiseaseCategories('MM')).toEqual(['MM']);
+    expect(recordDiseaseCategories('', null)).toEqual([]);
   });
 });

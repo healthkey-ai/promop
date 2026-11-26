@@ -78,6 +78,20 @@ export const recordDiseaseCategory = (mapped: string | null, diseaseType: string
 };
 
 /**
+ * Every Disease Category a record has the extension of, its primary one first.
+ * The server lists them for a record with more than one cancer
+ * (`disease_categories`); the primary is the page's own `recordDiseaseCategory`,
+ * so a name the server could not place never drops the tab the page already shows.
+ */
+export const recordDiseaseCategories = (primary: string, listed?: string[] | null): string[] => {
+  const found: string[] = [];
+  for (const code of [primary, ...(listed ?? [])]) {
+    if (code && code !== OTHER_DISEASE && !found.includes(code)) found.push(code);
+  }
+  return found;
+};
+
+/**
  * Whether a field is part of the record of Disease Category `category`: the
  * base record's fields are part of every record, and an extension field only
  * of the categories it names (#2332). A field the descriptor does not know

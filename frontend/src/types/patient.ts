@@ -302,6 +302,8 @@ export interface PatientInfo {
   disease_slug?: string | null;
   /** Every cancer on the record, primary first (derived, read-only). */
   disease_slugs?: string[];
+  /** The Disease Categories whose extension the record has, primary first. Sent only when the record has more than one cancer. */
+  disease_categories?: string[];
   validated?: boolean | null;
   validated_by?: string | null;
   validation_date?: string | null;

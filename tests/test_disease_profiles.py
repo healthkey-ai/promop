@@ -782,6 +782,51 @@ def test_a_records_category_is_its_mapping_then_the_keyword_fallback(text, mappe
     assert disease_profiles.record_category(text) == expected
 
 
+# ── A record with several cancers has each one's extension ────────────────
+
+def _prostate_category():
+    # The table is read as the category list once it holds a row, so the others are rows too.
+    for code, label in (('MM', 'Multiple Myeloma'), ('BC', 'Breast Cancer'), ('PC', 'Prostate Cancer')):
+        DiseaseCategoryChoice.objects.get_or_create(code=code, defaults={'label': label})
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Prostate cancer', category='PC')
+
+
+def test_a_record_with_myeloma_and_prostate_cancer_has_both_extensions():
+    _prostate_category()
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Multiple myeloma', category='MM')
+    assert disease_profiles.record_categories(
+        'Multiple myeloma', ['multiple-myeloma', 'prostate-cancer']) == ['MM', 'PC']
+    # primary first, whatever order the slugs come in
+    assert disease_profiles.record_categories(
+        'Prostate cancer', ['multiple-myeloma', 'prostate-cancer']) == ['PC', 'MM']
+
+
+def test_other_cancers_are_found_by_keyword_when_the_mapping_does_not_hold_them():
+    _prostate_category()
+    assert disease_profiles.record_categories('Multiple myeloma', ['multiple-myeloma', 'breast-cancer']) == ['MM', 'BC']
+
+
+def test_a_cancer_filed_under_other_or_unknown_adds_no_extension():
+    _prostate_category()
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Glioblastoma', category='Other')
+    assert disease_profiles.record_categories(
+        'Multiple myeloma', ['multiple-myeloma', 'glioblastoma', 'something-unmapped']) == ['MM']
+    assert disease_profiles.record_categories('', []) == []
+
+
+def test_the_record_read_lists_every_category_only_when_there_is_more_than_one_cancer():
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    _prostate_category()
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Multiple myeloma', category='MM')
+    both = PatientRecordFactory(disease='Multiple myeloma', disease_slug='multiple-myeloma',
+                                disease_slugs=['multiple-myeloma', 'prostate-cancer'])
+    one = PatientRecordFactory(disease='Multiple myeloma', disease_slug='multiple-myeloma',
+                               disease_slugs=['multiple-myeloma'])
+    assert PatientRecordSerializer(both).data['disease_categories'] == ['MM', 'PC']
+    assert 'disease_categories' not in PatientRecordSerializer(one).data
+
+
 def test_the_attestation_shows_the_section_of_the_category_not_the_disease_text():
     from omop_core.services import patient_visible_fields as visible
 

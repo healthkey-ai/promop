@@ -431,3 +431,39 @@ it('shows no role marker to a reader whose list has no Name column (#2838, #2460
   await screen.findByText('Breast Cancer');
   expect(screen.queryByText('Also doctor')).not.toBeInTheDocument();
 });
+
+const diseaseOptions = {
+  disease_categories: [{ value: 'MM', label: 'Multiple Myeloma' }, { value: 'PC', label: 'Prostate Cancer' }],
+  diseases_by_category: { MM: ['Multiple myeloma'], PC: ['Prostate cancer', 'Prostate adenocarcinoma'] },
+  orgs: [], diseases: [], stages: ['I'],
+};
+const lastParams = () => (vi.mocked(api.get).mock.calls.at(-1)![1] as { params: Record<string, string> }).params;
+
+it('keeps the chosen Disease Category and Disease when the page is opened again', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { ...cohort, filter_options: diseaseOptions } });
+  const { unmount } = render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  fireEvent.change(screen.getByLabelText('Disease Category'), { target: { value: 'PC' } });
+  fireEvent.change(await screen.findByLabelText('Disease'), { target: { value: 'Prostate cancer' } });
+  await waitFor(() => expect(lastParams()).toMatchObject({ disease_category: 'PC', disease: 'Prostate cancer' }));
+  unmount();
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  expect(screen.getByLabelText('Disease Category')).toHaveValue('PC');
+  expect(screen.getByLabelText('Disease')).toHaveValue('Prostate cancer');
+  expect(lastParams()).toMatchObject({ disease_category: 'PC', disease: 'Prostate cancer' });
+  // Changing the category clears the disease of the old one.
+  fireEvent.change(screen.getByLabelText('Disease Category'), { target: { value: 'MM' } });
+  await waitFor(() => expect(lastParams()).toMatchObject({ disease_category: 'MM', disease: 'all' }));
+});
+
+it('applies a saved category the list no longer offers as All, without losing the others', async () => {
+  localStorage.setItem('promop-patient-list:session', JSON.stringify({
+    filters: { ecog: '1' }, disease_category: 'GONE', disease: 'Whatever',
+  }));
+  vi.mocked(api.get).mockResolvedValue({ data: { ...cohort, filter_options: diseaseOptions } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  await waitFor(() => expect(lastParams()).toMatchObject({ disease_category: 'all', disease: 'all', ecog: '1' }));
+  expect(screen.getByLabelText('Disease Category')).toHaveValue('all');
+});

@@ -460,6 +460,84 @@ starts sending HealthKit, Health Connect or HL7 PHR codes finds a curated mappin
 
 ---
 
+## Oura Ring export
+
+Oura's cloud API is OAuth-gated; the linked account that reads it is
+[below](#oura-account-by-oauth). The export is the other way in: the
+export a member requests from Oura's Membership Hub (Export data; Oura says it
+can take up to ten days): a zip of CSV files that follows the Oura API V2 data
+models, durations in seconds (#2889). It is a file upload, so it sits with the
+Garmin and Apple Health uploads, in its own **Oura Ring** section of the
+Wearables tab directly below Garmin (`OuraUpload.tsx`), with its own collapsed
+uploads list. The section has its own button because a `.zip` on the top
+Upload button and drop zone is read as Apple Health.
+
+`POST /api/v1/patient-records/upload-wearable/` takes `device_type=oura` and a
+`.zip` or a single `.csv`; `parse_oura_export` (`oura_parser.py`) returns the
+same `WearableSample`s as the other parsers, and everything after that is the
+shared writer: the device's own code (the metric key behind `oura_`, so a bare
+`steps` stays Garmin's) under the `Oura` vocabulary, the patient's inventory entry, and the resolver.
+
+| File (any folder, any case, `_` ignored) | Columns | Metric |
+|---|---|---|
+| `dailyactivity` | `steps` | `steps` |
+| | `high_activity_time` + `medium_activity_time` (s) | `active_minutes` |
+| | `active_calories` | `active_energy` |
+| `sleepmodel` | `total_sleep_duration` (s), the day's sessions added | `sleep_duration` |
+| | `average_hrv`, of the longest session | `hrv_rmssd` |
+| | `lowest_heart_rate`, of the longest session | `resting_hr` |
+| | `average_breath`, of the longest session | `respiratory_rate` |
+| `dailyspo2` | `spo2_percentage`, a number or its `average` | `spo2` |
+| `vo2max` | `vo2_max` | `vo2_max` |
+
+- Oura's HRV is RMSSD and is stored as `hrv_rmssd`, never `hrv_sdnn`
+  ([Gap G](#gap-g--hrv-conflated-sdnn-with-rmssd--fixed-438)).
+- `deleted` and `rest` sleep sessions are skipped; Oura writes 0 where it has
+  no figure, so a 0 HRV, heart rate or breathing rate is not stored.
+- `equivalent_walking_distance` is an estimate from activity, not a distance
+  walked, so it is not stored as `distance`. Scores, temperature, stress and
+  the heart-rate series are not read.
+- **Not verified against a real export.** The names are Oura's documented API
+  V2 ones; a file or column that is absent is skipped, never guessed, and the
+  separator (`;` or `,`) is detected per file.
+- **Mappings.** `seed_wearable_device_mappings` seeds nine `Oura` rows at the
+  concepts Garmin's use, **proposed** (`origin_system` `hk-wearables-oura`):
+  an Oura reading is provisional or unresolved until a curator approves the
+  mapping. `Oura` is one of `WEARABLE_DEVICE_VOCABULARIES`, so the device-code
+  rules under [Row shape written today](#row-shape-written-today) hold for it,
+  and the Code Mapping Wearables tab lists its rows.
+- Zip limits: 200 files, 50 MB per CSV, 150 MB in all uncompressed, checked
+  before anything is read.
+- An Oura day is a total that Oura revises, so the upload is written with
+  `replace_daily=True` (a later export replaces the days an earlier one wrote,
+  as a Garmin sync does). A day with no steps, activity or calories is not
+  stored; a day repeated in a file is the later row; a plain `sleep` file is
+  read only when there is no `sleepmodel`.
+
+## Oura account by OAuth
+
+Oura's API V2 is OAuth2 only, and can be read on demand with history, so a
+patient links their account once and this server pulls their days (#2900). The
+rules are in `AGENTS.md` ("Wearables — Oura Account by OAuth"); this is the shape.
+
+| Step | Where | What |
+|---|---|---|
+| Register the app | `https://cloud.ouraring.com/oauth/applications` | redirect URL `<APP_BASE_URL>/api/v1/oura/oauth/callback/`; scopes `daily`, `spo2`, `heart_health`; an unapproved app is capped at ten users |
+| Consent | `POST /api/v1/oura/oauth/start/` | Oura's `https://cloud.ouraring.com/oauth/authorize` with a PKCE challenge, the scopes and a signed state |
+| Connect | `GET /api/v1/oura/oauth/callback/` | code exchanged at `https://api.ouraring.com/oauth/token`, tokens stored encrypted, back to `/?oura=connected` |
+| Sync | `POST /api/v1/oura/sync/` | `GET https://api.ouraring.com/v2/usercollection/{daily_activity,sleep,daily_spo2,vO2_max}` with `start_date`, `end_date`, `next_token` |
+| Disconnect | `DELETE /api/v1/oura/connection/` | `GET https://api.ouraring.com/oauth/revoke?access_token=...`, row removed |
+
+Every request carries a `User-Agent` (Oura may answer 403 without one). The API
+documents are read through the export parser's day rules, so the metric table
+under [Oura Ring export](#oura-ring-export) holds for both, with the API's
+field names: `daily_activity` (`steps`, `high_activity_time`,
+`medium_activity_time`, `active_calories`), `sleep` (`total_sleep_duration`,
+`average_hrv`, `lowest_heart_rate`, `average_breath`, `type`), `daily_spo2`
+(`spo2_percentage.average`), `vO2_max` (`vo2_max`). Both ways write device
+`oura` with `replace_daily=True`, so a later day from either replaces the same
+day from the other.
+
 ## Garmin Connect sync
 
 A Garmin patient can sync from the Wearables tab instead of downloading `.fit` files (#2794).
@@ -1172,7 +1250,8 @@ What a new vendor does touch:
 | `mappings.py` | Only if the vendor measures something the 18 canonical metrics don't cover |
 
 `WearableUpload.device_type` is `max_length=10`, which accommodates `fitbit`, `whoop`, and `oura`
-without a migration.
+without a migration. Oura's file export is the worked example of a fourth adapter:
+[Oura Ring export](#oura-ring-export).
 
 **Cloud-API vendors need a sync path, not an upload path.** Apple and Garmin arrive as file
 uploads; Fitbit, Whoop, and Oura are OAuth-gated REST APIs requiring token storage, refresh

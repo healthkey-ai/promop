@@ -172,8 +172,9 @@ describe('WearableTab — upload history', () => {
     ['apple', 'Apple'],
     // What a phone app syncs from Health Connect is filed as android.
     ['android', 'Android'],
+    ['oura', 'Oura'],
     // A device type the tab has no name for is shown as the server sent it.
-    ['oura', 'oura'],
+    ['fitbit', 'fitbit'],
     ['toString', 'toString'],
   ])('labels a %s upload %s', async (deviceType, label) => {
     mockGet.mockImplementation((url: string) => Promise.resolve({
@@ -1079,7 +1080,7 @@ describe('WearableTab — uploads sit in the section of their device (#2861)', (
   const HISTORY = [
     upload(1, 'garmin', 'garmin-a.fit'), upload(2, 'garmin', 'garmin-b.fit'),
     upload(3, 'apple', 'export.zip'), upload(4, 'android', 'Phone health app 2026-11'),
-    upload(5, 'oura', 'ring.csv'),
+    upload(5, 'fitbit', 'ring.csv'),
   ];
   const connection = (enabled: boolean) => ({
     enabled, connected: false, devices: 0, code_pending: false, code_expires_at: null,
@@ -1178,5 +1179,143 @@ describe('WearableTab — uploads sit in the section of their device (#2861)', (
     renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     expect(screen.queryByRole('button', { name: /^Uploads/ })).not.toBeInTheDocument();
+  });
+});
+
+describe('WearableTab — Oura Ring export (#2889)', () => {
+  const ouraUpload = {
+    id: 9, device_type: 'oura', filename: 'oura-export.zip', samples_created: 4, duplicates_skipped: 0,
+    sample_summary: [{ metric: 'steps', date: '2026-11-20', value: 9000 }],
+    uploaded_at: '2026-11-20T10:00:00Z',
+  };
+  const garminUpload = { ...ouraUpload, id: 8, device_type: 'garmin', filename: 'garmin-a.fit' };
+  const ouraSection = () => screen.getByRole('region', { name: 'Oura Ring' });
+  const ouraInput = () => within(ouraSection()).getByLabelText('Oura export files') as HTMLInputElement;
+
+  function loadHistory(history: unknown[]) {
+    mockGet.mockImplementation((url: string) => Promise.resolve({
+      data: url.includes('writable-fields') ? DESCRIPTORS : url.includes('wearable-uploads') ? history : [],
+    }));
+  }
+
+  it('sits directly below the Garmin section', () => {
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+    const garmin = screen.getByRole('region', { name: 'Garmin' });
+    expect(garmin.nextElementSibling).toBe(ouraSection());
+  });
+
+  it('is offered on the patient\'s own record only', () => {
+    renderTab({ ownRecord: false, canSyncOwnDevice: false, formData: { person_id: 202 } });
+    expect(screen.queryByRole('region', { name: 'Oura Ring' })).not.toBeInTheDocument();
+  });
+
+  it('uploads the chosen export as oura, for the page\'s record, and says so in its own section', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 12, duplicates_skipped: 2 } });
+    const onRefresh = vi.fn();
+    renderTab({ onRefresh, formData: { person_id: 101 } });
+
+    fireEvent.change(ouraInput(), { target: { files: [createFile('oura-export.zip')] } });
+
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    const [url, payload] = mockPost.mock.calls[0] as [string, FormData];
+    expect(url).toBe('/v1/patient-records/upload-wearable/');
+    expect(payload.get('device_type')).toBe('oura');
+    expect(payload.get('person_id')).toBe('101');
+    expect(await within(ouraSection()).findByText(/uploaded 12 samples \(2 duplicates skipped\)/i)).toBeInTheDocument();
+    // Not repeated beside the Upload button at the top.
+    expect(screen.getAllByText(/uploaded 12 samples/i)).toHaveLength(1);
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it('reads one of the export\'s CSV files too, several at once', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 1, duplicates_skipped: 0 } });
+    renderTab();
+    fireEvent.change(ouraInput(), {
+      target: { files: [createFile('dailyactivity.csv'), createFile('sleepmodel.csv')] },
+    });
+    await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
+    for (const call of mockPost.mock.calls) expect((call[1] as FormData).get('device_type')).toBe('oura');
+  });
+
+  it('refuses another file type without sending anything', async () => {
+    renderTab();
+    fireEvent.change(ouraInput(), { target: { files: [createFile('activity.fit')] } });
+    expect(await within(ouraSection()).findByRole('alert')).toHaveTextContent(/oura export \(\.zip\) or one of its \.csv files/i);
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('shows the server\'s refusal in its own section', async () => {
+    mockPost.mockRejectedValue({ response: { data: { error: 'Failed to parse file.' } } });
+    renderTab();
+    fireEvent.change(ouraInput(), { target: { files: [createFile('oura.zip')] } });
+    expect(await within(ouraSection()).findByRole('alert')).toHaveTextContent('Failed to parse file.');
+    expect(screen.getAllByText('Failed to parse file.')).toHaveLength(1);
+  });
+
+  it('lists its uploads, collapsed, in its own section and not in the leftovers', async () => {
+    loadHistory([garminUpload, ouraUpload]);
+    renderTab({ canSyncOwnDevice: true, formData: { person_id: 101 } });
+
+    const list = await screen.findByTestId('uploads-oura');
+    expect(ouraSection()).toContainElement(list);
+    const toggle = within(list).getByRole('button', { name: 'Uploads (1)' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(list).queryByText('oura-export.zip')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('uploads-other')).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(within(list).getByText('oura-export.zip')).toBeInTheDocument();
+    expect(within(list).getByText('Oura')).toBeInTheDocument();
+  });
+
+  it('deletes an upload from inside its section', async () => {
+    loadHistory([ouraUpload]);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockDelete.mockResolvedValue({ data: {} });
+    renderTab({ formData: { person_id: 101 } });
+
+    const list = await screen.findByTestId('uploads-oura');
+    fireEvent.click(within(list).getByRole('button', { name: 'Uploads (1)' }));
+    fireEvent.click(within(list).getByRole('button', { name: 'Delete upload oura-export.zip' }));
+    await waitFor(() => expect(mockDelete).toHaveBeenCalledWith('/v1/patient-records/wearable-uploads/9/'));
+    await waitFor(() => expect(screen.queryByTestId('uploads-oura')).not.toBeInTheDocument());
+  });
+
+  it('tells a refusal of the top upload at the top, after an Oura upload', async () => {
+    mockPost.mockResolvedValue({ data: { samples_created: 1, duplicates_skipped: 0 } });
+    renderTab();
+    fireEvent.change(ouraInput(), { target: { files: [createFile('oura.zip')] } });
+    await within(ouraSection()).findByText(/uploaded 1 sample/i);
+
+    const container = screen.getByText(/or drag & drop files here/i).closest('div[class*="relative"]')!;
+    fireEvent.drop(container, createDropEvent([createFile('data.csv')]));
+
+    expect(await screen.findByText(/unsupported file type/i)).toBeInTheDocument();
+    expect(within(ouraSection()).queryByText(/unsupported file type/i)).not.toBeInTheDocument();
+    expect(within(ouraSection()).queryByText(/uploaded 1 sample/i)).not.toBeInTheDocument();
+  });
+
+  it('says how many files were stored when a later one fails, and re-reads the record', async () => {
+    mockPost
+      .mockResolvedValueOnce({ data: { samples_created: 2, duplicates_skipped: 0 } })
+      .mockRejectedValueOnce({ response: { data: { error: 'No Oura export files found.' } } });
+    const onRefresh = vi.fn();
+    renderTab({ onRefresh });
+    fireEvent.change(ouraInput(), { target: { files: [createFile('a.csv'), createFile('b.csv')] } });
+
+    expect(await within(ouraSection()).findByRole('alert'))
+      .toHaveTextContent('No Oura export files found. 1 of 2 files were stored before it failed.');
+    expect(onRefresh).toHaveBeenCalled();
+  });
+
+  it('is disabled while its own upload is running', async () => {
+    let finish: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    renderTab();
+    fireEvent.change(ouraInput(), { target: { files: [createFile('oura.zip')] } });
+    const button = await within(ouraSection()).findByRole('button', { name: 'Sending...' });
+    expect(button).toBeDisabled();
+    await act(async () => { finish({ data: { samples_created: 1, duplicates_skipped: 0 } }); });
+    expect(within(ouraSection()).getByRole('button', { name: 'Choose Oura export' })).toBeEnabled();
   });
 });

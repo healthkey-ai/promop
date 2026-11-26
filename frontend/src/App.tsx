@@ -105,12 +105,13 @@ function AppRoutes() {
   // An analyst-only account sees no patient data (#2416): its home is the
   // Code Mapping page, and the patient pages send it there.
   const analystOnly = isAnalystOnly(currentUser);
-  // Garmin's consent page returns to "/?garmin=<outcome>" (#2802). A patient's
+  // Garmin's and Oura's consent pages return to "/?garmin=<outcome>" (#2802)
+  // and "/?oura=<outcome>" (#2900). A patient's
   // home is their record; an account that is also staff or a professional has
   // the patient list there, so it is taken on to its own record, where the
   // Wearables tab shows the outcome (#2816).
   const ownRecordId = ownPersonId(currentUser);
-  const garminReturn = ownRecordId != null && new URLSearchParams(location.search).has("garmin")
+  const garminReturn = ownRecordId != null && ["garmin", "oura"].some((name) => new URLSearchParams(location.search).has(name))
     ? `/patient/${ownRecordId}${location.search}`
     : null;
 

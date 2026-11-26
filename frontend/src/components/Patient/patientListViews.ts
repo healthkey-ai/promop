@@ -6,7 +6,11 @@ export type ReviewFilters = typeof REVIEW_FILTER_DEFAULTS;
 export interface Preferences {
   filters: ReviewFilters;
   ordering: string;
+  /** The top page's Disease Category and Disease: kept until they are changed. */
+  disease_category: string;
+  disease: string;
 }
+export const ALL_DISEASES = 'all';
 export const DEFAULT_ORDERING = '-updated';
 // Every key a heading can sort by; 'status' had a dropdown option and no column.
 const ORDERINGS = /^-?(updated|age|name|disease|stage|ecog|lines|unmapped_source_codes|freshness|gaps|organization)$/;
@@ -28,7 +32,13 @@ export function columnsFor({ outreach, multiOrg }: { outreach: boolean; multiOrg
 
 function sanitize(source: unknown): Preferences | null {
   if (!source || typeof source !== 'object') return null;
-  const raw = source as { filters?: Record<string, unknown>; ordering?: unknown };
+  const raw = source as {
+    filters?: Record<string, unknown>; ordering?: unknown; disease_category?: unknown; disease?: unknown;
+  };
+  const text = (value: unknown) => (typeof value === 'string' && value ? value.slice(0, 256) : ALL_DISEASES);
+  // A Disease only means something inside its category.
+  const disease_category = text(raw.disease_category);
+  const disease = disease_category === ALL_DISEASES ? ALL_DISEASES : text(raw.disease);
   const filters = { ...REVIEW_FILTER_DEFAULTS };
   for (const field of Object.keys(filters) as (keyof ReviewFilters)[]) {
     const value = raw.filters?.[field];
@@ -40,7 +50,12 @@ function sanitize(source: unknown): Preferences | null {
     };
     if (!choices[field] || choices[field]?.includes(value)) filters[field] = value.slice(0, 256);
   }
-  return { filters, ordering: typeof raw.ordering === 'string' && ORDERINGS.test(raw.ordering) ? raw.ordering : DEFAULT_ORDERING };
+  return {
+    filters,
+    ordering: typeof raw.ordering === 'string' && ORDERINGS.test(raw.ordering) ? raw.ordering : DEFAULT_ORDERING,
+    disease_category,
+    disease,
+  };
 }
 
 /** Clinical filters and sort, saved per account in this browser. A record
@@ -50,8 +65,8 @@ export function loadPreferences(key: string): Preferences {
   try {
     const saved = JSON.parse(localStorage.getItem(key) || '{}');
     const legacy = saved?.views && saved?.view ? saved.views[saved.view] : null;
-    return sanitize(legacy ?? saved) ?? { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: DEFAULT_ORDERING };
+    return sanitize(legacy ?? saved) ?? { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: DEFAULT_ORDERING, disease_category: ALL_DISEASES, disease: ALL_DISEASES };
   } catch {
-    return { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: DEFAULT_ORDERING };
+    return { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: DEFAULT_ORDERING, disease_category: ALL_DISEASES, disease: ALL_DISEASES };
   }
 }

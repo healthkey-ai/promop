@@ -47,7 +47,8 @@ export interface FieldDescriptor {
   /** profile: the curated choices the server resolves a concept from. Not the
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */
-  options?: Array<{ value: string; code?: string }>;
+  /** `value` is what a save stores; `label` is what a person reads, present only when it differs. */
+  options?: Array<{ value: string; code?: string; label?: string }>;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
   /** OMOP projection metadata — present when the field has an approved mapping.

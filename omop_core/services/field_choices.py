@@ -177,7 +177,14 @@ def set_aliases(choice, aliases: Iterable[str], *, source: str = 'curator') -> l
 
 
 def rename(choice, display: str) -> None:
-    """Change the label and keep the old one as an alias, so nothing stored is orphaned."""
+    """Change the label and keep the old one as an alias, so nothing stored is orphaned.
+
+    What a save writes for a choice is its stored value, which is the label
+    until a value is set. A rename must not change that, or saves made before
+    and after it would disagree, so the label being replaced is frozen into
+    ``value`` first when the choice has none (#1225). It is done here, at the
+    first rename, so a choice nobody renames stays as it was seeded.
+    """
     from omop_core.models import FieldChoiceAlias
 
     new = ' '.join(str(display or '').split())
@@ -192,7 +199,11 @@ def rename(choice, display: str) -> None:
         old = choice.display
         FieldChoiceAlias.objects.filter(choice=choice, alias_key=fold(new)).delete()
         choice.display = new
-        choice.save(update_fields=['display'])
+        fields = ['display']
+        if not choice.value:
+            choice.value = old
+            fields.append('value')
+        choice.save(update_fields=fields)
         if fold(old) != fold(new):
             FieldChoiceAlias.objects.get_or_create(
                 field_name=choice.field_name, context_key=choice.context_key, alias_key=fold(old),

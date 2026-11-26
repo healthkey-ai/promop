@@ -755,6 +755,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         proposed_items = getattr(instance, 'provisional_items', None)
         if proposed_items:
             data['provisional_items'] = proposed_items
+        # A record with more than one cancer has each one's extension, not only the
+        # primary's (#2182): the Disease Categories to draw, primary first. Only for
+        # such a record, so the usual one costs nothing extra.
+        slugs = instance.disease_slugs or []
+        if len(slugs) > 1:
+            from omop_core.services import disease_profiles
+            data['disease_categories'] = disease_profiles.record_categories(instance.disease, slugs)
         return self._apply_demographic_redaction(instance, data)
 
     # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.
@@ -2103,12 +2110,15 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
     created_by = serializers.CharField(
         source='created_by.username', read_only=True, default=None,
     )
+    # What a save writes for this answer: its value, or its label while it has
+    # none. Read only, so the editor shows the rule instead of repeating it.
+    stored_value = serializers.CharField(read_only=True)
 
     class Meta:
         model = FieldChoice
         fields = [
             'id', 'field_name', 'display', 'sort_order',
-            'code', 'context_key', 'value', 'value_type', 'retired',
+            'code', 'context_key', 'value', 'stored_value', 'value_type', 'retired',
             'aliases', 'diseases',
             'codes', 'created_by', 'created_at',
         ]
@@ -2171,11 +2181,14 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         display = ' '.join(str(attrs.get('display', getattr(instance, 'display', ''))).split())
         value_type = attrs.get('value_type', getattr(instance, 'value_type', 'text'))
         errors = {}
-        try:
-            attrs['value'] = field_choices.clean_value(
-                value_type, attrs.get('value', getattr(instance, 'value', '')))
-        except field_choices.ChoiceError as exc:
-            errors['value'] = str(exc)
+        if instance is None or 'value' in attrs or 'value_type' in attrs:
+            # Not on every edit: a value frozen at a rename is the old label, which a
+            # non-text type need not accept, and a reorder must not be refused for it.
+            try:
+                attrs['value'] = field_choices.clean_value(
+                    value_type, attrs.get('value', getattr(instance, 'value', '')))
+            except field_choices.ChoiceError as exc:
+                errors['value'] = str(exc)
         code = attrs.get('code')
         if code is not None and code != '' and field_choices.slug(code) != code:
             errors['code'] = 'Use lower case letters, digits and underscores.'

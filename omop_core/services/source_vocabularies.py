@@ -118,6 +118,7 @@ _MEASUREMENT_SYSTEMS = (
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('Oura', 'Oura — Oura Ring export metrics'),
     ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
     ('CDISC-BC', 'CDISC BC — CDISC Biomedical Concepts (NCIt codes)'),
     ('HealthConnect', 'Health Connect — Android Health Connect record types'),
@@ -134,6 +135,7 @@ _OBSERVATION_SYSTEMS = (
     ('OpenWearables', 'OpenWearables — unified wearable device metrics'),
     ('Apple', 'Apple — Apple HealthKit wearable metrics'),
     ('Garmin', 'Garmin — Garmin FIT wearable metrics'),
+    ('Oura', 'Oura — Oura Ring export metrics'),
     ('HL7-PHR', 'HL7 PHR — HL7 Personal Health Record metric codes'),
     ('CDISC-BC', 'CDISC BC — CDISC Biomedical Concepts (NCIt codes)'),
     ('HealthConnect', 'Health Connect — Android Health Connect record types'),
@@ -220,14 +222,14 @@ SOURCE_TAB_LABELS = {
 # so a wearable code reaches a BC by sharing its destination.
 CDISC_BC_VOCABULARY = 'CDISC-BC'
 WEARABLE_SOURCE_VOCABULARIES = {
-    'OpenWearables', 'Apple', 'Garmin', 'HL7-PHR', 'HealthConnect', CDISC_BC_VOCABULARY,
+    'OpenWearables', 'Apple', 'Garmin', 'Oura', 'HL7-PHR', 'HealthConnect', CDISC_BC_VOCABULARY,
 }
 
-# The three of those a device import files a patient's rows under (#2835): a
+# The four of those a device import files a patient's rows under (#2835): a
 # reading arrives as its device's own code, ``steps`` under ``Garmin``, and a
 # patient's source-code inventory says which device it came from. The others
 # name codes no import writes.
-WEARABLE_DEVICE_VOCABULARIES = frozenset({'Apple', 'Garmin', 'HealthConnect'})
+WEARABLE_DEVICE_VOCABULARIES = frozenset({'Apple', 'Garmin', 'HealthConnect', 'Oura'})
 # The local vocabulary the wearable metrics with no LOINC equivalent live in.
 WEARABLE_LOCAL_VOCABULARY = 'HK-Wearable'
 

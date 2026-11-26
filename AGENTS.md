@@ -154,6 +154,7 @@ redeploy does not. See `docs/render-staging-celery.md`.
 | SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
 | SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
 | Retired mapping destinations audit | `omop_core/management/commands/audit_retired_mapping_destinations.py` — read-only, exits 1 when any are found |
+| Regimen vocabulary audit | `omop_core/management/commands/audit_regimen_vocabulary.py` — LOT resolver ids the vocabulary cannot serve; read-only, exits 1 when any are found |
 | Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
 | React tests | `frontend/src/App.test.tsx`, `frontend/src/components/**/*.test.tsx` |
 
@@ -1180,6 +1181,7 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
 |---|---|---|
 | `garmin` | `Garmin` | the metric key (`steps`) |
 | `apple` | `Apple` | the HealthKit identifier, cut to the 50-character column |
+| `oura` | `Oura` | the metric key behind `oura_` (`oura_hrv_rmssd`), never Garmin's bare spelling; see [Oura Ring Export Upload](#wearables--oura-ring-export-upload) |
 | `android` | `HealthConnect` | the Health Connect record type (`HEALTH_CONNECT_CODES`; the code of an approved mapping that names the metric wins) |
 
 - **What an import stores.** The approved global mapping for exactly that
@@ -1361,6 +1363,185 @@ spelling), `PatientSourceCodesTab.wearables.test.tsx`,
 `PatientOmopTab.test.tsx`, `PatientWearableCodes.readings.test.tsx`.
 
 ---
+
+## Wearables — Oura Ring Export Upload
+
+A patient who wears an Oura Ring uploads the data export Oura's Membership
+Hub makes (Export data; the linked account that reads Oura's API is the
+[next section](#wearables--oura-account-by-oauth)):
+the **Oura Ring** section of the Wearables tab, directly below Garmin (#2889).
+Parser `omop_core/services/oura_parser.py`; route `upload-wearable` with
+`device_type=oura`. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-ring-export).
+
+- **A zip of CSV files, or one of them** (`.zip` or `.csv`, several files at
+  once). The section has its own button because the top Upload button and the
+  drop zone read a `.zip` as Apple Health; a dropped Oura zip is filed as
+  Apple and fails to parse. The section is offered wherever an upload is
+  (`ownRecord`), and its uploads list collapsed in it (`UploadsList` named
+  `oura`), never in the leftovers.
+- **Ordinary source codes.** The code is the metric key under the new `Oura`
+  vocabulary behind an `oura_` prefix (`oura_steps`, `oura_hrv_rmssd`), through
+  `wearable_rows.device_codes`: no Oura-only resolution path. The prefix is
+  deliberate: Garmin's code is the bare metric key, and a person holding one
+  spelling under two device vocabularies would have one device's mapping
+  answer for, and sweep, the other's rows. The mappings' `metric_key` stays
+  plain (`steps`). `Oura` is in
+  `WEARABLE_DEVICE_VOCABULARIES`, so every device-code rule under
+  [Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)
+  covers it.
+- **Seeded proposed, not approved.** `seed_wearable_device_mappings` seeds nine
+  `Oura` rows (`origin_system` `hk-wearables-oura`) at the concepts Garmin's
+  use, `proposed`: nobody has reviewed them, so an Oura reading is provisional
+  (unscored proposals qualify at the floor) or unresolved until a curator
+  approves the mapping (not the one who proposed it, if
+  `MAPPING_SEPARATE_APPROVER`). Existing instances get the rows from the next
+  vocabulary load, or `manage.py seed_wearable_device_mappings`, which also
+  fills the destination of an Oura code an upload queued before the seed ran
+  (still proposed, and only where no destination was chosen).
+- **What is read** (Oura API V2 names): `dailyactivity` (`steps`, high and
+  medium activity time as active minutes, `active_calories`), `sleepmodel`
+  (sessions of a day added for sleep duration; from the longest session
+  `average_hrv` as **RMSSD**, `lowest_heart_rate` as resting heart rate,
+  `average_breath`; `deleted` and `rest` sessions are not sleep, and a 0 is no
+  figure), `dailyspo2`, `vo2max`. Not read: scores, temperature, stress, the
+  heart-rate series, and `equivalent_walking_distance`, an estimate that is
+  not a distance walked.
+- **Not verified against a real export.** The file names and columns are
+  Oura's documented API V2 ones and the export's separator (`;` or `,`) is
+  sniffed; check a first real export's `samples_created` before relying on it.
+  A file or column that is absent is skipped, never guessed.
+- **A day's total replaces.** An export holds one total per day and Oura
+  revises recent days, so `upload_wearable` writes an Oura upload with
+  `replace_daily=True`: a later export replaces the days an earlier one wrote
+  (the Garmin sync's rule), where `.fit` and Apple Health files stack. A day
+  with nothing in it (0 steps, no activity, no calories) is not stored, a day
+  repeated in a file is the later row, and a plain `sleep` file is read only
+  when there is no `sleepmodel`.
+- **Limits.** 200 files, 50 MB per CSV and 150 MB in all, uncompressed,
+  checked before reading (zip bombs): a real export is a few MB, and the
+  archive is read into memory in the request. A refusal by the parser (not an
+  archive, no export files, too large) is returned as its own text.
+- **Seeded proposals are votable.** The nine `Oura` proposals carry a metric
+  key, so a public vote link that covers every source system lists them.
+
+Tests: `tests/test_oura_parser.py`,
+`patient_portal.tests.WearableUploadEndpointTest` (the `oura` cases),
+`omop_core.tests.SeedHl7PhrSourceCodesTest`, `OuraUpload` cases in
+`WearableTab.test.tsx`.
+
+## Wearables — Oura Account by OAuth
+
+A patient links their Oura account once and this server **pulls** their days from
+Oura's API V2 (#2900). Oura's API is OAuth2 only (personal access tokens are
+deprecated) and, unlike Garmin's Starter tier, can be read on demand with
+history, so there is no webhook and nothing arrives while the tab is closed.
+It sits above the export upload in the **Oura Ring** section of the Wearables
+tab. Rules in `omop_core/services/oura_oauth.py`, routes in
+`patient_portal/api/oura_oauth.py`, on `/api/v1/` only. Full description:
+[wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-account-by-oauth).
+
+| Route | Who | What |
+|---|---|---|
+| `GET oura/connection/` | a signed-in patient | `{configured, connected, connected_at, last_sync_at, synced_through}`; never a token |
+| `DELETE oura/connection/` | a signed-in patient | disconnect: the token is revoked at Oura, the row removed; `{disconnected, oura_notified}` |
+| `POST oura/oauth/start/` | a patient signed in to this site | `{authorize_url}`, Oura's consent page |
+| `GET oura/oauth/callback/` | the same browser, back from Oura | stores the connection, redirects to `/?oura=connected\|denied\|error` |
+| `POST oura/sync/` | a signed-in patient | reads their days from Oura and stores them |
+
+- **Configuration, per deployment, on the web service** (a worker needs none):
+  `OURA_CLIENT_ID`, `OURA_CLIENT_SECRET`, and the token key, which is
+  `GARMIN_TOKEN_KEY` (the wearable token key, named for Garmin, which came
+  first; `GARMIN_TOKEN_KEY_FALLBACKS` applies). All three or the tab offers
+  nothing (`configured()`). Register the app at
+  `https://cloud.ouraring.com/oauth/applications` with the redirect URL
+  `<APP_BASE_URL>/api/v1/oura/oauth/callback/` (`OURA_REDIRECT_URI`
+  overrides it; Oura matches it exactly). **Oura caps an unapproved app at ten
+  users**, so only ten patients can connect until Oura approves the app.
+- **The callback finishes only in the browser that started**, as Garmin's:
+  `start` wants this site's own session and leaves the consent's nonce in it;
+  the callback wants the same account signed in, active, holding that nonce,
+  and spends it on the first return. The state has its own signing salt, so a
+  Garmin state is no Oura state. PKCE (S256), the verifier derived from the
+  nonce. A token Oura issued for a connection that is then refused is revoked.
+- **Scopes asked: `daily spo2 heart_health`** (`SCOPES`); not `personal`, since
+  nothing here needs age, weight or e-mail. Oura lets the patient switch a box
+  off, so each document type is read on its own and one Oura answers 403 to is
+  reported in `unavailable` and left out; refused for all four is a 409.
+  **Which scope gates which endpoint is not documented** in the spec the code
+  was checked against (openapi 1.43): `sleep` and the daily summaries are
+  presumed `daily`, `vO2_max` `heart_health`, `daily_spo2` `spo2`.
+- **`OuraConnection`** (system data, one per person, no Oura user id: Oura pushes
+  nothing, so nothing routes by it): tokens, `connected_at`, `last_sync_at`,
+  `synced_through`. `copy_patient --replace` refuses a person who has one.
+- **Tokens are encrypted under the wearable token key**, in no database. **Oura's
+  refresh tokens are single use**: every refresh returns a new pair and retires
+  the old, so both are saved in the same write, under the row's lock, in a
+  transaction of its own that commits before the read (`fresh_access_token`): the
+  new pair must not be lost to a rollback of anything else. A refresh Oura refuses
+  (400, 401, 403), tokens that cannot be decrypted, or a 401 on a read mean
+  **connecting again** (409, `reconnect: true`; the row is kept, never deleted
+  behind the patient). Disconnect and erasure revoke the token at Oura first, best
+  effort, and the row goes whatever Oura answers (`_forget_oura`).
+- **What a sync reads.** `daily_activity`, `sleep`, `daily_spo2`, `vO2_max`
+  (`ENDPOINTS`), page by page by `next_token`, for `start_date` to the day
+  after `end_date` (Oura's end date may be exclusive). The documents go through
+  the **export parser's own day rules** (`samples_from_documents`, `_collect`):
+  a day's sleep sessions added, HRV (RMSSD), resting heart rate and breathing
+  rate from the longest, no day of zero movement. So a day reads the same
+  whichever way it arrived, under the same `Oura` source codes
+  ([Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)),
+  seeded *proposed*, so readings are provisional until a curator approves them.
+- **Which days.** The first sync reads the last 90 days (`INITIAL_DAYS`); a later
+  one starts a week before where the last ended (`OVERLAP_DAYS`: Oura revises
+  recent days, and a ring not synced for days back-fills them when it is) and runs to today. A sync that runs out of its 20-second budget
+  (`BUDGET_SECONDS`, 12, one deadline from the start of the request that the
+  token refresh and the read share, so a call started at it can still run its
+  9 seconds of timeouts inside a 30-second web server), or pages past
+  `MAX_PAGES_PER_ENDPOINT`, answers
+  `incomplete: true` and is not counted as a sync: neither `synced_through` nor
+  `last_sync_at` moves, so Sync now reads again instead of answering "up to date".
+  `synced_through` also stays put while any kind was `unavailable`, so days Oura
+  withheld (a scope switched off, a lapsed membership) are read once it allows them. The sync runs inside the request (a patient pressed the
+  button), with no call started after the budget.
+- **A second sync within five minutes reads nothing** (`MIN_SYNC_INTERVAL`,
+  answer `skipped: "recent"`): Oura's limit is 5,000 requests per five minutes
+  for the whole application, shared by every patient. A throttle of 20 syncs an
+  hour per user sits on top.
+- **A day's total replaces.** Written with `replace_daily=True` as device `oura`,
+  the export's rule: a later sync replaces the days an earlier sync or export
+  wrote, never stacking. History is one "Oura Ring sync <YYYY-MM>" upload per
+  patient per month (`_fold_history`, shared with the Garmin push); the record is
+  re-derived through the derivation dispatcher (off the request where a worker
+  exists, as the Garmin push does), so the 30-day values can lag the sync by a
+  few seconds.
+- **A sync checks its connection again under the lock before writing** (person
+  first, then the connection, matched on `connected_at`): a patient who
+  disconnected, or connected another account (the callback reuses the row, so
+  its pk is the same), while Oura was being read gets a 409 `CHANGED` and
+  nothing is written or marked synced. The callback calls Oura only outside
+  its lock: the earlier access token is revoked after the commit.
+- **The person, signed in, on their own record**: `is_interactive_session`, never
+  a service credential or a delegated token, and `person_id` in a sync body is
+  refused unless it is the caller's own. The tab renders the section's account
+  part only with `canSyncOwnDevice`.
+- **The tab** (`OuraAccountLink.tsx`) reads the days by itself right after
+  connecting (`?oura=connected`) and when it opens with a last sync older than 12
+  hours; otherwise "Sync now". **Nothing syncs while the tab is closed**: a
+  scheduled or webhook-driven sync is not built (Oura offers webhook
+  subscriptions: `/v2/webhook/subscription`, with the app's id and secret; the
+  patient would have to be matched by Oura's user id, which needs the `personal`
+  scope).
+- **Not verified against a live account.** Whether the `sleep` endpoint filters by
+  `day` or by bedtime is not known: if by bedtime, the first day of a window could
+  return only part of a night and `replace_daily` would replace a correct total.
+  The field names are checked against
+  Oura's published OpenAPI spec (1.43), not against a response. Check a first real
+  sync's `unavailable`, and whether a day's `sleep` documents arrive (the `sleep`
+  endpoint's `end_date` handling in particular).
+
+Tests: `tests/test_oura_oauth.py`, `patient_portal.tests.OuraOAuthEndpointTest`,
+`OuraAccountLink.test.tsx`.
 
 ## Wearables — Garmin Connect Sync
 
@@ -4309,6 +4490,13 @@ Run generator:
 
 ### Environment conventions
 
+- **The GitHub repository is `phrame-org/promop`** (it was `healthkey-ai/promop`; the
+  organization changed). Use `phrame-org/promop` for `--repo`, `gh api repos/...` and
+  the `origin` remote (`git@github.com:phrame-org/promop.git`). Old
+  `healthkey-ai/promop` links in the docs are stale; GitHub no longer resolves the old
+  name for this account, so a "repository not found" from `git` or `gh` means a stale
+  remote, not lost access.
+
 - Staging always means Render: https://promop-staging.onrender.com.
 - The staging web service is `promop-staging`; its worker is `promop-staging-worker`.
 - Do not use the old Google Cloud / Cloud Run staging deployment to investigate or verify staging unless the user explicitly asks for it.
@@ -4407,6 +4595,31 @@ so a stale green check does not catch it.
 - **Merge migration PRs one at a time.** When several open PRs add
   migrations, merge one, then rebase the next onto the new `dev`, check it, and
   let CI pass before merging it.
+
+- **Before `gh pr merge` of any PR that adds or changes a migration, re-check the
+  number against `dev` as it is now.** This is a rule for agents and people
+  alike, and it applies even when every check on the PR is green, because that
+  result describes `dev` at the time CI ran. Every time, immediately before the
+  merge:
+  ```bash
+  git fetch origin dev
+  git diff --name-only <pr-base-sha-or-last-ci-sha>..origin/dev -- omop_core/migrations/
+  ```
+  If that prints anything, `dev` gained a migration since the PR's last CI run:
+  rebase onto `origin/dev`, renumber your migration to the next free number
+  (see "Regenerate an unmerged migration"), run `makemigrations --check
+  --dry-run`, push, and wait for CI on the new head. Do not merge on the older
+  green result. #2902 and #2905 both took 0376 on 2026-11-26 because the second
+  merged on a result that predated the first.
+- **Several agents or sessions can have migration PRs open at once, on one
+  account.** Treat any open PR that touches `omop_core/migrations/` as a claim
+  on the next number: before choosing one, run `gh pr list --search
+  "omop_core/migrations in:files" --state open` and take the number after the
+  highest one used there or on `dev`. Merge them one at a time, in number order.
+- **`dev`'s ruleset should require branches to be up to date before merging**
+  (`strict_required_status_checks_policy: true` on ruleset 8217318), so GitHub
+  enforces the two rules above instead of anyone remembering them. If it is
+  off, the first rule is the only protection.
 
 #### Documentation naming and ownership
 

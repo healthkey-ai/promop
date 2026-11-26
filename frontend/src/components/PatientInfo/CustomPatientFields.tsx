@@ -33,11 +33,14 @@ function entered(field: CustomPatientField, value: unknown): unknown {
  * field shows its formula's result. Renders nothing when the tab has no
  * such field.
  */
-export function CustomPatientFields({ fields, tabs, diseases, formData, descriptors, onChange }: {
+export function CustomPatientFields({ fields, tabs, diseases, diseaseLabels, formData, descriptors, onChange }: {
   /** Every added field, from `useCustomPatientFields`. */
   fields: CustomPatientField[];
   tabs: string[];
   diseases: string[];
+  /** A name for each Disease Category. With more than one disease on the record, a field of
+   *  a disease's extension says whose it is. */
+  diseaseLabels?: Record<string, string>;
   formData: Record<string, unknown>;
   descriptors?: FieldDescriptors;
   /** An edit to one field's value; the editor saves it with the record. */
@@ -75,6 +78,12 @@ export function CustomPatientFields({ fields, tabs, diseases, formData, descript
                 disabled={!writable}
                 readOnly={computed}
               />
+              {diseases.length > 1 && fieldDiseases(field).length > 0 && (
+                <p className="mt-1 text-xs text-muted-foreground" data-testid={`scope-${field.field_name}`}>
+                  {fieldDiseases(field).filter((code) => diseases.includes(code))
+                    .map((code) => diseaseLabels?.[code] ?? code).join(", ")}
+                </p>
+              )}
               {reason && (
                 <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${field.field_name}`}>
                   {reason}

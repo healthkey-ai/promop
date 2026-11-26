@@ -186,6 +186,7 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
 const VOCABULARY_ALIASES: Record<string, string> = {
   Apple: "OpenWearables",
   Garmin: "OpenWearables",
+  Oura: "OpenWearables",
   "HL7-PHR": "OpenWearables",
   HealthConnect: "OpenWearables",
   "CDISC-BC": "OpenWearables",

@@ -18,6 +18,8 @@ interface Props {
   label: string;
   /** The stable identity; it never changes when the label does. */
   code?: string;
+  /** What a save writes for the answer; it stays as it is when the label is renamed. */
+  storedValue?: string;
   aliases?: string[];
   retired?: boolean;
   /** Disease Category codes the answer is offered to; none means every patient. */
@@ -44,14 +46,15 @@ const clean = (text: string): string[] => {
 
 /** The label, other spellings and standing of one answer (#1225).
  *
- *  The label is what patients see and what is stored, so a rename keeps the old
- *  label as another spelling (the server does that) and nothing already saved
- *  stops matching. Retiring stops offering the answer without deleting it or its
+ *  The label is what patients see; what a save stores is the answer's value,
+ *  frozen at the first rename so saves before and after it agree, and shown
+ *  here read only. A rename keeps the old label as another spelling (the
+ *  server does that) and nothing already saved stops matching. Retiring stops offering the answer without deleting it or its
  *  concept decision. */
 const sameSet = (a: string[], b: string[]) => [...a].sort().join("\n") === [...b].sort().join("\n");
 
 export function AnswerDetailsPanel({
-  choiceId, label, code, aliases = [], retired = false, diseases = [], contextKey = "",
+  choiceId, label, code, storedValue, aliases = [], retired = false, diseases = [], contextKey = "",
   diseaseOptions, optionsIncomplete = false, canEdit = true, onChanged,
 }: Props) {
   const [editing, setEditing] = useState(false);
@@ -127,6 +130,11 @@ export function AnswerDetailsPanel({
           <span className="rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-700">Retired</span>
         )}
         {code && <span>Code <span className="font-mono">{code}</span></span>}
+        {storedValue && (
+          <span title="What a save writes for this answer. Renaming the label never changes it.">
+            Saved as <span className="font-mono">{storedValue}</span>
+          </span>
+        )}
         {aliases.length > 0 && <span>Also written: {aliases.join(", ")}</span>}
         {contextKey && <span>Context <span className="font-mono">{contextKey}</span></span>}
         <span>{diseases.length ? `Offered to: ${diseases.join(", ")}` : "Offered to every patient"}</span>
