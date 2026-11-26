@@ -45,6 +45,20 @@ describe("CustomPatientFields", () => {
     expect(screen.queryByText(/frailty index/)).not.toBeInTheDocument();
   });
 
+  it("says whose a disease field is when the record has more than one cancer, and not otherwise", () => {
+    const fields = [field(1, "tumor_note", "disease", ["MM"]), field(2, "psa_note", "disease", ["PC"]),
+      field(3, "shared_note", "disease")];
+    const labels = { MM: "Multiple Myeloma", PC: "Prostate Cancer" };
+    const { rerender } = render(<CustomPatientFields fields={fields} tabs={["disease"]} diseases={["MM", "PC"]}
+      diseaseLabels={labels} formData={{}} />);
+    expect(screen.getByTestId("scope-tumor_note")).toHaveTextContent("Multiple Myeloma");
+    expect(screen.getByTestId("scope-psa_note")).toHaveTextContent("Prostate Cancer");
+    expect(screen.queryByTestId("scope-shared_note")).not.toBeInTheDocument();
+    rerender(<CustomPatientFields fields={fields} tabs={["disease"]} diseases={["MM"]} diseaseLabels={labels} formData={{}} />);
+    expect(screen.queryByTestId("scope-tumor_note")).not.toBeInTheDocument();
+    expect(screen.queryByText("psa note")).not.toBeInTheDocument();
+  });
+
   it("shows a base field to every record and a blood field on the labs tab, with the unit in the label", () => {
     render(<CustomPatientFields fields={FIELDS} tabs={["labs", "blood"]} diseases={[]} formData={{ custom_fields: { frailty_index: 4 } }} />);
     expect(box("frailty index (points)")).toHaveValue(4);

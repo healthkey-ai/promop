@@ -462,6 +462,17 @@ category has a section or a field placed on its extension, and for whoever can
 add a field (staff and org admins) for any category, because the tab's Add
 Field link is how the first field of an empty extension is made.
 
+A record with more than one cancer (`PatientRecord.disease_slugs`, #2182) has the
+extension of each, not only of the cancer `disease` names. The record read adds
+`disease_categories` (primary first; `disease_profiles.record_categories`) when
+there is more than one cancer, found through Disease Category management's names
+(each made into its slug) with the keyword rules as the fallback for a slug it
+does not hold. The disease tab is then one tab named "Diseases" with a section
+per cancer under its own heading (a category with no hand-authored section says
+its fields are under Additional fields), created fields say whose they are, and
+the tab offers one Add Field link per cancer. The attestation and the therapy
+tabs still read the primary cancer alone.
+
 Inside the tab a control reads its field's membership
 (`DiseaseProfile.tsx`, `ClinicalField`): a field of another disease's
 extension that holds a value renders read-only with "Not part of the <disease>

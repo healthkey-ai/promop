@@ -28,6 +28,16 @@ interface Props {
    *  does not own renders read-only and marked, or not at all when it is empty (#2332). */
   category?: string;
   categoryLabel?: string;
+  /** Every cancer the record has, when it has more than one (#2182): each draws its own
+   *  section under its own name. Fewer than two is the single `diseaseType` above. */
+  categories?: DiseaseCategoryView[];
+}
+
+export interface DiseaseCategoryView {
+  code: string;
+  label: string;
+  /** The hand-authored section its extension has, `other` when it has none. */
+  diseaseType: Props['diseaseType'];
 }
 
 const PRECISION_OPTIONS = [
@@ -381,7 +391,7 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
   );
 }
 
-export default function DiseaseTab({ formData, onChange, diseaseType, category, categoryLabel }: Props) {
+function DiseaseSections({ formData, onChange, diseaseType, category, categoryLabel }: Props) {
   const diseaseSection = (() => {
     switch (diseaseType) {
       case 'breast':
@@ -410,5 +420,28 @@ export default function DiseaseTab({ formData, onChange, diseaseType, category, 
     <DiseaseProfileContext.Provider value={{ category, label: categoryLabel || category }}>
       {sections}
     </DiseaseProfileContext.Provider>
+  );
+}
+
+export default function DiseaseTab(props: Props) {
+  const { categories, formData, onChange } = props;
+  if (!categories || categories.length < 2) return <DiseaseSections {...props} />;
+  return (
+    <>
+      {categories.map((c) => (
+        <section key={c.code} data-testid={`disease-${c.code}`} aria-label={c.label}
+          className="mt-8 border-t border-portal-border pt-8 first:mt-0 first:border-0 first:pt-0">
+          <h2 className="mb-4 text-xl font-semibold text-portal-text-primary">{c.label}</h2>
+          {c.diseaseType === 'other' ? (
+            <p className="text-sm text-portal-text-secondary">
+              The fields added for {c.label} are listed under Additional fields below.
+            </p>
+          ) : (
+            <DiseaseSections formData={formData} onChange={onChange} diseaseType={c.diseaseType}
+              category={c.code} categoryLabel={c.label} />
+          )}
+        </section>
+      ))}
+    </>
   );
 }

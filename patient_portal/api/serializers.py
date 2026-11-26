@@ -755,6 +755,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         proposed_items = getattr(instance, 'provisional_items', None)
         if proposed_items:
             data['provisional_items'] = proposed_items
+        # A record with more than one cancer has each one's extension, not only the
+        # primary's (#2182): the Disease Categories to draw, primary first. Only for
+        # such a record, so the usual one costs nothing extra.
+        slugs = instance.disease_slugs or []
+        if len(slugs) > 1:
+            from omop_core.services import disease_profiles
+            data['disease_categories'] = disease_profiles.record_categories(instance.disease, slugs)
         return self._apply_demographic_redaction(instance, data)
 
     # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.

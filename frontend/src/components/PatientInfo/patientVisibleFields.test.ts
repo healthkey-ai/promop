@@ -63,7 +63,7 @@ describe('patient visible fields', () => {
 
   it('maps each section to the disease type the DiseaseTab switch renders it for', () => {
     // Swapping two `case` lines would put a section's fields on the wrong disease's list.
-    const body = functionBlocks(readFileSync(here('tabs', 'DiseaseTab.tsx'), 'utf8')).get('DiseaseTab') ?? '';
+    const body = functionBlocks(readFileSync(here('tabs', 'DiseaseTab.tsx'), 'utf8')).get('DiseaseSections') ?? '';
     const rendered: Record<string, string[]> = {};
     const pairs = [
       ...body.matchAll(/case '(\w+)':\s*return <(\w+)/g),
