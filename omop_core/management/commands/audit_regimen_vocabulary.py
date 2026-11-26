@@ -1,19 +1,21 @@
 """Report HemOnc regimen ids the LOT resolvers return that this vocabulary cannot serve (#2764).
 
 Read-only. Checks each id in ``MYELOMA_REGIMEN_CONCEPT_IDS``,
-``REGIMEN_CONCEPT_IDS`` and ``_GENERATOR_ALIASES``. For each one that is missing,
-retired, not standard, unnamed, not a HemOnc Regimen, or without the component
-edges the derivation reads, prints the id, the table entries that return it, the
-failed condition, and any live successor that would pass. Exits 1 when any are
-found, on the pattern of audit_retired_mapping_destinations, so a release
-checklist can gate on it.
+``REGIMEN_CONCEPT_IDS`` and ``_GENERATOR_ALIASES``. For each one that is not an
+integer, missing, retired, not standard, unnamed, not a HemOnc Regimen, or
+without the component edges the derivation reads, prints the id, the table
+entries that return it, the failed condition, and any live successor that would
+pass. Exits 1 when any are found, on the pattern of
+audit_retired_mapping_destinations, so a release checklist can gate on it.
 
 A missing id means the vocabulary install is incomplete; a retired or wrong-kind
-id means the table needs a new id. Fixing either changes only what the resolvers
-return from then on. Ids already written into DrugExposure or Episode rows (for
-example by the enrichment commands) stay until those rows are corrected, and
-patient records keep the old answer until they are re-derived. Re-derive on
-staging, never production:
+id means the table needs a new id. An unnamed id, or one without component
+edges, points at the vocabulary rows or at the relationship types the derivation
+reads. Fixing any of them changes only what the resolvers return from then on.
+Ids already written into DrugExposure or Episode rows (for example by the
+enrichment commands) stay until those rows are corrected, and patient records
+keep the old answer until they are re-derived. Re-derive on staging, never
+production:
 ``DATABASE_URL="${STAGING_DATABASE_URL:?}" python manage.py backfill_patient_records --all``.
 """
 from django.core.management.base import BaseCommand

@@ -128,7 +128,7 @@ def test_the_derivations_own_regimen_test_is_applied(installed, monkeypatch):
     monkeypatch.setattr(regimen_vocabulary_audit, '_is_asserted_regimen', lambda c: c.concept_id != BR)
 
     [problem] = regimen_target_problems()
-    assert (problem.concept_id, problem.reason) == (BR, 'is not accepted as a HemOnc regimen by the derivation')
+    assert (problem.concept_id, problem.reason) == (BR, 'would not count as an asserted HemOnc regimen')
 
 
 def test_components_are_judged_by_the_derivations_own_expansion(installed, monkeypatch):

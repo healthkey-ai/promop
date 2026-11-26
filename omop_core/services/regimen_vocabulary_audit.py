@@ -85,8 +85,9 @@ def _problem_with(concept, has_components):
     if not (_usable_concept_name(concept) or '').strip():
         return 'has no usable name'
     if not _is_asserted_regimen(concept):
-        # The derivation's own test, should it come to differ from the above.
-        return 'is not accepted as a HemOnc regimen by the derivation'
+        # The derivation's test for an asserted HemOnc regimen, should it come
+        # to require more than the checks above.
+        return 'would not count as an asserted HemOnc regimen'
     if not has_components:
         return 'has no component edge the derivation reads (' + ', '.join(_COMPONENT_RELATIONSHIP_IDS) + ')'
     return None
