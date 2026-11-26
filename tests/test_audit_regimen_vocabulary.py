@@ -16,7 +16,7 @@ pytestmark = pytest.mark.django_db
 
 BR = 35804570           # Bendamustine and Rituximab, REGIMEN_CONCEPT_IDS
 DARA_KRD = 905602       # MYELOMA_REGIMEN_CONCEPT_IDS and the 'dkrd' alias
-PD = 35806066           # the 'pd' alias
+PD = 35806066           # pomalidomide + dexamethasone, and the 'pd' alias
 PD_SUCCESSOR = 42542407
 
 
@@ -113,7 +113,8 @@ def test_a_retired_id_shows_its_live_maps_to_target(installed):
     [problem] = regimen_target_problems()
     assert problem.maps_to == ((PD_SUCCESSOR, 'Pomalidomide and Dexamethasone (Pd)'),)
     _code, out = _run()
-    assert f"{PD} is retired (invalid_reason 'D'); returned by _GENERATOR_ALIASES['pd']; " \
+    assert f"{PD} is retired (invalid_reason 'D'); returned by " \
+           "MYELOMA_REGIMEN_CONCEPT_IDS[dexamethasone + pomalidomide], _GENERATOR_ALIASES['pd']; " \
            f'maps to {PD_SUCCESSOR} "Pomalidomide and Dexamethasone (Pd)"' in out
 
 
