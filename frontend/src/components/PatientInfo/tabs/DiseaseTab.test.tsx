@@ -11,7 +11,7 @@
  * returned vocabulary options.
  */
 
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import DiseaseTab from './DiseaseTab';
 import { __resetWritableFieldsCache, fetchWritableFields } from '@/hooks/useWritableFields';
@@ -184,6 +184,36 @@ function renderMyeloma(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('DiseaseTab — a record with more than one cancer', () => {
+  beforeEach(async () => {
+    __resetWritableFieldsCache();
+    (globalThis as Record<string, unknown>).__DESCRIPTORS__ = DESCRIPTORS;
+    await fetchWritableFields();
+    setupVocabMock();
+  });
+
+  const both = [
+    { code: 'MM', label: 'Multiple Myeloma', diseaseType: 'myeloma' as const },
+    { code: 'PC', label: 'Prostate Cancer', diseaseType: 'other' as const },
+  ];
+
+  it('draws a section for each cancer under its own name', () => {
+    render(<DiseaseTab {...BASE_PROPS} categories={both} />);
+    const myeloma = screen.getByTestId('disease-MM');
+    expect(within(myeloma).getByRole('heading', { name: 'Multiple Myeloma' })).toBeInTheDocument();
+    expect(within(myeloma).getByText('Prior SCT Type')).toBeInTheDocument();
+    const prostate = screen.getByTestId('disease-PC');
+    expect(within(prostate).getByRole('heading', { name: 'Prostate Cancer' })).toBeInTheDocument();
+    expect(within(prostate).getByText(/added for Prostate Cancer are listed under Additional fields/)).toBeInTheDocument();
+  });
+
+  it('draws the plain tab for one cancer, with no headings', () => {
+    render(<DiseaseTab {...BASE_PROPS} categories={[both[0]]} />);
+    expect(screen.queryByTestId('disease-MM')).not.toBeInTheDocument();
+    expect(screen.getByText('Prior SCT Type')).toBeInTheDocument();
+  });
+});
 
 describe('MyelomaSection — SCT fields', () => {
   beforeEach(async () => {

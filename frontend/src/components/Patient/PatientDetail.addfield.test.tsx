@@ -134,6 +134,29 @@ describe('PatientDetail — Add Field', () => {
     ]);
   });
 
+  it('has one disease tab for a record with more than one cancer, and an Add Field link for each', async () => {
+    diseaseMappings = [{ disease_name: 'Multiple Myeloma', category: 'MM' }];
+    record = { ...record, disease_categories: ['MM', 'PC'], disease_slugs: ['multiple-myeloma', 'prostate-cancer'] };
+    await renderPatient(ORG_ADMIN);
+    openTab('Diseases');
+    expect(screen.getByText('disease fields')).toBeInTheDocument();
+    const links = screen.getAllByRole('link', { name: /^Add Field to / });
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      '/field-mappings?new=1&tab=disease&disease=MM',
+      '/field-mappings?new=1&tab=disease&disease=PC',
+      '/field-mappings?new=1&tab=disease&disease=MM',
+      '/field-mappings?new=1&tab=disease&disease=PC',
+    ]);
+  });
+
+  it('shows the disease tab for the cancer that has an extension when the primary has none', async () => {
+    diseaseMappings = [{ disease_name: 'Glioblastoma', category: 'Other' }];
+    record = { ...record, disease: 'Glioblastoma', disease_categories: ['MM'] };
+    await renderPatient(DOCTOR);
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .getByRole('button', { name: 'Multiple Myeloma' })).toBeInTheDocument();
+  });
+
   it("picks the disease tab by Disease Category management's category, not the name match", async () => {
     // The old name match showed a diffuse large B-cell lymphoma on the follicular
     // tab; the record's category is DLBCL, which has no hand-authored section, so

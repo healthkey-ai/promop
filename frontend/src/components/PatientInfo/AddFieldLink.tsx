@@ -12,11 +12,13 @@ import { FieldMappingLinksContext, addFieldHref, type AddFieldReturn } from './f
  * tab, scoped to the record's disease. The page and tab to come back to
  * travel as router state, so the URL carries nothing about the patient.
  */
-export default function AddFieldLink({ tab, disease, returnPath }: {
+export default function AddFieldLink({ tab, disease, returnPath, label = 'Add Field' }: {
   tab: string;
   /** The record's Disease Category code, on the disease tab. */
   disease?: string;
   returnPath: string;
+  /** The link's text; the disease tab of a record with several cancers has one per cancer. */
+  label?: string;
 }) {
   if (!useContext(FieldMappingLinksContext)) return null;
   const addFieldReturn: AddFieldReturn = { path: returnPath, tab };
@@ -27,7 +29,7 @@ export default function AddFieldLink({ tab, disease, returnPath }: {
       title="Add a field to this tab in Field Concept Mapping"
       className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-muted"
     >
-      <Plus size={14} aria-hidden="true" /> Add Field
+      <Plus size={14} aria-hidden="true" /> {label}
     </Link>
   );
 }

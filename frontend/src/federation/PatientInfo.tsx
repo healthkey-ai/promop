@@ -19,7 +19,7 @@ import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
-import { addedFieldTabs, fieldDiseases, recordDiseaseCategory } from "@/utils/fieldScope";
+import { addedFieldTabs, fieldDiseases, recordDiseaseCategories, recordDiseaseCategory } from "@/utils/fieldScope";
 import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
@@ -394,11 +394,23 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     diseaseTypeOf(editedInfo?.disease),
   );
   const getDiseaseType = () => diseaseTypeOfCategory(recordCategory);
-  const categoryLabel = categoryObjects.find((c) => c.value === recordCategory)?.label ?? recordCategory;
+
+  // A record with more than one cancer has the extension of each (#2182), primary first.
+  const recordCategories = recordDiseaseCategories(
+    recordCategory,
+    Array.isArray(editedInfo?.disease_categories) ? (editedInfo.disease_categories as string[]) : [],
+  );
+  const tabCategory = recordCategories[0] ?? "";
+  const labelOfCategory = (code: string) => categoryObjects.find((c) => c.value === code)?.label ?? code;
+  const categoryViews = recordCategories.map((code) => ({
+    code, label: labelOfCategory(code), diseaseType: diseaseTypeOfCategory(code),
+  }));
 
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()]
-    ?? (categoryLabel || "Disease Specific");
+    recordCategories.length > 1
+      ? "Diseases"
+      : ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[diseaseTypeOfCategory(tabCategory)]
+        ?? (labelOfCategory(tabCategory) || "Disease Specific");
 
   // The host app shows a patient their own record; wording is the patient's.
   const provisionalValue = useMemo(
@@ -429,11 +441,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   }
 
   const diseaseType = getDiseaseType();
-  const diseaseCode = recordCategory;
-  const showDiseaseTab = recordCategory !== "" && (
-    diseaseType !== "other"
-    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(recordCategory))
-  );
+  const showDiseaseTab = recordCategories.some((code) => (
+    diseaseTypeOfCategory(code) !== "other"
+    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(code))
+  ));
   // Keyed rather than positional: a host that cannot serve wearable uploads
   // drops that tab, and arithmetic indices would silently shift every tab after it.
   const TAB_LABELS: Record<string, string> = {
@@ -521,9 +532,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
             <DiseaseTab
               formData={editedInfo}
               onChange={handleFieldChange}
-              diseaseType={diseaseType}
-              category={recordCategory}
-              categoryLabel={categoryLabel}
+              diseaseType={diseaseTypeOfCategory(tabCategory)}
+              category={tabCategory}
+              categoryLabel={labelOfCategory(tabCategory)}
+              categories={categoryViews}
             />
           )}
           {activeTab === treatmentIdx && (
@@ -550,7 +562,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
             <CustomPatientFields
               fields={addedFields}
               tabs={addedFieldTabs(tabKeys[activeTab])}
-              diseases={diseaseCode ? [diseaseCode] : []}
+              diseases={recordCategories}
+              diseaseLabels={Object.fromEntries(recordCategories.map((code) => [code, labelOfCategory(code)]))}
               formData={editedInfo}
               descriptors={editedInfo.person_id == null ? undefined : writableFields}
               onChange={readOnly ? undefined : handleAddedFieldChange}

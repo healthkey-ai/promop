@@ -39,7 +39,7 @@ import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider, returnedTab } from "@/components/PatientInfo/fieldMappingLinks";
 import AddFieldLink from "@/components/PatientInfo/AddFieldLink";
 import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
-import { addedFieldTabs, fieldDiseases, recordDiseaseCategory } from "@/utils/fieldScope";
+import { addedFieldTabs, fieldDiseases, recordDiseaseCategories, recordDiseaseCategory } from "@/utils/fieldScope";
 import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, addedFieldNames, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
@@ -944,10 +944,28 @@ export default function PatientDetail({
   );
   const getDiseaseType = () => diseaseTypeOfCategory(recordCategory);
   const categoryLabel = categoryObjects.find((c) => c.value === recordCategory)?.label ?? recordCategory;
+  // A record with more than one cancer has the extension of each (#2182), primary first.
+  const recordCategories = recordDiseaseCategories(
+    recordCategory,
+    Array.isArray(editedInfo?.disease_categories) ? (editedInfo.disease_categories as string[]) : [],
+  );
+  // The disease tab of a record with one cancer is that cancer's; this is the primary's
+  // unless the primary has no extension and another cancer does.
+  const tabCategory = recordCategories[0] ?? "";
+  const labelOfCategory = (code: string) => categoryObjects.find((c) => c.value === code)?.label ?? code;
+  const categoryViews = recordCategories.map((code) => ({
+    code, label: labelOfCategory(code), diseaseType: diseaseTypeOfCategory(code),
+  }));
+  const diseaseLabels = Object.fromEntries(recordCategories.map((code) => [code, labelOfCategory(code)]));
 
+  const DISEASE_LABELS: Record<string, string> = { breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" };
+  // The primary cancer's name, for what describes the record's main disease.
+  const primaryDiseaseLabel = DISEASE_LABELS[getDiseaseType()] ?? categoryLabel;
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()]
-    ?? categoryLabel;
+    recordCategories.length > 1
+      ? "Diseases"
+      : ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[diseaseTypeOfCategory(tabCategory)]
+        ?? labelOfCategory(tabCategory);
 
   // The fields a professional may confirm, as the server listed them on the record read. Not the
   // patient's own page (a patient confirms by entering a value) and nothing the page decides.
@@ -1021,11 +1039,11 @@ export default function PatientDetail({
   // placed on its extension: a category a curator adds gets its tab without a deploy.
   // Someone who can add fields gets it for any category, even an empty one, because
   // the tab's Add Field link is how its first field is made.
-  const showDiseaseTab = recordCategory !== "" && (
-    diseaseType !== "other"
+  const showDiseaseTab = recordCategories.length > 0 && recordCategories.some((code) => (
+    diseaseTypeOfCategory(code) !== "other"
     || canViewOmop
-    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(recordCategory))
-  );
+    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(code))
+  ));
   const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
@@ -1079,14 +1097,25 @@ export default function PatientDetail({
   const fieldTab = fieldTabs[activeTab];
   // The record's Disease Category, which scopes a field added from the
   // disease tab and decides which disease-specific added fields it shows.
-  const diseaseCode = recordCategory;
-  // Offered to whoever sees the fields' globes; nobody else gets its markup.
+  const diseaseCode = tabCategory;
+  // Offered to whoever sees the fields' globes; nobody else gets its markup. On the
+  // disease tab of a record with several cancers, one link per cancer: a field is
+  // added to one disease's extension.
   const addFieldLink = canViewOmop && fieldTab && personId ? (
-    <AddFieldLink
-      tab={fieldTab}
-      disease={fieldTab === "disease" ? diseaseCode : undefined}
-      returnPath={`/patient/${personId}`}
-    />
+    fieldTab === "disease" && recordCategories.length > 1 ? (
+      <div className="flex flex-wrap justify-end gap-2">
+        {recordCategories.map((code) => (
+          <AddFieldLink key={code} tab={fieldTab} disease={code}
+            label={`Add Field to ${labelOfCategory(code)}`} returnPath={`/patient/${personId}`} />
+        ))}
+      </div>
+    ) : (
+      <AddFieldLink
+        tab={fieldTab}
+        disease={fieldTab === "disease" ? diseaseCode : undefined}
+        returnPath={`/patient/${personId}`}
+      />
+    )
   ) : null;
 
   const tabDescriptions: Record<number, string> = {
@@ -1113,7 +1142,7 @@ export default function PatientDetail({
       record={editedInfo}
       name={patientName}
       diseaseType={diseaseType}
-      diseaseLabel={getDiseaseTabLabel()}
+      diseaseLabel={primaryDiseaseLabel}
     />
   ) : null;
 
@@ -1302,9 +1331,10 @@ export default function PatientDetail({
                   <DiseaseTab
                     formData={editedInfo}
                     onChange={handleFieldChange}
-                    diseaseType={diseaseType}
-                    category={recordCategory}
-                    categoryLabel={categoryLabel}
+                    diseaseType={diseaseTypeOfCategory(tabCategory)}
+                    category={tabCategory}
+                    categoryLabel={labelOfCategory(tabCategory)}
+                    categories={categoryViews}
                   />
                 )}
                 {activeTab === treatmentIdx && (
@@ -1345,7 +1375,8 @@ export default function PatientDetail({
                   <CustomPatientFields
                     fields={addedFields}
                     tabs={addedFieldTabs(fieldTab)}
-                    diseases={diseaseCode ? [diseaseCode] : []}
+                    diseases={recordCategories}
+                    diseaseLabels={diseaseLabels}
                     formData={editedInfo}
                     descriptors={writableFields.descriptors}
                     onChange={handleAddedFieldChange}
