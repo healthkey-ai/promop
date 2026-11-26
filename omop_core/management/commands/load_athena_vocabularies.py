@@ -1750,7 +1750,7 @@ class Command(EmbeddingLoadCommand):
         from django.core.management import call_command
 
         def seed_wearable_mappings():
-            self._log('  Seeding approved Apple and Garmin source-code mappings...')
+            self._log('  Seeding Apple and Garmin (approved) and Oura (proposed) source-code mappings...')
             call_command('seed_wearable_device_mappings', verbosity=verbosity)
 
         artifact = Path(__file__).resolve().parents[2] / 'data' / 'code_concept_mappings.json'

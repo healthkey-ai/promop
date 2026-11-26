@@ -3534,7 +3534,7 @@ class SupportiveTherapyCourse(models.Model):
 class WearableUpload(models.Model):
     """Tracks each wearable file upload so patients can review upload history."""
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='wearable_uploads')
-    device_type = models.CharField(max_length=10)  # 'garmin' | 'apple'
+    device_type = models.CharField(max_length=10)  # 'garmin' | 'apple' | 'android' | 'oura'
     filename = models.CharField(max_length=255)
     samples_created = models.IntegerField(default=0)
     duplicates_skipped = models.IntegerField(default=0)

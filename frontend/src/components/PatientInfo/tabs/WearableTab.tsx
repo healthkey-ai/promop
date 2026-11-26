@@ -8,6 +8,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import OuraUpload from './OuraUpload';
 import UploadsList, { type UploadRecord } from './UploadsList';
 import { pendingClause } from './wearableResult';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
@@ -69,6 +70,7 @@ const DEVICE_LABELS: Record<string, string> = {
   garmin: 'Garmin',
   apple: 'Apple',
   android: 'Android',
+  oura: 'Oura',
 };
 
 /** A device type the list does not name is shown as the server sent it. */
@@ -128,6 +130,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const [syncing, setSyncing] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Which section's upload the result and error above belong to, so each is
+  // shown beside the button that was used.
+  const [messageAt, setMessageAt] = useState<'top' | 'oura'>('top');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragCounter = useRef(0);
@@ -184,15 +189,19 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       if (expandedUpload === uploadId) setExpandedUpload(null);
       if (onRefresh) onRefresh();
     } catch {
+      // A refusal is told in the section the upload is listed in.
+      setMessageAt(uploads.find(u => u.id === uploadId)?.device_type === 'oura' ? 'oura' : 'top');
+      setUploadResult(null);
       setUploadError('Failed to delete upload. Please try again.');
     } finally {
       setDeletingId(null);
     }
-  }, [expandedUpload, onRefresh]);
+  }, [expandedUpload, onRefresh, uploads]);
 
   /** Upload a list of files with a given device type. Shared by file-picker and drag-and-drop. */
-  const uploadFiles = useCallback(async (files: File[], deviceType: string) => {
+  const uploadFiles = useCallback(async (files: File[], deviceType: string, at: 'top' | 'oura' = 'top') => {
     setUploading(true);
+    setMessageAt(at);
     setUploadResult(null);
     setUploadError(null);
 
@@ -201,6 +210,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     let totalProvisional = 0;
     let totalUnresolved = 0;
     let totalSettled = 0;
+    let storedFiles = 0;
 
     try {
       for (const file of files) {
@@ -220,6 +230,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         totalProvisional += res.data.provisional_samples || 0;
         totalUnresolved += res.data.unresolved_samples || 0;
         totalSettled += res.data.settled_rows || 0;
+        storedFiles += 1;
       }
 
       const pending = pendingClause({
@@ -241,7 +252,12 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
         || 'Upload failed. Please try again.';
-      setUploadError(msg);
+      setUploadError(storedFiles > 0
+        ? `${msg} ${storedFiles} of ${files.length} files were stored before it failed.` : msg);
+      if (storedFiles > 0) {
+        fetchUploads();
+        if (onRefresh) onRefresh();
+      }
     } finally {
       setUploading(false);
     }
@@ -261,11 +277,15 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     // Auto-detect device type from file extensions
     const types = new Set(fileList.map(f => detectDeviceType(f.name)));
     if (types.has(null)) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Unsupported file type. Please select .fit (Garmin) or .zip (Apple Health) files.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     if (types.size > 1) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Please upload one type at a time (.fit or .zip).');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
@@ -320,6 +340,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
       const html = e.dataTransfer.getData('text/html');
 
       if (uriList || html) {
+        setMessageAt('top');
+        setUploadResult(null);
         setUploadError(
           'Files dragged from the Garmin MTP device cannot be read directly by the browser. ' +
           'Please copy the files to a local folder first (e.g. Desktop), then drag them from there.'
@@ -332,11 +354,15 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
     const types = new Set(files.map(f => detectDeviceType(f.name)));
 
     if (types.has(null)) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Unsupported file type. Please drop .fit (Garmin) or .zip (Apple Health) files.');
       return;
     }
 
     if (types.size > 1) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Please drop files of one type at a time (.fit or .zip, not both).');
       return;
     }
@@ -354,7 +380,9 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const phoneUploads = canSyncOwnDevice && phonePanelShown
     ? uploads.filter(u => PHONE_DEVICES.includes(u.device_type))
     : [];
-  const placed = new Set([...garminUploads, ...phoneUploads].map(u => u.id));
+  // Oura's sit in the Oura section, which is offered wherever an upload is.
+  const ouraUploads = ownRecord ? uploads.filter(u => u.device_type === 'oura') : [];
+  const placed = new Set([...garminUploads, ...phoneUploads, ...ouraUploads].map(u => u.id));
   // The phone uploads wait while the panel has not said whether it is there,
   // rather than show here for a moment and then move.
   const waiting = canSyncOwnDevice && phonePanelShown === null;
@@ -420,10 +448,10 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
 
         <span className="text-xs text-gray-400">or drag &amp; drop files here</span>
 
-        {uploadResult && (
+        {messageAt === 'top' && uploadResult && (
           <span className="text-sm text-green-600">{uploadResult}</span>
         )}
-        {uploadError && (
+        {messageAt === 'top' && uploadError && (
           <span className="text-sm text-red-600">{uploadError}</span>
         )}
       </div>}
@@ -469,6 +497,19 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
             {!uploadsLoading && <UploadsList {...uploadsProps} uploads={garminUploads} name="garmin" />}
           </div>
         </section>
+      )}
+
+      {/* An Oura Ring export (#2889): the file Oura's Membership Hub sends. */}
+      {ownRecord && (
+        <OuraUpload
+          disabled={uploading || syncing || deletingId !== null}
+          uploading={uploading && messageAt === 'oura'}
+          result={messageAt === 'oura' ? uploadResult : null}
+          error={messageAt === 'oura' ? uploadError : null}
+          onFiles={(files) => void uploadFiles(files, 'oura', 'oura')}
+        >
+          {!uploadsLoading && <UploadsList {...uploadsProps} uploads={ouraUploads} name="oura" />}
+        </OuraUpload>
       )}
 
       {/* A phone app built on Open Wearables, connected with a one-time code:

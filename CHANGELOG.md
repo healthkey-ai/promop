@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: upload an Oura Ring export** — an "Oura Ring" section on the
+  Wearables tab, directly below Garmin, takes the data export Oura's Membership
+  Hub sends (the zip, or any of its CSV files). Steps, active minutes and
+  energy, sleep duration, HRV (RMSSD), resting heart rate, breathing rate,
+  blood oxygen and VO2 max become ordinary source codes under a new `Oura`
+  vocabulary, seeded as *proposed* mappings, so the readings are provisional
+  until a curator approves them. Its uploads list collapsed in the section. The
+  file layout is Oura's documented API V2 one and has not been checked against
+  a real export (#2889). See
+  [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-ring-export).
 - **PHR therapy: whether a line's response had been assessed** —
   `GET /api/v1/phr/therapy/` returns `response_assessed` beside each line's
   other detail: false when the patient said their response had not been
