@@ -8,6 +8,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import OuraAccountLink from './OuraAccountLink';
 import OuraUpload from './OuraUpload';
 import UploadsList, { type UploadRecord } from './UploadsList';
 import { pendingClause } from './wearableResult';
@@ -127,7 +128,13 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const [uploading, setUploading] = useState(false);
   // A Garmin Connect sync in flight: uploads and deletes wait for it, as it
   // waits for them.
-  const [syncing, setSyncing] = useState(false);
+  // A count, not a flag: the Garmin sync and the Oura account's sync can run
+  // together, and the first to finish must not unlock what the other holds.
+  const [syncCount, setSyncCount] = useState(0);
+  const syncing = syncCount > 0;
+  const setSyncing = useCallback((busy: boolean) => {
+    setSyncCount(count => Math.max(0, count + (busy ? 1 : -1)));
+  }, []);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   // Which section's upload the result and error above belong to, so each is
@@ -499,7 +506,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         </section>
       )}
 
-      {/* An Oura Ring export (#2889): the file Oura's Membership Hub sends. */}
+      {/* Oura Ring: the account linked once (#2900), whose days this site reads,
+          and under it the export file Oura's Membership Hub sends (#2889). */}
       {ownRecord && (
         <OuraUpload
           disabled={uploading || syncing || deletingId !== null}
@@ -507,6 +515,17 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           result={messageAt === 'oura' ? uploadResult : null}
           error={messageAt === 'oura' ? uploadError : null}
           onFiles={(files) => void uploadFiles(files, 'oura', 'oura')}
+          account={canSyncOwnDevice ? (
+            <OuraAccountLink
+              personId={personId}
+              disabled={uploading || deletingId !== null}
+              onBusyChange={setSyncing}
+              onSynced={(changed) => {
+                fetchUploads();
+                if (changed && onRefresh) onRefresh();
+              }}
+            />
+          ) : null}
         >
           {!uploadsLoading && <UploadsList {...uploadsProps} uploads={ouraUploads} name="oura" />}
         </OuraUpload>

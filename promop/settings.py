@@ -667,6 +667,19 @@ GARMIN_REDIRECT_URI = os.environ.get('GARMIN_REDIRECT_URI', '')
 GARMIN_TOKEN_KEY = os.environ.get('GARMIN_TOKEN_KEY', '')
 GARMIN_TOKEN_KEY_FALLBACKS = _env_list('GARMIN_TOKEN_KEY_FALLBACKS')
 
+# Oura API app (#2900): a patient links their Oura account by OAuth and this
+# server reads their days. Register the app at
+# https://cloud.ouraring.com/oauth/applications (Oura caps an unapproved app at
+# ten users).
+#   OURA_CLIENT_ID / OURA_CLIENT_SECRET: the app's client id and secret.
+# Tokens are stored under GARMIN_TOKEN_KEY (the wearable token key, named for
+# Garmin, which came first), so it must be set as well. The redirect URL
+# registered with Oura is <APP_BASE_URL>/api/v1/oura/oauth/callback/ unless
+# OURA_REDIRECT_URI says otherwise; it must match the registration exactly.
+OURA_CLIENT_ID = os.environ.get('OURA_CLIENT_ID', '')
+OURA_CLIENT_SECRET = os.environ.get('OURA_CLIENT_SECRET', '')
+OURA_REDIRECT_URI = os.environ.get('OURA_REDIRECT_URI', '')
+
 # Open Wearables SDK routes (#2810): a phone app built on the Open Wearables
 # SDK syncs HealthKit and Health Connect straight to this deployment. Needs no
 # credentials; set to false to answer 404 on the routes and hide the panel.
