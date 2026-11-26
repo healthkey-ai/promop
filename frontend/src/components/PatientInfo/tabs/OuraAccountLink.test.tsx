@@ -159,6 +159,27 @@ describe('OuraAccountLink', () => {
     expect(mockPost).toHaveBeenCalledWith(expect.stringContaining('/v1/oura/sync/'), { person_id: 7 });
   });
 
+  it('does not read the days by itself while another write to the record is running', async () => {
+    mockGet.mockResolvedValue(connected({ last_sync_at: hoursAgo(30) }));
+    render(<OuraAccountLink disabled />);
+    expect(await screen.findByRole('button', { name: 'Sync now' })).toBeDisabled();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
+
+  it('still tells the tab its rows were written when it is left before the sync ends', async () => {
+    mockGet.mockResolvedValue(connected());
+    let finish: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const onSynced = vi.fn();
+    const onBusyChange = vi.fn();
+    const view = render(<OuraAccountLink onSynced={onSynced} onBusyChange={onBusyChange} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Sync now' }));
+    view.unmount();
+    finish(synced());
+    await waitFor(() => expect(onSynced).toHaveBeenCalledWith(true));
+    expect(onBusyChange.mock.calls.map(call => call[0])).toEqual([true, false]);
+  });
+
   it('reads the days at once after connecting, even though the account is new', async () => {
     window.history.replaceState(null, '', '/?oura=connected&keep=1#top');
     mockGet.mockResolvedValue(connected({ last_sync_at: null }));

@@ -38107,7 +38107,7 @@ class OuraOAuthEndpointTest(TestCase):
         # The corrected total replaces the first; it never stacks.
         self.assertEqual(self._steps(), [9100.0])
         start, end = fetch.call_args.args[1:3]
-        self.assertEqual((end - start).days, 3)
+        self.assertEqual((end - start).days, 7)
         # One history row per month, not one per press.
         self.assertEqual(WearableUpload.objects.filter(person=self.person, device_type='oura').count(), 1)
 
@@ -38134,13 +38134,69 @@ class OuraOAuthEndpointTest(TestCase):
         self.assertTrue(response.data['incomplete'])
         row = OuraConnection.objects.get()
         self.assertIsNone(row.synced_through)
-        self.assertIsNotNone(row.last_sync_at)
+        # Not a finished sync: the next press reads again, not "up to date".
+        self.assertIsNone(row.last_sync_at)
+        again, fetch = self._sync()
+        self.assertNotIn('skipped', again.data)
+        fetch.assert_called_once()
 
-    def test_what_ouras_scopes_withheld_is_said(self):
+    def test_what_ouras_scopes_withheld_is_said_and_those_days_stay_to_be_read(self):
+        from omop_core.models import OuraConnection
         self._connect()
         response, _ = self._sync(self._days(sleep=False), unavailable=['spo2', 'vo2'])
         self.assertEqual(response.data['unavailable'], ['spo2', 'vo2'])
         self.assertEqual(self._steps(), [8200.0])
+        row = OuraConnection.objects.get()
+        self.assertIsNotNone(row.last_sync_at)
+        self.assertIsNone(row.synced_through)
+
+    def test_a_sync_whose_connection_ended_while_oura_was_read_writes_nothing(self):
+        """The patient disconnected between the read and the write."""
+        from unittest import mock
+        from omop_core.models import OuraConnection, WearableUpload
+        from omop_core.services import oura_oauth
+        self._connect()
+
+        def disconnect_meanwhile(*args, **kwargs):
+            OuraConnection.objects.all().delete()
+            return oura_oauth.Fetched(documents=self._days())
+
+        with mock.patch('omop_core.services.oura_oauth.fetch_days', side_effect=disconnect_meanwhile):
+            response = self._as(self.identity).post(self.SYNC, {}, format='json')
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['error'], oura_oauth.CHANGED)
+        self.assertFalse(response.data['reconnect'])
+        self.assertEqual(self._steps(), [])
+        self.assertFalse(WearableUpload.objects.filter(person=self.person).exists())
+
+    def test_a_sync_whose_account_was_replaced_while_oura_was_read_does_not_mark_the_new_one(self):
+        """A reconnect reuses the row: the pk is the same, the connection is not."""
+        from unittest import mock
+        from omop_core.models import OuraConnection
+        from omop_core.services import oura_oauth
+        self._connect()
+
+        def reconnect_meanwhile(*args, **kwargs):
+            OuraConnection.objects.update(connected_at=timezone.now() + timedelta(seconds=5),
+                                          last_sync_at=None, synced_through=None)
+            return oura_oauth.Fetched(documents=self._days())
+
+        with mock.patch('omop_core.services.oura_oauth.fetch_days', side_effect=reconnect_meanwhile):
+            response = self._as(self.identity).post(self.SYNC, {}, format='json')
+        self.assertEqual(response.status_code, 409)
+        row = OuraConnection.objects.get()
+        # The new account's first read is still to come.
+        self.assertIsNone(row.synced_through)
+        self.assertIsNone(row.last_sync_at)
+        self.assertEqual(self._steps(), [])
+
+    def test_the_refresh_and_the_read_share_one_deadline(self):
+        from omop_core.models import OuraConnection
+        self._connect()
+        response, fetch = self._sync()
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(fetch.call_args.kwargs['deadline'], float)
+        OuraConnection.objects.update(last_sync_at=None)
 
     def test_a_sync_with_no_connection_says_so(self):
         response, fetch = self._sync()

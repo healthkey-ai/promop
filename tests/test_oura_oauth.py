@@ -286,8 +286,8 @@ TODAY = date(2026, 11, 26)
 
 def test_the_first_sync_reads_ninety_days_and_a_later_one_starts_a_few_days_back():
     assert oo.sync_window(None, TODAY) == (TODAY - timedelta(days=90), TODAY)
-    assert oo.sync_window(TODAY - timedelta(days=1), TODAY) == (TODAY - timedelta(days=4), TODAY)
-    assert oo.sync_window(TODAY, TODAY) == (TODAY - timedelta(days=3), TODAY)
+    assert oo.sync_window(TODAY - timedelta(days=1), TODAY) == (TODAY - timedelta(days=8), TODAY)
+    assert oo.sync_window(TODAY, TODAY) == (TODAY - timedelta(days=7), TODAY)
     # A long gap is cut to the ninety days.
     assert oo.sync_window(TODAY - timedelta(days=400), TODAY)[0] == TODAY - timedelta(days=90)
 
@@ -351,6 +351,13 @@ def test_a_rejected_token_a_limit_or_an_outage_fails_the_whole_read(status, expe
     assert error.value.status == expected
 
 
+@pytest.mark.parametrize('status', [400, 422])
+def test_a_request_oura_refuses_is_not_a_refused_connection(status):
+    with pytest.raises(oo.OuraOAuthError) as error:
+        oo.fetch_days(ACCESS, START, END, session=FakeSession(FakeResponse(status)))
+    assert (error.value.message, error.value.status) == (oo.UNEXPECTED, 502)
+
+
 @pytest.mark.parametrize('body', [None, [], {'data': 'x'}, {'nodata': []}])
 def test_an_answer_that_is_not_a_page_is_unexpected(body):
     with pytest.raises(oo.OuraOAuthError) as error:
@@ -363,6 +370,18 @@ def test_the_read_stops_starting_calls_when_its_budget_is_spent():
     session = FakeSession(page([{'day': '2026-11-02'}]))
     fetched = oo.fetch_days(ACCESS, START, END, session=session, clock=lambda: next(ticks))
     assert len(session.calls) == 1 and fetched.incomplete
+
+
+def test_a_deadline_given_by_the_caller_is_the_one_used():
+    # Spent before the first call: nothing is read, and it is said so.
+    session = FakeSession()
+    fetched = oo.fetch_days(ACCESS, START, END, session=session, clock=lambda: 50, deadline=10)
+    assert session.calls == [] and fetched.incomplete
+
+
+def test_the_default_budget_leaves_room_for_the_write_under_a_30_second_server():
+    # A call started at the deadline can still run its connect and read timeouts.
+    assert oo.BUDGET_SECONDS + oo.CONNECT_TIMEOUT_SECONDS + oo.REQUEST_TIMEOUT_SECONDS <= 22
 
 
 def test_pages_that_never_end_are_cut_off_and_said_so():

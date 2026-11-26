@@ -135,6 +135,8 @@ export default function OuraAccountLink({
   // The outcome the page opened with, kept for the first read: it is cleared
   // from the address on mount.
   const openedWith = useRef<Outcome | null>(outcome);
+  // Another write to the record running when the tab opens: the patient presses Sync now instead.
+  const disabledRef = useRef(disabled);
 
   useEffect(() => { clearOutcome(); }, []);
 
@@ -156,6 +158,10 @@ export default function OuraAccountLink({
     try {
       const res = await clinicalClient().post<SyncResult>(
         clinicalUrl('/v1/oura/sync/'), personId != null ? { person_id: personId } : {});
+      // The rows are written whether or not this is still on screen: the tab is
+      // told so it re-reads them.
+      onSynced?.((res.data.samples_created ?? 0) > 0 || (res.data.replaced ?? 0) > 0
+        || (res.data.settled_rows ?? 0) > 0);
       if (!mounted.current) return;
       setResult(describe(res.data));
       if (res.data.skipped !== 'recent') {
@@ -164,8 +170,6 @@ export default function OuraAccountLink({
           synced_through: res.data.incomplete ? current.synced_through : (res.data.end_date ?? current.synced_through),
         });
       }
-      onSynced?.((res.data.samples_created ?? 0) > 0 || (res.data.replaced ?? 0) > 0
-        || (res.data.settled_rows ?? 0) > 0);
     } catch (err: unknown) {
       if (!mounted.current) return;
       setError(errorText(err, 'Sync failed. Please try again.'));
@@ -189,7 +193,7 @@ export default function OuraAccountLink({
       if (!mounted.current || !status) return;
       setConnection(status);
       // Right after connecting, and when the last sync is old: read the days.
-      if (status.connected && !autoRan.current && (openedWith.current === 'connected' || stale(status.last_sync_at))) {
+      if (status.connected && !disabledRef.current && !autoRan.current && (openedWith.current === 'connected' || stale(status.last_sync_at))) {
         autoRan.current = true;
         await sync();
       }

@@ -63,9 +63,13 @@ ENDPOINTS = (('activity', 'daily_activity'), ('sleep', 'sleep'),
 USER_AGENT = 'promop-wearables'
 
 CONNECT_TIMEOUT_SECONDS = 3.0
-REQUEST_TIMEOUT_SECONDS = 8.0
-# The sync runs inside the patient's request: no call starts after this.
-BUDGET_SECONDS = 20.0
+REQUEST_TIMEOUT_SECONDS = 6.0
+# The sync runs inside the patient's request, under a web server that gives up
+# at 30 seconds. One deadline is measured from the start of the request and
+# covers the token refresh and the read: no call starts after it, and a call
+# that starts just before it can still run a connect and a read timeout (9
+# seconds), which leaves room for the write that follows.
+BUDGET_SECONDS = 12.0
 MAX_PAGES_PER_ENDPOINT = 30
 MAX_DOCUMENTS = 20000
 STATE_MAX_AGE_SECONDS = 15 * 60
@@ -73,9 +77,10 @@ EXPIRY_MARGIN_SECONDS = 300
 # The first sync reads this many days; Oura keeps more, but a patient's tab
 # needs the recent ones and a request has a budget.
 INITIAL_DAYS = 90
-# Oura revises recent days (a ring that synced late), so a sync re-reads the
-# last days it already has.
-OVERLAP_DAYS = 3
+# Oura revises recent days, and documents a day only once the ring has uploaded
+# it: a ring that was not synced for days back-fills them when it is, so a
+# sync re-reads the last week it already has.
+OVERLAP_DAYS = 7
 # A second sync this soon would only repeat the first and spend Oura's limit
 # (5,000 requests per 5 minutes for the whole application).
 MIN_SYNC_INTERVAL = timedelta(minutes=5)
@@ -89,6 +94,7 @@ NOT_CONFIGURED = 'Connecting an Oura account is not set up on this server.'
 DENIED = 'Oura did not complete the connection. Try again.'
 UNREACHABLE = 'Could not reach Oura. Try again later.'
 UNEXPECTED = 'Oura returned an answer this server could not read.'
+CHANGED = 'Your Oura connection changed while syncing. Sync again.'
 RECONNECT = 'Oura no longer accepts this connection. Connect your Oura account again.'
 RATE_LIMITED = 'Oura is limiting requests right now. Try again in a few minutes.'
 NO_ACCESS = ('Oura shared none of the data this site reads. Connect again and leave the '
@@ -375,7 +381,7 @@ def recently_synced(connection, now=None):
     return last is not None and (now or timezone.now()) - last < MIN_SYNC_INTERVAL
 
 
-def fetch_days(access_token, start, end, *, session=None, clock=time.monotonic):
+def fetch_days(access_token, start, end, *, session=None, clock=time.monotonic, deadline=None):
     """Read the days ``start`` to ``end`` (inclusive) from Oura.
 
     Each kind of document is read on its own, page by page. A kind Oura
@@ -383,11 +389,12 @@ def fetch_days(access_token, start, end, *, session=None, clock=time.monotonic):
     lapsed) is reported in ``unavailable`` and the rest are kept; refused for
     every kind is :data:`NO_ACCESS`. A 401 or 429, or Oura being down, is an
     error for the whole read, since what was read would be a part of a day.
-    The read stops starting calls after :data:`BUDGET_SECONDS`
-    (``incomplete``). The end date asked for is a day later than ``end``, as
+    The read stops starting calls at ``deadline`` (a ``clock`` time; by default
+    :data:`BUDGET_SECONDS` from now), reported as ``incomplete``. The end date asked for is a day later than ``end``, as
     Oura's end date may be exclusive for some documents.
     """
-    deadline = clock() + BUDGET_SECONDS
+    if deadline is None:
+        deadline = clock() + BUDGET_SECONDS
     result = Fetched(documents={kind: [] for kind, _path in ENDPOINTS})
     total = 0
     own = session is None
@@ -410,6 +417,9 @@ def fetch_days(access_token, start, end, *, session=None, clock=time.monotonic):
                         result.unavailable.append(kind)
                         result.documents[kind] = []
                         break
+                    if exc.upstream in (400, 422):
+                        # Oura refused the request itself: not a refused connection.
+                        raise OuraOAuthError(UNEXPECTED, 502, exc.upstream) from None
                     raise
                 data = payload.get('data') if isinstance(payload, dict) else None
                 if not isinstance(data, list):

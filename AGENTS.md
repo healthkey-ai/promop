@@ -1492,11 +1492,16 @@ tab. Rules in `omop_core/services/oura_oauth.py`, routes in
   ([Readings Come In as Source Codes](#wearables--readings-come-in-as-source-codes)),
   seeded *proposed*, so readings are provisional until a curator approves them.
 - **Which days.** The first sync reads the last 90 days (`INITIAL_DAYS`); a later
-  one starts three days before where the last ended (`OVERLAP_DAYS`: Oura revises
-  recent days) and runs to today. A sync that runs out of its 20-second budget
-  (`BUDGET_SECONDS`), or pages past `MAX_PAGES_PER_ENDPOINT`, answers
-  `incomplete: true` and does **not** move `synced_through`, so the next one
-  re-reads the range. The sync runs inside the request (a patient pressed the
+  one starts a week before where the last ended (`OVERLAP_DAYS`: Oura revises
+  recent days, and a ring not synced for days back-fills them when it is) and runs to today. A sync that runs out of its 20-second budget
+  (`BUDGET_SECONDS`, 12, one deadline from the start of the request that the
+  token refresh and the read share, so a call started at it can still run its
+  9 seconds of timeouts inside a 30-second web server), or pages past
+  `MAX_PAGES_PER_ENDPOINT`, answers
+  `incomplete: true` and is not counted as a sync: neither `synced_through` nor
+  `last_sync_at` moves, so Sync now reads again instead of answering "up to date".
+  `synced_through` also stays put while any kind was `unavailable`, so days Oura
+  withheld (a scope switched off, a lapsed membership) are read once it allows them. The sync runs inside the request (a patient pressed the
   button), with no call started after the budget.
 - **A second sync within five minutes reads nothing** (`MIN_SYNC_INTERVAL`,
   answer `skipped: "recent"`): Oura's limit is 5,000 requests per five minutes
@@ -1506,7 +1511,15 @@ tab. Rules in `omop_core/services/oura_oauth.py`, routes in
   the export's rule: a later sync replaces the days an earlier sync or export
   wrote, never stacking. History is one "Oura Ring sync <YYYY-MM>" upload per
   patient per month (`_fold_history`, shared with the Garmin push); the record is
-  re-derived in the request, as the Garmin sync does.
+  re-derived through the derivation dispatcher (off the request where a worker
+  exists, as the Garmin push does), so the 30-day values can lag the sync by a
+  few seconds.
+- **A sync checks its connection again under the lock before writing** (person
+  first, then the connection, matched on `connected_at`): a patient who
+  disconnected, or connected another account (the callback reuses the row, so
+  its pk is the same), while Oura was being read gets a 409 `CHANGED` and
+  nothing is written or marked synced. The callback calls Oura only outside
+  its lock: the earlier access token is revoked after the commit.
 - **The person, signed in, on their own record**: `is_interactive_session`, never
   a service credential or a delegated token, and `person_id` in a sync body is
   refused unless it is the caller's own. The tab renders the section's account
@@ -1518,7 +1531,10 @@ tab. Rules in `omop_core/services/oura_oauth.py`, routes in
   subscriptions: `/v2/webhook/subscription`, with the app's id and secret; the
   patient would have to be matched by Oura's user id, which needs the `personal`
   scope).
-- **Not verified against a live account.** The field names are checked against
+- **Not verified against a live account.** Whether the `sleep` endpoint filters by
+  `day` or by bedtime is not known: if by bedtime, the first day of a window could
+  return only part of a night and `replace_daily` would replace a correct total.
+  The field names are checked against
   Oura's published OpenAPI spec (1.43), not against a response. Check a first real
   sync's `unavailable`, and whether a day's `sleep` documents arrive (the `sleep`
   endpoint's `end_date` handling in particular).

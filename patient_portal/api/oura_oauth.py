@@ -19,6 +19,7 @@ thing a page load carries. Oura pushes nothing here, so there is no webhook.
 """
 import hmac
 import logging
+import time
 
 from django.db import transaction
 from django.http import HttpResponseRedirect
@@ -33,12 +34,11 @@ from rest_framework.response import Response
 from rest_framework.throttling import UserRateThrottle
 
 from omop_core.models import OuraConnection, Person
-from omop_core.services import oura_oauth
+from omop_core.services import garmin_oauth, oura_oauth
 from omop_core.services.oura_parser import samples_from_documents
-from omop_core.services.patient_record_service import refresh_patient_record
 from patient_portal.consent import RECORD_OFF, record_permitted
 
-from .garmin_oauth import _fold_history
+from .garmin_oauth import _derive, _fold_history
 from .permissions import is_interactive_session
 
 logger = logging.getLogger(__name__)
@@ -159,11 +159,12 @@ def _back(outcome):
     return response
 
 
-def _abandon(tokens, person_id):
-    """Oura issued a token and the account is not being connected here after
-    all: revoke it, or it would stay good at Oura for nothing."""
+def _abandon(access_token, person_id):
+    """An access token that is not kept (Oura issued it and the account is not
+    being connected here after all, or a new connection replaced it): revoke it,
+    or it would stay good at Oura for nothing."""
     try:
-        oura_oauth.revoke(tokens.access_token)
+        oura_oauth.revoke(access_token)
     except oura_oauth.OuraOAuthError as exc:
         logger.warning('oura_revoke_failed person_id=%s status=%s', person_id, exc.status)
 
@@ -204,6 +205,10 @@ def oauth_callback(request):
 
     from patient_portal.models import PatientUser
 
+    # Oura is only called outside the lock: a call here would hold the
+    # patient's ETL and clinical writes for as long as Oura takes.
+    superseded = None      # an earlier connection's access token, revoked after the commit
+    refused = False
     with transaction.atomic():
         # Person first, then the connection: the order a sync takes them in.
         person = Person.objects.select_for_update(no_key=True).filter(pk=person_id).first()
@@ -211,23 +216,26 @@ def oauth_callback(request):
         # started this must still be this person's own.
         if (person is None or not record_permitted(person)
                 or not PatientUser.objects.filter(identity_id=read.identity_id, person=person).exists()):
-            _abandon(tokens, person_id)
-            return _back('error')
-        row = OuraConnection.objects.select_for_update().filter(person=person).first() \
-            or OuraConnection(person=person)
-        if row.pk:
-            # Connecting again, perhaps another Oura account: the earlier token
-            # is revoked, and the first sync reads the recent days afresh.
-            try:
-                oura_oauth.revoke(oura_oauth.usable_access_token(row))
-            except oura_oauth.OuraOAuthError as exc:
-                logger.warning('oura_revoke_failed person_id=%s status=%s', person_id, exc.status)
-        row.last_sync_at = None
-        row.synced_through = None
-        row.connected_by_id = read.identity_id
-        row.connected_at = timezone.now()
-        oura_oauth.store_tokens(row, tokens)
-        row.save()
+            refused = True
+        else:
+            row = OuraConnection.objects.select_for_update().filter(person=person).first() \
+                or OuraConnection(person=person)
+            if row.pk:
+                # Connecting again, perhaps another Oura account: the earlier
+                # token is revoked as stored (an expired one is already dead),
+                # and the first sync reads the recent days afresh.
+                superseded = garmin_oauth.decrypt(row.access_token)
+            row.last_sync_at = None
+            row.synced_through = None
+            row.connected_by_id = read.identity_id
+            row.connected_at = timezone.now()
+            oura_oauth.store_tokens(row, tokens)
+            row.save()
+    if refused:
+        _abandon(tokens.access_token, person_id)
+        return _back('error')
+    if superseded:
+        _abandon(superseded, person_id)
     logger.info('oura_connected person_id=%s', person_id)
     return _back('connected')
 
@@ -269,6 +277,8 @@ def sync(request):
     if not oura_oauth.configured():
         return Response({'error': oura_oauth.NOT_CONFIGURED}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
+    # One deadline for the whole request: the refresh and the read share it.
+    deadline = time.monotonic() + oura_oauth.BUDGET_SECONDS
     today = timezone.now().date()
     start, end = oura_oauth.sync_window(row.synced_through, today)
     try:
@@ -278,7 +288,7 @@ def sync(request):
         if access is None:
             return Response({'error': 'No Oura account is connected.', 'connected': False},
                             status=status.HTTP_404_NOT_FOUND)
-        fetched = oura_oauth.fetch_days(access, start, end)
+        fetched = oura_oauth.fetch_days(access, start, end, deadline=deadline)
     except oura_oauth.OuraOAuthError as exc:
         logger.info('oura_sync_refused person_id=%s status=%s upstream=%s',
                     person.person_id, exc.status, exc.upstream)
@@ -294,6 +304,15 @@ def sync(request):
         Person.objects.select_for_update(no_key=True).filter(pk=person.pk).first()
         if not record_permitted(person):
             return Response({'error': RECORD_OFF}, status=status.HTTP_403_FORBIDDEN)
+        # The connection this read was made for, still: the patient may have
+        # disconnected, or connected another account (the row is reused, so
+        # its pk is the same), while Oura was being read. Locked after the
+        # person, the order the callback takes them in.
+        live = OuraConnection.objects.select_for_update().filter(
+            pk=row.pk, connected_at=row.connected_at).first()
+        if live is None:
+            return Response({'error': oura_oauth.CHANGED, 'reconnect': False},
+                            status=status.HTTP_409_CONFLICT)
         if samples:
             written = PatientRecordViewSet()._write_wearable_samples(
                 request.user, person, 'oura', samples, label, True)
@@ -305,19 +324,25 @@ def sync(request):
                                 status=status.HTTP_503_SERVICE_UNAVAILABLE)
             result = written
             _fold_history(person, label, result, 'oura')
-        update = {'last_sync_at': timezone.now()}
+        update = {}
         if not fetched.incomplete:
-            update['synced_through'] = end
-        OuraConnection.objects.filter(pk=row.pk).update(**update)
+            # Only a read that finished counts as a sync: "Sync again for the
+            # rest" must not be answered "up to date".
+            update['last_sync_at'] = timezone.now()
+            # A kind Oura refused (a scope switched off, a lapsed membership)
+            # leaves its days unread: the window stays where it was, so they
+            # are read once Oura allows them.
+            if not fetched.unavailable:
+                update['synced_through'] = end
+        if update:
+            OuraConnection.objects.filter(pk=live.pk).update(**update)
 
-    # A sync that stored nothing new can still have settled earlier rows (#2835).
-    # Re-derived here, as the Garmin sync does: the patient pressed the button
-    # and reads the 30-day values next.
+    # A sync that stored nothing new can still have settled earlier rows
+    # (#2835). Re-derived off the request where a worker exists: a bulk-loaded
+    # record takes longer than what is left of the request, and the rows are
+    # committed already.
     if result.get('samples_created') or result.get('replaced') or result.get('settled_rows'):
-        try:
-            refresh_patient_record(person)
-        except Exception:
-            logger.exception('oura_sync_refresh_failed person_id=%s', person.person_id)
+        _derive(person, source='oura_sync')
     result.update({
         'start_date': start.isoformat(),
         'end_date': end.isoformat(),
