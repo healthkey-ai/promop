@@ -207,7 +207,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 35
+DERIVATION_VERSION = 36
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -2697,6 +2697,15 @@ _COMPONENT_RELATIONSHIP_IDS = (
 # matching EXACT's TherapyComponent.omop_concept_id leveling).
 _LEVELING_RELATIONSHIP_IDS = ('Maps to', 'Has ingredient')
 
+# A live edge to a live target. Athena keeps retired relationships and concepts
+# with invalid_reason set; following one would put an outdated drug into a
+# patient's component ids, where it can satisfy or trip a trial criterion
+# (#2764). Empty string counts as live, as in _standard_drug_targets.
+_LIVE_EDGE_TO_LIVE_TARGET = (
+    (Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    & (Q(concept_2__invalid_reason__isnull=True) | Q(concept_2__invalid_reason=''))
+)
+
 
 def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
     """Expand one therapy line's inputs into a set of component drug concept_ids.
@@ -2711,6 +2720,9 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
       4. 'Has ingredient' targets of the 'Maps to' targets from (3), covering
          HemOnc drug → RxNorm clinical drug → ingredient.
 
+    Steps 1, 3 and 4 follow only live edges to live targets. The exposure ids in
+    (2) are kept as recorded.
+
     At most 3 batched queries regardless of input size.
     """
     base = set()
@@ -2718,6 +2730,7 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
     if regimen_ids:
         base.update(
             ConceptRelationship.objects.filter(
+                _LIVE_EDGE_TO_LIVE_TARGET,
                 concept_1_id__in=regimen_ids,
                 relationship_id__in=_COMPONENT_RELATIONSHIP_IDS,
             ).values_list('concept_2_id', flat=True)
@@ -2728,6 +2741,7 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
 
     hop1 = set(
         ConceptRelationship.objects.filter(
+            _LIVE_EDGE_TO_LIVE_TARGET,
             concept_1_id__in=base,
             relationship_id__in=_LEVELING_RELATIONSHIP_IDS,
         ).values_list('concept_2_id', flat=True)
@@ -2736,6 +2750,7 @@ def _expand_component_ids(regimen_concept_ids, drug_concept_ids):
     if hop1:
         hop2 = set(
             ConceptRelationship.objects.filter(
+                _LIVE_EDGE_TO_LIVE_TARGET,
                 concept_1_id__in=hop1,
                 relationship_id='Has ingredient',
             ).values_list('concept_2_id', flat=True)

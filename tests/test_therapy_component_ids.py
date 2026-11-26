@@ -100,6 +100,71 @@ def test_expand_unknown_regimen_yields_empty():
 
 
 # ---------------------------------------------------------------------------
+# Retired edges and targets are not followed (#2764)
+# ---------------------------------------------------------------------------
+
+def _retire_edge(c1, c2, rel_id, reason='D'):
+    assert ConceptRelationship.objects.filter(
+        concept_1_id=c1, concept_2_id=c2, relationship_id=rel_id).update(invalid_reason=reason) == 1
+
+
+def _retire_concept(concept_id, reason='D'):
+    assert Concept.objects.filter(concept_id=concept_id).update(invalid_reason=reason) == 1
+
+
+# Each edge of _regimen_graph, and what is reachable only through it.
+_GRAPH_EDGES = {
+    'regimen to component': ((REGIMEN_ID, COMPONENT_A_ID, 'Has targeted therapy'),
+                             {COMPONENT_A_ID, RXNORM_CD_ID, RXNORM_ING_ID}),
+    'maps to': ((COMPONENT_A_ID, RXNORM_CD_ID, 'Maps to'), {RXNORM_CD_ID, RXNORM_ING_ID}),
+    'has ingredient': ((RXNORM_CD_ID, RXNORM_ING_ID, 'Has ingredient'), {RXNORM_ING_ID}),
+}
+
+
+@pytest.mark.parametrize('retired', ['edge', 'target'])
+@pytest.mark.parametrize('position', list(_GRAPH_EDGES))
+def test_expand_does_not_follow_a_retired_edge_or_target(position, retired):
+    expected = _regimen_graph(_hemonc_vocab())
+    (c1, c2, rel_id), reachable_only_through_it = _GRAPH_EDGES[position]
+    if retired == 'edge':
+        _retire_edge(c1, c2, rel_id)
+    else:
+        _retire_concept(c2)
+
+    result = _expand_component_ids([REGIMEN_ID], [])
+
+    assert result == expected - reachable_only_through_it
+    assert COMPONENT_B_ID in result   # the live sibling stays
+
+
+def test_expand_reads_an_empty_invalid_reason_as_live():
+    expected = _regimen_graph(_hemonc_vocab())
+    ConceptRelationship.objects.update(invalid_reason='')
+    Concept.objects.filter(concept_id__in=expected | {REGIMEN_ID}).update(invalid_reason='')
+
+    assert _expand_component_ids([REGIMEN_ID], []) == expected
+
+
+def test_expand_does_not_level_an_exposure_through_a_retired_edge():
+    drug = ConceptFactory(concept_name='drug as recorded')
+    outdated = ConceptFactory(concept_name='outdated standard drug')
+    current = ConceptFactory(concept_name='current standard drug')
+    _link(drug.concept_id, outdated.concept_id, 'Maps to')
+    _link(drug.concept_id, current.concept_id, 'Maps to')
+    _retire_edge(drug.concept_id, outdated.concept_id, 'Maps to', reason='U')
+
+    assert _expand_component_ids([], [drug.concept_id]) == {drug.concept_id, current.concept_id}
+
+
+def test_expand_keeps_a_recorded_exposure_concept_even_if_retired():
+    """Only traversal is filtered: the drug the exposure records is the patient's fact."""
+    drug = ConceptFactory(concept_name='retired drug as recorded')
+    _retire_concept(drug.concept_id)
+
+    assert _expand_component_ids([], [drug.concept_id]) == {drug.concept_id}
+
+
+# ---------------------------------------------------------------------------
 # Episodes derivation path
 # ---------------------------------------------------------------------------
 
@@ -160,6 +225,30 @@ def test_episode_path_populates_per_line_and_aggregate_component_ids():
     assert set(data['therapy_component_ids']) == line1_expected | {COMPONENT_C_ID}
     # sorted lists, not sets, on the wire
     assert data['first_line_component_ids'] == sorted(line1_expected)
+
+
+def test_episode_path_drops_components_reached_only_through_a_retired_edge():
+    person = PersonFactory()
+    hemonc = _hemonc_vocab()
+    line_expected = _regimen_graph(hemonc)
+    _retire_edge(COMPONENT_A_ID, RXNORM_CD_ID, 'Maps to')
+    concepts = {
+        'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
+        'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
+        'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
+        'field': ConceptFactory(concept_id=1147094, concept_name='drug_exposure.drug_exposure_id'),
+    }
+    drug = DrugExposureFactory(
+        person=person, drug_concept=Concept.objects.get(concept_id=COMPONENT_A_ID),
+        drug_exposure_start_date=date(2024, 1, 1), drug_exposure_end_date=date(2024, 3, 1),
+    )
+    _make_episode(person, 1, 1, Concept.objects.get(concept_id=REGIMEN_ID), drug, concepts)
+
+    data = _get_treatment_data(person)
+
+    kept = line_expected - {RXNORM_CD_ID, RXNORM_ING_ID}
+    assert set(data['first_line_component_ids']) == kept
+    assert set(data['therapy_component_ids']) == kept
 
 
 # ---------------------------------------------------------------------------
