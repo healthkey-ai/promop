@@ -8,6 +8,13 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A deployment's own patient invitation email** — `PATIENT_INVITATION_EMAIL`,
+  set in a deployment's settings module, names a function
+  `(invitation, accept_url) -> (subject, body)` that writes the invitation
+  email, for both the first send and "Send the invitation again". A deployment
+  whose members are not PROMOP's patients can then use its own name and
+  wording instead of "your health record on PROMOP". Empty (the default):
+  PROMOP's email, unchanged.
 - **Email through Twilio SendGrid** — set `SENDGRID_API_KEY` (a key with Mail
   Send permission) and promop sends through SendGrid's SMTP relay instead of
   Mailgun; `SENDGRID_SMTP_HOST` names the relay, `smtp.eu.sendgrid.net` for an
