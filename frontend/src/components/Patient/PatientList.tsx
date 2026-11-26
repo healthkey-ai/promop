@@ -153,8 +153,21 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
   const [search, setSearch] = useState("");
-  const [diseaseCategoryFilter, setDiseaseCategoryFilter] = useState(ALL_FILTER_VALUE);
-  const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
+  // Sticky: kept with the other saved choices, until the reader changes them.
+  // A saved choice the list no longer offers (a category or disease since removed) is
+  // applied as All once the options are known, and kept until the reader picks another.
+  const categoryOffered = preferences.disease_category === ALL_FILTER_VALUE
+    || !filterOptions.disease_categories
+    || filterOptions.disease_categories.some((cat) => cat.value === preferences.disease_category);
+  const diseaseCategoryFilter = categoryOffered ? preferences.disease_category : ALL_FILTER_VALUE;
+  const diseaseOffered = preferences.disease === ALL_FILTER_VALUE
+    || !filterOptions.diseases_by_category
+    || (filterOptions.diseases_by_category[diseaseCategoryFilter] ?? []).includes(preferences.disease);
+  const diseaseFilter = categoryOffered && diseaseOffered ? preferences.disease : ALL_FILTER_VALUE;
+  const setDiseaseCategoryFilter = (value: string) => setPreferences((previous) => ({
+    ...previous, disease_category: value, disease: ALL_FILTER_VALUE,
+  }));
+  const setDiseaseFilter = (value: string) => setPreferences((previous) => ({ ...previous, disease: value }));
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
   const { page, pageSize, setPage, setPageSize } = useLocalPagination(10);
@@ -529,7 +542,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               onChange={(e) => {
                 resetToFirstPage();
                 setDiseaseCategoryFilter(e.target.value);
-                setDiseaseFilter(ALL_FILTER_VALUE);
               }}
               className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
             >
