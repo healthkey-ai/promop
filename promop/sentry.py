@@ -43,6 +43,7 @@ _EXTRA_SECRET_KEYS: tuple[str, ...] = (
     'ANTHROPIC_API_KEY',
     'MAILGUN_API_KEY',
     'SENDGRID_API_KEY',
+    'EMAIL_HOST_PASSWORD',
     'ADMIN_PASSWORD',
 )
 

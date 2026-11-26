@@ -383,46 +383,49 @@ ACCOUNT_CLOSED_BLOCK_SECONDS = int(os.environ.get('ACCOUNT_CLOSED_BLOCK_SECONDS'
 EXPORT_SIGNING_KEY = os.environ.get('EXPORT_SIGNING_KEY', '')
 
 
-def _email_settings(env) -> tuple[str, dict]:
-    """The mail backend and ANYMAIL settings that ``env`` asks for.
+def _email_settings(env) -> dict:
+    """The email settings that ``env`` asks for.
 
-    SendGrid when SENDGRID_API_KEY is set (SENDGRID_API_URL points it at a
-    regional API, e.g. https://api.eu.sendgrid.com/v3/ for an EU-resident
-    account); otherwise Mailgun when MAILGUN_API_KEY and MAILGUN_SENDER_DOMAIN
-    are; otherwise the console backend, for local development. EMAIL_BACKEND
-    overrides the choice. SendGrid's open, click and subscription tracking are off: click
-    tracking rewrites every link, so a password-reset or invitation token would
-    pass through SendGrid's redirect. Values are stripped: a key pasted into a
-    secret with its newline would otherwise be refused in the Authorization
-    header, and every send would fail.
+    Twilio SendGrid when SENDGRID_API_KEY is set: its SMTP relay, at
+    SENDGRID_SMTP_HOST (smtp.eu.sendgrid.net for an EU-resident account), with
+    tracking off (promop.mail). Otherwise Mailgun's HTTP API, through anymail,
+    when MAILGUN_API_KEY and MAILGUN_SENDER_DOMAIN are set; otherwise the
+    console backend, for local development. EMAIL_BACKEND overrides the choice.
+    Values are stripped: a key pasted into a secret with its newline would
+    otherwise fail every sign-in to the relay.
     """
     value = {key: env.get(key, '').strip() for key in (
-        'SENDGRID_API_KEY', 'SENDGRID_API_URL', 'MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN')}
-    anymail = {}
+        'SENDGRID_API_KEY', 'SENDGRID_SMTP_HOST', 'MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN')}
+    email = {'ANYMAIL': {k: value[k] for k in ('MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN') if value[k]}}
     if value['SENDGRID_API_KEY']:
-        backend = 'anymail.backends.sendgrid.EmailBackend'
-        anymail['SENDGRID_API_KEY'] = value['SENDGRID_API_KEY']
-        if value['SENDGRID_API_URL']:
-            anymail['SENDGRID_API_URL'] = value['SENDGRID_API_URL']
-        anymail['SENDGRID_SEND_DEFAULTS'] = {
-            'track_clicks': False, 'track_opens': False,
-            # Nor SendGrid's own unsubscribe footer, whatever the account says:
-            # the apps that need one write their own List-Unsubscribe.
-            'esp_extra': {'tracking_settings': {'subscription_tracking': {'enable': False}}},
-        }
+        email.update(
+            EMAIL_BACKEND='promop.mail.SendGridSMTPBackend',
+            EMAIL_HOST=value['SENDGRID_SMTP_HOST'] or 'smtp.sendgrid.net',
+            EMAIL_PORT=587,
+            EMAIL_USE_TLS=True,
+            EMAIL_HOST_USER='apikey',  # SendGrid's fixed user name for an API key
+            EMAIL_HOST_PASSWORD=value['SENDGRID_API_KEY'],
+            EMAIL_TIMEOUT=30,  # a request that sends mail never hangs on the relay
+        )
     elif value['MAILGUN_API_KEY'] and value['MAILGUN_SENDER_DOMAIN']:
-        backend = 'anymail.backends.mailgun.EmailBackend'
+        email['EMAIL_BACKEND'] = 'anymail.backends.mailgun.EmailBackend'
     else:
-        backend = 'django.core.mail.backends.console.EmailBackend'
-    for key in ('MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN'):
-        if value[key]:
-            anymail[key] = value[key]
-    return env.get('EMAIL_BACKEND', backend), anymail
+        email['EMAIL_BACKEND'] = 'django.core.mail.backends.console.EmailBackend'
+    if env.get('EMAIL_BACKEND'):
+        email['EMAIL_BACKEND'] = env['EMAIL_BACKEND']
+    return email
 
 
-# Email — through django-anymail (SendGrid or Mailgun) when configured; see
-# _email_settings.
-EMAIL_BACKEND, ANYMAIL = _email_settings(os.environ)
+# Email — SendGrid's SMTP relay or Mailgun when configured; see _email_settings.
+_EMAIL = _email_settings(os.environ)
+EMAIL_BACKEND = _EMAIL['EMAIL_BACKEND']
+ANYMAIL = _EMAIL['ANYMAIL']
+EMAIL_HOST = _EMAIL.get('EMAIL_HOST', 'localhost')
+EMAIL_PORT = _EMAIL.get('EMAIL_PORT', 25)
+EMAIL_USE_TLS = _EMAIL.get('EMAIL_USE_TLS', False)
+EMAIL_HOST_USER = _EMAIL.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = _EMAIL.get('EMAIL_HOST_PASSWORD', '')
+EMAIL_TIMEOUT = _EMAIL.get('EMAIL_TIMEOUT')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.

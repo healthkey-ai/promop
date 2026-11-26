@@ -611,7 +611,7 @@ address as typed.
 
 - **Mail.** Voting needs working outbound email: the links are built from
   `APP_BASE_URL` and sent through the deployment's mail backend
-  (`SENDGRID_API_KEY`, with `SENDGRID_API_URL` for a regional account, or
+  (`SENDGRID_API_KEY`, with `SENDGRID_SMTP_HOST` for a regional relay, or
   `MAILGUN_API_KEY` and `MAILGUN_SENDER_DOMAIN`; and `DEFAULT_FROM_EMAIL`). When
   `CELERY_BROKER_URL` is set the worker sends the email, so the worker needs
   those variables and `APP_BASE_URL` too; without a broker it is sent in the
