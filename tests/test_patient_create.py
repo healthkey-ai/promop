@@ -185,6 +185,22 @@ def test_a_deployment_writes_its_own_invitation_email(settings):
     assert 'PROMOP' not in sent.subject + sent.body
 
 
+def broken_invitation(invitation, accept_url):
+    raise RuntimeError('the deployment\'s template is broken')
+
+
+def test_a_failing_deployment_email_is_an_email_not_sent(settings):
+    """The invitation stands and the response warns, as for a backend failure."""
+    settings.PATIENT_INVITATION_EMAIL = 'tests.test_patient_create.broken_invitation'
+    mail.outbox = []
+    resp = _client(_admin(_org())).post(URL, {
+        'given_name': 'Rae', 'email': 'rae@example.com', 'invite': True}, format='json')
+    assert resp.status_code == 201, resp.data
+    assert resp.data['email_warning']
+    assert PatientInvitation.objects.filter(person_id=resp.data['person_id']).exists()
+    assert mail.outbox == []
+
+
 @pytest.mark.parametrize('raw', ['0', '91', '3000', 'thirty', ''])
 def test_an_invite_ttl_outside_1_to_90_days_stops_startup(raw):
     from django.core.exceptions import ImproperlyConfigured

@@ -69,7 +69,13 @@ def _patient_invitation_message(invitation, accept_url: str) -> tuple[str, str]:
 
 def _send_patient_invitation_email(invitation) -> None:
     accept_url = f"{settings.APP_BASE_URL}/accept-patient-invite?token={invitation.token}"
-    subject, body = _patient_invitation_message(invitation, accept_url)
+    try:
+        subject, body = _patient_invitation_message(invitation, accept_url)
+    except Exception as exc:
+        # A deployment's function that fails is an email that could not be
+        # sent, as a backend failure is: the invitation stands, the caller warns.
+        logger.exception("Could not write the email for patient invitation %s", invitation.pk)
+        raise PatientInvitationEmailError from exc
     if settings.DEBUG:
         logger.info(
             "Patient invitation email preview\nTo: %s\nFrom: %s\nSubject: %s\n\n%s",
