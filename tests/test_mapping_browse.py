@@ -980,7 +980,7 @@ def test_plain_list_filters_by_updated_since_rfc3339_instant():
     assert response.status_code == 200 and len(response.data) == 2
 
 
-@pytest.mark.parametrize('k_service, expected', [('ctomop-staging', 'trusted'), ('', 'None')])
+@pytest.mark.parametrize('k_service, expected', [('promop-staging', 'trusted'), ('', 'None')])
 def test_proxy_ssl_header_is_trusted_on_cloud_run(k_service, expected):
     """Cloud Run strips a client's X-Forwarded-Proto as Render does, so Django
     may build https links behind it; a bare server still trusts nothing."""

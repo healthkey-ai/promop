@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-BUCKET="${1:-ctomop-staging-vocab}"
+BUCKET="${1:-promop-staging-vocab}"
 VOCAB_DIR="${2:-$HOME/Downloads/vocabulary_download_v5_*}"
 
 FILES="CONCEPT.csv CONCEPT_CLASS.csv CONCEPT_RELATIONSHIP.csv \
@@ -93,4 +93,4 @@ fi
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "To run the load job:"
-echo "  gcloud run jobs execute ctomop-staging-load-vocab --region us-central1 --wait"
+echo "  gcloud run jobs execute promop-staging-load-vocab --region us-central1 --wait"
