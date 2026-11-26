@@ -1877,6 +1877,16 @@ export default function EditMappingDialog({
               <span className="break-words text-slate-600">
                 {selectedRow?.origin_system || "\u2014"}
               </span>
+              {selectedRow?.proposer_email && (
+                <span className="break-words text-slate-600" data-testid="mapping-proposer">
+                  {" \u00b7 proposed by "}{selectedRow.proposer_email}
+                </span>
+              )}
+              {selectedRow?.status === "approved" && (selectedRow.reviewer_email || selectedRow.reviewer) && (
+                <span className="break-words text-slate-600" data-testid="mapping-approver">
+                  {" \u00b7 approved by "}{selectedRow.reviewer_email || selectedRow.reviewer}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
