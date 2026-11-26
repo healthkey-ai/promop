@@ -161,21 +161,26 @@ def descriptor(*, mapping_approved=False):
     options, recipes = [], {}
     for choice, code in preferred:
         concept = concepts.get((code.vocabulary_id, code.code)) if code else None
-        option = {'value': choice.display, 'code': code.code if code else None,
+        # What is stored and keyed on is the choice's value (its label until one
+        # is set), which a rename of the label leaves alone (#1225).
+        stored = choice.stored_value
+        option = {'value': stored, 'code': code.code if code else None,
                   'vocabulary': code.vocabulary_id if code else None,
                   'concept_id': concept.pk if concept else None,
                   'display': concept.concept_name if concept else None}
+        if stored != choice.display:
+            option['label'] = choice.display
         options.append(option)
         if concept:
-            recipes[choice.display] = {
+            recipes[stored] = {
                 'omop_table': 'observation', 'concept_id': concept.pk,
-                'source_value': SOURCE_PREFIX + choice.display,
+                'source_value': SOURCE_PREFIX + stored,
                 'type_concept_id': 32817, 'value_kind': 'string',
             }
     entry['options'] = options
     entry['projection'] = {
         'omop_table': 'observation', 'choice_projections': recipes,
-        'choice_values': [choice.display for choice in choices],
+        'choice_values': [choice.stored_value for choice in choices],
     }
     legacy_concept = concepts.get(('SNOMED', LEGACY_CONCEPT_CODE))
     if legacy_concept:

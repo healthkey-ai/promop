@@ -342,6 +342,25 @@ def test_patch_rename_keeps_the_stored_value_and_reports_it(staff):
     assert r.json()['stored_value'] == 'IV'
 
 
+def test_a_reorder_after_the_first_rename_is_not_refused_for_a_non_text_choice(staff):
+    choice = make('Unknown', value_type='integer')
+    r = staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'display': 'Not known'}, format='json')
+    assert r.status_code == 200, r.data
+    assert r.json()['value'] == 'Unknown'
+    r = staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'sort_order': 4}, format='json')
+    assert r.status_code == 200, r.data
+
+
+def test_cytogenetic_options_and_recipes_follow_the_stored_value_after_a_rename():
+    from omop_core.services import cytogenetics
+    choice = FieldChoice.objects.create(field_name='cytogenetic_markers', display='del(17p)')
+    field_choices.rename(choice, 'del 17p')
+    entry = cytogenetics.descriptor(mapping_approved=True)
+    assert [o['value'] for o in entry['options']] == ['del(17p)']
+    assert entry['options'][0]['label'] == 'del 17p'
+    assert entry['projection']['choice_values'] == ['del(17p)']
+
+
 def test_stored_value_cannot_be_written_through_the_field_choice_api(staff):
     choice = make('Stage IV')
     staff.patch(f'/api/v1/field-choices/{choice.pk}/', {'stored_value': 'x'}, format='json')

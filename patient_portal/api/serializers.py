@@ -2174,11 +2174,14 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         display = ' '.join(str(attrs.get('display', getattr(instance, 'display', ''))).split())
         value_type = attrs.get('value_type', getattr(instance, 'value_type', 'text'))
         errors = {}
-        try:
-            attrs['value'] = field_choices.clean_value(
-                value_type, attrs.get('value', getattr(instance, 'value', '')))
-        except field_choices.ChoiceError as exc:
-            errors['value'] = str(exc)
+        if instance is None or 'value' in attrs or 'value_type' in attrs:
+            # Not on every edit: a value frozen at a rename is the old label, which a
+            # non-text type need not accept, and a reorder must not be refused for it.
+            try:
+                attrs['value'] = field_choices.clean_value(
+                    value_type, attrs.get('value', getattr(instance, 'value', '')))
+            except field_choices.ChoiceError as exc:
+                errors['value'] = str(exc)
         code = attrs.get('code')
         if code is not None and code != '' and field_choices.slug(code) != code:
             errors['code'] = 'Use lower case letters, digits and underscores.'
@@ -2243,10 +2246,6 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         retired = validated_data.pop('retired', None)
         display = validated_data.pop('display', None)
         validated_data.pop('code', None)
-        if 'value' not in getattr(self, 'initial_data', {}) and not validated_data.get('value'):
-            # ``validate`` fills ``value`` from the row; the label's freeze
-            # below must not be written back over by that stale blank.
-            validated_data.pop('value', None)
         try:
             if display is not None:
                 field_choices.rename(instance, display)
