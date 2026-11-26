@@ -709,7 +709,7 @@ def test_the_cdisc_destination_keeps_its_catalog_whatever_the_systems(reader):
 def test_the_reference_lists_the_systems_in_tab_order(reader):
     systems = reader.get('/api/v1/code-mappings/reference/').json()['wearable_source_systems']
     assert [system['id'] for system in systems] == [
-        'Apple', 'HealthConnect', 'Garmin', 'OpenWearables', 'HL7-PHR', 'CDISC-BC']
+        'Apple', 'HealthConnect', 'Garmin', 'Oura', 'OpenWearables', 'HL7-PHR', 'CDISC-BC']
     assert systems[0] == {'id': 'Apple', 'label': 'HealthKit'}
 
 

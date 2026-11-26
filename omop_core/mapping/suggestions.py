@@ -194,7 +194,7 @@ RANKING_MODELS = {'anthropic', 'jev', 'both'}
 # Map Anthropic's qualitative confidence labels to numeric values for comparison
 # with Jev's probabilistic scores.
 ANTHROPIC_CONFIDENCE_MAP = {'high': 0.85, 'medium': 0.55, 'low': 0.25}
-DEFAULT_RANKING_MODEL = 'anthropic'
+DEFAULT_RANKING_MODEL = 'jev'
 # Backwards compat: old code that reads RANKING_MODEL gets the Anthropic model.
 RANKING_MODEL = RANKING_MODEL_ANTHROPIC
 
@@ -1319,9 +1319,44 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     return chosen, note, alternatives
 
 
+def is_fallback_note(note):
+    """Whether *note* is the one a ranker that could not run leaves behind.
+
+    The note is how a fallback is told from a selection everywhere a result is
+    handled, and what migration 0360 backfilled ``suggestion_fallback`` from.
+    """
+    return 'ranking model unavailable' in (note or '').lower()
+
+
 def _is_retrieval_fallback(chosen, note):
     """Whether a ranker's pick is the retrieval-order stand-in, not a selection."""
-    return chosen is not None and 'ranking model unavailable' in (note or '').lower()
+    return chosen is not None and is_fallback_note(note)
+
+
+def archive_suggestion_review(mapping):
+    """Move *mapping*'s completed review aside before its suggestion is replaced.
+
+    The mapping holds one suggestion and its first disposition. A new
+    suggestion, from a forward run or a ranker-chosen reverse proposal, would
+    otherwise erase a review that happened, or be scored against it. The
+    caller clears ``suggestion_outcome``. No-op for a row never reviewed.
+    """
+    if not mapping.suggestion_outcome:
+        return
+    from omop_core.models import MappingSuggestionReview
+    MappingSuggestionReview.objects.create(
+        mapping=mapping,
+        source_vocabulary_id=mapping.source_vocabulary_id,
+        source_code=mapping.source_code,
+        suggested_target_concept_id=(
+            mapping.suggested_target_concept_id or mapping.target_concept_id
+        ),
+        suggestion_model_version=mapping.suggestion_model_version,
+        suggestion_outcome=mapping.suggestion_outcome,
+        suggestion_fallback=mapping.suggestion_fallback,
+        suggestion_auto_approved=mapping.suggestion_auto_approved,
+        auto_approved_confidence=mapping.auto_approved_confidence,
+    )
 
 
 def _ranker_answered(chosen, note):
@@ -2024,7 +2059,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                      strategies=None, lexical_limit=CANDIDATE_LIMIT,
                      resuggest=False, progress=None, activity=None,
                      ranking_model=DEFAULT_RANKING_MODEL, mapping_ids=None,
-                     skip_fallback=False):
+                     skip_fallback=False, auto_approve_threshold=None, approve_as=None,
+                     on_auto_approve=None):
     """Propose destinations for the unanswered queue rows on one tab.
 
     The candidate set is :func:`suggestable_mappings` -- rows already on the
@@ -2061,6 +2097,18 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
     left exactly as it was, unwritten and unstamped (so a rerun retries it), and
     its result entry carries ``unanswered: True``. A ranker's explicit decline is
     an answer and is still written and stamped.
+
+    *auto_approve_threshold* (a whole percent, with *approve_as*, the person the run
+    belongs to) approves a proposal as it is written when a ranker's confidence in
+    it, as it is and not rounded, is at or above the threshold (#1532,
+    ``suggest_auto_approve``). Off when either is ``None`` and for a dry run, so every
+    existing caller is unchanged. The result entry of a row it approved carries
+    ``auto_approved: True``; one whose approval failed unexpectedly carries
+    ``auto_approve_error: True`` and the run carries on. A row the approval is refused
+    for (a locked destination concept, an Athena duplicate, the approver being its
+    proposer) stays proposed. *on_auto_approve*, when given, is called with
+    ``'approved'`` or ``'error'`` right after each such attempt, so a caller can keep
+    count while the run is still going.
 
     *progress*, when given, is called as ``progress(stage, done, total)`` with
     *stage* ``'retrieving'`` then ``'writing'``.  Retrieval is two thirds of the
@@ -2364,26 +2412,19 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 if concept.pk != mapping.target_concept_id:
                     moved_off = mapping.target_concept_id
                     destination_moved = True
-                if mapping.suggestion_outcome:
-                    from omop_core.models import MappingSuggestionReview
-                    MappingSuggestionReview.objects.create(
-                        mapping=mapping,
-                        source_vocabulary_id=mapping.source_vocabulary_id,
-                        source_code=mapping.source_code,
-                        suggested_target_concept_id=(
-                            mapping.suggested_target_concept_id or mapping.target_concept_id
-                        ),
-                        suggestion_model_version=mapping.suggestion_model_version,
-                        suggestion_outcome=mapping.suggestion_outcome,
-                    )
+                archive_suggestion_review(mapping)
                 mapping.status = 'proposed'
                 mapping.suggestion_outcome = ''
+                # The auto-approval belonged to the suggestion being replaced
+                # (the archive above kept it with that suggestion's review).
+                mapping.suggestion_auto_approved = False
+                mapping.auto_approved_confidence = None
                 mapping.suggested_action = ''
                 mapping.reviewer = None
                 mapping.reviewed_at = None
                 fields += [
-                    'status', 'suggestion_outcome', 'suggested_action',
-                    'reviewer', 'reviewed_at',
+                    'status', 'suggestion_outcome', 'suggestion_auto_approved',
+                    'auto_approved_confidence', 'suggested_action', 'reviewer', 'reviewed_at',
                 ]
                 mapping.target_concept = concept
                 mapping.suggested_target_concept = concept
@@ -2398,6 +2439,11 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 # be recorded as having overridden one.
                 mapping.origin_system = SUGGESTION_PROVENANCE
                 mapping.suggestion_model_version = SUGGESTION_MODEL_VERSION
+                # The first retrieval hit, written because no ranker could be
+                # reached, is a destination to review and not the model's
+                # answer: it is never scored as one (#2743). A real pick that
+                # replaces it takes the mark off.
+                mapping.suggestion_fallback = _is_retrieval_fallback(chosen, note)
                 mapping.suggestion_confidence = chosen_confidence(chosen, job.get('alternatives'))
                 # A destination the machine moved is its own, not whoever proposed
                 # the one it replaced; one it re-confirms stays its proposer's
@@ -2407,7 +2453,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 fields += [
                     'target_concept', 'suggested_target_concept',
                     'destination_vocabulary_id', 'origin_system',
-                    'suggestion_model_version', 'suggestion_confidence', 'proposed_by',
+                    'suggestion_model_version', 'suggestion_fallback',
+                    'suggestion_confidence', 'proposed_by',
                 ]
             # Notes is a free-text field a curator writes in, and the row we are
             # writing to may not be one a Suggest run created -- the candidate set is
@@ -2427,9 +2474,11 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             # is blank, so a note ingest supplied through _record_proposal survives
             # too. Only a note left by a previous run of this code is rewritten.
             ours = attempted_before and mapping.updated_by_id is None
+            note_written = False
             if (not mapping.notes and mapping.updated_by_id is None) or ours:
                 mapping.notes = note
                 fields.append('notes')
+                note_written = True
             # Source-side enrichment is written only when it was missing: these
             # describe the code, not the suggestion, and a curator may have
             # corrected them.
@@ -2446,6 +2495,21 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             if moved_off:
                 from omop_core.mapping.code_resolution import revert_provisional_rows
                 revert_provisional_rows(mapping=mapping, concept_id=moved_off)
+            # The proposal is written; a ranker certain enough of it gets it
+            # approved by the person the run belongs to, through the approval a
+            # curator's save makes.
+            if (auto_approve_threshold is not None and approve_as is not None
+                    and concept is not None and not athena_duplicate):
+                from omop_core.services import suggest_auto_approve
+                if suggest_auto_approve.qualifies(mapping, auto_approve_threshold, concept=concept):
+                    outcome = suggest_auto_approve.approve(
+                        mapping, approve_as, auto_approve_threshold, note_written=note_written)
+                    if outcome == 'approved':
+                        entry['auto_approved'] = True
+                    elif outcome == 'error':
+                        entry['auto_approve_error'] = True
+                    if outcome in ('approved', 'error') and on_auto_approve is not None:
+                        on_auto_approve(outcome)
         entry['updated'] = True
         results.append(entry)
         emit('result', **entry, dry_run=False)

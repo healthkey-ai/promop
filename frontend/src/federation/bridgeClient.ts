@@ -9,7 +9,7 @@
 import axios, { type AxiosInstance } from "axios";
 
 export interface BridgeConnectionProps {
-  /** Service origin, e.g. "https://ctomop-staging-….run.app". */
+  /** Service origin, e.g. "https://promop-staging-….run.app". */
   baseUrl: string;
   /** Appended to baseUrl to form the axios baseURL. promop serves under /api. */
   apiBasePath?: string;

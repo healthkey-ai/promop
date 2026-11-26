@@ -195,6 +195,68 @@ def resolver() -> Callable[[object], str | None]:
     return resolve
 
 
+def record_category(disease: object) -> str:
+    """The Disease Category whose extension a record with this disease text has.
+
+    ``''`` is the base record alone: no disease, a disease the mapping files
+    under ``Other``, or one nothing recognises. The order is the patient
+    editor's (``recordDiseaseCategory`` in ``fieldScope.ts``), so the page and
+    the attestation agree on which disease section is on screen: what Disease
+    Category management maps the name to, case-insensitively, decides; only a
+    name the mapping does not hold falls back to the keyword rules the editor
+    used before categories picked the tab (``patient_visible_fields.disease_type``).
+    """
+    from omop_core.models import DiseaseCategoryMapping
+    from omop_core.services import patient_visible_fields as visible
+
+    text = str(disease or '').strip()
+    if not text:
+        return ''
+    mapped = (DiseaseCategoryMapping.objects.filter(disease_name__iexact=text)
+              .values_list('category', flat=True).first())
+    if mapped:
+        return '' if mapped == OTHER else mapped
+    return visible.DISEASE_TYPE_CATEGORY.get(visible.disease_type(text), '')
+
+
+def record_categories(disease: object, slugs: Iterable[str] | None) -> list[str]:
+    """Every Disease Category whose extension a record has, its primary one first.
+
+    A record with several cancers (``PatientRecord.disease_slugs``, #2182) has
+    the extension of each, not only of the cancer ``disease`` names: a patient
+    with myeloma and prostate cancer has both. The primary comes from
+    ``record_category``. Every other cancer is a slug, which is looked up
+    among the names Disease Category management maps (each name made into its
+    slug the way the record does), and only a slug it does not hold falls back
+    to the keyword rules. ``Other`` and an unknown category have no extension
+    and are left out.
+    """
+    from omop_core.models import DiseaseCategoryMapping
+    from omop_core.services import patient_visible_fields as visible
+    from omop_core.services.disease_episodes import disease_slug
+
+    known = category_codes() - {OTHER}
+    found: list[str] = []
+    primary = record_category(disease)
+    if primary in known:
+        found.append(primary)
+    others = [slug for slug in (slugs or []) if slug]
+    if not others:
+        return found
+    by_slug: dict[str, str] = {}
+    for name, category in DiseaseCategoryMapping.objects.values_list('disease_name', 'category'):
+        slug = disease_slug(name)
+        if slug:
+            by_slug.setdefault(slug, category)
+    for slug in others:
+        category = by_slug.get(slug)
+        if category is None:
+            category = visible.DISEASE_TYPE_CATEGORY.get(visible.disease_type(slug.replace('-', ' ')), '')
+        if category in known and category not in found:
+            found.append(category)
+    return found
+
+
 def clean_codes(codes: Iterable[str]) -> list[str]:
     """The diseases a scope may name, de-duplicated and sorted.
 

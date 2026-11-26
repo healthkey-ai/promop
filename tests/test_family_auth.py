@@ -435,7 +435,8 @@ def _verified_phr_patient(settings, mailoutbox):
     mailoutbox.clear()
 
 
-def test_a_phr_patient_who_forgot_their_password_resets_it_on_phr(settings, mailoutbox):
+def test_a_phr_patient_who_forgot_their_password_resets_it_on_phr(settings, mailoutbox,
+                                                                 django_capture_on_commit_callbacks):
     import re
 
     from django.core.cache import cache
@@ -444,7 +445,8 @@ def test_a_phr_patient_who_forgot_their_password_resets_it_on_phr(settings, mail
     settings.FAMILY_AUTH_RESET_APPS = ["phr"]  # phr serves /reset-password
     cache.clear()  # the reset endpoint's rate limit counts every earlier test's requests
 
-    assert APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"}).status_code == 200
+    with django_capture_on_commit_callbacks(execute=True):
+        assert APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"}).status_code == 200
 
     message = mailoutbox[-1]
     assert message.subject == "Reset your HealthKey PHR password"
@@ -497,7 +499,8 @@ def test_other_anonymous_requests_do_not_use_up_the_reset_limit(settings):
 
 
 
-def test_an_installation_without_a_reset_page_resets_on_promops(settings, mailoutbox):
+def test_an_installation_without_a_reset_page_resets_on_promops(settings, mailoutbox,
+                                                               django_capture_on_commit_callbacks):
     """phr serves /verify-email but not /reset-password: its patients' reset
     links stay on PROMOP's page, and the email still names phr."""
     from django.core.cache import cache
@@ -507,7 +510,8 @@ def test_an_installation_without_a_reset_page_resets_on_promops(settings, mailou
     settings.FAMILY_AUTH_RESET_APPS = []
     cache.clear()
 
-    APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"})
+    with django_capture_on_commit_callbacks(execute=True):
+        APIClient().post("/api/v1/auth/request-reset/", {"email": "pat@example.com"})
 
     assert mailoutbox[-1].subject == "Reset your HealthKey PHR password"
     assert "https://promop.test/reset-password?uid=" in mailoutbox[-1].body
@@ -571,3 +575,118 @@ def test_asking_for_links_does_not_use_up_the_tries_at_a_new_password():
 
     completing = client.post("/api/v1/auth/reset-password/", {"uid": "x", "token": "y", "new_password": "z"})
     assert completing.status_code == 400  # refused for the bad link, not for the rate
+
+
+
+# ── The reset email is sent after the response, on a worker ─────────────────
+
+def test_a_reset_request_queues_the_email_and_names_only_the_account(settings, mailoutbox,
+                                                                    django_capture_on_commit_callbacks):
+    """The request does not wait for the mail provider, which only an existing
+    account would make it do: the worker gets the account's id, never its
+    address or the link."""
+    from unittest import mock
+
+    from django.core.cache import cache
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    cache.clear()
+    settings.CELERY_BROKER_URL = "redis://broker.test:6379/0"
+    identity = Identity.objects.create_user(email="queued@example.com", password="a-long-enough-pass-42")
+
+    with mock.patch.object(send_password_reset_task, "delay") as delay, \
+            django_capture_on_commit_callbacks(execute=True):
+        known = APIClient().post("/api/v1/auth/request-reset/", {"email": "queued@example.com"})
+        unknown = APIClient().post("/api/v1/auth/request-reset/", {"email": "nobody@example.com"})
+
+    assert known.data == unknown.data and known.status_code == unknown.status_code == 200
+    delay.assert_called_once_with(identity.pk, False)
+    assert mailoutbox == []  # nothing sent during either request
+
+    send_password_reset_task.run(identity.pk, False)  # the worker
+    assert mailoutbox[-1].to == ["queued@example.com"]
+    assert "We received a request to reset the password" in mailoutbox[-1].body
+
+
+def test_the_worker_sends_nothing_to_an_account_that_closed_or_lost_its_password(mailoutbox):
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    gone = Identity.objects.create_user(email="gone@example.com", password="a-long-enough-pass-42")
+    gone.is_active = False
+    gone.save(update_fields=["is_active"])
+
+    send_password_reset_task.run(gone.pk, False)
+    send_password_reset_task.run(999_999_999, False)
+
+    assert mailoutbox == []
+
+
+# Requests run in autocommit, so on_commit runs the hand-off inside the
+# request itself: these tests run that way (transaction=True), as production does.
+
+@pytest.mark.django_db(transaction=True)
+def test_in_a_request_the_email_is_queued_and_not_sent(settings, mailoutbox):
+    from unittest import mock
+
+    from django.core.cache import cache
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    cache.clear()
+    settings.CELERY_BROKER_URL = "redis://broker.test:6379/0"
+    identity = Identity.objects.create_user(email="live@example.com", password="a-long-enough-pass-42")
+
+    with mock.patch.object(send_password_reset_task, "delay") as delay:
+        assert APIClient().post("/api/v1/auth/request-reset/", {"email": "live@example.com"}).status_code == 200
+
+    delay.assert_called_once_with(identity.pk, False)
+    assert mailoutbox == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_broker_that_is_down_fails_nobody_and_the_email_still_goes(settings, mailoutbox):
+    """The broker refusing the task must not answer differently for an
+    address with an account (a 500 would tell them apart), and the email
+    must not be lost: it is sent inline instead."""
+    from unittest import mock
+
+    from django.core.cache import cache
+    from kombu.exceptions import OperationalError
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    cache.clear()
+    settings.CELERY_BROKER_URL = "redis://broker.test:6379/0"
+    Identity.objects.create_user(email="down@example.com", password="a-long-enough-pass-42")
+    client = APIClient(raise_request_exception=False)
+
+    with mock.patch.object(send_password_reset_task, "delay", side_effect=OperationalError("broker down")):
+        known = client.post("/api/v1/auth/request-reset/", {"email": "down@example.com"})
+        unknown = client.post("/api/v1/auth/request-reset/", {"email": "nobody@example.com"})
+
+    assert (known.status_code, known.data) == (unknown.status_code, unknown.data) == (200, unknown.data)
+    assert [m.to for m in mailoutbox] == [["down@example.com"]]
+
+
+def test_the_worker_tries_a_failing_mail_provider_again(mailoutbox):
+    from unittest import mock
+
+    from celery.exceptions import Retry
+
+    from patient_portal.models import Identity
+    from patient_portal.tasks import send_password_reset_task
+
+    identity = Identity.objects.create_user(email="retry@example.com", password="a-long-enough-pass-42")
+
+    with mock.patch("patient_portal.api.password_reset.send_mail", side_effect=OSError("provider down")), \
+            mock.patch.object(send_password_reset_task, "retry", side_effect=Retry()) as retry:
+        with pytest.raises(Retry):
+            send_password_reset_task.run(identity.pk, False)
+
+    assert retry.call_args.kwargs["countdown"] == 60
+    assert send_password_reset_task.max_retries == 3

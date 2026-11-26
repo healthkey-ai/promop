@@ -89,8 +89,32 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     locked_until = models.DateTimeField(
         null=True, blank=True, help_text="If set and in the future, local logins are refused (lockout).",
     )
+    suggest_auto_approve_threshold = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        help_text=(
+            "The confidence (whole percent, 90-100) at or above which this curator's Code Mapping "
+            "Suggest runs approve a ranker's proposal as they write it (#1532). Sticky between "
+            "runs. Null means the default, 100. Read only for an account that may approve mappings "
+            "(omop_core.services.suggest_auto_approve)."
+        ),
+    )
+    suggest_auto_approve_off = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            "The curator turned Suggest auto-approval off (#1532). Stricter than any threshold, so "
+            "it breaks no minimum; the threshold above is kept and returns when they turn it on."
+        ),
+    )
 
     objects = IdentityManager()
+
+    def get_full_name(self) -> str:
+        return self.name
+
+    def get_short_name(self) -> str:
+        """What the admin greets the account by: the first name, else the
+        address. Without it Django shows the username, the issuer and subject."""
+        return (self.name or '').split(' ')[0] or self.email or self.uid
 
     @property
     def is_locked(self) -> bool:
@@ -102,10 +126,24 @@ class Identity(AbstractBaseUser, PermissionsMixin):
     class Meta:
         db_table = "identity"
         verbose_name_plural = "identities"
+        permissions = [
+            # Staff roles (docs/staff-sign-in.md): what a member-support role
+            # may do for a member, and what manages other staff.
+            ("support_member_accounts",
+             "Can help members with their accounts: password reset links, invitations, permission withdrawals"),
+            ("manage_staff", "Can invite staff and change or remove their roles"),
+            ("close_member_accounts", "Can close a member's account on their behalf, deleting everything"),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["issuer", "sub"],
                 name="uq_identity_issuer_sub",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(suggest_auto_approve_threshold__isnull=True)
+                           | models.Q(suggest_auto_approve_threshold__gte=90,
+                                      suggest_auto_approve_threshold__lte=100)),
+                name="ck_identity_suggest_auto_approve_threshold",
             ),
         ]
 
@@ -198,6 +236,42 @@ class PatientUser(models.Model):
         return f"{self.identity} - Person {self.person.person_id}"
 
 
+class StaffInvitation(models.Model):
+    """An invitation for one person to become staff here, signing in through
+    one of ``STAFF_SIGN_IN_PROVIDERS`` (patient_portal.staff_sign_in). The
+    link holds a token; only its hash is kept. Accepting it makes a staff
+    account tied to the provider account that signed in, with ``role``."""
+    email = models.EmailField()
+    provider = models.CharField(max_length=50, help_text="A key of STAFF_SIGN_IN_PROVIDERS.")
+    role = models.CharField(max_length=150, blank=True, default="",
+                            help_text="A group named in STAFF_ROLES; empty with full_staff.")
+    full_staff = models.BooleanField(
+        default=False, help_text="is_staff, promop's full access, instead of a role. Only a superuser invites it.",
+    )
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    invited_by = models.ForeignKey(
+        Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    accepted_identity = models.ForeignKey(
+        Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "staff_invitation"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.email} ({'full staff' if self.full_staff else self.role or 'no role'}, {self.provider})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.accepted_at is None and self.cancelled_at is None and self.expires_at > timezone.now()
+
+
 class PatientInvitation(models.Model):
     """An email invitation for a patient to claim (sign up for) their own record.
 
@@ -223,9 +297,16 @@ class PatientInvitation(models.Model):
         null=True, blank=True, related_name='+',
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # When it was last sent: a resend reuses the row, so retention counts from here.
+    sent_at = models.DateTimeField(default=timezone.now)
     expires_at = models.DateTimeField()
     accepted_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    # Whether this invitation put its address on the person, and what it
+    # replaced there (None: nothing), so deleting an invitation never accepted
+    # undoes only that (patient_portal.invitation_retention).
+    set_person_email = models.BooleanField(default=False)
+    replaced_email = models.EmailField(null=True, blank=True)
 
     class Meta:
         db_table = 'patient_invitation'
@@ -776,6 +857,16 @@ class ConsentPurpose(models.Model):
         default=list, blank=True,
         help_text='Countries where a gated purpose is available, matched case-insensitively to the record.',
     )
+    erases_record_on_withdrawal = models.BooleanField(
+        default=False,
+        help_text="Withdrawing it deletes the member's health answers straight away and keeps the account "
+                  '(patient_portal.erasure.erase_record).',
+    )
+    requires = models.SlugField(
+        max_length=50, blank=True, default='',
+        help_text='The key of the purpose this one depends on. It cannot be granted while that one is not, and is '
+                  'withdrawn with it (a system event) when that grant ends.',
+    )
     sort_order = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -800,6 +891,8 @@ class ConsentPurpose(models.Model):
                 raise ValidationError({name: f'Must be a list of strings of at most {limit} characters.'})
         if self.asks_frequency and not self.frequency_options:
             raise ValidationError({'frequency_options': 'A purpose that asks a frequency needs options.'})
+        if self.requires and self.requires == self.key:
+            raise ValidationError({'requires': 'A purpose cannot require itself.'})
 
     def available_in(self, country) -> bool:
         if not self.gated_by_country:
@@ -938,6 +1031,10 @@ class ConsentEvent(AppendOnlyModel):
     source = models.CharField(max_length=10, choices=SOURCES, default=MEMBER)
     recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     recorded_at = models.DateTimeField(default=timezone.now)
+    # A change staff record on the member's behalf: when the member asked, and
+    # how (e.g. "by email to the support address"). Empty for the member's own.
+    requested_on = models.DateField(null=True, blank=True, help_text='When the member asked, for a change staff recorded.')
+    note = models.CharField(max_length=500, blank=True, default='', help_text='How the member asked; no health details.')
 
     class Meta:
         db_table = 'consent_event'
@@ -974,7 +1071,8 @@ class ConsentLedgerEntry(AppendOnlyModel):
     """The permission history kept after the account is gone.
 
     Holds the member's email address and what they decided (which purpose or
-    document, which version, when) and nothing else: no foreign key to the
+    document, which version, when, and for a change staff recorded on their
+    behalf the date they asked) and nothing else: no foreign key to the
     account or person, so deleting either leaves this row in place. Written
     in the same transaction as every ConsentEvent and DocumentAcceptance.
     """
@@ -989,6 +1087,10 @@ class ConsentLedgerEntry(AppendOnlyModel):
     decision = models.CharField(max_length=10, help_text='A ConsentEvent decision, or "accepted" for a document.')
     frequency = models.CharField(max_length=30, blank=True, default='')
     recorded_at = models.DateTimeField(default=timezone.now)
+    # When the member asked, for a change staff recorded on their behalf: kept
+    # with the decision, as evidence it was theirs. No note: free text stays
+    # with the account, not in the six-year history.
+    requested_on = models.DateField(null=True, blank=True)
 
     class Meta:
         db_table = 'consent_ledger_entry'

@@ -1,12 +1,23 @@
 import { useId } from "react";
-import FieldMappingLink from "./FieldMappingLink";
+import Field from "./Field";
 import type { CustomPatientField } from "@/hooks/useCustomPatientFields";
+import type { FieldDescriptors } from "@/hooks/useWritableFields";
 import { fieldDiseases } from "@/utils/fieldScope";
+import { addedMark } from "./provisional";
 
-function displayValue(value: unknown, field: CustomPatientField) {
-  if (value === undefined || value === null || value === "") return "Not recorded";
-  if (field.field_type === "boolean") return value ? "Yes" : "No";
-  return String(value) + (field.unit && typeof value === "number" ? ` ${field.unit}` : "");
+/**
+ * What an input hands back, as the field's type stores it. A number box
+ * yields text, and an emptied one clears the value.
+ */
+function entered(field: CustomPatientField, value: unknown): unknown {
+  if (value === "" || value === null || value === undefined) return null;
+  if (field.field_type === "number") {
+    const number = Number(value);
+    // Not a number yet ("-", "1e"): sent as typed, and refused by the server
+    // with the reason, rather than silently becoming something else.
+    return Number.isFinite(number) ? number : value;
+  }
+  return value;
 }
 
 /**
@@ -15,16 +26,25 @@ function displayValue(value: unknown, field: CustomPatientField) {
  * `tabs` that are part of this record, which is the base record plus the
  * extension of each Disease Category in `diseases`.
  *
- * Read-only. A value is derived from the patient's OMOP facts for the
- * field's concept, or computed from its formula; nothing here writes one.
- * Renders nothing when the tab has no such field.
+ * A field takes a value here when the server says this caller may write it
+ * (#2669): `descriptors` is the writable-fields answer for this patient, and
+ * a field it does not list as writable renders read-only with the reason,
+ * as a column does. Without `onChange` every field is read-only. A computed
+ * field shows its formula's result. Renders nothing when the tab has no
+ * such field.
  */
-export function CustomPatientFields({ fields, tabs, diseases, formData }: {
+export function CustomPatientFields({ fields, tabs, diseases, diseaseLabels, formData, descriptors, onChange }: {
   /** Every added field, from `useCustomPatientFields`. */
   fields: CustomPatientField[];
   tabs: string[];
   diseases: string[];
+  /** A name for each Disease Category. With more than one disease on the record, a field of
+   *  a disease's extension says whose it is. */
+  diseaseLabels?: Record<string, string>;
   formData: Record<string, unknown>;
+  descriptors?: FieldDescriptors;
+  /** An edit to one field's value; the editor saves it with the record. */
+  onChange?: (fieldName: string, value: unknown) => void;
 }) {
   const headingId = useId();
   const visible = fields.filter((field) => {
@@ -38,19 +58,41 @@ export function CustomPatientFields({ fields, tabs, diseases, formData }: {
   return (
     <section className="mt-8 border-t border-border pt-6" data-testid="custom-patient-fields" aria-labelledby={headingId}>
       <h3 id={headingId} className="mb-4 text-sm font-semibold">Additional fields</h3>
-      <dl className="grid gap-4 sm:grid-cols-2">
-        {visible.map((field) => (
-          <div key={field.id}>
-            <dt className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-              <span>{field.display_name}</span>
-              <FieldMappingLink name={field.field_name} label={field.display_name} />
-            </dt>
-            <dd className="mt-1 min-h-9 rounded border bg-muted/30 px-3 py-2 text-sm">
-              {displayValue(values[field.field_name], field)}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <div className="grid gap-4 sm:grid-cols-2">
+        {visible.map((field) => {
+          const descriptor = descriptors?.[field.field_name];
+          const computed = field.mode === "computed";
+          const writable = !!onChange && !computed && !!descriptor?.writable;
+          const reason = writable
+            ? undefined
+            : descriptor?.reason ?? (computed ? "Computed from its formula; not editable here." : undefined);
+          return (
+            <div key={field.id}>
+              <Field
+                label={field.unit ? `${field.display_name} (${field.unit})` : field.display_name}
+                name={field.field_name}
+                markName={addedMark(field.field_name)}
+                type={field.field_type}
+                value={values[field.field_name] ?? (field.field_type === "boolean" ? null : "")}
+                onChange={(name, value) => onChange?.(name, entered(field, value))}
+                disabled={!writable}
+                readOnly={computed}
+              />
+              {diseases.length > 1 && fieldDiseases(field).length > 0 && (
+                <p className="mt-1 text-xs text-muted-foreground" data-testid={`scope-${field.field_name}`}>
+                  {fieldDiseases(field).filter((code) => diseases.includes(code))
+                    .map((code) => diseaseLabels?.[code] ?? code).join(", ")}
+                </p>
+              )}
+              {reason && (
+                <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${field.field_name}`}>
+                  {reason}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </section>
   );
 }

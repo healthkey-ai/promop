@@ -107,7 +107,7 @@ def _stub_jev(monkeypatch, pick, scores):
 def _score(client, concept_id, **extra):
     return client.post(SCORE, {
         **SOURCE, 'source_code_description': DESCRIPTION,
-        'destination_concept_id': concept_id, **extra,
+        'destination_concept_id': concept_id, 'ranking_model': 'anthropic', **extra,
     }, format='json')
 
 
@@ -325,7 +325,7 @@ def test_a_suggest_one_alternative_carries_a_token_for_its_own_destination(lab, 
     _stub_ranker(monkeypatch, lab['glucose'], confidence=0.9)
     monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [_hit(lab['glucose'])])
 
-    response = staff.post('/api/v1/code-mappings/suggest-one/', {**SOURCE, 'source_code_description': 'Glucose'},
+    response = staff.post('/api/v1/code-mappings/suggest-one/', {**SOURCE, 'source_code_description': 'Glucose', 'ranking_model': 'anthropic'},
                           format='json')
 
     [alternative] = response.data['alternatives']

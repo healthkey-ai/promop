@@ -150,6 +150,19 @@ describe("Scope (#2332)", () => {
     expect(screen.queryByRole("group", { name: "Disease Categories" })).not.toBeInTheDocument();
   });
 
+  it("shows a curator who cannot approve the scope, and sends none", async () => {
+    render(<ConceptAssignDialog {...editProps} fieldScope={{ ...scoped(["MM"]), readOnly: true }} />);
+    expect(diseaseSpecific()).toBeChecked();
+    expect(diseaseSpecific()).toBeDisabled();
+    expect(base()).toBeDisabled();
+    expect(category("MM")).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Notes"), { target: { value: "n" } });
+    fireEvent.click(screen.getByRole("button", { name: "Update Mapping" }));
+    await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+    expect(mockPatch.mock.calls[0][1]).not.toHaveProperty("diseases");
+    expect(mockPut).not.toHaveBeenCalled();
+  });
+
   it("opens on a disease-specific field with its categories ticked", () => {
     render(<ConceptAssignDialog {...editProps} fieldScope={scoped(["FL", "MM"])} />);
     expect(diseaseSpecific()).toBeChecked();

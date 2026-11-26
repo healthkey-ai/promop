@@ -35,7 +35,8 @@ proposal, as a whole-number percentage (0-100). The percentage is not the 0-1
 float Suggest records on `SourceCodeConceptMapping.suggestion_confidence`: a
 two-digit number is what the page shows and what a threshold is set in
 (#1532), and an integer compares exactly. A proposal at 100 is still a
-proposal.
+proposal until something approves it; #1532's auto-approval, whose default
+threshold is 100%, is what would.
 
 The design keeps `patient_record` exactly as it is: a flat table of approved
 data, read by everything that reads it today. Provisional data lives in a
@@ -82,9 +83,9 @@ Three invariants hold everywhere:
 - **A proposal with no confidence.** An import proposal that nothing ranked
   (`suggestion_confidence` null) carries no number, so no provisional row can
   be written from it. Only a ranked proposal qualifies.
-- **A proposal below the floor.** `PROVISIONAL_CONFIDENCE_FLOOR` (default 70,
-  the threshold #1532 proposes for auto-approval) is the least confidence a
-  provisional row is written at. Below it the code stays unresolved as today.
+- **A proposal below the floor.** `PROVISIONAL_CONFIDENCE_FLOOR` (default 70;
+  not the auto-approval threshold of #1532, which defaults to 100%) is the least
+  confidence a provisional row is written at. Below it the code stays unresolved as today.
 
 ## Where provisional rows come from
 
@@ -95,12 +96,9 @@ explicit opt-in; none changes behaviour by default.
 |---|---|---|
 | Generate OMOP (`_create_missing_clinical_rows`, `resolve_person_source_codes`) | creates and re-points rows for approved mappings only | also creates a row for a ranked proposal at or above the floor, with its confidence; re-resolve promotes or reverts provisional rows as the proposal moved |
 | `code-mappings/lookup/` (the ETL) | an unresolved entry carries `proposed_target_concept_id` as curator evidence, which the ETL must not write | with `include_provisional: true` in the request, such an entry also carries `provisional: true` and `confidence`; the ETL writes the row with that `confidence` through the bulk endpoints |
+| `upsert_if_mapped` on the clinical endpoints (#2813) | writes a row only at an approved mapping's concept; a proposed target is never written | unchanged, and a row that sends `confidence` is refused: what it writes is approved. A row whose code has only a proposal is not written, so it never becomes provisional through this entrance |
 | Bulk OMOP writes (`POST /api/v1/measurements/` etc.) | no `confidence` field | accept `confidence` on a row; refuse it on a row at concept 0 and refuse it from a session user (machine credentials and staff only) |
-| FHIR sync and `upload_fhir_bundle` (`resolve_source_code`) | a proposed mapping returns no concept | a new `accept_proposed=True` argument returns the proposal's concept and confidence; sync passes it when the organization or deployment opts in |
-
-`resolve_source_code_variant` already has a `provisional` keyword that means
-something else (one lookup sighting per batch, #2123). The new argument is
-`accept_proposed`, and the docstring says why the two are different.
+| FHIR sync and `upload_fhir_bundle` (`resolve_source_code`) | a proposed mapping returns no concept | unchanged: a patient chooses to import their FHIR data, so there is no organization opt-in and sync does not write provisional rows; a code with only a proposed mapping is stored at concept 0 and picked up by the sweep like any other unresolved row |
 
 Generate OMOP is the first writer to build, because it is the one HealthTree
 needs: the per-patient inventory (`PatientSourceCode`) is loaded, the
@@ -157,6 +155,28 @@ Generate OMOP already uses (`resolve_person_source_codes`), and
   covers the ones that stay candidates (a provisional row is rewritten, never
   done). A retried chunk can double-count in the run's totals; the rows do not
   change.
+
+  **A run's state.** The run is `running` from its first chunk and `completed` (with
+  `finished_at`) when the chunk that reaches the end of the candidates finishes;
+  a full sweep does not know its total in advance, so `total` is the persons done
+  so far, and a poll showing `running` with `done` equal to `total` is a sweep
+  between or inside chunks, not a finished one. Every progress save and state
+  change stamps `updated_at`, the run's heartbeat. A run whose worker was lost
+  (a deploy restarts the worker pool and a chunk in flight can be lost with it;
+  a task hard-killed by its time limit, the OOM killer or SIGKILL may never reach
+  `on_failure`) stops moving and stays `running`: `manage.py
+  sweep_provisional_rows --close-stale [--stale-minutes N] [--dry-run]` closes, as
+  `failed`, every run still pending or running with no heartbeat for N minutes
+  (default 120, at least 1; it takes no sweep options). That is a judgement, not
+  proof: the broker's visibility timeout is seven hours, so a message lost with
+  a killed worker can be redelivered long after the run was closed, and the chunk
+  that arrives reopens its run (`running`, `finished_at` cleared) and finishes
+  it; the bulk resolve does the same. It changes run rows only, needs no switch,
+  and covers the bulk resolve too (they share the table). Adding the heartbeat
+  column stamped every existing run with the migration's time, so runs orphaned
+  before the deploy become closable 120 minutes after it. A sweep run from the
+  command that is interrupted or crashes is marked `failed`, since no task is
+  left to retry it.
 - **Trigger.** A `pre_save`/`post_save` pair on `SourceCodeConceptMapping`
   compares what the mapping said before the save with what it says after (does it
   qualify, its destination, its confidence, its table) and queues a sweep of its
@@ -489,8 +509,8 @@ are not. What the code does, where the plan left a choice:
   the provenance lookups (`_lookup_measurement`, `_lookup_observation`,
   `_lookup_condition`, `_lookup_drug_exposure`, `_lookup_procedure`,
   `_lookup_sct`), so a guess is never the "selected" source of an approved
-  value; the outbound FHIR export (`build_fhir_bundle`), unless
-  `include_provisional=True`; the patient list's freshness date
+  value; the outbound FHIR export (`build_fhir_bundle`), always (see "Provisional
+  data is never exported"); the patient list's freshness date
   (`annotate_context`); and the diagnosis context reader (`condition_contexts`),
   matching `medication_contexts`. `_lookup_genomics` reads the snapshot, which
   is real-only already.
@@ -559,6 +579,29 @@ rule for a composite field is the **minimum** confidence of the provisional
 rows that joined its answer. JSON-typed fields were in this group; the lists
 a reader can run over provisional rows alone are now covered
 ([List fields as built](#list-fields-as-built-2534)).
+
+### Wearable readings as built (#2835)
+
+A device import files its rows under the device's own code and records the
+code in the patient's source-code inventory, so a wearable code follows this
+plan like any other: unresolved until a mapping answers, provisional under a
+qualifying proposal, real once approved. Two things are particular to it.
+
+- **Which proposal qualifies.** A wearable device's proposal (`Garmin`,
+  `Apple`, `HealthConnect`) qualifies with no ranker's confidence, and its row
+  carries `PROVISIONAL_CONFIDENCE_FLOOR`: the wearable mappings are a curated
+  proposal nobody put to a ranker. A ranker's score below the floor still
+  disqualifies one, and its destination may be a local `HK-Wearable` concept,
+  which is not standard. The number is never 0 and never null: null is a real
+  row everywhere a confidence is read, the PHR API's `confidence` included, and
+  a consumer that tests the number for truth would take 0 for one. The rule is
+  `code_resolution.proposal_percent`, the one statement the resolver, the
+  sweep's index, the mapping trigger and the `fill_provisional_record` report
+  read.
+- **The reader.** `_get_wearable_data` joins the phase 1 readers, so a 30-day
+  summary whose readings are all provisional is laid over the empty field and
+  marked. The summaries are not writable, so one never blocks a patient's
+  "Confirm my record", and a mark is lifted only by the mapping's approval.
 
 ### Composite readers as built (#2534)
 
@@ -694,6 +737,84 @@ the cancer names of the provisional conditions are canonicalized with one
 row. The migration adds columns to `patient_record_confidence`, so it waits
 behind a running derivation that holds a lock on the table.
 
+### Created fields as built (#2857)
+
+A field an administrator created (`CustomPatientField`) has no column: its value is a
+key of `PatientRecord.custom_fields`, derived from OMOP rows through its approved
+mapping (`custom_field_values`, `patient_record_service.custom_field_answers`). It takes
+part in provisional data as a **scalar, key by key**: a proposal-based row (confidence
+not null) answers it, marked with the row's confidence.
+
+- **Storage.** `patient_record_confidence.custom_fields` is a nullable JSON object,
+  `{field_name: percent}`, holding the proposals only (`PROVISIONAL_OBJECT_FIELDS` names
+  the one object field; the parity test and `confidence_field_names()` cover it).
+  `patient_record_provisional.custom_fields` (the existing clone) is the picture: the
+  approved values with the proposed ones added. `patient_record.custom_fields` stays
+  approved-only.
+- **The pass.** `provisional_record.custom_proposals` runs the approved reader
+  (`custom_field_answers`, the same `latest_row` rule, so a value entered under
+  `custom:<name>` and one at the mapping's concept are both read) over the provisional
+  rows only, and keeps a value for a name when the approved record has no value for it
+  and nobody typed or cleared one (`user_edited_fields` `custom_fields.<name>`, the
+  set before and after the refresh). The newest fact answers and its percent is the
+  mark. Only an approved, editable field has a reader: a computed field is its formula's
+  result and is never proposed (a later phase could propose it from provisional inputs, as
+  the built-in calculated fields are), and a field whose mapping is not approved is
+  ignored. The floor and the switch act where they do for every field: rows are written
+  provisional only at or above `PROVISIONAL_CONFIDENCE_FLOOR`, and with
+  `PROVISIONAL_DATA_ENABLED` off nothing is stored, mirrored or overlaid. The reader runs
+  in its own savepoint, once per pass whatever the number of created fields.
+- **The read.** `overlay` lays a proposal into the key the live record leaves empty and has
+  no pending edit on, and reports the mark in `provisional_fields` as
+  `custom_fields.<name>`, the name a pending edit has in `user_edited_fields` (a created
+  field is a scalar, so it is not in `provisional_items`). The patient list does not
+  carry them (`overlay(custom=False)`: its rows hold no created values). The PHR owner
+  reads see them through the same overlay: the primary cancer's spread is read from the
+  created field `hematologic_spread`, and its `confidence` includes that field's mark.
+  An approved-only consumer sees none: the FHIR export, the CSV export, the PHR
+  record export and sharing read approved rows or the stored record.
+- **Writes.** A PATCH of `custom_fields: {name: value}` is an approval of that key exactly
+  as for a column: the value lands on the record, and `mirror_user_edit` (told
+  `custom_fields.<name>` for each edited key) drops that key's mark and keeps the others.
+  **A client must send only the keys the user changed.** The in-repo editors do (the
+  page and the federated view keep the real record as the baseline and send the dirty keys
+  of `custom_fields`). A client that PATCHes the whole `custom_fields` object it read
+  approves every proposal in it, as a client that echoes a whole record approves its
+  scalar proposals; no server guard is added.
+- **Rejecting a created proposal (#2857).** A patient clears a marked created field (text,
+  number, date, or a boolean's null) and the page declares it, as for a column
+  ([Rejecting a proposal](#approval-rejection-and-a-moved-proposal) below, #2671): the
+  body names `custom_fields.<name>` in `rejected_proposals` and sends a blank for that key
+  (`created_proposal_clears`). The rejection is kept in `ProposalRejection` under the same
+  name (`field_name` is 120 characters, `custom_fields.` plus a 100-character name) with
+  the origin triple (table, source code, concept) of the row that answered the field, by
+  the same rules: only a signed-in person's session (`allow_reject`), not a machine
+  credential or the survey mapping; nothing is written to the record and no row or mapping
+  changes; `custom_proposals` leaves the field out while the row that answers it is one it
+  was made against, so a new reading of the same code stays rejected and a different code
+  shows again; typing a value approves it and the rejection is then ignored; the mark and
+  shown value go in the same request (`mirror_user_edit`). A name that is not a marked,
+  defined, approved, editable created field is ignored (as an unmarked column is), a
+  malformed `rejected_proposals` is a 400, and `false` or `0` is an answer, not a
+  blank. The page declares the mark of a key it showed a proposal on and the patient
+  cleared (`rejectedProposals` in `provisional.ts`); the federated view also keeps a
+  blank key's mark until the save sends it.
+- **Confirm my record.** Created fields are runtime data, so no generated file can list
+  the ones a patient tab shows. A mark blocks when the field's definition says the patient
+  sees and can edit it (`custom_field_values.shown_to_patient` on the server,
+  `attestationBlockers(info, descriptors, category, customFields)` on the page, the same
+  rule): defined, approved and editable; placed on a tab a patient page has
+  (`custom_field_tabs` in `patientVisibleFields.json`: every tab but the unplaced
+  one); part of the record (no scope, or the record's Disease Category); and on the disease
+  tab only when the record has one. A field placed on no tab, a computed or unapproved
+  one, or one of another disease never blocks, since the block could not be lifted.
+  `createdFieldAttestationCases.json` is one list of cases run by both sides' tests.
+  Until the page has loaded the definitions it counts no created field and offers the
+  button; the server's 409 decides.
+- **Instances.** Both tables stay derived (`instance_data`): not copied, rebuilt after
+  `copy_patient`. `backfill_patient_records --all` fills the new column; there is no data
+  migration (`0374` adds the column and widens `ProposalRejection.field_name` to 120 characters; its reverse drops the marks, and would fail on a rejection whose name is longer than 100).
+
 ### Computed fields
 
 `recompute_patient_record_fields` computes BMI, scores and aliases from stored
@@ -728,7 +849,7 @@ calculated fields, not the edit's own mirror. Left for later: fields calculated 
 a JSON input (`no_other_active_malignancies`, FLIPI, GELF), the free light chain
 ratio and `measurable_disease_imwg` (they read one lab event's pair), age,
 `last_treatment`, and fields owned by a formula.
-Custom fields (`custom_fields` JSON) are phase 3.
+Custom fields (`custom_fields` JSON) are covered: see [Created fields as built](#created-fields-as-built-2857).
 
 Decision (2026-11-17): with the switch on, computed fields use provisional
 inputs, so a patient with a proposed weight and height sees a BMI. The
@@ -790,12 +911,16 @@ migration, three `AddField` operations instead of one.
 **`patient_record_confidence`.** One row per person, primary key `person`.
 One nullable `PositiveSmallIntegerField` per non-JSON field in
 `_OMOP_DERIVED_FIELDS`, 274 at first, named exactly as the field is, plus one
-per covered JSON list (`PROVISIONAL_JSON_FIELDS`, #2534). Generated the same
+per covered JSON list (`PROVISIONAL_JSON_FIELDS`, #2534), plus **one JSON column,
+`custom_fields`** (`PROVISIONAL_OBJECT_FIELDS`, #2857), which holds
+`{field_name: percent}` for the person's provisional created-field values, since a
+created field has no column of its own to carry a confidence. Generated the same
 way.
 
 A parity test fails the build when the three tables drift: the provisional
 table must have every cloned column of `patient_record`, and the confidence
-table must have exactly the derived non-JSON fields and the covered JSON lists. The model pair is
+table must have exactly the derived non-JSON fields, the covered JSON lists and the
+created-fields object. The model pair is
 classified in `omop_core/services/instance_data.py` like `PatientRecord`:
 derived and re-derived after `copy_patient`, not copied
 ([Copying data between instances](../AGENTS.md#copying-data-between-instances)).
@@ -839,12 +964,13 @@ column name, joined on `person`.
 |---|---|---|
 | `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served, and a record read carries no overlay |
 | `PROVISIONAL_CONFIDENCE_FLOOR` | `70` | least confidence a provisional row is written at |
-| `Organization.accepts_provisional_data` | `False` | FHIR sync for this organization passes `accept_proposed` |
 
-The floor and the auto-approval threshold of #1532 are the same number in
-spirit: a proposal at or above the auto-approval threshold would become real,
-so the floor only matters for the band between the two. Build the floor first;
-#1532 can read it.
+The floor and the auto-approval threshold of #1532 are two settings. The
+threshold's default is 100% (decided on #1532, 2026-09-21), and a curator can set
+it lower per run. A proposal at or above it is approved and becomes real, so the
+provisional band is the confidence from the floor up to, but not including, the
+threshold: 70 to 99 by default, and empty if a curator sets the threshold at or
+below the floor. Auto-approval is not built; the floor does not depend on it.
 
 ## What consumers see
 
@@ -866,6 +992,296 @@ keeps the real record as its PATCH baseline. The purpose is to give patients a
 view of their data while the concepts are mapped to codes. Analysts read no
 patient, so they see no proposals. With the switch off nothing is computed,
 stored or shown to anyone ([#2659](https://github.com/healthkey-ai/promop/issues/2659)).
+
+**Confirming a record that shows proposals (#2761).** A patient's "Confirm my record"
+(`POST /api/patient-info/me/confirm/`) says what the page shows is accurate, so
+it is not offered, and the server refuses it, while a value the patient can see and
+edit is still marked Provisional:
+
+- **What blocks.** The scalar fields the overlay marks for the patient's own record
+  (`attestation_blockers` in `provisional_record.py`: `overlay(record, lists=False)`
+  marks) that a patient tab renders, and the patient can edit. "A patient tab renders
+  it" is `patientVisibleFields.json`, beside the frontend code: the confidence columns
+  named in the General, Labs, Behavior and Wearable tab components (shown whatever the
+  disease), and, per disease type, the ones named in the disease tab's sections for it
+  (`disease_fields`), generated by
+  `python -m omop_core.services.patient_visible_fields --write`. The disease tab shows
+  one section, for the disease the page reads from the disease text, so a field of that
+  section is on screen, and blocks, only on a record with that disease: the first
+  keyword found in the lowercased text wins (`disease_rules` in the same file: breast,
+  mantle, lymphoma, myeloma, cll, chronic lymphocytic; none is `other`, which has no
+  disease tab), applied by `diseaseTypeOf` in `provisional.ts` (which `PatientDetail`
+  uses to pick the tab) and by `disease_type` on the server, over the disease the page
+  shows, a proposed one included. The one file is
+  imported by the frontend (whose image is built from `frontend/` alone) and read by the
+  server (every backend image carries `frontend/`). A backend test and a frontend test
+  fail when the tabs and the file drift, when a new disease-tab section is not mapped to
+  a disease type, and when the two sides read a disease text differently. Of those, a field with no
+  write path of its own (calculated, mirrored, a unit picker) does not block, since it
+  clears with the field it follows, and a shown field the write descriptor does not
+  know does. Left out: the fields the General tab renders only outside patient mode (`validated`,
+  `validated_by`, `validation_date`: staff see them, and a patient's PATCH refuses them,
+  so a mark on one could never be cleared by a patient), a field no tab renders (`concomitant_medications`, the
+  diagnosis date, `blood_type`, ...), which the sweep proposes but is marked only in
+  the record read; the list fields, which no patient tab shows; the treatment tab
+  (therapy lines have their own dialog, and its planned-therapies picker is not a column
+  that holds a proposal); and the treating institution, which is identity and contact
+  data that a proposal is never laid over (`NEVER_OVERLAID`), so it never carries a
+  mark. The GELF and FLIPI checklists render outside `Field`, so they carry the
+  indicator through `MarkedControl` (above the control, naming the field it shows,
+  `gelf_criteria_options` and, for the score the FLIPI control displays, `flipi_score`),
+  and the same quoted name puts them in the lymphoma list: GELF blocks; the FLIPI score is
+  calculated from the factor checklist, so it has no write path of its own and, as any
+  such field, does not (its indicator says to choose the risk factors, not to enter the
+  score). A date's **precision** column (`sct_date_precision`,
+  `dlbcl_transformation_date_precision`, any `<date>_precision`) follows its date: the pass
+  proposes it beside the date, but its picker is neither a `Field` nor a `MarkedControl`,
+  shows no indicator and, re-picked to clear a mark, would rewrite a proposed day, so
+  only the date blocks and entering the date lifts the block. A name a tab shows only as
+  text (the legacy cytogenetic summary) is also left out (`not_editable`), and the scan
+  ignores names inside comments. A test ties the `DiseaseTab` switch to the section map.
+  Until the write descriptor has loaded the page counts nothing (it would count a
+  calculated field the server does not) and offers the button; the server's 409 decides.
+  With the switch off, or no proposal on display, nothing blocks.
+- **The endpoint.** The record is locked first (as derivation does), so a sweep cannot
+  add a proposal between the check and the save. 409 with
+  `{detail, provisional_fields: [names], count}` and nothing stored on the record or
+  the person. The page applies the same rule to the marks it holds
+  (`attestationBlockers` in `PatientInfo/provisional.ts`, over the same JSON, then the
+  write descriptor once it has loaded), so the banner and the endpoint agree. Before
+  confirming, the page sends any edit the autosave has not sent yet; a 409 it did not
+  predict makes it read the record again, and a save of a marked field does too, so
+  marks the server cleared (the disease group, a calculated field) update the banner.
+- **The page** (General tab, patient mode only). Not confirmed, with blockers: an amber
+  banner, "N values are marked Provisional (not yet confirmed)", saying to check each
+  one and enter the right value in its field (entering the same value keeps it), and
+  that Confirm Record returns once none are marked, with no button. Confirmed, with
+  blockers: "Record confirmed on <date>" and "N values are marked Provisional and not
+  covered by that confirmation", Re-confirm hidden. Otherwise unchanged.
+- **How a block is lifted.** By entering your own answer in the marked field: that saves
+  it as approved data and drops its mark (the PATCH path above), and the disease group goes
+  together. For a number or text field that means retyping a value; for a select or a
+  boolean, picking another option and then the shown one again (choosing the option that is
+  already selected sends no change), so the banner says so. A patient who disagrees and
+  does not know the right value **rejects the proposal** instead: see "Rejecting a
+  proposal" below, which also lifts the block.
+- **What is stored.** `validated`, `validated_by` and `validation_date` still say only
+  that the patient pressed the button; the endpoint guarantees that no value from the
+  list above was marked Provisional when they did. A proposal that arrives later (a
+  sweep) does not undo an earlier confirmation, and the page says so; it blocks the next
+  one. Confirmations made before this change are not revisited.
+
+**Rejecting a proposal (#2671).** A user who sees a wrong proposed value clears the field.
+The editor sends `null` (or `''`) for a field the real record already leaves empty, which
+used to change nothing, so the proposal came back at the next derivation. Now such a clear
+is a rejection, in `apply_patient_record_patch` (`proposal_clears`, `reject_proposals` in
+`provisional_record.py`), when **all** of these hold:
+
+- **A signed-in person at the editor asked for it** (`allow_reject`, set only by
+  `PatientRecordViewSet._patch_record` for a session or partner-authenticated user, never a
+  machine credential or a token someone handed out). The survey mapping, an ETL sending
+  `{field: null}` and every other caller leave a blank exactly as it always was: stored,
+  or a no-op for `null` on an empty field.
+- **The client declared it.** The body names the cleared field in `rejected_proposals`
+  (`rejectedProposals` in `PatientInfo/provisional.ts`, sent by the page and the federated
+  view: the fields it showed a proposal on and that are now cleared). A stale page or a
+  client that sends a whole representation carries blanks it never chose and declares
+  nothing, so it rejects nothing; a malformed list is a 400. A client that does not send
+  the key (an older or third-party one) therefore cannot reject.
+- **The field is a scalar the record marks**, and the real record leaves it empty.
+
+What follows from it:
+
+- **Not an edit, not an approval.** Nothing is written to `patient_record` (no `''`, no
+  `user_edited_fields` entry) and no clinical row or mapping is deleted or changed.
+  Entering a value, including the proposed one, is still an approval.
+- **What is not a rejection.** A value (including the echo of the displayed one); a blank
+  for a field that shows no proposal; clearing a real value (the ordinary clear); a
+  calculated field (it goes when its inputs do), a list field (their proposed items are not
+  the user's to write) and a unit (it goes with its value). A created field is rejected the same way, as `custom_fields.<name>` (see [Created fields as built](#created-fields-as-built-2857)). With `PROVISIONAL_DATA_ENABLED`
+  off nothing is marked, so nothing is a rejection. **The GELF and FLIPI checklists**
+  (`RECORDED_EMPTY_FIELDS`) are the exception to "`''` is blank": their `''` is a recorded
+  answer ("Record no GELF criteria" is Not Met, "Record no risk factors" a FLIPI of 0), so
+  `''` is saved as before and only `null` ("Mark not assessed") rejects. Another control
+  that sends `''` on purpose belongs in that set.
+- **Where it is kept.** `ProposalRejection` (one row per person and field, migration
+  `0364`): the field, the provisional rows that fed it when it was rejected, as
+  `(table, source_value, concept_id)` triples, and who (`rejected_by`, the Identity id as
+  text, so a doctor or a representative rejecting for a patient leaves a trace) and when
+  (`rejected_at`). `user_edited_fields` cannot hold it: derivation drops an entry whose value
+  matches, and for a clear of an empty field it always does. A clear marker row in OMOP
+  cannot either, because it hides only rows with the same source value and concept, and a
+  proposal's rows carry the hospital's own code. It is patient data (`copy_patient` carries
+  it with `rejected_by` cleared, since an Identity id means nothing on another instance;
+  erasure removes it) and is never exported. A row is **not deleted** when the field is later
+  approved or the user types a value: it then has no proposal to hold and is ignored.
+- **What it does.** The pass (`_provisional_values`) drops a rejected field from the
+  proposals before it reads the lists and calculated fields, so a BMI from a rejected
+  weight goes with it, and the same request rewrites the provisional pair
+  (`mirror_user_edit`), so the page and the confirmation banner follow at once. A field
+  goes with the ones that are the same proposal: a weight's unit, a lab's aliases and their
+  unit, and rejecting the disease or its slug rejects the whole disease group and the
+  `disease_slugs` list.
+- **The rows it is held against.** The rows that feed the field, not every provisional row of
+  the person (`_field_origins`, found only for a field that has a rejection): the code groups
+  the field changes without, or, when several codes agree and none decides it alone, those
+  that give the same value on their own. The disease group and the medication list use the
+  condition or drug rows they read. **This search re-runs on every derivation pass while the
+  hold applies**, about two queries per code group, so it is bounded: when every provisional
+  row the person has is one the rejection was made against it is skipped altogether (nothing
+  else can feed the field), and a person with more than `MAX_ORIGIN_GROUPS` (40, as the
+  confidence's own cap) code groups, or a field no group explains, falls back to every
+  measurement and observation row, which can only lapse a rejection more often. An unrelated
+  new proposal never lapses one below the cap.
+- **A date and its precision.** They are one answer: rejecting `diagnosis_date`, `sct_date`
+  or `dlbcl_transformation_date` rejects its `<date>_precision` (`REJECTION_FOLLOWERS`);
+  the overlay shows a proposed precision only with its proposed date (an approved
+  2020-05-12 beside a proposed precision "year" does not read as "2020"); and editing the
+  date takes its precision's proposal back (`mirror_user_edit`).
+- **When a rejection lapses.** It holds while every provisional row that feeds the field
+  is one of the rows that fed it when it was rejected (`held_rejections`): the same
+  source code under the same concept. A new reading of that code stays rejected. A code now
+  mapped to another concept, or another code that now feeds the field, is a new proposal
+  and shows again, marked. Approval is not a case: an approved mapping makes the value real
+  data, which a rejected proposal never blocks.
+- **An accidental clear.** The page's date control emits `null` when emptied, and its
+  select's "Unknown" emits `''` after the two-second autosave, so a user can reject a
+  proposal without meaning to. There is no control that restores a rejected proposal, and
+  the page shows nothing where it was; **typing a value in the field is the only way back**
+  (until a different code or concept proposes the field again). A text clear that is
+  retried or submitted twice, after the first has removed the mark, arrives as an ordinary
+  blank on a field with no proposal and is stored as `''`: an edit, with the same empty
+  result. The General tab's **Disease Category** select sends `disease: null` when the
+  category changes to one that does not contain the disease, or is cleared; with a proposed
+  disease on display that is declared as a rejection of the whole disease group, which is the
+  meaning of the change (the proposed disease does not fit the category the user chose), and
+  is left as it is. A "show proposal again"
+  control would need the record read to list the rejections and a way to delete one; it is
+  left for later.
+- **Access.** Whoever may write the record: the patient's own, a verified representative's,
+  a doctor's or an org admin's, staff's (`can_write_patient`, `patient_person_for`); an
+  analyst is refused as for any patient write. A member whose permission for the record is
+  withdrawn is refused on `/me/` by the record-off rule, which counts a declared rejection
+  as the change it is, and through the id route by `can_write_patient`.
+
+**Staff confirm provisional values (#2870).** A patient makes a shown proposal real by
+entering it (and attests the record with "Confirm my record", #2761). Staff, an org admin or
+a doctor who reads the same record can do the first in one step, without retyping. "Confirm"
+here means what a patient's entry means: the proposal becomes an approved value on
+`patient_record`, tracked in `user_edited_fields` until OMOP holds it, projected into OMOP through
+the field's descriptor, its mark dropped. It is **not** a mapping approval and not the record
+attestation.
+
+- **The endpoint.** `POST /api/v1/patient-records/<person_id>/confirm-provisional/`
+  (`PatientRecordV1ViewSet.confirm_provisional`; v1 only) with `{"fields": ["name", ...]}` or
+  `{"all": true, "expected": {...}}` (not both), and `{"expected": {field: shown value}}`, **required
+  with `all`** (400 without it: the page always sends what it showed). 200 with
+  `{person_id, confirmed: [fields], skipped: [{field, reason, detail?}], remaining: n}`, each field
+  reported at most once; 409 with the same body when nothing was confirmed and a field was skipped as
+  `changed`; 400 for a malformed body. `remaining` is how many marks the record still shows.
+- **What "Confirm all" covers: what the person sees.** The server's `confirmable` (on the record
+  read, and the set `all` takes) is only the scalar fields that have a Confirm control for that
+  viewer: the on-screen rule of `attestation_blockers` (`patientVisibleFields.json`: the always-shown
+  tabs, the disease tab's section for the record's disease, the GELF checklist), the write
+  descriptor says the editor can write, **and OMOP can acknowledge** (below). A marked field no tab
+  shows (`diagnosis_date`, `disease_slug`, `concomitant_medications`, a field of another disease's
+  section) is `not_shown` and is neither taken by `all` nor by name: nobody could see it to confirm it.
+  "Confirm all N" confirms the N the person saw: the question lists their labels, and with `expected`
+  a confirmable proposal the page did not list is `not_seen`.
+- **A confirmed value must be acknowledged, or it is not confirmed.** `user_edited_fields` keeps a
+  pending edit until derivation reads the same value back. A projected field (an OMOP fact the write
+  adds) lapses its pin at once; a field with no projection (the disease, the GELF checklist, a stage)
+  would stay pinned for as long as the derived value differs, so a newer approved fact would never
+  replace it, which is a typed edit's contract but not one a confirmation should hand out. So a field
+  with no OMOP projection (and no Person/Location column behind it) is `no_projection` and is entered
+  by typing; the disease is the notable one. No mechanism was added to let a pin lapse. If a
+  projection promised by the descriptor leaves the field pinned anyway, that group is taken back to a
+  savepoint and reported `no_projection`. A test holds both: a confirmed hemoglobin is replaced by a
+  newer approved fact on the next derivation, and an older one does not displace it.
+- **One write, groups decided whole.** `provisional_confirm.confirm` locks the record first (as
+  derivation and the attestation do), reads the overlay under that lock, takes each value from the
+  **server's** proposal (never from the body), and saves them in **one** `apply_patient_record_patch`
+  call in one transaction: one write, one recalculation, one mirror into the provisional pair. It is
+  the PATCH path (a test holds the result equal to the same values typed), without `allow_reject`. Fields
+  that are one answer (`provisional_confirm.groups`: a date and its precision, from
+  `REJECTION_FOLLOWERS`; the server's, never the client's) are decided **before** any write: with `expected`,
+  every member must be listed in it and equal the server's current value, else the whole group is
+  skipped (`changed` if a member differs, otherwise `not_seen`), nothing of it written. The read lists
+  the groups, and the page sends `expected` for every member, even on a single-field click. A value the
+  record's own validation refuses skips its whole group as `invalid`. A weight's unit, a lab's aliases
+  and a calculation made from confirmed inputs clear through the write's mirror.
+- **The reading's own date.** `project_single_value` writes "today's fact", so a 2024 result confirmed
+  today would have become a 2025 fact and distorted "latest wins" and every trend. A confirmation passes
+  `as_of` (and `as_of_datetime`): each approved fact is dated when the reading behind the proposal was
+  taken (`provisional_record.proposal_dates`: of the provisional rows that feed the field, the newest
+  whose number is the proposed value, else the newest), keeping the same concept, value, unit and source
+  value a typed one has. The proposal's own row is left as it is; its mapping's approval promotes it. A typed
+  edit passes neither and is unchanged. The dating reads the rows again per provisional code (bounded by
+  `MAX_ORIGIN_GROUPS`), so the work of a confirmation beyond the editor's own write follows the number of
+  codes, a few queries each; a field no row explains is dated today, as a typed one.
+  `project_single_value` also no longer matches a proposal's row (`confidence` set) as the fact it updates.
+- **Skip reasons.** Per field: `list_field` (**a gap**: the proposed items of lists are not the user's to
+  write), `calculated` (clears with its inputs), `mirrored` (an alias), `unit`, `follows_field` (a
+  precision named alone), `attestation` (`validated`, `validated_by`, `validation_date`: the patient's own
+  act), `no_write_path`, `not_shown`, `no_projection`; for a named field that is not marked: `rejected` (a
+  held rejection, #2671), `already_approved`, `not_provisional`; per request `changed`, `not_seen`,
+  `invalid` (with `detail`), `not_saved`, `disabled` (with `PROVISIONAL_DATA_ENABLED` off nothing is read
+  or written); and `dropped_with_group` for a proposal the write discarded with the group it confirmed
+  (the mirror takes the proposals of the fields that are one answer with a confirmed one, as typing the
+  field does: confirming a disease would drop its slug, dates and `disease_slugs` list; no confirmable
+  field has such a group today). Names that are not record columns are `not_provisional`.
+- **Who.** Staff, an org admin (a grant, or the trust-derived admin) or a doctor who reaches that patient
+  (`provisional_confirm.may_confirm`, the professional path of `can_write_patient`, `has_professional_write`),
+  and only as **a person at the page**: a session or partner (Firebase/PHR) sign-in, never a service
+  credential, a client-credentials application or a delegated OAuth2 token
+  (`InteractiveSessionPermission`; 403). Not an analyst (no access to the patient: 404), not a patient or
+  representative on their own record (403) or another's (404), **and not an account that is this record's
+  patient or representative, whatever else it is**: a doctor or staff member who is also this patient is
+  the patient here (403) and confirms by entering a value. Staff who are not this patient may confirm. A
+  caller who cannot read the patient gets 404, as every record route.
+- **The read.** `GET /api/v1/patient-records/<id>/` (v1 only; the legacy `patient-info` read is frozen)
+  adds `provisional_confirm: {confirmable, skipped, groups}` to `patient_info` for a reader who `may_confirm`
+  and only while a mark is shown. The cheap name rules run first, the write descriptor is built only when a
+  field is left that needs it, and the question whether the reader may confirm comes last. It costs up to
+  8 extra queries for staff and 9 for a doctor (the descriptor's 6, the reader's own/represented checks and
+  grant); a test bounds it. Not cached across requests: the descriptor depends on the mapping and vocabulary
+  tables, and the writable-fields endpoint builds it per request too. The page offers a control only for a
+  listed, still-marked field and never decides confirmability itself; a patient, an analyst, a credential
+  and an unmarked record get no key.
+- **The page** (provider editor, not patient mode, not the federated view). Beside the Provisional badge of
+  every listed field, in `Field` and in `MarkedControl` (GELF), an explicit button "Confirm <field label>"
+  (`useConfirmControl`); a banner over the tab with "Confirm all N provisional values" that asks once, inline,
+  naming the N fields ("Save these N provisional values as approved data for this patient: ..."; a field's
+  own label once its control has been shown, a plain rendering of its name before). Both send `expected` for
+  the fields and every member of their groups, then read the record again, which is how the marks the server
+  cleared go. A 409, a 403 and a field's own skip show inline. A device-reading summary (`fromDevice`) gets
+  no button: its mapping settles it. `attestationBlockers` and the patient's own page are unchanged.
+- **A confirmation lifts the patient's attestation block for that field.** A confirmed value is no longer
+  marked, so `attestation_blockers` no longer counts it and a patient whose "Confirm my record" was refused for
+  it can now confirm. That is the intended reading (the value is approved data now) but it means a patient
+  attests a value a professional approved, not one they entered. The patient's rule is unchanged, and the
+  revision source records it: the revision of a confirmed value says `confirmed_from_proposal` (below), so
+  the history still tells it from the patient's own entry.
+- **Who did it.** The editor's own history names the author: each field written leaves a `RecordRevision`
+  (`changed_by` is the confirming Identity's id, `old_value` null, `new_value` the value, and `source`
+  `confirmed_from_proposal`: `RecordRevision.source`, migration `0375`, blank for a typed edit, read-only on the
+  `revisions/` endpoint and the admin, carried by `copy_patient` with the rest of the row), which is not the
+  patient's id; the projected fact is typed as the recipe says for anyone who is not the patient (a patient's
+  own entry is also typed self-report and carries PATIENT_SELF provenance); and the request is one
+  `AuditEvent` (`POST .../confirm-provisional/`, classified `record_update`, the caller, the person as
+  `resource_id`, and `detail.provisional_confirm`: only the mode, `all` or `fields`; the revisions name the
+  fields, and the audit trail holds nothing about the record).
+- **Never.** It never approves, edits or rejects a code mapping (a test holds `SourceCodeConceptMapping`
+  and `FieldConceptMapping` unchanged), never changes or deletes a provisional clinical row (the rows stay
+  proposals until their mapping is approved; the approved fact the write projects is the only row added),
+  never touches another person, never sets `validated`, `validated_by` or `validation_date`, and exports
+  nothing: provisional rows stay out of every export ("Provisional data is never exported").
+- **Gaps.** List fields (listed as `list_field`; confirming a proposed item would be a different design).
+  Fields with no OMOP projection, the disease first among them (`no_projection`): they are entered by typing
+  until a mechanism exists to let their pin lapse. Created fields (`custom_fields`) are not in the provisional
+  picture on `dev` yet (#2857 adds them to the confidence table), so they have nothing to confirm; once they
+  are marked, `classify` needs a `custom_fields.<name>` branch. The federated patient view offers no control
+  (it reads the frozen legacy path).
 
 **PHR APIs and lists.** The same audiences see the same proposals on the PHR
 labs and other APIs and on the patient list, with `confidence` on each, never a
@@ -891,8 +1307,7 @@ reads `measurement`, `observation`, `condition_occurrence`, `drug_exposure` or
 existing `is_erroneous=False` filters (61 call sites) are the inventory to
 review. Each either keeps provisional rows deliberately (the patient page, the
 OMOP tab) or adds `confidence IS NULL` (anything aggregate or outbound, and
-FHIR export, which excludes them unless `include_provisional=true` and then
-marks each with a `provisional-confidence` extension). The review is a checklist
+FHIR export, which always excludes them). The review is a checklist
 in the PR for phase 1, not a change at every site.
 
 **Mapping pages.** The Code to Concept list shows, per proposed row, how many
@@ -944,17 +1359,34 @@ lookup contract below remains for a caller that does want to write rows itself.
 
 - `code-mappings/lookup/` `include_provisional` and the response fields.
 - ETL repository change to write `confidence` and to re-send after approval.
-- Lab results API and FHIR export handling.
+- Lab results API handling. (FHIR export is settled: provisional data is never exported.)
 - Mapping-page counts and #2263.
 
 ### Phase 3: wider reach
 
 - Composite extractors (therapy lines, staging, genomics) one at a time, each
   with the minimum rule.
-- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table.
-- FHIR sync opt-in per organization.
-- Patient-facing display policy.
-- #1532 auto-approval reading the same floor.
+- JSON derived fields (done for the lists a reader can run over provisional rows, #2534) and custom fields in the confidence table (done, #2857: [Created fields as built](#created-fields-as-built-2857), rejection included; computed created fields are left).
+- ~~FHIR sync opt-in per organization~~ dropped (2026-11-20): a patient decides
+  whether to import their FHIR data, and an export never carries provisional data
+  (see "Provisional data is never exported").
+- ~~Patient-facing display policy~~ done: patients see approved and provisional
+  values, and each provisional value is marked (the "Provisional NN%" badge, "not yet
+  confirmed" in patient wording; open decisions 3 and 5).
+- #1532 auto-approval (default threshold 100%, curator-lowerable). It is a separate
+  setting from the floor; the provisional band is floor to threshold, exclusive.
+
+### Provisional data is never exported
+
+The PHR is the patient's source of truth, and provisional values are unconfirmed
+proposals, so nothing that leaves the PHR carries them: the FHIR export
+(`build_fhir_bundle`, which backs the patient-records export, the signed PHR record
+export and the CLI command) filters `confidence IS NULL` and has no option to include
+provisional rows, and any future write-back or upload to an institution must do the
+same. Nobody is blocked from sharing: a patient who approves a value, by entering it
+themselves or through an approved mapping, makes it real, and it then exports like any
+other row. Saving a provisional value *in place* in the PHR is not an export and is
+unaffected.
 
 ### Gaps before HealthTree can run with provisional data on (2026-11-17)
 
@@ -968,14 +1400,16 @@ without a click:
 
 | Gap | Issue | State |
 |---|---|---|
-| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) | done (#2665); controls that bypass `Field` (GELF, FLIPI, treating institution, planned therapies) show no indicator yet |
+| Frontend: indicator on every provisional field, real record as PATCH baseline, no toggle (replaces the toggle in #2532) | [#2659](https://github.com/healthkey-ai/promop/issues/2659) | done (#2665, and the controls outside `Field`: GELF and the FLIPI score show the indicator through `MarkedControl`; the treating institution and planned therapies cannot hold a proposal) |
 | The PHR APIs and the patient list show the same proposals, with confidence | [#2660](https://github.com/healthkey-ai/promop/issues/2660) | done (#2667); Genetics and Imaging wait on #2534; list filters and sort stay approved-only |
 | Computed fields use provisional inputs at the lowest input confidence | [#2661](https://github.com/healthkey-ai/promop/issues/2661) | done (#2666, #2672); JSON-input fields, FLC pair, age left |
 | Proposals are stored with a confidence on the mapping, kept on approval, recomputed by Calc | [#2668](https://github.com/healthkey-ai/promop/issues/2668) | done (#2670) |
 | Server-side provisional rows from proposed mappings (the ETL does not propose) | [#2662](https://github.com/healthkey-ai/promop/issues/2662) | done (#2679): unscoped proposals only; run `sweep_provisional_rows` after enabling; confirm HealthTree's ETL does not pass `organization_id` on Epic/Cerner lookups |
-| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | open |
-| The patient's "Confirm my record" attestation is still offered while proposals are shown | (no issue yet) | open |
+| A user cannot clear a displayed proposal (PATCH null on an already-empty field is a no-op) | [#2671](https://github.com/healthkey-ai/promop/issues/2671) | done: a blank value for a marked scalar field rejects the proposal (`ProposalRejection`, migration `0364`); holds until a different code or concept proposes the field; list fields are not covered; see "Rejecting a proposal" |
+| The patient's "Confirm my record" attestation is still offered while proposals are shown | [#2761](https://github.com/healthkey-ai/promop/issues/2761) | done: refused (409) and not offered while a marked field a patient tab shows and the patient can edit is on display, the disease tab's section for the record's disease and the GELF checklist included; a patient lifts a block by entering a value or by rejecting the proposal (#2671); see "Confirming a record that shows proposals" |
+| Staff, org admins and doctors can only approve a shown proposal by retyping it | [#2870](https://github.com/healthkey-ai/promop/issues/2870) | done: `POST /api/v1/patient-records/<id>/confirm-provisional/` saves the server's current proposal through the PATCH path in one transaction, with a per-field "Confirm" control and "Confirm all N" in the editor; scalar fields a tab shows and OMOP can acknowledge, **list fields and unprojected fields (the disease) are gaps**; see "Staff confirm provisional values" |
 | Measure, then enable on Render staging, then HealthTree GCP with `--update-env-vars`, `sweep_provisional_rows`, backfill, check patient 52971; rollback | [#2663](https://github.com/healthkey-ai/promop/issues/2663) | open: needs a go-ahead and HealthTree access |
+| Created fields (`custom_fields`) in the confidence table | [#2857](https://github.com/healthkey-ai/promop/issues/2857) | done: `patient_record_confidence.custom_fields` is `{name: percent}`; marked `custom_fields.<name>`, rejectable like a column; computed created fields are left; see "Created fields as built" |
 | Composite readers (therapy lines, staging, genomics) and conditions/drugs/procedures feeding `patient_record` fields | [#2534](https://github.com/healthkey-ai/promop/issues/2534) | partly done: disease fields, `concomitant_medications` and the JSON lists (`disease_slugs`, `active_malignancies`, `prior_procedures`, `genetic_mutations`, `genomics_*`); therapy lines, staging, cytogenetics and SCT open |
 
 The rule for all of them: with the switch off, no provisional data is computed,
@@ -984,6 +1418,33 @@ stored or shown to anyone.
 Each phase is its own PR against `dev`, with a migration in phase 0 only;
 rebase on `dev` immediately before `makemigrations` and again before merge
 (see [Migration conflicts](../AGENTS.md#migration-conflicts)).
+
+### Auto-approval threshold (#1532)
+
+Built as its own setting, separate from the provisional floor. A curator's Suggest
+run approves a proposal as it writes it when the ranker's confidence is at or above
+the run's threshold: **90 to 100, default 100, never below 90, or off**, compared as
+the score it is (100 means exactly 1.0, no rounding), remembered per curator between
+runs (`Identity.suggest_auto_approve_threshold` and `suggest_auto_approve_off`,
+prefilled in the Suggest controls, which carry an always-visible line saying what the
+run will do) and recorded on the run. Only staff and org admins get it, checked for
+every row; an analyst's runs never approve anything; and a deployment with no worker
+queue approves nothing. The approval is the curator's own path
+(`_upsert_source_code_mapping`), so approval clears the confidence on provisional rows
+exactly as a hand approval does. The Code Mapping list can be filtered to the rows
+Suggest approved by itself, and `AGENTS.md` ("Auto-approving a Suggest result") says
+how to undo one and how the accuracy analytics count them (#2856): the
+`suggestion_auto_approved` column, set by the approval and reported as an
+`auto_approved` block beside, not inside, the model's precision and recall, so a
+curator's later accept, override or reject says whether approving at 90 to 100 was
+right.
+
+Because the minimum is 90 and the floor is 70, the provisional band (floor up to, not
+including, the threshold) is never empty: a proposal of 70 to 89 can only ever be
+provisional, and one of 90 to 99 stays provisional unless the curator lowered the
+threshold to meet it. The Anthropic ranker's qualitative labels score 0.85, 0.55 and
+0.25, so with that ranker alone nothing reaches 90 and nothing is auto-approved;
+Jev's probabilities do.
 
 ## Alternatives considered
 

@@ -11,6 +11,11 @@ export function optionKey(v: unknown) {
   return String(v);
 }
 
-export function stringsToOptions(strings: string[]): Option[] {
-  return strings.map((s) => ({ value: s, label: s }));
+/** A choice: the text it stores, or the text it stores with another one shown. */
+export type OptionInput = string | { value: string; label?: string };
+
+export function stringsToOptions(strings: OptionInput[]): Option[] {
+  return strings.map((s) => (typeof s === 'string'
+    ? { value: s, label: s }
+    : { value: s.value, label: s.label ?? s.value }));
 }

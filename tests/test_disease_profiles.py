@@ -322,12 +322,29 @@ def test_rows_left_by_a_removed_field_can_be_cleared_and_do_not_block_a_category
 
 
 @pytest.mark.parametrize('role,read,write', (
-    ('org_admin', 200, 200), ('analyst', 200, 200), ('doctor', 200, 403), ('patient', 403, 403)))
-def test_scope_by_name_follows_the_mapping_page_roles(role, read, write):
+    ('org_admin', 200, 200), ('analyst', 200, 403), ('doctor', 200, 403), ('patient', 403, 403)))
+def test_scope_by_name_is_read_by_the_mapping_page_roles_and_written_by_approvers(role, read, write):
     client = as_role(role)
     assert client.get(scope_url('stage')).status_code == read
     assert client.put(scope_url('stage'), {'diseases': ['MM']}, format='json').status_code == write
     assert diseases_of('stage') == (['MM'] if write == 200 else ['FL', 'MCL', 'MM'])
+
+
+def test_an_analyst_cannot_set_a_scope_through_a_mapping_either():
+    """Scope has no proposal stage, so it is not reachable around the approvers-only endpoint."""
+    analyst = as_role('analyst')
+    row = FieldConceptMapping.objects.create(field_name='hemoglobin_g_dl', provenance='curator')
+    response = analyst.patch(f'{MAPPINGS}{row.pk}/', {'diseases': ['MM'], 'notes': 'x'}, format='json')
+    assert response.status_code == 403
+    assert diseases_of('hemoglobin_g_dl') == []
+    row.refresh_from_db()
+    assert row.notes != 'x'
+    # A mapping edit that names no scope is still the analyst's to make.
+    assert analyst.patch(f'{MAPPINGS}{row.pk}/', {'notes': 'x'}, format='json').status_code == 200
+    assert diseases_of('hemoglobin_g_dl') == []
+    created = analyst.post(MAPPINGS, {'field_name': 'hematocrit_percent', 'diseases': ['CLL']}, format='json')
+    assert created.status_code == 403
+    assert diseases_of('hematocrit_percent') == []
 
 
 # ── The mapping API ───────────────────────────────────────────────────────
@@ -392,8 +409,8 @@ def test_a_new_mapping_may_carry_its_scope(staff):
 
 
 # A scope edit follows mapping write access: the analyst's, not the doctor's (#2416).
-@pytest.mark.parametrize('role,status', (('org_admin', 200), ('analyst', 200), ('doctor', 403)))
-def test_setting_a_scope_follows_mapping_write_access(role, status):
+@pytest.mark.parametrize('role,status', (('org_admin', 200), ('analyst', 403), ('doctor', 403)))
+def test_setting_a_scope_with_a_mapping_is_for_approvers(role, status):
     row = FieldConceptMapping.objects.create(field_name='hemoglobin_g_dl')
     response = as_role(role).patch(f'{MAPPINGS}{row.pk}/', {'diseases': ['MM']}, format='json')
     assert response.status_code == status
@@ -741,3 +758,102 @@ def test_pruning_a_created_field_takes_its_memberships_with_it():
     disease_profiles.set_field_diseases('frailty_index', ['MM'])
     apply_payload({'mappings': [], 'custom_fields': []}, tables=('custom_fields',), prune=True)
     assert not CustomPatientField.objects.exists() and diseases_of('frailty_index') == []
+
+
+# ── Which disease section a record shows (#2332) ──────────────────────────
+
+@pytest.mark.parametrize('text, mapped, expected', [
+    # What Disease Category management maps the name to decides, in any case.
+    ('Diffuse large B-cell lymphoma', 'DLBCL', 'DLBCL'),
+    ('smoldering MYELOMA', 'MM', 'MM'),
+    # ...including the base record, even for a name the keyword rules would place.
+    ('Mantle Cell Lymphoma', 'Other', ''),
+    # A name the mapping does not hold falls back to the editor's keyword rules.
+    ('Follicular lymphoma', None, 'FL'),
+    ('Mantle cell lymphoma, relapsed', None, 'MCL'),
+    ('Glioblastoma', None, ''),
+    ('', None, ''),
+    (None, None, ''),
+])
+def test_a_records_category_is_its_mapping_then_the_keyword_fallback(text, mapped, expected):
+    if mapped:
+        DiseaseCategoryChoice.objects.get_or_create(code=mapped, defaults={'label': mapped})
+        DiseaseCategoryMapping.objects.create(disease_name=text, category=mapped)
+    assert disease_profiles.record_category(text) == expected
+
+
+# ── A record with several cancers has each one's extension ────────────────
+
+def _prostate_category():
+    # The table is read as the category list once it holds a row, so the others are rows too.
+    for code, label in (('MM', 'Multiple Myeloma'), ('BC', 'Breast Cancer'), ('PC', 'Prostate Cancer')):
+        DiseaseCategoryChoice.objects.get_or_create(code=code, defaults={'label': label})
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Prostate cancer', category='PC')
+
+
+def test_a_record_with_myeloma_and_prostate_cancer_has_both_extensions():
+    _prostate_category()
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Multiple myeloma', category='MM')
+    assert disease_profiles.record_categories(
+        'Multiple myeloma', ['multiple-myeloma', 'prostate-cancer']) == ['MM', 'PC']
+    # primary first, whatever order the slugs come in
+    assert disease_profiles.record_categories(
+        'Prostate cancer', ['multiple-myeloma', 'prostate-cancer']) == ['PC', 'MM']
+
+
+def test_other_cancers_are_found_by_keyword_when_the_mapping_does_not_hold_them():
+    _prostate_category()
+    assert disease_profiles.record_categories('Multiple myeloma', ['multiple-myeloma', 'breast-cancer']) == ['MM', 'BC']
+
+
+def test_a_cancer_filed_under_other_or_unknown_adds_no_extension():
+    _prostate_category()
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Glioblastoma', category='Other')
+    assert disease_profiles.record_categories(
+        'Multiple myeloma', ['multiple-myeloma', 'glioblastoma', 'something-unmapped']) == ['MM']
+    assert disease_profiles.record_categories('', []) == []
+
+
+def test_the_record_read_lists_every_category_only_when_there_is_more_than_one_cancer():
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    _prostate_category()
+    DiseaseCategoryMapping.objects.get_or_create(disease_name='Multiple myeloma', category='MM')
+    both = PatientRecordFactory(disease='Multiple myeloma', disease_slug='multiple-myeloma',
+                                disease_slugs=['multiple-myeloma', 'prostate-cancer'])
+    one = PatientRecordFactory(disease='Multiple myeloma', disease_slug='multiple-myeloma',
+                               disease_slugs=['multiple-myeloma'])
+    assert PatientRecordSerializer(both).data['disease_categories'] == ['MM', 'PC']
+    assert 'disease_categories' not in PatientRecordSerializer(one).data
+
+
+def test_the_attestation_shows_the_section_of_the_category_not_the_disease_text():
+    from omop_core.services import patient_visible_fields as visible
+
+    follicular = visible.on_screen('Follicular lymphoma')
+    assert 'b_symptom_fever' in follicular
+    # A lymphoma the mapping files under a category with no section has none on screen.
+    DiseaseCategoryChoice.objects.get_or_create(code='DLBCL', defaults={'label': 'DLBCL'})
+    DiseaseCategoryMapping.objects.create(disease_name='Diffuse large B-cell lymphoma', category='DLBCL')
+    assert 'b_symptom_fever' not in visible.on_screen('Diffuse large B-cell lymphoma')
+    # Re-mapping the name changes the profile and nothing else.
+    DiseaseCategoryMapping.objects.filter(disease_name='Diffuse large B-cell lymphoma').update(category='FL')
+    assert 'b_symptom_fever' in visible.on_screen('Diffuse large B-cell lymphoma')
+
+
+def test_each_disease_type_names_the_category_whose_extension_its_section_renders():
+    from omop_core.services import patient_visible_fields as visible
+
+    assert set(visible.DISEASE_TYPE_CATEGORY) == set(visible.DISEASE_SECTIONS)
+    assert set(visible.DISEASE_TYPE_CATEGORY.values()) == set(disease_profiles.SEED_DISEASE_FIELDS)
+
+
+def test_the_category_list_says_how_big_each_extension_is(staff):
+    DiseaseCategoryChoice.objects.get_or_create(code='MM', defaults={'label': 'Myeloma'})
+    DiseaseCategoryChoice.objects.get_or_create(code='Lung', defaults={'label': 'Lung cancer'})
+    disease_profiles.set_field_diseases('bulky_disease', ['Lung'])
+
+    sizes = {row['value']: row['extension_size'] for row in staff.get('/api/v1/disease-categories/').data}
+
+    assert sizes['Lung'] == 1
+    assert sizes['MM'] == len(disease_profiles.SEED_DISEASE_FIELDS['MM'])

@@ -182,6 +182,28 @@ def repoint_mapping_rows_task(mapping_id: int) -> dict[str, Any]:
     return {'mapping_id': mapping_id, **run_repoint(mapping_id)}
 
 
+class _MappingBusy(Exception):
+    """A re-point of the same mapping is running; try again shortly."""
+
+
+@shared_task(name='omop_core.unpoint_mapping_rows', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3)
+def unpoint_mapping_rows_task(mapping_id: int, old_concept_id: int) -> dict[str, Any]:
+    """Move a mapping's stored rows off a destination a curator removed (#2744).
+
+    Dispatched when Delete clears a destination. Idempotent: a repeat finds no
+    rows left at the old destination. Retried while a re-point of the same
+    mapping holds it; past that the destination stays on the mapping's
+    ``pending_repoint_concept_ids`` and the next approval moves the rows.
+    """
+    from omop_core.services.repoint_jobs import run_unpoint
+
+    result = run_unpoint(mapping_id, old_concept_id)
+    if result.pop('busy'):
+        raise _MappingBusy(f'mapping {mapping_id} is being re-pointed')
+    return {'mapping_id': mapping_id, 'old_concept_id': old_concept_id, **result}
+
+
 @shared_task(name='omop_core.relocate_mapping_rows', autoretry_for=(Exception,),
              retry_backoff=60, max_retries=3)
 def relocate_mapping_rows_task(mapping_id: int, from_table: str, to_table: str) -> dict[str, Any]:
@@ -196,11 +218,16 @@ def relocate_mapping_rows_task(mapping_id: int, from_table: str, to_table: str) 
 
 
 @shared_task(name='omop_core.bulk_resolve_source_codes')
-def bulk_resolve_source_codes_task(run_id: str, person_ids: list[int] | None = None) -> dict[str, Any]:
-    """Run a bulk source-code resolution across multiple patients."""
+def bulk_resolve_source_codes_task(run_id: str, person_ids: list[int] | None = None,
+                                   refresh_record: bool = False) -> dict[str, Any]:
+    """Run a bulk source-code resolution across multiple patients.
+
+    *refresh_record*: derive each patient's record in the run (a patient's own
+    Generate OMOP, #2822).
+    """
     from omop_core.services.resolve_jobs import run_bulk_resolve
 
-    run_bulk_resolve(run_id, person_ids)
+    run_bulk_resolve(run_id, person_ids, refresh_record=refresh_record)
     from omop_core.models import SourceCodeResolveRun
     run = SourceCodeResolveRun.objects.filter(pk=run_id).first()
     if run is None:

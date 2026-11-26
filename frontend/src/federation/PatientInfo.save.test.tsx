@@ -251,6 +251,18 @@ describe('federated PatientInfo save', () => {
   });
 });
 
+describe('embedded PatientInfo wearables (#2819)', () => {
+  it("offers the upload and reads the history: the page is the patient's own record", async () => {
+    await renderAndLoad();
+    fireEvent.click(screen.getByRole('button', { name: 'Wearable' }));
+    // Offered only on one's own record; this page is `patient-info/me/`.
+    expect(await screen.findByRole('button', { name: /upload/i })).toBeInTheDocument();
+    await waitFor(() => expect(
+      (client.get as ReturnType<typeof vi.fn>).mock.calls.some(([url]) => String(url).includes('wearable-uploads')),
+    ).toBe(true));
+  });
+});
+
 describe('federated PatientInfo added fields (#721)', () => {
   it('shows a field added through Field Concept Mapping on its tab, with no Add Field', async () => {
     const original = (client.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
@@ -278,8 +290,90 @@ describe('federated PatientInfo added fields (#721)', () => {
 
     await openLabsTab();
     expect(await screen.findByText('Frailty index')).toBeInTheDocument();
-    expect(screen.getByText('Fit')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Fit')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Add Field' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /Field concept mapping/ })).not.toBeInTheDocument();
+    // The host's server does not list the field as writable, so it is no input.
+    expect(screen.getByDisplayValue('Fit')).toBeDisabled();
+  });
+
+  it('saves an edit to an added field through the host client (#2669)', async () => {
+    const original = (client.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) {
+        return Promise.resolve({ data: { ...DESCRIPTORS, frailty_index: {
+          kind: 'direct', writable: true, target: 'patient_record', custom: true,
+        } } });
+      }
+      if (url.includes('custom-patient-fields')) {
+        return Promise.resolve({ data: [{
+          id: 1, field_name: 'frailty_index', display_name: 'Frailty index', tab: 'labs',
+          field_type: 'text', mode: 'editable', unit: '', scope: 'base', diseases: [],
+        }] });
+      }
+      if (url.includes('/patient-info/me/')) {
+        return Promise.resolve({ data: {
+          patient_info: { ...PATIENT_INFO, custom_fields: { frailty_index: 'Fit' } },
+          user: { name: 'Alishia Howell', email: 'howell@example.org' },
+          patient_name: 'Alishia Tawny Howell',
+        } });
+      }
+      return original(url);
+    });
+
+    await renderAndLoad();
+    await openLabsTab();
+    const input = await screen.findByDisplayValue('Fit');
+    await waitFor(() => expect(input).toBeEnabled());
+    await editAndSave('Fit', 'Frail');
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0][1]).toEqual({ custom_fields: { frailty_index: 'Frail' } });
+  });
+
+  it('rejects a proposed added field by clearing it, and keeps its mark until the save (#2857)', async () => {
+    const original = (client.get as ReturnType<typeof vi.fn>).getMockImplementation()!;
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) {
+        return Promise.resolve({ data: { ...DESCRIPTORS, frailty_index: {
+          kind: 'direct', writable: true, target: 'patient_record', custom: true,
+        } } });
+      }
+      if (url.includes('custom-patient-fields')) {
+        return Promise.resolve({ data: [{
+          id: 1, field_name: 'frailty_index', display_name: 'Frailty index', tab: 'labs',
+          field_type: 'text', mode: 'editable', unit: '', scope: 'base', diseases: [],
+        }] });
+      }
+      if (url.includes('/patient-info/me/')) {
+        return Promise.resolve({ data: {
+          patient_info: {
+            ...PATIENT_INFO, custom_fields: { frailty_index: 'Fit' },
+            provisional_fields: { 'custom_fields.frailty_index': 82 },
+          },
+          user: { name: 'Alishia Howell', email: 'howell@example.org' },
+          patient_name: 'Alishia Tawny Howell',
+        } });
+      }
+      return original(url);
+    });
+
+    await renderAndLoad();
+    await openLabsTab();
+    const input = await screen.findByDisplayValue('Fit');
+    await waitFor(() => expect(input).toBeEnabled());
+    expect(screen.getByTestId('provisional-custom_fields.frailty_index')).toBeInTheDocument();
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(input, { target: { value: '' } });
+    // A blank is no answer until the save sends it as a rejection: the mark stays.
+    expect(screen.getByTestId('provisional-custom_fields.frailty_index')).toBeInTheDocument();
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches).toHaveLength(1));
+    expect(patches[0][1]).toEqual({
+      custom_fields: { frailty_index: null },
+      rejected_proposals: ['custom_fields.frailty_index'],
+    });
   });
 });

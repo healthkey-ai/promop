@@ -15,6 +15,8 @@ export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'dire
 
 export interface FieldDescriptor {
   kind: FieldKind;
+  /** The Disease Categories whose extension the field is in; none is the base record (#2331). */
+  diseases?: string[];
   writable: boolean;
   reason?: string;
   /** Where the write lands. 'patient_record' for clinical fields, 'person'
@@ -45,7 +47,8 @@ export interface FieldDescriptor {
   /** profile: the curated choices the server resolves a concept from. Not the
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */
-  options?: Array<{ value: string; code?: string }>;
+  /** `value` is what a save stores; `label` is what a person reads, present only when it differs. */
+  options?: Array<{ value: string; code?: string; label?: string }>;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
   /** OMOP projection metadata — present when the field has an approved mapping.
@@ -90,6 +93,8 @@ export const LIFECYCLE: ReadonlySet<string> = new Set([
   'provisional_fields',
   // Which items of a list field are proposals (#2534): read, never written.
   'provisional_items',
+  // What a professional may confirm on the record (#2870): read, never written.
+  'provisional_confirm',
 ]);
 
 /** Cached per patient, because the answer is per patient.
@@ -109,6 +114,13 @@ export function __resetWritableFieldsCache() {
   cached.clear();
   inflight.clear();
 }
+
+/** Forget every cached answer. Call after a change to which fields exist or
+ *  are mapped (a field added or a mapping saved in Field Concept Mapping):
+ *  that changes what is writable for every patient, and a patient page
+ *  reached without a reload would otherwise render from the answer it was
+ *  given before. */
+export const invalidateAllWritableFields = __resetWritableFieldsCache;
 
 /** Invalidate the cached descriptor for one patient so the next render
  *  re-fetches it. Call after authoring a therapy line or any other action
@@ -148,11 +160,18 @@ export function fetchWritableFields(
   return pending;
 }
 
+const NONE: FieldDescriptors = {};
+
 export function useWritableFields(personId?: number | string) {
   const key = keyFor(personId);
-  const [descriptors, setDescriptors] = useState<FieldDescriptors>(
-    () => cached.get(key) ?? {},
+  // Held with the key it answers. When the person changes (a view that
+  // learns its person only once the record loads), the answer for the old
+  // key must not be read as the new one's: an absent entry is read-only,
+  // and the deployment-wide answer says every mapped field is writable.
+  const [loaded, setLoaded] = useState<{ key: string; descriptors: FieldDescriptors }>(
+    () => ({ key, descriptors: cached.get(key) ?? NONE }),
   );
+  const descriptors = loaded.key === key ? loaded.descriptors : (cached.get(key) ?? NONE);
   const [loading, setLoading] = useState(!cached.has(key));
   const [error, setError] = useState(false);
 
@@ -162,14 +181,14 @@ export function useWritableFields(personId?: number | string) {
     if (ready) {
       Promise.resolve().then(() => {
         if (!alive) return;
-        setDescriptors(ready);
+        setLoaded({ key, descriptors: ready });
         setLoading(false);
       });
       return;
     }
     fetchWritableFields(personId)
       .then((d) => {
-        if (alive) setDescriptors(d);
+        if (alive) setLoaded({ key, descriptors: d });
       })
       .catch(() => {
         // An unreachable descriptor must not make fields look editable. Callers

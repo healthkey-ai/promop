@@ -150,14 +150,22 @@ def test_wearables_domain_lists_only_concepts_wearable_codes_map_to(client, conc
     source('unmapped', source_vocabulary_id='OpenWearables')
 
     expected = {steps.pk, *(target.pk for target in by_vocabulary.values())}
-    # The default scope is patient-field concepts, and none of these backs a
-    # field: Wearables ignores the scope, whichever is sent.
-    for params in ({'domain': 'wearables'}, {'domain': 'wearables', 'scope': 'all'},
-                   {'domain': 'wearables', 'scope': 'fields'}):
+    # Elsewhere the default scope is patient-field concepts. Here none of these
+    # backs a field, so a request that names no scope lists them all.
+    for params in ({'domain': 'wearables'}, {'domain': 'wearables', 'scope': 'all'}):
         response = client.get(BASE, params)
         assert response.status_code == 200
         assert {item['concept_id'] for item in response.data['results']} == expected
         assert response.data['total'] == len(expected)
+    # "Patient field concepts", asked for by name, narrows to the wearable
+    # concepts that back a patient field (#2808): none yet, then one.
+    narrowed = client.get(BASE, {'domain': 'wearables', 'scope': 'fields'})
+    assert narrowed.status_code == 200 and narrowed.data['total'] == 0
+    FieldConceptMapping.objects.create(
+        field_name='wearable_steps_test_field', omop_table='observation', concept=steps, status='approved')
+    narrowed = client.get(BASE, {'domain': 'wearables', 'scope': 'fields'})
+    assert [item['concept_id'] for item in narrowed.data['results']] == [steps.pk]
+    assert client.get(BASE, {'domain': 'wearables'}).data['total'] == len(expected)
     listed = {item['concept_id']: item for item in client.get(BASE, {'domain': 'wearables'}).data['results']}
     assert listed[steps.pk]['sccm_counts'] == {'approved': 1, 'proposed': 1, 'rejected': 0}
     # Search still narrows inside it.

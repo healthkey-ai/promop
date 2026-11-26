@@ -21,13 +21,13 @@ import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
-import SourceSystemManagementPage from "@/components/CodeMappings/SourceSystemManagementPage";
+import FacilityBrowsePage from "@/components/CodeMappings/FacilityBrowsePage";
 import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
 import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
-import { canViewMappings, isAnalystOnly, isStaffOrOrgAdmin } from "@/utils/roles";
+import { canViewMappings, isAnalystOnly, isStaffOrOrgAdmin, ownPersonId } from "@/utils/roles";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import ChronicConditionOverridesPage from "@/components/MappingHub/ChronicConditionOverridesPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
@@ -105,6 +105,14 @@ function AppRoutes() {
   // An analyst-only account sees no patient data (#2416): its home is the
   // Code Mapping page, and the patient pages send it there.
   const analystOnly = isAnalystOnly(currentUser);
+  // Garmin's consent page returns to "/?garmin=<outcome>" (#2802). A patient's
+  // home is their record; an account that is also staff or a professional has
+  // the patient list there, so it is taken on to its own record, where the
+  // Wearables tab shows the outcome (#2816).
+  const ownRecordId = ownPersonId(currentUser);
+  const garminReturn = ownRecordId != null && new URLSearchParams(location.search).has("garmin")
+    ? `/patient/${ownRecordId}${location.search}`
+    : null;
 
   // Provider-only routes: require a signed-in provider. Signed-in patients are
   // redirected home (their own record); logged-out users go to login.
@@ -164,6 +172,8 @@ function AppRoutes() {
               <PatientHome user={currentUser} onLogout={logout} />
             ) : analystOnly ? (
               <Navigate to="/code-mappings" replace />
+            ) : garminReturn ? (
+              <Navigate to={garminReturn} replace />
             ) : (
               <PatientList />
             )
@@ -183,7 +193,8 @@ function AppRoutes() {
       <Route path="/mappings" element={mappingRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingRoute(<CodeMappingPage />)} />
-      <Route path="/code-mappings/source-systems" element={mappingRoute(<SourceSystemManagementPage />)} />
+      <Route path="/code-mappings/facilities" element={mappingRoute(<FacilityBrowsePage />)} />
+      <Route path="/code-mappings/source-systems" element={<Navigate to="/code-mappings/facilities" replace />} />
       <Route path="/code-mappings/suggest-runs/:runId" element={mappingRoute(<SuggestRunLogPage />)} />
       <Route path="/code-mappings/accuracy" element={mappingRoute(<CodeMappingAccuracyPage />)} />
       <Route path="/code-mappings/accuracy/analytics" element={mappingRoute(<MappingAccuracyAnalyticsPage />)} />

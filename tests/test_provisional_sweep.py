@@ -6,13 +6,16 @@ the after-ingest job make a patient's unresolved rows provisional from such a
 proposal without any ETL change. The sweep is the manual path (no broker); the
 trigger and the ingest hook queue Celery jobs and never resolve in a request.
 """
-from datetime import date
+from datetime import date, timedelta
+from io import StringIO
 
 import pytest
 from celery.exceptions import SoftTimeLimitExceeded
 from django.core.cache import cache
+from django.core.management import CommandError, call_command
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from omop_core import tasks
@@ -975,3 +978,231 @@ def test_an_inventory_alias_for_a_table_is_folded_onto_its_canonical_key(world):
 
     assert provisional_sweep.person_scope(
         person.person_id, provisional_sweep.qualifying_codes()) == (['ANEM'], ['condition'])
+
+
+# --- a run's state: finished, still going, or lost ------------------------------------------
+
+def _age(run, minutes):
+    """Make the run's last progress *minutes* old (a queryset update skips auto_now)."""
+    then = timezone.now() - timedelta(minutes=minutes)
+    SourceCodeResolveRun.objects.filter(pk=run.pk).update(updated_at=then, created_at=then)
+    run.refresh_from_db()
+    return run
+
+
+def test_a_finished_inline_sweep_is_completed_with_its_counts_and_a_finish_time(world):
+    _person(); _person()
+    _proposal(world)
+
+    run = provisional_sweep.start_sweep()
+
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.COMPLETED
+    assert run.finished_at is not None and run.updated_at is not None
+    assert (run.done, run.total, run.provisional) == (2, 2, 2)
+
+
+def test_a_queued_sweep_is_completed_by_its_last_chunk_even_when_the_last_fills_the_limit(broker, monkeypatch):
+    chained = []
+    monkeypatch.setattr(tasks.provisional_sweep_task, 'delay', lambda *a: chained.append(a))
+    people = sorted((_person() for _ in range(2)), key=lambda p: p.person_id)
+    _proposal(ConceptFactory(concept_name='Queued glucose'))
+    run = provisional_sweep.start_run_record()
+
+    tasks.provisional_sweep_task.run(str(run.id), 0, None, 2)        # exactly `limit` persons
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING and run.done == 2
+    assert chained == [(str(run.id), people[1].person_id, None, 2)]
+
+    tasks.provisional_sweep_task.run(*chained.pop())                 # the empty chunk that ends it
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.COMPLETED and run.finished_at is not None
+    assert chained == []
+
+
+def test_a_run_still_working_stays_running_and_is_not_stale(world):
+    for _ in range(3):
+        _person()
+    _proposal(world)
+    run = provisional_sweep.start_run_record()
+
+    provisional_sweep.run_sweep(run.id, after=0, limit=10, budget_seconds=-1)
+
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING and run.finished_at is None
+    assert run.updated_at is not None                                 # every chunk stamps it
+    assert list(provisional_sweep.stale_runs()) == []
+
+
+def test_an_inline_sweep_that_crashes_is_marked_failed_not_left_running(world, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError('database went away')
+    monkeypatch.setattr(provisional_sweep, 'run_sweep', boom)
+
+    with pytest.raises(RuntimeError):
+        provisional_sweep.start_sweep()
+
+    run = SourceCodeResolveRun.objects.get()
+    assert run.state == SourceCodeResolveRun.FAILED and run.finished_at is not None
+    assert 'database went away' in run.error_detail[0]['error']
+
+
+def test_a_late_chunk_reopens_a_run_closed_as_stale_and_finishes_it(world):
+    _person()
+    _proposal(world)
+    run = _age(provisional_sweep.start_run_record(), 600)
+    provisional_sweep.close_stale_runs()
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.FAILED
+
+    provisional_sweep.run_sweep(run.id, after=0, limit=10)           # the chain was alive after all
+
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.COMPLETED and run.done == 1
+
+
+def test_close_stale_closes_only_pending_and_running_runs_with_no_recent_progress(world):
+    lost = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING, done=120, total=120), 300)
+    never_started = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.PENDING), 300)
+    fresh = SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING)
+    slow_but_alive = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 90)
+    done_long_ago = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.COMPLETED), 900)
+
+    closed = provisional_sweep.close_stale_runs()
+
+    assert {run.pk for run in closed} == {lost.pk, never_started.pk}
+    for run in (lost, never_started, fresh, slow_but_alive, done_long_ago):
+        run.refresh_from_db()
+    assert (lost.state, never_started.state) == (SourceCodeResolveRun.FAILED, SourceCodeResolveRun.FAILED)
+    assert lost.finished_at is not None and 'Closed as stale' in lost.error_detail[0]['error']
+    assert lost.done == 120                                           # what it had done is kept
+    assert fresh.state == slow_but_alive.state == SourceCodeResolveRun.RUNNING
+    assert done_long_ago.state == SourceCodeResolveRun.COMPLETED
+
+
+def test_a_run_with_no_heartbeat_falls_back_to_its_creation_time(world):
+    # Defensive: nothing writes a null (the migration stamped existing runs with its own time).
+    old = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 400)
+    SourceCodeResolveRun.objects.filter(pk=old.pk).update(updated_at=None)
+
+    assert [run.pk for run in provisional_sweep.stale_runs()] == [old.pk]
+
+
+def test_close_stale_takes_the_threshold_and_a_dry_run_changes_nothing(world):
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 30)
+
+    assert provisional_sweep.close_stale_runs() == []                  # default: two hours
+    assert [r.pk for r in provisional_sweep.close_stale_runs(timedelta(minutes=10), dry_run=True)] == [run.pk]
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING
+    assert [r.pk for r in provisional_sweep.close_stale_runs(timedelta(minutes=10))] == [run.pk]
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.FAILED
+
+
+def test_a_run_that_saved_progress_after_it_was_read_is_not_closed(world, monkeypatch):
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 300)
+    real = provisional_sweep.stale_runs
+    calls = []
+
+    def racing(older_than=None):
+        queryset = real(older_than)
+        if calls:                                                      # between the read and the close
+            SourceCodeResolveRun.objects.filter(pk=run.pk).update(updated_at=timezone.now())
+        calls.append(1)
+        return queryset
+    monkeypatch.setattr(provisional_sweep, 'stale_runs', racing)
+
+    assert provisional_sweep.close_stale_runs() == []
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING
+
+
+def test_the_command_closes_stale_runs_without_the_switch_and_reports_them(world, settings):
+    settings.PROVISIONAL_DATA_ENABLED = False
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 300)
+    out = StringIO()
+
+    call_command('sweep_provisional_rows', '--close-stale', '--dry-run', stdout=out)
+    assert 'Would close 1 stale run(s)' in out.getvalue() and str(run.pk) in out.getvalue()
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING
+
+    out = StringIO()
+    call_command('sweep_provisional_rows', '--close-stale', '--stale-minutes', '60', stdout=out)
+    assert 'Closed 1 stale run(s)' in out.getvalue()
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.FAILED
+
+
+def test_a_bulk_resolve_stamps_the_heartbeat_too(world):
+    from omop_core.services.resolve_jobs import run_bulk_resolve
+    person = _person()
+    run = SourceCodeResolveRun.objects.create(total=1)
+    SourceCodeResolveRun.objects.filter(pk=run.pk).update(updated_at=None)
+
+    run_bulk_resolve(run.id, [person.person_id])
+
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.COMPLETED and run.updated_at is not None
+
+
+def test_the_command_lists_the_runs_it_closed_as_failed(world):
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 300)
+    out = StringIO()
+
+    call_command('sweep_provisional_rows', '--close-stale', stdout=out)
+
+    line = next(line for line in out.getvalue().splitlines() if str(run.pk) in line)
+    assert ' failed ' in line and ' running ' not in line
+
+
+@pytest.mark.parametrize('args', [
+    ['--stale-minutes', '0'], ['--stale-minutes', '-5'],
+    ['--limit', '10'], ['--mapping-id', '1'], ['--after-person-id', '5'], ['--queue'],
+])
+def test_close_stale_rejects_a_threshold_below_one_and_sweep_options_it_would_ignore(world, args):
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.RUNNING), 300)
+
+    with pytest.raises(CommandError):
+        call_command('sweep_provisional_rows', '--close-stale', *args, stdout=StringIO())
+
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.RUNNING                  # nothing was closed
+
+
+@pytest.mark.parametrize('error', [RuntimeError('database went away'), KeyboardInterrupt()])
+def test_the_command_marks_its_run_failed_when_it_crashes_or_is_interrupted(world, monkeypatch, error):
+    def boom(*args, **kwargs):
+        raise error
+    monkeypatch.setattr(provisional_sweep, 'run_sweep', boom)
+
+    with pytest.raises(type(error)):
+        call_command('sweep_provisional_rows', stdout=StringIO())
+
+    run = SourceCodeResolveRun.objects.get()
+    assert run.state == SourceCodeResolveRun.FAILED and run.finished_at is not None
+    assert repr(error) in run.error_detail[0]['error']
+
+
+def test_a_bulk_resolve_that_starts_after_its_run_was_closed_reopens_and_completes_it(world, monkeypatch):
+    from omop_core.services import resolve_jobs
+    person = _person()
+    run = _age(SourceCodeResolveRun.objects.create(state=SourceCodeResolveRun.PENDING, total=1), 300)
+    provisional_sweep.close_stale_runs()
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.FAILED and run.finished_at is not None
+    seen = []
+    real = provisional_sweep.resolve_person_source_codes
+
+    def resolve(p, **kwargs):
+        seen.append(SourceCodeResolveRun.objects.values_list('state', 'finished_at').get(pk=run.pk))
+        return real(p, **kwargs)
+    # The run resolves under the per-person lock, which is the sweep module's.
+    monkeypatch.setattr(provisional_sweep, 'resolve_person_source_codes', resolve)
+
+    resolve_jobs.run_bulk_resolve(run.id, [person.person_id])         # the task that was only delayed
+
+    assert seen == [(SourceCodeResolveRun.RUNNING, None)]             # open while it works
+    run.refresh_from_db()
+    assert run.state == SourceCodeResolveRun.COMPLETED and run.done == 1

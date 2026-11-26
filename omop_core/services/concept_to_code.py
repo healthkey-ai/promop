@@ -101,14 +101,16 @@ def browse_concepts(params):
     concepts = standard_destinations()
     scope = 'fields' if disease else params.get('scope', 'fields')
     if wearables:
-        # Wearables is its own scope: few of these concepts back a patient
-        # field, so "Patient field concepts" would hide nearly all of them.
-        # A disease still narrows, as it does under every other domain. A
+        # Every concept a wearable code maps to, unless "Patient field
+        # concepts" is asked for by name (#2808): few of these concepts back a
+        # patient field, so that scope is not the default here as it is under
+        # the other domains, and a request that names none gets them all. A
+        # disease narrows to its fields' concepts, as under every domain. A
         # rejected mapping is a code that is not mapped to the concept.
         concepts = concepts.filter(Exists(SourceCodeConceptMapping.objects.filter(
             target_concept_id=OuterRef('pk'), source_vocabulary_id__in=WEARABLE_SOURCE_VOCABULARIES,
         ).exclude(status='rejected')))
-        if disease:
+        if disease or params.get('scope') == 'fields':
             concepts = concepts.filter(Exists(fields.filter(concept_id=OuterRef('pk'))))
     elif scope == 'fields':
         concepts = concepts.filter(Exists(fields.filter(concept_id=OuterRef('pk'))))

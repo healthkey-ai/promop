@@ -153,6 +153,7 @@ type TestMappingRow = Omit<typeof proposedRow, "status"> & {
   source_retired?: boolean | null;
   source_retirement_evidence?: string[];
   source_evidence?: Record<string, unknown>;
+  delete_effect?: "unmap" | "delete";
   source_system_context?: SourceSystemContext;
   suggestion_confidence?: number | null;
 };
@@ -176,11 +177,13 @@ function suggestRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
+function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow], referenceData: object | Promise<object> = reference) {
   mockGet.mockImplementation((url: string) => {
     if (url.endsWith("/canonical-unit/")) return Promise.resolve({ data: { unit: "", revision: 0, available_units: ["mg/dL", "g/L"], example_units: ["mg/dL"], can_edit: true } });
     if (url === "/v1/code-mappings/") return Promise.resolve({ data: [...rows] });
-    if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+    if (url === "/v1/code-mappings/reference/") {
+      return referenceData instanceof Promise ? referenceData.then((data) => ({ data })) : Promise.resolve({ data: referenceData });
+    }
     const detail = url.match(/^\/v1\/code-mappings\/(\d+)\/$/);
     if (detail) {
       const row = rows.find((candidate) => candidate.mapping_id === Number(detail[1]));
@@ -265,6 +268,188 @@ describe("CodeMappingPage", () => {
       "title",
       `Deployed commit ${reference.release_commit}`,
     );
+  });
+
+  describe("Suggest auto-approval (#1532)", () => {
+    const control = (overrides: Record<string, unknown> = {}) => ({
+      ...reference,
+      suggest_auto_approve: {
+        allowed: true, available: true, unavailable_reason: "", threshold: 95, off: false, min: 90, max: 100,
+        anthropic_max_percent: 85, ...overrides,
+      },
+    });
+    const approverReference = control();
+    afterEach(() => { mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER }); });
+    const prefilled = async (referenceData: object = approverReference) => {
+      renderPage([proposedRow], referenceData);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      await waitFor(() => expect(threshold).toHaveValue(95));
+      return threshold;
+    };
+    // The Anthropic ranker's labels top out at 85%, so most of these use Jev, which can approve.
+    const useJev = () => fireEvent.change(screen.getByLabelText("Ranker"), { target: { value: "jev" } });
+
+    it("offers no threshold to an account that may not approve", async () => {
+      renderPage([proposedRow], control({ allowed: false, threshold: 100 }));
+      await screen.findByLabelText("Number of suggestions");
+      expect(screen.queryByLabelText("Auto-approve confidence")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("auto-approve-warning")).not.toBeInTheDocument();
+    });
+
+    it("prefills the curator's last choice and sends the one chosen with the run", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({
+        total: 3, destinations: 3, auto_approved: 2, auto_approve_threshold: 92,
+      }) });
+      const threshold = await prefilled();
+
+      fireEvent.change(threshold, { target: { value: "92" } });
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        "/v1/code-mappings/suggest/",
+        expect.objectContaining({ auto_approve_threshold: 92 }),
+      ));
+      // The progress strip and the banner both say how many it approved on its own.
+      expect(await screen.findAllByText(/2 of them approved automatically \(confidence 92% or more\)/)).toHaveLength(2);
+    });
+
+    it("states, always and not only in a tooltip, what the run is about to do", async () => {
+      const threshold = await prefilled();
+      useJev();
+      const warning = screen.getByTestId("auto-approve-warning");
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above and re-points patient data.");
+      expect(threshold).toHaveAttribute("aria-describedby", warning.id);
+      // Not a live region: it would announce on every keystroke.
+      expect(warning).not.toHaveAttribute("role");
+
+      fireEvent.change(threshold, { target: { value: "92" } });
+      expect(warning).toHaveTextContent("Auto-approves at 92% or above and re-points patient data.");
+      fireEvent.change(threshold, { target: { value: "89" } });
+      expect(warning).toHaveTextContent("Choose an auto-approval confidence between 90 and 100, or turn it off.");
+    });
+
+    it("says so when the ranker chosen cannot reach the threshold, so nothing will be approved", async () => {
+      await prefilled();
+      const warning = screen.getByTestId("auto-approve-warning");
+      // Jev is the default ranker and can reach the threshold.
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above");
+
+      fireEvent.change(screen.getByLabelText("Ranker"), { target: { value: "anthropic" } });
+      expect(warning).toHaveTextContent("the Anthropic ranker scores at most 85%, so this run will approve nothing");
+
+      useJev();
+
+      expect(warning).toHaveTextContent("Auto-approves at 95% or above");
+    });
+
+    it("can be turned off, and says so, sending off with the run", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ total: 1, destinations: 1 }) });
+      const threshold = await prefilled();
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto-approval off" }));
+
+      expect(threshold).toBeDisabled();
+      expect(screen.getByTestId("auto-approve-warning")).toHaveTextContent("Auto-approval off");
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+        "/v1/code-mappings/suggest/", expect.objectContaining({ auto_approve_threshold: "off" })));
+    });
+
+    it("starts off when the curator last turned it off", async () => {
+      renderPage([proposedRow], control({ off: true }));
+      const checkbox = await screen.findByRole("checkbox", { name: "Auto-approval off" });
+      await waitFor(() => expect(checkbox).toBeChecked());
+      expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled();
+      expect(screen.getByLabelText("Auto-approve confidence")).toBeDisabled();
+    });
+
+    it("does not let an out-of-range number block a run that is off", async () => {
+      const threshold = await prefilled();
+      fireEvent.change(threshold, { target: { value: "89" } });
+      expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
+
+      fireEvent.click(screen.getByRole("checkbox", { name: "Auto-approval off" }));
+
+      expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled();
+    });
+
+    it("treats a server that does not send the off flag as not off", async () => {
+      const older = control();
+      delete (older.suggest_auto_approve as { off?: boolean }).off;
+      await prefilled(older);
+      expect(screen.getByRole("checkbox", { name: "Auto-approval off" })).not.toBeChecked();
+    });
+
+    it("says when this deployment cannot auto-approve", async () => {
+      await prefilled(control({ available: false, unavailable_reason: "this deployment has no worker queue." }));
+      expect(screen.getByTestId("auto-approve-warning"))
+        .toHaveTextContent("Auto-approval is unavailable here: this deployment has no worker queue.");
+    });
+
+    it("says on a finished run when it could not auto-approve for want of a worker", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({
+        total: 2, destinations: 2,
+        auto_approve: { state: "disabled", threshold: null, reason: "no_worker" },
+      }) });
+      await prefilled();
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+      expect((await screen.findAllByText(/Auto-approval did not run: this deployment has no worker queue/)).length).toBeGreaterThan(0);
+    });
+
+    it("keeps what the curator typed when the saved setting arrives after they started typing", async () => {
+      // An approver sees the control as soon as the page opens; the reference (and the
+      // saved value in it) can arrive later. Their keystrokes are theirs.
+      mockUseAuth.mockReturnValue({ currentUser: { id: 9, is_staff: true } });
+      let release!: () => void;
+      const gate = new Promise<object>((resolve) => { release = () => resolve(approverReference); });
+      renderPage([proposedRow], gate);
+      const threshold = await screen.findByLabelText("Auto-approve confidence");
+      expect(threshold).toHaveValue(100);
+      expect(screen.getByTestId("auto-approve-warning")).toHaveTextContent("Loading your auto-approval setting");
+      fireEvent.change(threshold, { target: { value: "93" } });
+
+      release();
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled());
+      expect(screen.getByLabelText("Auto-approve confidence")).toHaveValue(93);
+    });
+
+    it("does not run Suggest until the saved setting has loaded", async () => {
+      mockUseAuth.mockReturnValue({ currentUser: { id: 9, is_staff: true } });
+      let release!: () => void;
+      const gate = new Promise<object>((resolve) => { release = () => resolve(approverReference); });
+      renderPage([proposedRow], gate);
+      const button = await screen.findByRole("button", { name: "Suggest" });
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(mockPost).not.toHaveBeenCalled();
+
+      release();
+
+      await waitFor(() => expect(button).not.toBeDisabled());
+      await waitFor(() => expect(screen.getByLabelText("Auto-approve confidence")).toHaveValue(95));
+    });
+
+    it("will not start a run below the minimum", async () => {
+      const threshold = await prefilled();
+
+      fireEvent.change(threshold, { target: { value: "89" } });
+
+      expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
+    });
+
+    it("sends no threshold for an account that may not approve", async () => {
+      mockPost.mockResolvedValue({ data: suggestRun({ total: 1, destinations: 1 }) });
+      renderPage([proposedRow]);
+      await screen.findByLabelText("Number of suggestions");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Suggest" })).not.toBeDisabled());
+
+      fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+
+      await waitFor(() => expect(mockPost).toHaveBeenCalled());
+      const [, body] = mockPost.mock.calls[0];
+      expect(body).not.toHaveProperty("auto_approve_threshold");
+    });
   });
 
   it("flags a source code whose units imply several LOINC axis sets", async () => {
@@ -508,7 +693,8 @@ describe("CodeMappingPage", () => {
         rows.splice(1, 1);
         return Promise.resolve({ data: {} });
       });
-      fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove destination" }));
+      fireEvent.click(within(screen.getByRole("group", { name: "Confirm removal" })).getByRole("button", { name: "Remove destination" }));
       await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/102/"));
       await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
       expect(await screen.findByRole("button", { name: "Edit A02.0" })).toBeInTheDocument();
@@ -1995,10 +2181,94 @@ describe("CodeMappingPage", () => {
       });
     });
 
-    it("deletes a mis-keyed mapping", async () => {
-      await openDialog();
-      fireEvent.click(screen.getByRole("button", { name: /Delete/ }));
-      await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/"));
+    describe("Delete (#2744)", () => {
+      const confirmation = () => screen.getByRole("group", { name: "Confirm removal" });
+      const openOn = async (deleteEffect: "unmap" | "delete") => {
+        renderPage([{ ...proposedRow, delete_effect: deleteEffect }, approvedRow]);
+        fireEvent.click(await screen.findByRole("button", { name: "Edit M-PROTEIN, SERUM" }));
+        await screen.findByRole("dialog");
+      };
+
+      it("removes only the destination of a code patient data carries, after asking", async () => {
+        await openOn("unmap");
+        mockDelete.mockResolvedValue({ status: 200, data: { removed: false } });
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        expect(mockDelete).not.toHaveBeenCalledWith("/v1/code-mappings/7/");
+        expect(confirmation()).toHaveTextContent(
+          "Remove the destination from M-PROTEIN, SERUM? The source code stays in the list as unmapped, and its stored results go back to unmapped.");
+
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Remove destination" }));
+
+        await waitFor(() => expect(mockDelete).toHaveBeenCalledWith("/v1/code-mappings/7/"));
+        expect(await screen.findByText(
+          "Destination removed. M-PROTEIN, SERUM is back in the unmapped queue; its stored results are being moved back to unmapped.",
+        )).toBeInTheDocument();
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      });
+
+      it("deletes the mapping of a code no patient data carries, and says that is what it will do", async () => {
+        await openOn("delete");
+        mockDelete.mockResolvedValue({ status: 204, data: "" });
+        fireEvent.click(await screen.findByRole("button", { name: "Delete mapping" }));
+        expect(confirmation()).toHaveTextContent(
+          "Delete this mapping? No patient data carries M-PROTEIN, SERUM, so it leaves the list.");
+
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Delete mapping" }));
+
+        expect(await screen.findByText("Mapping for M-PROTEIN, SERUM deleted.")).toBeInTheDocument();
+      });
+
+      it("sends nothing when the curator keeps it", async () => {
+        await openOn("unmap");
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Keep it" }));
+
+        expect(screen.queryByRole("group", { name: "Confirm removal" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Remove destination" })).toBeEnabled();
+        expect(mockDelete).not.toHaveBeenCalledWith("/v1/code-mappings/7/");
+      });
+
+      it("sends one request however often the button is pressed while it runs", async () => {
+        await openOn("unmap");
+        let finish: (value: unknown) => void = () => {};
+        mockDelete.mockImplementation((url: string) => (
+          url === "/v1/code-mappings/7/" ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ data: {} })));
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        const confirm = within(confirmation()).getByRole("button", { name: "Remove destination" });
+
+        fireEvent.click(confirm);
+        const busy = await within(confirmation()).findByRole("button", { name: "Removing…" });
+        expect(busy).toBeDisabled();
+        fireEvent.click(busy);
+        fireEvent.click(busy);
+        expect(within(confirmation()).getByRole("button", { name: "Keep it" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Update Mapping" })).toBeDisabled();
+
+        expect(mockDelete.mock.calls.filter(([url]) => url === "/v1/code-mappings/7/")).toHaveLength(1);
+        finish({ status: 200, data: { removed: false } });
+        await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      });
+
+      it("shows why the server refused, and leaves the dialog open", async () => {
+        await openOn("unmap");
+        mockDelete.mockImplementation((url: string) => (url === "/v1/code-mappings/7/"
+          ? Promise.reject({ response: { status: 423, data: { detail: "Mapping is locked by another user." } } })
+          : Promise.resolve({ data: {} })));
+        fireEvent.click(await screen.findByRole("button", { name: "Remove destination" }));
+        fireEvent.click(within(confirmation()).getByRole("button", { name: "Remove destination" }));
+
+        expect(await screen.findByText("Mapping is locked by another user.")).toBeInTheDocument();
+        expect(screen.getByRole("dialog")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Remove destination" })).toBeEnabled();
+      });
+
+      it("words the question for either outcome when the mapping could not be read", async () => {
+        await openDialog();
+        fireEvent.click(screen.getByRole("button", { name: "Remove destination" }));
+
+        expect(confirmation()).toHaveTextContent(
+          "A code patient data carries stays in the list as unmapped; one no patient data carries is deleted.");
+      });
     });
   });
 
@@ -2627,6 +2897,29 @@ describe("server mapping pages", () => {
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1", page_0: 1 }) });
   });
 
+  it("filters the list to what Suggest approved by itself, off by default", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      const auto = { ...proposedRow, source_code: "AUTO CODE", origin_system: "suggest v0.4 auto-approved 100%" };
+      const other = { ...proposedRow, mapping_id: 9902, source_code: "OTHER CODE" };
+      const results = config?.params?.auto_approved === "1" ? [auto] : [auto, other];
+      return Promise.resolve({ data: browseData({
+        results, total: results.length,
+        pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: results.length } },
+      }) });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("OTHER CODE");
+    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes Suggest approved by itself" });
+    expect(filter).not.toBeChecked();
+    expect(mockGet).not.toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ auto_approved: "1" }) });
+
+    fireEvent.click(filter);
+
+    await waitFor(() => expect(screen.queryByText("OTHER CODE")).not.toBeInTheDocument());
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ auto_approved: "1", page_0: 1 }) });
+  });
+
   it("shows and filters hospital organization on vendor tabs", async () => {
     const epicRow = {
       ...proposedRow,
@@ -2685,11 +2978,11 @@ describe("server mapping pages", () => {
     expect(picker.selectedOptions[0].textContent).toContain("UPMC");
     expect(screen.getByText(oid, { selector: "code" })).toBeInTheDocument();
     const systemLink = screen.getByRole("link", { name: oid });
-    expect(systemLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}`);
+    expect(systemLink).toHaveAttribute("href", `/code-mappings/facilities?system=${encodeURIComponent(oid)}`);
     expect(systemLink).toHaveAttribute("title", expect.stringContaining("review and manage facilities"));
     expect(screen.queryByRole("link", { name: "Manage hospitals for this source code system" })).not.toBeInTheDocument();
     const facilityLink = screen.getByRole("link", { name: "UPMC" });
-    expect(facilityLink).toHaveAttribute("href", `/code-mappings/source-systems?system=${encodeURIComponent(oid)}&facility=UPMC`);
+    expect(facilityLink).toHaveAttribute("href", `/code-mappings/facilities?system=${encodeURIComponent(oid)}`);
   });
 
   it("counts all matching sources even when the page contains one label group", async () => {
@@ -3732,7 +4025,7 @@ describe("write controls follow the role (#2416)", () => {
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Mapping" })).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "Suggest controls" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse by facility" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: `Edit ${proposedRow.source_code}` })).toBeInTheDocument();
   });
 
@@ -3743,7 +4036,7 @@ describe("write controls follow the role (#2416)", () => {
     const cells = await screen.findAllByText(proposedRow.source_code);
     expect(cells.length).toBeGreaterThan(0);
     expect(screen.getByText("Read-only: mapping codes needs the analyst role.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse by facility" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upload" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New Mapping" })).not.toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "Suggest controls" })).not.toBeInTheDocument();
@@ -3788,6 +4081,6 @@ describe("write controls follow the role (#2416)", () => {
     renderPage([proposedRow]);
     await screen.findByText("Code Mapping");
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Browse by facility" })).toBeInTheDocument();
   });
 });

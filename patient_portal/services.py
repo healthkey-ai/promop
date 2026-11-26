@@ -242,7 +242,12 @@ def prolog_participant_id(request):
     needs a path of its own.
     """
     person = patient_person_for(getattr(request, 'user', None))
-    return person.person_id if person is not None else None
+    if person is None:
+        return None
+    # A member whose record is off answers no questionnaire about themselves:
+    # the runner refuses an account survey to a caller it cannot resolve.
+    from patient_portal.consent import record_permitted
+    return person.person_id if record_permitted(person) else None
 
 
 def create_unidentified_person(source='prolog', organization=None):

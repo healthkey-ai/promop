@@ -109,7 +109,9 @@ request each, so it is offered only for a list of twelve categories or fewer
 (`EXPAND_ALL_LIMIT`) and is disabled, with a title that says why, above that. The
 categories remembered as open are fetched when the page loads, after the
 headers, and no others. Drag-to-reorder needs visible rows, so it works among
-the categories that are open.
+the categories that are open. Under the Wearables domain neither button is
+shown and the folded line ends at "its concepts." (#2795): the row holds From,
+To and the files there, and each category opens and folds from its own header.
 
 Priority remains one list across every category. Typing a number, the arrows
 and a drop onto a row in another category all set the global position, and the
@@ -120,8 +122,11 @@ narrow it: a domain, a disease or a search.
 
 The order and the opened categories are remembered with the chosen domain, per
 account in the browser (`promop-concept-to-code:<user id>`), as
-`{"domain", "order"?, "expanded"?}`: `order` when it is `priority`, and
-`expanded`, the categories opened under each domain (`""` is Uncategorized).
+`{"domain", "order"?, "wearables_order"?, "expanded"?}`: `order` when it is
+`priority`; `wearables_order` likewise, the order chosen under the Wearables
+domain, which is kept apart so that Wearables opens by category whatever the
+clinical domains use (#2795); and `expanded`, the categories opened under each
+domain (`""` is Uncategorized).
 A category that is not listed is folded, so a new account, a new domain and a
 category never seen start folded. A stored part of the wrong shape is ignored
 without discarding the rest, and an older `collapsed` list, which recorded what

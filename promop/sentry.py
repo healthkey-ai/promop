@@ -10,6 +10,18 @@ _ID_SEGMENT = re.compile(
     r'^(\d+|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{16,})$'
 )
 
+# A path segment that is itself a credential: Garmin's push webhook is
+# authenticated by the last segment of its URL (#2802).
+# A path segment that is a credential: a Garmin webhook's secret, a staff
+# invitation's token (only its hash is stored).
+_SECRET_SEGMENT = re.compile(r'(/garmin/webhooks/|/admin/sign-in/invitation/)[^/?#]+')
+
+
+def redact_secret_segments(path: str) -> str:
+    """A path with any credential segment replaced, for logs, audit and Sentry."""
+    return _SECRET_SEGMENT.sub(r'\1:secret', path)
+
+
 _EMAIL = re.compile(r'[^\s<>"\']+@[^\s<>"\']+\.[A-Za-z]{2,}')
 
 _EXTRA_SECRET_KEYS: tuple[str, ...] = (
@@ -50,6 +62,7 @@ def _env_rate(name: str, default: str) -> float:
 
 def redact_path(url: str) -> str:
     """Replace the id segments of a URL path with a placeholder."""
+    url = redact_secret_segments(url)
     prefix, separator, path = url.partition('://')
     if separator:
         host, slash, path = path.partition('/')

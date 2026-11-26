@@ -138,12 +138,26 @@ def _unmapped_group(field):
     return GROUP_NEEDS_CONCEPT
 
 
-def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
-    """Return curator-managed displays and their preferred code for every field."""
-    result: dict[str, list[tuple[str, str | None]]] = {}
-    for choice in FieldChoice.objects.prefetch_related('codes').all():
+def _field_choice_options() -> dict[str, list[tuple[str, str | None, str]]]:
+    """Return curator-managed answers as ``(stored value, preferred code, label)`` per field.
+
+    A save stores the answer's value, which is its label until one is set and
+    stays what it was when the label is renamed (#1225), so a rename changes
+    what a person reads and not what is stored.
+    """
+    result: dict[str, list[tuple[str, str | None, str]]] = {}
+    seen: set[tuple[str, str]] = set()
+    # A row holding decisions about a lookup's entries is not offered (option_sources).
+    for choice in FieldChoice.objects.prefetch_related('codes').exclude(context_key__startswith='lookup:'):
+        # One answer offered in several contexts (stage I in two staging
+        # systems) is one text to accept here; which meaning a record means
+        # is the scope's business, not this list's.
+        stored = choice.stored_value
+        if (choice.field_name, stored) in seen:
+            continue
+        seen.add((choice.field_name, stored))
         primary = next((code.code for code in choice.codes.all() if code.is_primary), None)
-        result.setdefault(choice.field_name, []).append((choice.display, primary))
+        result.setdefault(choice.field_name, []).append((stored, primary, choice.display))
     return result
 
 # PatientRecord field → the Person field the persons endpoint accepts.
@@ -481,29 +495,13 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
         if e.get('value_kind') == 'concept' and e.get('projection')
     ]
     if concept_fields:
-        from omop_core.models import FieldChoiceCode
-        codes = list(
-            FieldChoiceCode.objects
-            .filter(choice__field_name__in=concept_fields, is_primary=True)
-            .values_list('choice__field_name', 'choice__display',
-                         'vocabulary_id', 'code')
-        )
-        if codes:
-            # Resolve (vocabulary_id, code) pairs → concept_id.  Group by
-            # vocabulary so the existing helper works.
-            by_vocab: dict[str, set[str]] = {}
-            for _, _, vid, code in codes:
-                by_vocab.setdefault(vid, set()).add(code)
-            resolved: dict[tuple[str, str], int] = {}
-            for vid, code_set in by_vocab.items():
-                for code, cid in _resolve_concept_ids(code_set, vid).items():
-                    resolved[(vid, code)] = cid
-            for fn, display, vid, code in codes:
-                pk = resolved.get((vid, code))
-                if pk is not None:
-                    proj = entries[fn].get('projection')
-                    if proj is not None:
-                        proj.setdefault('value_concept_map', {})[display] = pk
+        # The approved answer-to-concept decisions (#1224); a choice nobody has
+        # decided yet keeps the concept of its primary code, as before.
+        from omop_core.services.field_value_mappings import answer_concept_ids
+        for fn, concepts in answer_concept_ids(concept_fields).items():
+            proj = entries[fn].get('projection')
+            if proj is not None and concepts:
+                proj['value_concept_map'] = concepts
     return entries
 
 
@@ -594,8 +592,10 @@ def build_writable_field_descriptor():
 
     choice_options = {
         field_name: [
-            {'value': display, 'code': primary_code}
-            for display, primary_code in choices
+            # ``label`` only where it differs from what is stored: the shape a
+            # client that ignores it has always seen is unchanged.
+            {'value': stored, 'code': primary_code, **({'label': label} if label != stored else {})}
+            for stored, primary_code, label in choices
         ]
         for field_name, choices in _field_choice_options().items()
     }

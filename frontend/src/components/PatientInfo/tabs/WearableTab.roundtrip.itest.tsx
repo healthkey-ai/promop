@@ -50,7 +50,8 @@ describe('WearableTab against the live descriptor', () => {
   it('renders every value read-only, with the upload control that does change them', async () => {
     await fetchWritableFields();
     const record = (await api.get(`/patient-info/${PERSON}/`)).data.patient_info;
-    render(<WearableTab formData={record} onChange={vi.fn()} />);
+    // The person's own record: the upload control is offered nowhere else (#2819).
+    render(<WearableTab formData={record} onChange={vi.fn()} ownRecord />);
 
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /upload/i })).toBeInTheDocument(),

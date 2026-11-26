@@ -182,6 +182,9 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'patient_portal.api.middleware.AuditLogMiddleware',
     'patient_portal.api.middleware.ForcePasswordChangeMiddleware',
+    # Ends a provider sign-in at its deadline, and a staff session that began
+    # with a password once staff passwords are off (docs/staff-sign-in.md).
+    'patient_portal.api.middleware.StaffSessionMiddleware',
     'patient_portal.api.middleware.DeprecationWarningMiddleware',
 ]
 
@@ -256,6 +259,15 @@ LOGGING = {
 # AUDIT_EVENT_RETENTION_DAYS env var, or per-run via `--days N`.
 AUDIT_EVENT_RETENTION_DAYS = int(os.environ.get('AUDIT_EVENT_RETENTION_DAYS', '2190'))
 
+# Patient invitations never accepted are deleted this many days after they
+# were last sent, once expired or cancelled, undoing the email they put on the person
+# (`purge_unaccepted_invitations`, run daily; patient_portal.invitation_retention).
+# 0 keeps them. A privacy policy that promises to delete what is held about
+# people invited who never joined sets its period here.
+PATIENT_INVITATION_RETENTION_DAYS = int(os.environ.get('PATIENT_INVITATION_RETENTION_DAYS', '0'))
+if not 0 <= PATIENT_INVITATION_RETENTION_DAYS <= 3650:
+    raise ImproperlyConfigured('PATIENT_INVITATION_RETENTION_DAYS must be between 0 (keep) and 3650 days.')
+
 ROOT_URLCONF = 'promop.urls'
 
 TEMPLATES = [
@@ -326,6 +338,26 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
+# How long a patient invitation link lasts, in days: the link's expires_at and
+# the email's "This link expires in N days". A deployment inviting members by
+# campaign may want longer. Org (staff) invitations keep their own 7 days.
+# The link claims the account, so a value outside 1-90 stops startup rather
+# than silently issuing links that live for years.
+INVITE_TTL_MAX_DAYS = 90
+
+
+def _invite_ttl_days(raw: str) -> int:
+    try:
+        days = int(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f'INVITE_TTL_DAYS must be a whole number of days, not {raw!r}.') from None
+    if not 1 <= days <= INVITE_TTL_MAX_DAYS:
+        raise ImproperlyConfigured(f'INVITE_TTL_DAYS must be between 1 and {INVITE_TTL_MAX_DAYS} days, not {days}.')
+    return days
+
+
+INVITE_TTL_DAYS = _invite_ttl_days(os.environ.get('INVITE_TTL_DAYS', '7'))
+
 # Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
 # All env-configurable per organizational policy.
 AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
@@ -340,6 +372,10 @@ BREAK_GLASS_ALLOW_SERVICE = os.environ.get('BREAK_GLASS_ALLOW_SERVICE', 'false')
 # Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes
 # audit writes via an advisory lock; can be disabled under extreme write load.
 AUDIT_HASH_CHAIN_ENABLED = os.environ.get('AUDIT_HASH_CHAIN_ENABLED', 'true').lower() in ('1', 'true', 'yes')
+# How long a partner sign-in whose account was closed is refused, so a token
+# that is still valid cannot open a new, empty account (patient_portal.erasure).
+# Longer than any partner token lives; 0 turns the check off.
+ACCOUNT_CLOSED_BLOCK_SECONDS = int(os.environ.get('ACCOUNT_CLOSED_BLOCK_SECONDS', '86400'))
 
 # Data-exchange integrity & non-repudiation (S.3.6#10 / PH.2.3#09, issue #306).
 # Key used to sign exported FHIR bundles (HMAC-SHA256). Falls back to SECRET_KEY
@@ -531,6 +567,34 @@ def _json_env(name, default, expected, example):
 PHR_SIGNUP_COUNTRIES = _json_env("PHR_SIGNUP_COUNTRIES", None, list, '["GB","IE","US"]')
 PHR_SIGNUP_MINIMUM_AGES = _json_env("PHR_SIGNUP_MINIMUM_AGES", {}, dict, '{"CA": 19}')
 
+# Staff sign-in through OpenID Connect providers (docs/staff-sign-in.md), as
+# JSON: a list of {"key", "label", "issuer", "client_id", "client_secret_env",
+# "claims", "require_mfa"}. "claims" are values the ID token must carry, which
+# pin the organisation (Microsoft: {"tid": "<tenant id>"}; Google: {"hd":
+# "<domain>"}); "require_mfa" refuses a sign-in whose token does not say the
+# provider did two-step verification. Empty: no provider sign-in.
+STAFF_SIGN_IN_PROVIDERS = _json_env(
+    'STAFF_SIGN_IN_PROVIDERS', [], list,
+    '[{"key": "google", "label": "Google", "issuer": "https://accounts.google.com", ...}]',
+)
+# False: staff and superuser accounts cannot sign in with a password at all,
+# only through a provider above. Members are not affected.
+STAFF_PASSWORD_SIGN_IN = _env_bool('STAFF_PASSWORD_SIGN_IN', True)
+# The groups a staff invitation may give, and a staff manager may set: the
+# deployment's staff roles. Comma-separated names of existing groups.
+STAFF_ROLES = [r.strip() for r in os.environ.get('STAFF_ROLES', '').split(',') if r.strip()]
+STAFF_INVITATION_DAYS = max(1, int(os.environ.get('STAFF_INVITATION_DAYS', '7')))
+# How long a provider sign-in lasts, in hours, from the sign-in (not from the
+# last request): a working day by default, so someone whose provider account
+# is switched off is out by the end of it.
+STAFF_SESSION_HOURS = max(1, float(os.environ.get('STAFF_SESSION_HOURS', '8')))
+# The organisations whose members role staff act on (comma-separated slugs):
+# their support actions reach only members every one of whose records is in
+# one of them. Empty: role staff act on no member. Full staff are not limited.
+STAFF_ORGANIZATIONS = [o.strip() for o in os.environ.get('STAFF_ORGANIZATIONS', '').split(',') if o.strip()]
+# The time zone staff's dates are in ("the date the member asked").
+STAFF_TIME_ZONE = os.environ.get('STAFF_TIME_ZONE', '') or TIME_ZONE
+
 # ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
 # PROMOP issues the HealthKey family's RS256 tokens for its own identities, so
 # a phr installation signs users in against PROMOP accounts. Off until a key
@@ -581,6 +645,33 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # omop_core/mapping/anthropic_client.py).
 ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
+
+# Garmin Connect Developer Program app (#2802): a patient links their Garmin
+# account by OAuth and Garmin pushes their data to the webhook. All four must
+# be set before the Wearables tab offers "Garmin account".
+#   GARMIN_CLIENT_ID / GARMIN_CLIENT_SECRET: the app's consumer key and secret.
+#   GARMIN_WEBHOOK_SECRET: a random string of at least 32 characters, the last
+#     path segment of the URL registered with Garmin for every push type:
+#     <APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/
+#   GARMIN_TOKEN_KEY: the Fernet key patients' Garmin tokens are stored under,
+#     a key of its own so that neither a database dump nor SECRET_KEY reads
+#     them. GARMIN_TOKEN_KEY_FALLBACKS (comma-separated) lists earlier keys,
+#     which still decrypt while tokens are re-encrypted under the new one.
+# The redirect URL registered with Garmin is
+# <APP_BASE_URL>/api/v1/garmin/oauth/callback/ unless GARMIN_REDIRECT_URI says
+# otherwise; it must match the registration exactly.
+GARMIN_CLIENT_ID = os.environ.get('GARMIN_CLIENT_ID', '')
+GARMIN_CLIENT_SECRET = os.environ.get('GARMIN_CLIENT_SECRET', '')
+GARMIN_WEBHOOK_SECRET = os.environ.get('GARMIN_WEBHOOK_SECRET', '')
+GARMIN_REDIRECT_URI = os.environ.get('GARMIN_REDIRECT_URI', '')
+GARMIN_TOKEN_KEY = os.environ.get('GARMIN_TOKEN_KEY', '')
+GARMIN_TOKEN_KEY_FALLBACKS = _env_list('GARMIN_TOKEN_KEY_FALLBACKS')
+
+# Open Wearables SDK routes (#2810): a phone app built on the Open Wearables
+# SDK syncs HealthKit and Health Connect straight to this deployment. Needs no
+# credentials; set to false to answer 404 on the routes and hide the panel.
+OPEN_WEARABLES_SYNC_ENABLED = os.environ.get(
+    'OPEN_WEARABLES_SYNC_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes')
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
 
 # loinc.org release API. LOINC is licensed, so there is no anonymous access and
@@ -927,6 +1018,14 @@ PROLOG_PARTICIPANT_RESOLVER = 'patient_portal.services.prolog_participant_id'
 # Mints the person for a respondent who is not signed in (PROlog RUN-2). The
 # counterpart to resolve_or_create_person, which needs an Identity.
 PROLOG_PARTICIPANT_FACTORY = 'patient_portal.services.create_unidentified_person'
+# What promop knows about a signed-in patient that a questionnaire may declare
+# as a fact and show a question by (PROlog DEF-14, RUN-23): the catalogue in
+# patient_portal.prolog_facts.
+PROLOG_FACTS_PROVIDER = 'patient_portal.prolog_facts.facts_for'
+# An update of a revisable questionnaire starts from the patient's record as it
+# stands now, read back through its record mapping, not from answers check-ins
+# have since overtaken (PROlog RUN-4; patient_portal/survey_record_revision.py).
+PROLOG_REVISION_ANSWERS_PROVIDER = 'patient_portal.survey_record_revision.revision_answers'
 
 # Deployment-supplied content, mounted read-only. Empty by default: a PRomop
 # that offers no surveys loads none.
@@ -966,6 +1065,22 @@ PROLOG_MACHINE_LANGUAGES = [
     lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
 ]
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
+# The smallest count PROlog's survey report and admin show (RUN-24): a count
+# under it reads "fewer than N". 0 shows every count; a deployment whose privacy
+# policy promises no figure for a small group sets that size. Refused here, not
+# only by PROlog's system check (E003): gunicorn and scheduled jobs never run
+# the checks, and a negative floor would show every count.
+def _stats_min_count(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f'PROLOG_STATS_MIN_COUNT must be a whole number of 0 or more, not {raw!r}.') from None
+    if value < 0:
+        raise ImproperlyConfigured(f'PROLOG_STATS_MIN_COUNT must be 0 or more, not {value}.')
+    return value
+
+
+PROLOG_STATS_MIN_COUNT = _stats_min_count(os.environ.get('PROLOG_STATS_MIN_COUNT', '0'))
 
 # Sharing a Personal Health Record (patient_portal/api/phr/sharing.py).
 # PHR_SHARE_URL is where the app that shows a shared record lives; the link is

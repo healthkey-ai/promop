@@ -51,21 +51,25 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
+from datetime import timedelta
 
 from django.conf import settings
 from django.core.cache import cache
 from django.db import connection, transaction
 from django.db.models import Exists, OuterRef, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import (
     CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, _QUARANTINE_VOCABULARIES, _confidence_percent,
-    _usable_destination, choose_proposal, normalize_omop_table, resolve_person_source_codes,
+    choose_proposal, normalize_omop_table, proposal_percent, resolve_person_source_codes,
 )
 from omop_core.models import (
     Concept, PatientSourceCode, Person, SourceCodeConceptMapping, SourceCodeResolveRun,
 )
-from omop_core.services.source_vocabularies import canonical_source_vocabulary
+from omop_core.services.source_vocabularies import (
+    WEARABLE_DEVICE_VOCABULARIES, canonical_source_vocabulary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +164,15 @@ def _release_pending(key):
 _INDEX_KEY = 'provisional-sweep:index'
 
 
+def _as_stored(table, code) -> str:
+    """A source code as a clinical row of *table* holds it: cut to the column."""
+    entry = CLINICAL_TABLES.get(table)
+    if entry is None:
+        return code
+    model, _concept_col, source_col = entry
+    return code[:model._meta.get_field(source_col).max_length or 50]
+
+
 def build_qualifying_index() -> dict:
     """The qualifying proposals, indexed for the resolver's own decision.
 
@@ -170,24 +183,29 @@ def build_qualifying_index() -> dict:
     over the proposals plus one for the quarantine concepts; for a worker or the
     command, never a request.
     """
-    floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
     entries: dict[str, dict[str, list]] = {}
     codes: dict[str, set[str]] = {}
     rows = SourceCodeConceptMapping.objects.filter(
-        status='proposed', organization__isnull=True,
-        target_concept__isnull=False, suggestion_confidence__isnull=False,
+        status='proposed', organization__isnull=True, target_concept__isnull=False,
+    ).filter(
+        # A wearable device's curated proposal qualifies with no score (#2835).
+        Q(suggestion_confidence__isnull=False)
+        | Q(source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES),
     ).select_related('target_concept').only(
         'omop_table', 'source_code', 'source_vocabulary_id', 'suggestion_confidence', 'target_concept')
     for mapping in rows.iterator():
         table = normalize_omop_table(mapping.omop_table)
-        if not (table in CLINICAL_TABLES and mapping.source_code
-                and _confidence_percent(mapping.suggestion_confidence) >= floor
-                and _usable_destination(mapping.target_concept, table)):
+        percent = (proposal_percent(mapping, table)
+                   if table in CLINICAL_TABLES and mapping.source_code else None)
+        if percent is None:
             continue
-        entries.setdefault(table, {}).setdefault(mapping.source_code.upper(), []).append(
-            (mapping.target_concept_id, _confidence_percent(mapping.suggestion_confidence),
-             canonical_source_vocabulary(mapping.source_vocabulary_id)))
-        codes.setdefault(table, set()).add(mapping.source_code)
+        entry = (mapping.target_concept_id, percent,
+                 canonical_source_vocabulary(mapping.source_vocabulary_id))
+        # Under the code, and under the code as a row holds it: cut to the
+        # column. A HealthKit identifier runs past it (#2835).
+        for key in {mapping.source_code, _as_stored(table, mapping.source_code)}:
+            entries.setdefault(table, {}).setdefault(key.upper(), []).append(entry)
+            codes.setdefault(table, set()).add(key)
     return {'entries': entries, 'codes': {t: sorted(c) for t, c in codes.items()},
             'quarantine': sorted(_quarantine_concept_ids())}
 
@@ -405,7 +423,7 @@ def _bump(run, **counts):
 
 
 _RUN_FIELDS = ['done', 'total', 'resolved', 'created', 'provisional', 'reverted',
-               'skipped', 'already_resolved', 'errors', 'error_detail']
+               'skipped', 'already_resolved', 'errors', 'error_detail', 'updated_at']
 
 
 def start_run_record(user=None, total=0):
@@ -417,7 +435,7 @@ def _finish(run, notes=None, state=SourceCodeResolveRun.COMPLETED):
     run.finished_at = timezone.now()
     if notes:
         run.code_details = notes
-    run.save(update_fields=['state', 'finished_at', 'code_details', 'error_detail'])
+    run.save(update_fields=['state', 'finished_at', 'code_details', 'error_detail', 'updated_at'])
 
 
 def fail_run(run_id, message):
@@ -460,8 +478,12 @@ def run_sweep(run_id, *, after=0, mapping_id=None, limit=SWEEP_CHUNK,
             # The pending mark covers queued-but-not-started; a change from here
             # on queues a new sweep.
             _release_pending(_code_key(mapping))
+    # A chunk reaching a run that was closed (as stale, or failed on a lost task)
+    # shows the chain is alive after all, so the run is reopened: its state
+    # follows what is happening, and it finishes below like any other.
     run.state = SourceCodeResolveRun.RUNNING
-    run.save(update_fields=['state'])
+    run.finished_at = None
+    run.save(update_fields=['state', 'finished_at', 'updated_at'])
 
     # A full sweep always refreshes the index. A mapping's sweep rebuilds it at
     # most once a minute, so a burst of saves does not rebuild it for each; when
@@ -555,9 +577,66 @@ def start_sweep(*, mapping=None, user=None, limit=SWEEP_CHUNK):
         transaction.on_commit(enqueue, robust=True)
         return run
     after = 0
-    while after is not None:
-        after = run_sweep(run.id, after=after, mapping_id=mapping_id, limit=limit)
+    try:
+        while after is not None:
+            after = run_sweep(run.id, after=after, mapping_id=mapping_id, limit=limit)
+    except BaseException as exc:
+        # Nothing else will finish this run: there is no task to retry it.
+        fail_run(run.id, f'The sweep stopped: {exc!r}')
+        raise
     return run
+
+
+# ---- runs that stopped -----------------------------------------------------------
+
+STALE_RUN_MINUTES = 120      # no progress for this long: the worker holding it is gone
+
+
+def stale_runs(older_than=None):
+    """Runs still pending or running whose last progress is older than *older_than*.
+
+    A run's heartbeat is ``updated_at`` (``created_at`` stands in for a null). A
+    chunk saves every few persons and is bounded by its time budget, so a
+    healthy run is never silent for long; two hours is well past that, so a run
+    this quiet has most likely lost its task (a worker restarted by a deploy, a
+    task hard-killed by its time limit, the OOM killer or SIGKILL, none of which
+    reach ``on_failure``). It is a judgement, not proof: the broker's visibility
+    timeout is seven hours, so a message lost with a killed worker can still be
+    redelivered long after, and the chunk that then arrives reopens its closed
+    run (see ``run_sweep``). The table is shared with the bulk resolve, whose
+    runs are reclaimed the same way.
+    """
+    older_than = timedelta(minutes=STALE_RUN_MINUTES) if older_than is None else older_than
+    return (SourceCodeResolveRun.objects
+            .filter(state__in=[SourceCodeResolveRun.PENDING, SourceCodeResolveRun.RUNNING])
+            .annotate(last_progress=Coalesce('updated_at', 'created_at'))
+            .filter(last_progress__lt=timezone.now() - older_than)
+            .order_by('created_at'))
+
+
+def close_stale_runs(older_than=None, *, dry_run=False):
+    """Close each stale run as FAILED; the runs found (closed, unless *dry_run*).
+
+    Only the run row changes, never clinical data. The close is one conditional
+    UPDATE, so a run that saved progress after it was read is left alone, and a
+    chunk that does arrive later reopens its run (see ``run_sweep``).
+    """
+    older_than = timedelta(minutes=STALE_RUN_MINUTES) if older_than is None else older_than
+    found = list(stale_runs(older_than))
+    if dry_run:
+        return found
+    now = timezone.now()
+    closed = []
+    for run in found:
+        note = {'error': 'Closed as stale: no progress since '
+                         f'{run.last_progress.isoformat(timespec="seconds")}; its worker is presumed lost.'}
+        changed = (stale_runs(older_than).filter(pk=run.pk)
+                   .update(state=SourceCodeResolveRun.FAILED, finished_at=now, updated_at=now,
+                           error_detail=(run.error_detail + [note])[:100]))
+        if changed:
+            run.state = SourceCodeResolveRun.FAILED       # what the row says now
+            closed.append(run)
+    return closed
 
 
 # ---- the mapping trigger ---------------------------------------------------------
@@ -574,7 +653,13 @@ def _state(mapping) -> tuple | None:
     """
     if mapping is None:
         return None
-    percent = None if mapping.suggestion_confidence is None else _confidence_percent(mapping.suggestion_confidence)
+    if mapping.suggestion_confidence is not None:
+        percent = _confidence_percent(mapping.suggestion_confidence)
+    elif mapping.source_vocabulary_id in WEARABLE_DEVICE_VOCABULARIES:
+        # A wearable device's curated proposal: unscored, it stands at the floor (#2835).
+        percent = max(settings.PROVISIONAL_CONFIDENCE_FLOOR, 1)
+    else:
+        percent = None
     qualifies = (
         mapping.status == 'proposed' and mapping.organization_id is None
         and mapping.target_concept_id is not None and percent is not None
@@ -673,7 +758,8 @@ def person_needs_resolve(person_id) -> bool | None:
     vocabularies = defaultdict(set)
     for table, value, vocabulary in PatientSourceCode.objects.filter(person_id=person_id).values_list(
             'omop_table', 'source_value', 'source_vocabulary_id'):
-        vocabularies[(normalize_omop_table(table), (value or '').upper())].add(vocabulary)
+        table = normalize_omop_table(table)
+        vocabularies[(table, _as_stored(table, value or '').upper())].add(vocabulary)
     for table, (model, concept_col, source_col) in CLINICAL_TABLES.items():
         table_entries = entries.get(table, {})
         with_rows = set()

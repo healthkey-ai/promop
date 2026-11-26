@@ -49,7 +49,7 @@ beforeEach(() => {
   __resetWritableFieldsCache();
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
-    if (url.includes('/patient-info/')) {
+    if (/\/v1\/patient-records\/\d+\//.test(url)) {
       return Promise.resolve({
         data: {
           patient_info: { person_id: 261, patient_name: 'Ada Lovelace', country, region: null, city: null, postal_code: null },

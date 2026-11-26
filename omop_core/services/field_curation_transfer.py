@@ -111,6 +111,14 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # The last curator decision's surface and ranker confidence (#2382).
     'decision_surface': '',
     'decision_confidence': None,
+    # Whether the stored suggestion is a ranker-unavailable fallback (#2743):
+    # it travels with the suggestion and outcome it describes.
+    'suggestion_fallback': False,
+    # Whether Suggest approved the stored suggestion itself (#2856): travels
+    # with the outcome that says whether a curator upheld it.
+    'suggestion_auto_approved': False,
+    # The score it was approved at, which the analytics bands read (#2856).
+    'auto_approved_confidence': None,
     # Travels with the note it describes (#2423): the copy replaces the text,
     # so a payload without the key leaves no mark over the source's note.
     'curator_note_at': None,
@@ -240,6 +248,32 @@ def read_payload(
                 'field_name': fc.field_name,
                 'display': fc.display,
                 'sort_order': fc.sort_order,
+                # Identity, scope and spellings (#1224). An older payload has
+                # none of these and is read as one unscoped choice per display.
+                'code': fc.code,
+                'context_key': fc.context_key,
+                'value': fc.value,
+                'value_type': fc.value_type,
+                'retired': fc.retired_at is not None,
+                'aliases': sorted(
+                    ({'alias': a.alias, 'source': a.source} for a in fc.aliases.all()),
+                    key=lambda a: a['alias'].casefold()),
+                'diseases': sorted(d.disease for d in fc.disease_scope.all()),
+                # What the answer means and who decided it: only the decision in
+                # force and the open proposal. Concepts travel as vocabulary and
+                # code; the reviewer, ids and revision log stay on their instance.
+                'value_mappings': [
+                    {
+                        'role': m.role, 'outcome': m.outcome, 'status': m.status,
+                        'vocabulary_id': m.vocabulary_id, 'concept_code': m.concept_code,
+                        'question_vocabulary_id': m.question_vocabulary_id,
+                        'question_concept_code': m.question_concept_code,
+                        'rationale': m.rationale, 'vocabulary_release': m.vocabulary_release,
+                        'provenance': m.provenance,
+                    }
+                    for m in sorted(fc.value_mappings.all(), key=lambda m: (m.role, m.status))
+                    if m.status in ('approved', 'proposed')
+                ],
                 'codes': [
                     {
                         'code': code.code,
@@ -253,8 +287,8 @@ def read_payload(
                 ],
             }
             for fc in FieldChoice.objects.using(using)
-            .prefetch_related('codes')
-            .order_by('field_name', 'sort_order', 'display')
+            .prefetch_related('codes', 'aliases', 'disease_scope', 'value_mappings')
+            .order_by('field_name', 'context_key', 'sort_order', 'display')
         ]
 
     if 'formulas' in tables:
@@ -597,29 +631,225 @@ def _apply_memberships(payload: dict, stats: TransferStats) -> None:
 
 
 def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
-    existing = {(c.field_name, c.display): c for c in FieldChoice.objects.all()}
+    from django.utils import timezone
+
+    from omop_core.models import FieldChoiceAlias, FieldChoiceDisease
+    from omop_core.services import disease_profiles, field_choices
+
+    known = disease_profiles.category_codes() - {disease_profiles.OTHER}
+    claimed = {(r['field_name'], r.get('context_key', ''), r['code'])
+               for r in rows if r.get('code')}
+
+    def local():
+        by_code, by_display = {}, {}
+        for c in FieldChoice.objects.all():
+            by_code[(c.field_name, c.context_key, c.code)] = c
+            by_display[(c.field_name, c.context_key, c.display)] = c
+        return by_code, by_display
+
+    def find(row):
+        """The local choice a payload row is, or None for a new one.
+
+        A choice is found by its stable code. One the code does not find is
+        found by its display only when the payload has no code (it predates
+        codes) or the local choice's own code is one the payload does not
+        name: an instance that numbered a label that slugs alike differently
+        still has the same choice, which then takes the payload's code.
+        """
+        context = row.get('context_key', '')
+        if row.get('code'):
+            hit = by_code.get((row['field_name'], context, row['code']))
+            if hit is not None:
+                return hit
+        hit = by_display.get((row['field_name'], context, row['display']))
+        if hit is None:
+            return None
+        if row.get('code') and (hit.field_name, hit.context_key, hit.code) in claimed:
+            return None
+        return hit
+
+    by_code, by_display = local()
+    # A source that renamed one choice and gave its old label to another, or
+    # swapped two labels, would collide with the label rule midway. Move every
+    # label that is about to change aside first; each is set again below.
+    moving = []
     for row in rows:
-        key = (row['field_name'], row['display'])
-        choice = existing.get(key)
+        hit = find(row)
+        if hit is not None and hit.display != row['display']:
+            moving.append(hit)
+    for choice in moving:
+        choice.display = f'~moving~{choice.pk}'
+        choice.save(update_fields=['display'])
+    if moving:
+        by_code, by_display = local()
+
+    for row in rows:
+        context = row.get('context_key', '')
+        choice = find(row)
+        value_type = row.get('value_type', 'text')
+        try:
+            value = field_choices.clean_value(value_type, row.get('value', ''))
+        except field_choices.ChoiceError as exc:
+            stats.warnings.append(f'choice {row["field_name"]}/{row["display"]}: {exc}')
+            value, value_type = '', 'text'
         if choice is None:
             choice = FieldChoice.objects.create(
                 field_name=row['field_name'],
                 display=row['display'],
                 sort_order=row['sort_order'],
+                code=row.get('code', ''),
+                context_key=context,
+                value=value,
+                value_type=value_type,
+                retired_at=timezone.now() if row.get('retired') else None,
                 created_by=None,
             )
             stats._bump(stats.created, 'choices')
         else:
+            choice.display = row['display']
             choice.sort_order = row['sort_order']
+            if row.get('code') and choice.code != row['code'] and (
+                    choice.field_name, choice.context_key, row['code']) not in by_code:
+                choice.code = row['code']
+            if 'value' in row:
+                choice.value = value
+                choice.value_type = value_type
+                if row.get('retired'):
+                    # Keep when it was retired, not when it was last copied.
+                    choice.retired_at = choice.retired_at or timezone.now()
+                else:
+                    choice.retired_at = None
             choice.created_by = None
-            choice.save(update_fields=['sort_order', 'created_by'])
+            choice.save()
             stats._bump(stats.updated, 'choices')
-        # Codes are pure data hanging off the choice, so the source's set
-        # replaces the local one wholesale rather than being merged.
+        by_code[(choice.field_name, choice.context_key, choice.code)] = choice
+        by_display[(choice.field_name, choice.context_key, choice.display)] = choice
+        # Codes, spellings and scope are pure data hanging off the choice, so
+        # the source's set replaces the local one wholesale rather than being
+        # merged. A payload from before #1224 names none and leaves them be.
         choice.codes.all().delete()
         FieldChoiceCode.objects.bulk_create([
             FieldChoiceCode(choice=choice, **code) for code in row['codes']
         ])
+        if 'aliases' in row:
+            choice.aliases.all().delete()
+            FieldChoiceAlias.objects.bulk_create([
+                FieldChoiceAlias(
+                    choice=choice, field_name=choice.field_name,
+                    context_key=choice.context_key, alias=a['alias'],
+                    alias_key=field_choices.fold(a['alias']),
+                    source=a.get('source', 'curator'))
+                for a in row['aliases']
+            ], ignore_conflicts=True)
+        if 'diseases' in row:
+            choice.disease_scope.all().delete()
+            # A category this instance does not have cannot scope anything here.
+            FieldChoiceDisease.objects.bulk_create([
+                FieldChoiceDisease(choice=choice, disease=d)
+                for d in sorted(set(row['diseases'])) if d in known
+            ])
+        if 'value_mappings' in row:
+            _apply_value_mappings(choice, row['value_mappings'], stats)
+
+
+def _apply_value_mappings(choice, rows: list[dict], stats: TransferStats) -> None:
+    """Make the choice's current answer mappings the source's.
+
+    A concept is found again by vocabulary and code, never by the source's id.
+    An approval whose concept this instance has not loaded, or that is not a
+    valid target here, cannot be approved here, so the decision already in
+    force locally is left as it is and the source's answer is kept as an
+    unresolved proposal (unless the source also has an open proposal for the
+    role, which then wins), with a warning. A decision the source no longer has
+    in force is superseded (approved) or rejected (proposed) rather than
+    deleted, so its revisions stay. Reviewers are not copied; the same account
+    id is another person on another instance, and a transferred row is
+    attributed to the transfer, with no review date.
+    """
+    from omop_core.models import FieldValueConceptMapping as Mapping
+    from omop_core.services import field_value_mappings as fvm
+
+    label = 'transfer'
+    where = f'value mapping {choice.field_name}/{choice.display}'
+    wanted: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        role, outcome = row.get('role'), row.get('outcome')
+        if (role not in fvm.ROLES or outcome not in fvm.OUTCOMES
+                or row.get('status') not in ('approved', 'proposed')):
+            stats.warnings.append(f'{where}: skipped a row with an unknown role, outcome or status.')
+            continue
+        if outcome == 'no_equivalent' and row.get('concept_code'):
+            stats.warnings.append(f'{where}: skipped a "no equivalent" row that names a concept.')
+            continue
+        if role != 'context_recipe' and row.get('question_concept_code'):
+            stats.warnings.append(f'{where}: skipped a row with a question outside a recipe.')
+            continue
+        wanted[(role, row['status'])] = row
+
+    ctx = fvm.CheckContext()
+    plan = []
+    blocked_approvals = set()
+    for (role, status), row in sorted(wanted.items()):
+        target = question = None
+        resolution = ''
+        if row['outcome'] == 'mapped':
+            target = fvm.lookup_concept(vocabulary_id=row.get('vocabulary_id', ''),
+                                        concept_code=row.get('concept_code', ''))
+            problem = fvm.target_problem(target, role, choice.field_name, ctx=ctx)
+            if problem:
+                resolution = 'unresolved' if target is None else 'invalid'
+                stats.warnings.append(f'{where}: {problem}')
+                target = None
+            if role == 'context_recipe':
+                question = fvm.lookup_concept(vocabulary_id=row.get('question_vocabulary_id', ''),
+                                              concept_code=row.get('question_concept_code', ''))
+                if fvm.target_problem(question, role, choice.field_name, question=True, ctx=ctx):
+                    question = None
+                    resolution = resolution or 'unresolved'
+        if status == 'approved' and row['outcome'] == 'mapped' and (
+                target is None or (role == 'context_recipe' and question is None)):
+            blocked_approvals.add(role)
+            if (role, 'proposed') in wanted:
+                continue                      # the source's own open proposal holds the place
+            status = 'proposed'
+        plan.append((role, status, row, target, question, resolution))
+
+    applied = set()
+    for role, status, row, target, question, resolution in plan:
+        applied.add((role, status))
+        fields = dict(
+            outcome=row['outcome'], target_concept=target,
+            vocabulary_id=row.get('vocabulary_id', ''), concept_code=row.get('concept_code', ''),
+            question_concept=question,
+            question_vocabulary_id=row.get('question_vocabulary_id', ''),
+            question_concept_code=row.get('question_concept_code', ''),
+            source_resolution=resolution, rationale=row.get('rationale', ''),
+            vocabulary_release=(fvm.release_of(target.vocabulary_id) if target else ''),
+            provenance=(row.get('provenance', '') or label)[:100],
+            reviewer=None, reviewed_at=None, proposed_by=None,
+        )
+        existing = Mapping.objects.filter(choice=choice, role=role, status=status).first()
+        if existing is None:
+            if status == 'approved':
+                for old in Mapping.objects.filter(choice=choice, role=role, status='approved'):
+                    old.status = 'superseded'
+                    old.save(update_fields=['status', 'updated_at'])
+                    fvm._record(old, 'superseded', None, label)
+            existing = Mapping.objects.create(choice=choice, role=role, status=status, **fields)
+        else:
+            for name, value in fields.items():
+                setattr(existing, name, value)
+            existing.save()
+        fvm._record(existing, 'transferred', None, label)
+    # What the source no longer has in force. A local approval an incoming one
+    # could not replace here stays in force.
+    for old in Mapping.objects.filter(choice=choice, status__in=('approved', 'proposed')):
+        key = (old.role, old.status)
+        if key in applied or (old.status == 'approved' and old.role in blocked_approvals):
+            continue
+        old.status = 'superseded' if old.status == 'approved' else 'rejected'
+        old.save(update_fields=['status', 'updated_at'])
+        fvm._record(old, 'transferred', None, label)
 
 
 def _apply_formulas(rows: list[dict], stats: TransferStats) -> None:
@@ -864,9 +1094,13 @@ def _prune(payload: dict, tables: tuple[str, ...], stats: TransferStats) -> None
         stats._bump(stats.deleted, 'mappings', deleted)
 
     if 'choices' in tables:
-        keep = {(row['field_name'], row['display']) for row in payload.get('choices', [])}
+        rows = payload.get('choices', [])
+        keep_code = {(r['field_name'], r.get('context_key', ''), r['code'])
+                     for r in rows if r.get('code')}
+        keep_display = {(r['field_name'], r.get('context_key', ''), r['display']) for r in rows}
         stale = [c.pk for c in FieldChoice.objects.all()
-                 if (c.field_name, c.display) not in keep]
+                 if (c.field_name, c.context_key, c.code) not in keep_code
+                 and (c.field_name, c.context_key, c.display) not in keep_display]
         if stale:
             # Cascades to FieldChoiceCode; count only the choices themselves.
             FieldChoice.objects.filter(pk__in=stale).delete()

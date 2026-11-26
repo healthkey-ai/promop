@@ -29,14 +29,321 @@ second manually maintained UI-to-concept table.
 | Model | Current responsibility |
 |---|---|
 | `FieldConceptMapping` | Field-level recipe: concept, destination, source key, value kind, units, type, review state and provenance |
-| `FieldChoice` | Allowed display values keyed by `(field_name, display)`, with ordering and creator metadata |
+| `FieldChoice` | An allowed value with a stable identity `(field_name, context_key, code)`, an editable label, a typed canonical `value`, ordering, a retired mark and creator metadata (#1224) |
+| `FieldChoiceAlias` | Another spelling of a choice: an earlier label or a source's wording; one spelling names one choice within a field and context |
+| `FieldChoiceDisease` | The Disease Categories that offer a choice; no rows means every disease |
+| `FieldValueConceptMapping` / `FieldValueConceptMappingRevision` | The standard concept an answer means in a role, or the reviewed statement that it has none; one decision per row, with a transition log (#1224) |
 | `FieldChoiceCode` | Vocabulary/code aliases for a choice, with a primary flag; this does not independently approve an answer mapping |
 | `CustomPatientField` / `FieldFormula` | Dynamic field definitions and computed values using the existing mapping/formula services |
 | Therapy reference models | Regimen, component, class and disease/round relationships, resolved by their dedicated authoring paths |
 
-The models are in [omop_core/models.py](../omop_core/models.py). The current choice
-schema does not provide stable scoped answer identity or a reviewed
-`FieldValueConceptMapping` model. The plan owns that extension.
+The models are in [omop_core/models.py](../omop_core/models.py). A choice has
+stable, scoped identity and a reviewed binding to a standard concept (both
+below). Nothing that writes patient data reads the binding yet.
+
+### Scoped choices: `FieldChoice` identity (#1224)
+
+A choice used to be known by its label, which a curator can edit, and offered
+to every patient. Its identity is now `(field_name, context_key, code)`;
+`omop_core/services/field_choices.py` holds the rules and writers use it
+rather than the models.
+
+- **`code`** is made once from the label (`stage_iv`, then `stage_iv_2` for a
+  label that slugs alike) and never changes: the API refuses a different code
+  on PATCH, and a label edit goes through `rename`. Migration `0365` gave every
+  existing row its code, in sort order, before the unique constraint was
+  added, so it does not depend on row order and a replay changes nothing.
+- **`context_key`** separates answers of one field that mean different things
+  (stage `I` in the ISS system and in Ann Arbor); blank when there is one
+  meaning. The label is unique within a field and context, not within the
+  field, so both can exist.
+- **`value` / `value_type`** are the canonical storage value and how it is read
+  (`text`, `integer`, `decimal`, `boolean`); blank `value` means the label,
+  which is what every seeded row stored. A value the type cannot hold is a 400.
+  **A save always stores the value** (`stored_value`, the value or the label while
+  there is none), never the label as it reads now: `rename` freezes the label
+  being replaced into a blank `value` at the first rename (lazily, so an answer
+  nobody renames is untouched and no migration rewrites rows), and a later rename
+  leaves it. The write descriptor's options therefore carry `value` (what is
+  stored) and, only when it differs, `label` (what a person reads); the patient
+  select shows the label and saves the value, derivation reads a concept-only
+  fact back as the value, and the projection already matched the value, the
+  label and every alias. The editor shows the value read only ("Saved as"); a
+  `value` sent through the API on purpose still wins. A curation transfer copies
+  the source's `value`, so a source that has frozen one gives the target the same.
+- **Aliases.** A rename keeps the old label as an alias (`source='label'`), so
+  stored data that still reads it resolves; `set_aliases` replaces the curator's
+  own spellings and keeps those. A spelling another choice of the field and
+  context answers to, as its label, code or alias, is refused by name, and the
+  database holds the alias rule (`uq_field_choice_alias`).
+- **Scope.** `FieldChoiceDisease` rows name the Disease Categories that offer a
+  choice, validated against the categories (`Other` refused, its profile is the
+  base record). `offered(field, disease)` returns the unscoped choices plus the
+  disease's own, retired ones left out; `GET /api/v1/field-choices/?disease=MM`
+  is the same read. `resolve(field, text, disease)` finds the one choice a
+  spelling names for that disease and raises `AmbiguousChoice` rather than
+  guess when two are in scope. Scope hides nothing already stored.
+- **Retired** (`retired_at`) stops a choice being offered; it still resolves.
+- **Shapes.** The API and the field descriptors keep their old keys and gain
+  `code`, `context_key`, `value`, `value_type`, `retired`, `aliases` and
+  `diseases`. The write descriptor still lists an answer once however many
+  contexts hold it; which meaning a record means is scope's business, and
+  enforcing it on write is #2333. It also still offers the label, not `value`,
+  and keeps retired choices, because a retired value already stored must still
+  save when an edit echoes it back; honouring `value` on write and hiding
+  retired values from new entries belong with that enforcement.
+- **Transfer.** The curation payload carries the new keys. A choice is matched
+  by code, so a rename on the source renames it here instead of adding a
+  second choice; a payload from before this matches by label as it did, and so
+  does a coded row whose code this instance does not have, when the local
+  choice's own code is not one the payload names (two instances that numbered a
+  label that slugs alike differently); it then takes the payload's code.
+  Labels about to change are moved aside first, so a rename that hands its old
+  label to another choice, or a swap, does not trip the label rule. A choice
+  already retired keeps the date it was retired.
+  Aliases and scope are replaced from the source, and a disease this instance
+  has no category for is dropped.
+- **Not here.** The editor shows none of this (#1225), and the disease tab's
+  `stage` options are still the hand-written ones (#2332).
+
+### Answer-to-concept mappings: `FieldValueConceptMapping` (#1224)
+
+`omop_core/services/field_value_mappings.py` holds the rules; writers use it
+and never the model.
+
+- **One row is one decision** about one choice in one **role**:
+  `value_as_concept` (the answer is the value of the field's question),
+  `main_concept` (the answer is itself the fact) or `context_recipe` (the
+  answer only means something with its own `question_concept`). The
+  `outcome` is `mapped` (a `target_concept`) or `no_equivalent`, a reviewed
+  statement with a reason and no target; the value stays saveable either way.
+- **Review.** `proposed` / `approved` / `rejected`, plus `superseded` for an
+  approval a later one replaced. The database holds *one approved and one open
+  proposal per choice and role* and that an approved `mapped` row has a target
+  (and that only a recipe has a question), so a change is proposed beside the
+  decision in force and replaces it only when approved; the replaced row stays,
+  superseded. Withdrawing an approval is a rejection. Decisions on one choice
+  take turns (the choice row is locked), and a lost race is a 409.
+- **A target is checked on the server**, by id or by exact vocabulary and
+  code, never trusted from the client: it must be a loaded, current
+  (`invalid_reason` blank), standard concept of a vocabulary that is not
+  withdrawn, outside the domains that describe the record rather than a
+  finding (Unit, Type Concept, Metadata, ...), and for `main_concept` in the
+  domain of the table the field's mapping stores to. It is checked again at
+  approval, since a vocabulary reload can retire it between the two.
+  `target_state` on an approved row reports `ok`, `retired`, `non_standard`
+  or `invalid` as the vocabulary stands now.
+- **Release and revisions.** The vocabulary version the target was checked
+  against is stored with the decision; every transition (proposed, edited,
+  approved, superseded, rejected, transferred, migrated) is an append-only
+  `FieldValueConceptMappingRevision` that holds the concept as ids and codes,
+  with no foreign key, so a vocabulary reload cannot block it.
+- **Migration `0368`** carries each choice's first primary `FieldChoiceCode`
+  over as a `value_as_concept` **proposal** (never an approval), recording
+  whether it resolved, was not loaded here (`unresolved`), is retired
+  (`invalid`) or non-standard. The codes stay for source codings. A replay
+  changes nothing. Existing choices without a concept remain usable. On a fresh
+  instance the migration runs before any vocabulary, so every proposal starts
+  unresolved; `load_athena_vocabularies` re-resolves them after every load
+  (best effort, like the field mappings) and `manage.py
+  resolve_field_value_mappings` does it by hand: a current standard concept
+  becomes the target, a retired or non-standard one is recorded as such, one
+  not loaded stays. Approved rows are never touched.
+- **API**, on `/api/v1/` only: `GET`/`POST field-choices/<id>/value-mappings/`
+  (read: anyone who reads the mapping pages; propose: mapping curators),
+  `POST .../<mapping>/approve|reject/` (org admins and staff, as for field
+  mappings), `GET .../<mapping>/revisions/`, and `GET
+  field-choices/answer-coverage/` (`?field_name=`). A choice's own payload
+  carries its current `value_mappings` for readers of the mapping pages only; a
+  patient's dropdown never sees who reviewed what. Field descriptors gain
+  `answer_coverage` (`choices`, `mapped`, `no_equivalent`, `proposed`,
+  `unmapped`, over the choices still offered), kept apart from whether the
+  field's question is mapped.
+  The Field Mappings list shows it as an **Answers** column ("3 of 5 decided":
+  a concept or a reviewed no-equivalent counts as decided; amber until all are,
+  the tooltip gives the four counts, a dash for a field with no curated
+  answers). It is the server's figure from the list's own response, so it is
+  not the editor's stricter client-side count; for a reader who can write
+  mappings it opens the field's answers.
+- **Target search for the editor** (#1225): `GET
+  field-choices/<id>/value-mappings/targets/?q=&role=&question=&vocabulary_id=`
+  (readers of the mapping pages). `q` is three characters or more and matches a
+  name, an exact vocabulary code or an OMOP id, as the curator's concept search
+  does (`omop_core.api.concepts.concept_text_search`, shared). The server's
+  rules decide what is listed (`field_value_mappings.search_targets`, the
+  query form of `target_problem`): current, standard, outside withdrawn
+  vocabularies and record-keeping domains, and for `main_concept` in the domain
+  of the field's table; `question=1` (a recipe only) searches the question
+  concept with no domain rule. So the editor offers nothing a proposal would
+  refuse. The answer is the concept search's page plus `rules` (`required_domain`,
+  `excluded_domains`, `excluded_vocabularies`) so the editor can say why a
+  concept it knows is missing. Unlike the general search it never lists
+  non-standard concepts authored on this instance: those are not valid targets.
+- **In the choice editor** (#1225, `AnswerConceptPanel.tsx`): each answer shows
+  where its concept stands, as one of five states (`answerState`): no concept
+  decided, proposed (and when the proposed concept is not loaded here), approved,
+  approved as "no standard equivalent", or approved but unusable (retired,
+  non-standard or no longer fitting the field, which the panel says writes the
+  value without a concept). A mapping curator searches (the target search
+  above) and proposes, or records no equivalent with a reason; an org admin or
+  staff approves, rejects or withdraws. Only `value_as_concept` is offered, since
+  nothing projects the other roles. The panel shows the server's own refusal
+  text (and reads the list again when a decision is refused, in case another
+  curator decided first), keeps its place on a save rather than reloading the
+  list, and the editor passes `canApprove` from the page.
+  Beside it, `AnswerDetailsPanel.tsx` shows the answer's stable code and other
+  spellings and lets a mapping curator change the label and the spellings (one
+  per line) or retire and restore it, all through `PATCH field-choices/<id>/`:
+  only what changed is sent, a new label keeps the old one as a spelling (the
+  server's `rename`), the code never changes, and the server's refusal is shown
+  as written (`refusalText` reads serializer field errors as well as `detail`).
+  Retiring asks first; a retired answer is dimmed with a "Retired" mark and is
+  still projected and read back. `AnswerHistory.tsx` lists every proposal,
+  approval and rejection of the answer's concept, newest first, for readers of
+  the mapping pages: one request for the decisions and one per decision for its
+  revisions, made only when History is opened. Deleting an answer a non-approver
+  cannot delete shows the server's reason, and the confirmation points to
+  retiring.
+  **Disease scope** is edited in the same form (#1225, #2332): the line above it
+  says "Offered to every patient" or "Offered to: MM, FL" and names the answer's
+  context when it has one, and the form reuses `FieldScopeControl` with its own
+  wording ("Every patient" / "Only some Disease Categories"). `diseases` is sent
+  only when the ticked set changed from what the form opened on; offering the
+  answer to every patient sends `[]`; narrowing to no category is refused before
+  asking the server; the categories come from the page (Other has no extension,
+  so it is not offered) and without them the scope is shown, not edited. A
+  category the list lacks but the answer already names stays ticked. Scope
+  changes which answers a record of that category is offered; a value already
+  saved is neither changed nor hidden.
+  **Answer coverage** heads the editor for a reader of the mapping pages
+  (`AnswerCoverage.tsx`, `answerCoverage` in `answerConcept.ts`), computed from
+  the list the editor already holds so it costs no request. It is the stricter
+  count: only the `value_as_concept` role is read, and an approved concept the
+  server can no longer use ("needs attention") is not counted as mapped, which
+  the server's `answer-coverage` totals do count as mapped. Each offered answer
+  is in one of four groups: decided (a concept, or a reviewed no standard
+  equivalent), needs attention, nothing approved or proposed, or retired
+  (not counted). "Nothing approved or proposed" is not "writes no concept": an
+  answer with a legacy code may still write that code's concept. **Waiting for
+  approval** is separate and overlaps the groups: every answer with an open
+  proposal, including a replacement for an approved concept that cannot be
+  used, so an approver filtering on it finds the whole queue. The summary says
+  it counts the answers only, the field's own question concept being mapped on
+  the field. The chips list one group; a filtered view cannot reorder, the rows
+  it listed when it was chosen stay listed (with their new state) until the
+  filter changes, so a decision does not take its row away, and adding an
+  answer returns to the whole list. The summary sticks to the top of the
+  scrolling editor. The stored value is shown read only in the
+  editor, frozen at the first rename (see `value` above); typing one is not
+  offered. Still not here: concept mapping for the options of a therapy catalog.
+  **Lookup options** (#1225, `LookupOptions.tsx`, `GET field-choices/lookup/
+  ?field_name=`, `omop_core/services/option_sources.py`): nineteen fields draw
+  their dropdown from a `VocabularyLookup` table, which until now only the
+  frontend knew (`useVocabulary('her2-status')` beside the field). The editor
+  now lists that lookup, read only and never copied into choices (so there is
+  no second list to drift), with its source and a Show entries control. The
+  binding is **enforced** when the field's approved mapping names the lookup in
+  `value_vocabulary` and is complete enough to write (a concept and a table; five
+  fields today): the write descriptor then offers only those titles, so answers
+  added in the editor are not offered (the two transplant fields also have
+  serializer and upload validators that keep only the lookup's titles),
+  otherwise **offered**: the tab draws its dropdown from the lookup,
+  and a field with an approved concept mapping and answers offers those
+  instead, which the section says. `LOOKUP_FIELDS` must match the tabs;
+  `tests/test_option_sources.py` fails when a `useVocabulary` call names a
+  lookup no field uses, or an enforced seed names one it does not map.
+  **What an entry means as a concept** is decided here too (#1225). Each entry
+  row has a Concept control that opens the same panel an answer has: search,
+  propose, approve, reject, withdraw, history. The decision is held by a
+  `FieldChoice` made when a curator first decides something for the entry
+  (`POST field-choices/lookup/answer/` `{field_name, code}`, mapping curators,
+  `option_sources.ensure_answer`): its context is `lookup:<slug>`, its label the
+  entry's title (which is also how the entry is found again) and its value what
+  the tab stores, the entry's code for `CODE_VALUED` fields (ECOG, Karnofsky)
+  and its title for the rest. Because it is an ordinary choice, propose,
+  approve, revisions, the projection (`answer_concept_ids`: the title and the
+  code both project), the readback (`answer_values_by_concept` returns the
+  stored value for such a row), the curation transfer and the two-role rules
+  all apply unchanged, and no migration was needed. It is **not an answer**:
+  `lookup:` rows are left out of `GET field-choices/`, the descriptors'
+  `choices`, the write descriptor's options, `answer_coverage` and
+  `field_choices.offered`; they cannot be created, renamed, retired, scoped or
+  given codes through the answer endpoints (400), and a `context_key` starting
+  `lookup:` cannot be sent when adding an answer. `GET field-choices/lookup/`
+  returns each entry's `choice_id` and `value_mappings` (null and empty for an
+  entry nobody has decided anything for, so reading makes nothing) and
+  `orphaned`: decisions about a title the lookup no longer has (a renamed
+  entry starts afresh and its old decision stays, listed there). A row holding
+  decisions cannot be deleted either (400, even for an approver): a decision is
+  withdrawn or rejected, so its history stays. **A curated answer speaks over
+  a lookup entry**: in both `answer_concept_ids` and `answer_values_by_concept`
+  a lookup row fills only the spellings (and concepts) no curated answer of the
+  field uses, so a decision about an entry can neither void nor override an
+  answer the field has of its own. The response says whether the field's
+  approved mapping stores a concept (`writes_concepts`): where it stores text
+  (`value_kind` other than `concept`, as `her2_status` does today) a decision is
+  recorded and reviewed but not written, and the section says so. The tab says
+  how many entries have a concept decided. Not here: therapy catalogs, which
+  are lookups of the same kind (`therapy-regimen`, `-component`, `-class`) but
+  carry their own mappings, and reconciling a renamed entry with its old
+  decision.
+- **Transfer** carries the decision in force and the open proposal as
+  vocabulary and code, re-resolved here. A concept this instance has not
+  loaded, or that is not a valid target here, cannot be approved here: the
+  decision already in force here is left as it is, and the source's answer
+  arrives as an unresolved proposal with a warning (unless the source also has
+  an open proposal for the role, which then takes the place). A decision the
+  source no longer has in force is superseded (approved) or rejected
+  (proposed), not deleted; a malformed row is skipped with a warning. Reviewers,
+  review dates and the revision log are not copied.
+- **Deleting an answer** removes its mappings and revisions with it, so an
+  answer with an approved mapping can be deleted only by org admins and staff;
+  retire it to stop offering it.
+- **The projection reads the decision.** A concept-valued field's write recipe
+  carries `value_concept_map`, `{spelling: concept_id}`, built by
+  `field_value_mappings.answer_concept_ids` in a fixed number of queries
+  whatever the number of choices. A spelling is the label, the stored `value`
+  or any alias, so a value saved under an earlier label still projects, and a
+  retired choice still projects. Per choice, in the `value_as_concept` role:
+  - **approved, mapped** writes the target, provided it is still a current
+    standard concept; a target a reload has since retired or made non-standard
+    writes none (the value saves as text);
+  - **approved, no equivalent** writes none, even where the choice has a legacy
+    code;
+  - **no decision, or only an open proposal** keeps the concept of its primary
+    `FieldChoiceCode`, as before. The proposal migration 0368 made from that
+    code is not a decision; holding projection until each is approved would stop
+    writing concepts that are written today;
+  - **a decision once made and gone** (an approval withdrawn or superseded), or
+    a **rejection of the primary code's own concept**, does not fall back to that
+    code: a reviewer answered for it. Rejecting some other proposal for the
+    choice leaves the code in place.
+
+  A spelling that two choices of one field (the same label in two contexts)
+  resolve to different concepts, or one to a concept and one to an explicit "no
+  concept" decision, writes none; a choice with no code and no decision says
+  nothing, as before. Where a live choice and a retired one share a spelling, the
+  live one decides.
+- **Derivation reads the decision back.** A fact that carries the answer as a
+  concept and no text (an ETL's `value_as_concept_id`) is read into a
+  concept-valued field as the answer that concept stands for
+  (`answer_values_by_concept`, called from `curated_values_from_snapshot`). It
+  is the inverse of the projection above and takes its decisions from the same
+  function, so an approved answer reads back as what it writes and a retired
+  target, a no-equivalent decision or a withdrawn approval reads as nothing,
+  and a choice nobody has decided keeps its primary code's concept, as in the
+  projection. The value is the choice's label, which the editor offers and the
+  projection stores. A fact's own text or number always
+  wins; the concept is the fallback. A concept that two answers of one field
+  share (or one live and one retired answer) is not guessed: the live answer
+  speaks over a retired one, and two live ones read as nothing. The lookup is
+  made once per refresh, and only when such a fact is met, so a refresh with
+  none costs no query more. Other readers (the dedicated extractors) are
+  unchanged.
+- **Not here.** `main_concept` and `context_recipe` decisions are recorded and
+  reviewed but nothing projects or reads them; the two-person rule is not
+  applied (as for field mappings), there is no scoped question recipe beyond a
+  recipe's own question concept, and no UI (#1225).
 
 `FieldConceptMapping.provenance` distinguishes System Generated and Curator
 recipes. Approval state is separate from origin: approving a recipe does not
@@ -119,6 +426,19 @@ Because the field arrives approved, creating one is gated by
 link nor the page's own Add field button is offered to them. Saving or
 cancelling a dialog the link opened returns to the patient tab.
 
+A scope change takes effect at once and has no proposal stage, so it is an
+approval too (#1225): `PUT field-mappings/<name>/diseases/` and a `diseases`
+sent with a field mapping are 403 for an analyst, and the mapping dialog shows
+the scope read-only to anyone who cannot approve. The same holds for an
+existing answer's label, spellings, scope, retired flag and codes
+(`PATCH field-choices/<id>/` with anything but `sort_order`, and
+`field-choices/<id>/codes/`): a curator may add an answer (with no scope,
+spellings, codes or retirement), reorder answers and propose a concept, and the
+choice editor shows the rest to a non-approver read-only, with no code controls.
+Deleting an answer is approvers only too: it takes the answer's codes,
+spellings, scope and decisions with it, and an answer deleted and added again
+plain would get around the rest. The editor shows no Delete to anyone else.
+
 `CustomPatientFields.tsx` renders created fields last on their tab, for
 every reader of the record, in the app's patient page and in the federated
 editor (which offers no Add Field: the host has no Field Mappings page):
@@ -132,16 +452,58 @@ The record's Disease Category is what Disease Category management maps its
 disease to (`useAllDiseaseMappings`), with the editor's own disease-type
 match as the fallback for a name that mapping does not hold
 (`fieldScope.recordDiseaseCategory`); a disease mapped to `Other` has the
-base record only. Two limits remain with #2332: a record with several
-cancers is read by its primary disease, and a field placed on the disease
-tab shows only for a record the editor has a disease tab for.
+base record only. That category, not the disease name, picks the disease tab
+(#2332): a record shows the hand-authored section of its category (BC, FL, MM,
+CLL and MCL have one; `patientVisibleFields.json`'s `disease_categories` names
+them), and a category without one shows its created fields. The server's
+`disease_profiles.record_category` is the same rule, so the attestation counts
+the fields of the section on screen. The tab appears for a record when its
+category has a section or a field placed on its extension, and for whoever can
+add a field (staff and org admins) for any category, because the tab's Add
+Field link is how the first field of an empty extension is made.
 
-Created fields are read-only on the tab. A value is derived from the
-patient's OMOP facts for the field's concept (`_get_custom_patient_field_data`)
-when the record is next derived, or computed from its formula at creation,
-so a field added just now reads "Not recorded" on a record until then;
-`manage.py backfill_patient_records --all` derives every record. The patient
-editor has no write path for a created field yet.
+A record with more than one cancer (`PatientRecord.disease_slugs`, #2182) has the
+extension of each, not only of the cancer `disease` names. The record read adds
+`disease_categories` (primary first; `disease_profiles.record_categories`) when
+there is more than one cancer, found through Disease Category management's names
+(each made into its slug) with the keyword rules as the fallback for a slug it
+does not hold. The disease tab is then one tab named "Diseases" with a section
+per cancer under its own heading (a category with no hand-authored section says
+its fields are under Additional fields), created fields say whose they are, and
+the tab offers one Add Field link per cancer. The attestation and the therapy
+tabs still read the primary cancer alone.
+
+Inside the tab a control reads its field's membership
+(`DiseaseProfile.tsx`, `ClinicalField`): a field of another disease's
+extension that holds a value renders read-only with "Not part of the <disease>
+record", is never cleared, and renders nothing when it is empty. Controls
+that do not go through `ClinicalField` (GELF, FLIPI) are not held to
+membership; they belong to the lymphoma section. Two limits remain with
+#2332: a record with several cancers is read by its primary disease, and the
+disease-scoped choice lists (#1224) are not done. The keyword match survives
+only as the fallback for a disease name Disease Category management does not
+hold, so a record whose name is not mapped keeps the tab it had.
+
+A created field takes a value on the tab (#2669), along the
+[PatientRecord-first path](patient-record-first-writes.md#created-fields):
+the record PATCH carries it under `custom_fields`, it lands in
+`PatientRecord.custom_fields`, and it is projected into OMOP through the
+field's own mapping. The section renders an input for each field the
+writable-fields descriptor lists as writable for this caller and this
+patient, and a read-only box otherwise, with the server's reason when it
+gives one (a field the descriptor does not list, as on a host served by an
+older instance, is simply read-only); a computed field shows its formula's
+result. A value already in a patient's OMOP data for the
+field's concept (`_get_custom_patient_field_data`) appears when the record
+is next derived, so a field added just now is empty on a record until then;
+`manage.py backfill_patient_records --all` derives every record.
+
+With provisional data on (#2857), the same reader runs over rows from proposed
+mappings (`custom_field_answers`, `provisional_record.custom_proposals`): a proposal
+fills a created field the record leaves empty, marked with its confidence in
+`patient_record_confidence.custom_fields` (`{name: percent}`) and in the record read as
+`provisional_fields["custom_fields.<name>"]`. A computed field is not proposed. The
+[plan](provisional_data_plan.md#created-fields-as-built-2857) has the rules.
 
 ### Whose record a field is part of: `FieldDiseaseMembership`
 

@@ -22,9 +22,13 @@ SYSTEM: frozenset[str] = frozenset({
     'oauth2_provider.IDToken', 'oauth2_provider.RefreshToken',
     # Family auth refresh tokens (phr#43): this deployment's sessions.
     'family_auth.RefreshToken',
+    # The audit trail of answer mappings; it belongs to the instance it happened on.
+    'omop_core.FieldValueConceptMappingRevision',
     'patient_portal.AuditEvent', 'patient_portal.BreakGlassGrant',
     'patient_portal.Identity', 'patient_portal.Identity_groups',
     'patient_portal.Identity_user_permissions', 'patient_portal.PasswordHistory',
+    # Invitations to become staff here, by this deployment's sign-in providers.
+    'patient_portal.StaffInvitation',
     'patient_portal.ServiceAccessToken', 'patient_portal.ServiceApplication',
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
@@ -52,6 +56,14 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.Organization', 'omop_core.PatientGroup',
     'omop_core.PatientGroupMembership', 'omop_core.PersonalRepresentative',
     'omop_core.FhirConnection', 'omop_core.FhirOauthState',
+    # A patient's link to this deployment's Garmin app registration (#2802).
+    'omop_core.GarminConnection',
+    # A patient's saved Garmin Connect Personal API key, encrypted (#2834).
+    'omop_core.GarminPersonalKey',
+    # A patient's phones signed in to this deployment's Open Wearables SDK
+    # routes, and the running day totals of what they sent (#2810).
+    'omop_core.OpenWearablesConnection', 'omop_core.OpenWearablesDevice',
+    'omop_core.OpenWearablesDay',
     # Instance-specific unit policy and its audit history must not follow vocabulary copies.
     'omop_core.CanonicalUnitPreference', 'omop_core.CanonicalUnitChange',
     # Holds this deployment's own SMART client registration.
@@ -129,7 +141,9 @@ _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
     'omop_core.ChronicConditionOverride',
     'omop_core.CustomPatientField', 'omop_core.DiseaseCategoryChoice',
     'omop_core.DiseaseCategoryMapping',
-    'omop_core.FieldChoice', 'omop_core.FieldChoiceCode',
+    'omop_core.FieldChoice', 'omop_core.FieldChoiceAlias',
+    'omop_core.FieldChoiceCode', 'omop_core.FieldChoiceDisease',
+    'omop_core.FieldValueConceptMapping',
     'omop_core.FieldConceptMapping', 'omop_core.FieldDiseaseMembership',
     'omop_core.FieldFormula', 'omop_core.FieldSynonym',
     'omop_core.MappingDestinationCandidate',
@@ -152,6 +166,8 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
     'omop_core.PatientSourceCode',
     'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional',
+    # A user's rejection of a proposed value, kept beside the record (#2671).
+    'omop_core.ProposalRejection',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
     # The patient's own confirmation that the treatment list is complete (#1924).
     'omop_core.TherapyHistoryAttestation',

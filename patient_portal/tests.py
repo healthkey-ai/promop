@@ -7100,9 +7100,12 @@ class _ConceptFixtureBase(_SmartBase):
         # may already contain these real IDs, codes and other matching names.
         # Unloaded vocabulary mappings legitimately have a NULL concept. SQL
         # NOT IN (NULL) matches no rows, so exclude those from the subquery.
-        Concept.objects.filter(vocabulary_id__in=('LOINC', 'SNOMED')).exclude(
-            pk__in=FieldConceptMapping.objects.filter(concept_id__isnull=False).values_list('concept_id', flat=True),
-        ).delete()
+        # Answer mappings (#1224) protect their target and question concepts too.
+        from omop_core.models import FieldValueConceptMapping
+        held = set(FieldConceptMapping.objects.filter(concept_id__isnull=False).values_list('concept_id', flat=True))
+        held |= set(FieldValueConceptMapping.objects.filter(target_concept_id__isnull=False).values_list('target_concept_id', flat=True))
+        held |= set(FieldValueConceptMapping.objects.filter(question_concept_id__isnull=False).values_list('question_concept_id', flat=True))
+        Concept.objects.filter(vocabulary_id__in=('LOINC', 'SNOMED')).exclude(pk__in=held).delete()
         Vocabulary.objects.filter(pk__in=('LOINC', 'SNOMED')).update(vocabulary_version='')
 
         # Token with no read scope — must be rejected by ScopedTokenPermission
@@ -7870,6 +7873,17 @@ class PatientRecordOmopActionTest(TestCase):
         c.force_authenticate(user=identity)
         return c
 
+    def client_rows(self, person_id, **params):
+        resp = self._client_as(self.admin).get(
+            f'/api/v1/patient-records/{person_id}/omop-rows/', {'table': 'measurements', **params})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.data['rows']
+
+    def test_the_legacy_path_keeps_the_raw_rows(self):
+        resp = self._client_as(self.admin).get(f'/api/patient-info/{self.person.person_id}/omop/')
+        tables = {table['key']: table for table in resp.data['tables']}
+        self.assertEqual(tables['measurements']['rows'][0]['measurement_id'], self.measurement.measurement_id)
+
     def test_org_admin_can_view_consolidated_omop_rows(self):
         resp = self._client_as(self.admin).get(
             f'/api/v1/patient-records/{self.person.person_id}/omop/'
@@ -7877,8 +7891,12 @@ class PatientRecordOmopActionTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         tables = {table['key']: table for table in resp.data['tables']}
         self.assertEqual(resp.data['person_id'], self.person.person_id)
+        # Measurements come grouped by concept (#2863): the rows are read per group.
         self.assertEqual(tables['measurements']['count'], 1)
-        self.assertEqual(tables['measurements']['rows'][0]['measurement_id'], self.measurement.measurement_id)
+        self.assertTrue(tables['measurements']['grouped'])
+        self.assertEqual(tables['measurements']['unresolved_groups'][0]['count'], 1)
+        rows = self.client_rows(self.person.person_id, concept=0, source_value='')
+        self.assertEqual(rows[0]['id'], self.measurement.measurement_id)
         self.assertEqual(tables['condition_occurrences']['count'], 1)
         self.assertEqual(
             tables['condition_occurrences']['rows'][0]['condition_occurrence_id'],
@@ -14709,7 +14727,9 @@ class AuthControlsTest(TestCase):
         from django.test import RequestFactory
         from patient_portal.admin import IdentityAdmin
         request = RequestFactory().post('/admin/')
-        request.user = self.identity
+        # The action is an administrator's: a superuser here, whom no staff
+        # role's organisation scope (STAFF_ORGANIZATIONS) limits.
+        request.user = Identity.objects.create_superuser(email='root-reset@test.com', password='Root-passw0rd-9021')
         setattr(request, 'session', 'session')
         setattr(request, '_messages', FallbackStorage(request))
         IdentityAdmin(Identity, site).require_password_change(
@@ -16322,9 +16342,11 @@ class SelfServicePasswordResetTest(TestCase):
 
     def test_known_email_returns_200_and_sends_email(self):
         from django.core import mail
-        resp = APIClient().post('/api/v1/auth/request-reset/', {
-            'email': 'self-reset@test.com',
-        })
+        # The email goes once the request commits (queue_password_reset).
+        with self.captureOnCommitCallbacks(execute=True):
+            resp = APIClient().post('/api/v1/auth/request-reset/', {
+                'email': 'self-reset@test.com',
+            })
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn('self-reset@test.com', mail.outbox[0].to)
@@ -16350,9 +16372,10 @@ class SelfServicePasswordResetTest(TestCase):
             )
             federated.set_unusable_password()
             federated.save()
-        response = APIClient().post('/api/v1/auth/request-reset/', {
-            'email': self.identity.email.upper(),
-        })
+        with self.captureOnCommitCallbacks(execute=True):
+            response = APIClient().post('/api/v1/auth/request-reset/', {
+                'email': self.identity.email.upper(),
+            })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(mail.outbox), 1)
         uid = urlsafe_base64_encode(force_bytes(self.identity.pk))
@@ -18883,15 +18906,15 @@ class WearableUploadEndpointTest(TestCase):
                 measurement_concept=self.wearable_concepts['walking_step_length'],
             ).exists())
 
-    def test_unresolvable_metric_is_reported_not_silently_dropped(self):
-        """A missing concept must be distinguishable from "no data exported"."""
-        from omop_core.models import Concept
-        from omop_core.services.concept_cache import concept_cache_clear
+    def test_a_metric_with_no_approved_mapping_is_kept_unresolved_and_reported(self):
+        """A reading no approved mapping answers for is stored under its device
+        code and waits (#2835), and the answer says so: neither dropped, nor
+        indistinguishable from "no data exported"."""
+        from omop_core.models import Measurement, PatientSourceCode, SourceCodeConceptMapping
 
-        Concept.objects.filter(
-            concept_id=self.wearable_concepts['vo2_max'].concept_id).delete()
-        concept_cache_clear()
-        self.addCleanup(concept_cache_clear)
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Apple', source_code='HKQuantityTypeIdentifierVO2Max',
+        ).update(status='proposed', target_concept=None)
 
         xml = """<?xml version="1.0" encoding="UTF-8"?>
 <HealthData>
@@ -18901,9 +18924,17 @@ class WearableUploadEndpointTest(TestCase):
 </HealthData>
 """
         data = self._upload_apple(xml)
-        self.assertEqual(data['samples_created'], 0)
-        self.assertEqual(data['unmapped_samples'], 1, data)
-        self.assertIn('vo2_max', data['unmapped_metrics'])
+        self.assertEqual(data['samples_created'], 1)
+        self.assertEqual(data['unmapped_samples'], 0, data)
+        self.assertEqual((data['unresolved_samples'], data['unresolved_metrics']), (1, ['vo2_max']))
+        row = Measurement.objects.get(
+            person=self.person, measurement_source_value='HKQuantityTypeIdentifierVO2Max')
+        self.assertEqual((row.measurement_concept_id, float(row.value_as_number), row.confidence),
+                         (0, 34.5, None))
+        # The patient holds the code under Apple's vocabulary: the Source Codes tab lists it.
+        self.assertTrue(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='Apple',
+            source_value='HKQuantityTypeIdentifierVO2Max', omop_table='measurement').exists())
 
     def test_rows_are_typed_patient_self_report(self):
         """Provenance must be 32865, not 'Survey' (32883) or 'Lab' (32856). (#441)"""
@@ -19113,11 +19144,126 @@ class WearableUploadEndpointTest(TestCase):
         client = self._client_as(self.identity)
         resp = client.post(
             '/api/v1/patient-records/upload-wearable/',
-            data={'file': uploaded, 'device_type': 'oura'},
+            data={'file': uploaded, 'device_type': 'fitbit'},
             format='multipart',
         )
         self.assertEqual(resp.status_code, 400)
         self.assertIn('device_type', resp.data['error'])
+
+    # -- Oura Ring export (#2889) ---------------------------------------------
+
+    _OURA_ACTIVITY = (
+        'id;day;steps;high_activity_time;medium_activity_time;active_calories\n'
+        'a;2024-07-01;8200;600;1800;410\n')
+    _OURA_SLEEP = (
+        'id;day;type;total_sleep_duration;average_hrv;lowest_heart_rate;average_breath\n'
+        's;2024-07-01;long_sleep;27000;52;51;14.5\n')
+
+    def _post_oura(self, filename, content, identity=None, **fields):
+        import io
+        import zipfile
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        if filename.endswith('.zip'):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, 'w') as archive:
+                for name, text in content.items():
+                    archive.writestr(name, text)
+            content = buffer.getvalue()
+        else:
+            content = content.encode()
+        uploaded = SimpleUploadedFile(filename, content)
+        return self._client_as(identity or self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'oura', **fields},
+            format='multipart',
+        )
+
+    def test_oura_export_is_stored_as_ordinary_source_codes(self):
+        """The zip's rows are filed under the Oura vocabulary, one code per metric."""
+        from omop_core.models import Observation, PatientSourceCode, SourceCodeConceptMapping, WearableUpload
+        resp = self._post_oura('oura.zip', {
+            'App Data/dailyactivity.csv': self._OURA_ACTIVITY,
+            'App Data/sleepmodel.csv': self._OURA_SLEEP,
+            'App Data/heartrate.csv': 'timestamp;bpm\n',
+        })
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 7)
+
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'oura')
+        # The device's own code, in the Oura vocabulary, in the patient's inventory.
+        held = set(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='Oura').values_list('source_value', flat=True))
+        # Under Oura's own spelling: a bare ``steps`` is Garmin's.
+        self.assertEqual(held, {'oura_steps', 'oura_active_minutes', 'oura_active_energy',
+                                'oura_sleep_duration', 'oura_hrv_rmssd', 'oura_resting_hr',
+                                'oura_respiratory_rate'})
+        self.assertTrue(Observation.objects.filter(
+            person=self.person, observation_source_value='oura_steps', value_as_number=8200).exists())
+        self.assertTrue(Measurement.objects.filter(
+            person=self.person, measurement_source_value='oura_hrv_rmssd', value_as_number=52).exists())
+        # No Oura mapping is approved, so each code is queued for a curator.
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', status='approved').exists())
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Oura', source_code='oura_steps').exists())
+
+    def test_oura_csv_alone_is_accepted(self):
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 3)
+
+    def test_oura_upload_twice_stores_each_reading_once(self):
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 0)
+        self.assertEqual(resp.data['duplicates_skipped'], 3)
+        self.assertEqual(self._wearable_rows(self.person)[0], 3)
+
+    def test_oura_upload_refuses_other_file_types_and_unreadable_files(self):
+        resp = self._post_oura('oura.fit', 'x')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('.zip', resp.data['error'])
+        resp = self._post_oura('oura.zip', {'notes.txt': 'nothing here'})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('No Oura export files found', resp.data['error'])
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_a_later_oura_export_replaces_the_days_an_earlier_one_wrote(self):
+        """Oura revises recent days: the corrected total replaces, never stacks."""
+        from omop_core.models import Observation
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        revised = self._OURA_ACTIVITY.replace(';8200;', ';9100;')
+        resp = self._post_oura('dailyactivity.csv', revised)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        steps = Observation.objects.filter(person=self.person, observation_source_value='oura_steps')
+        self.assertEqual(list(steps.values_list('value_as_number', flat=True)), [9100])
+
+    def test_a_parse_refusal_of_another_device_is_still_the_generic_answer(self):
+        resp = self._client_as(self.identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': __import__('django.core.files.uploadedfile', fromlist=['x']).SimpleUploadedFile(
+                'export.zip', b'not a zip'), 'device_type': 'apple'},
+            format='multipart')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('Failed to parse file', resp.data['error'])
+
+    def test_oura_upload_started_from_another_record_is_refused(self):
+        other = Person.objects.create(person_id=99012, family_name='Other', given_name='Olive')
+        PatientRecord.objects.create(person=other)
+        resp = self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY, person_id=str(other.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_oura_upload_is_deleted_with_its_rows(self):
+        from omop_core.models import WearableUpload
+        self._post_oura('dailyactivity.csv', self._OURA_ACTIVITY)
+        upload = WearableUpload.objects.get(person=self.person)
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._wearable_rows(self.person)[0], 0)
 
     def test_upload_wrong_extension(self):
         """POST with wrong file extension returns 400."""
@@ -19144,6 +19290,84 @@ class WearableUploadEndpointTest(TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
+    # -- The record the page shows (#2819) ----------------------------------
+
+    _STEPS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount"
+          startDate="2024-07-09 08:00:00 -0700"
+          endDate="2024-07-09 08:30:00 -0700" value="4321"/>
+</HealthData>
+"""
+
+    def _post_steps(self, identity, **fields):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile(
+            'export.zip', self._make_apple_zip(self._STEPS_XML).read(), content_type='application/zip')
+        return self._client_as(identity).post(
+            '/api/v1/patient-records/upload-wearable/',
+            data={'file': uploaded, 'device_type': 'apple', **fields},
+            format='multipart',
+        )
+
+    def _wearable_rows(self, person):
+        from omop_core.models import Measurement, Observation, WearableUpload
+        return (Measurement.objects.filter(person=person).count()
+                + Observation.objects.filter(person=person).count(),
+                WearableUpload.objects.filter(person=person).count())
+
+    def test_upload_naming_the_callers_own_record_is_stored(self):
+        resp = self._post_steps(self.identity, person_id=str(self.person.person_id))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertEqual(self._wearable_rows(self.person), (1, 1))
+
+    def test_upload_started_from_another_record_is_refused_and_writes_nothing(self):
+        """The page says whose record it shows; the rows would go to the caller's.
+
+        Refused, so an upload from somebody else's page is never filed quietly
+        under the caller while that page reports it."""
+        other = Person.objects.create(person_id=99002, family_name='Other', given_name='Olive')
+        PatientRecord.objects.create(person=other)
+        resp = self._post_steps(self.identity, person_id=str(other.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.data, {'error': 'Wearable uploads go to your own record only.'})
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+        self.assertEqual(self._wearable_rows(other), (0, 0))
+
+    def test_upload_from_another_record_is_refused_for_an_admin_who_is_a_patient(self):
+        """Staff reach every record, and still upload only to their own."""
+        admin = Identity.objects.create_user(email='admin-patient@test.com', password='pw', is_staff=True)
+        own = Person.objects.create(person_id=99003, family_name='Admin', given_name='Ada')
+        PatientRecord.objects.create(person=own)
+        from patient_portal.models import PatientUser
+        PatientUser.objects.create(identity=admin, person=own)
+
+        resp = self._post_steps(admin, person_id=str(self.person.person_id))
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+        self.assertEqual(self._wearable_rows(own), (0, 0))
+
+        resp = self._post_steps(admin, person_id=str(own.person_id))
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._wearable_rows(own), (1, 1))
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_upload_with_a_person_id_that_is_no_id_is_refused(self):
+        for value in ('abc', '99001x', '0', '-99001'):
+            with self.subTest(person_id=value):
+                resp = self._post_steps(self.identity, person_id=value)
+                self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self._wearable_rows(self.person), (0, 0))
+
+    def test_upload_without_a_person_id_goes_to_the_callers_record(self):
+        """An older page, or the federated one before it sends the field."""
+        for fields in ({}, {'person_id': ''}):
+            with self.subTest(fields=fields):
+                resp = self._post_steps(self.identity, **fields)
+                self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(self._wearable_rows(self.person)[1], 2)
+
     def test_upload_unauthenticated(self):
         """POST without authentication returns 401/403."""
         from django.core.files.uploadedfile import SimpleUploadedFile
@@ -19155,6 +19379,958 @@ class WearableUploadEndpointTest(TestCase):
             format='multipart',
         )
         self.assertIn(resp.status_code, [401, 403])
+
+
+# No key to encrypt under, whatever the environment holds: these are the sync
+# with nothing saved. GarminSavedKeyTest covers the saved key (#2834).
+@override_settings(GARMIN_TOKEN_KEY='', GARMIN_TOKEN_KEY_FALLBACKS=[])
+class GarminSyncEndpointTest(TestCase):
+    """POST /api/v1/patient-records/sync-garmin/ (#2794).
+
+    The Garmin Connect read is patched: tests/test_garmin_connect.py covers
+    it. These cover who may sync, what is written, and the rule that a day's
+    total from the API replaces what earlier Garmin uploads wrote for the day.
+    """
+
+    URL = '/api/v1/patient-records/sync-garmin/'
+    KEY = 'gcpk_TEST-key.0123456789'
+
+    @classmethod
+    def setUpTestData(cls):
+        # The same concepts, approved Garmin mappings, type concept and
+        # patient as the file upload's tests.
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+        cls.day = timezone.now().date() - timedelta(days=3)
+
+    def setUp(self):
+        # The throttle counts in the cache, per user, across tests.
+        from django.core.cache import cache
+        cache.clear()
+
+    def _client_as(self, identity):
+        # Signed in with a session: the endpoint refuses any credential that
+        # can be presented without the person.
+        c = APIClient()
+        c.force_login(identity)
+        return c
+
+    def _sample(self, metric_key, value, day=None):
+        from omop_core.services.wearable_parsers import WearableSample
+        return WearableSample(metric_key=metric_key, date=day or self.day, value=value)
+
+    def _sync(self, samples, failed=(), body=None, identity=None, expect=200):
+        """Sync with Garmin answering ``samples``; returns (response, the patched read)."""
+        from unittest import mock
+        with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                        return_value=(list(samples), list(failed))) as fetch:
+            resp = self._client_as(identity or self.identity).post(
+                self.URL, {'api_key': self.KEY} if body is None else body, format='json')
+        self.assertEqual(resp.status_code, expect, getattr(resp, 'data', None))
+        return resp, fetch
+
+    def _values(self, metric_key, day=None):
+        """Stored values for a metric and day, from whichever table holds it."""
+        from omop_core.models import Measurement, Observation
+        concept = self.wearable_concepts[metric_key]
+        if concept.domain_id == 'Observation':
+            rows = Observation.objects.filter(
+                person=self.person, observation_concept=concept, observation_date=day or self.day)
+        else:
+            rows = Measurement.objects.filter(
+                person=self.person, measurement_concept=concept, measurement_date=day or self.day)
+        return sorted(float(v) for v in rows.values_list('value_as_number', flat=True))
+
+    def _stored(self, device_type, metric_key, values, type_concept_id=None, in_history=True):
+        """Rows as an earlier upload from ``device_type`` left them, with its history."""
+        from omop_core.models import Measurement, Observation, WearableUpload
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+        from omop_core.services.pk import next_pk_batch
+        concept = self.wearable_concepts[metric_key]
+        type_id = type_concept_id or WEARABLE_TYPE_CONCEPT_ID
+        if concept.domain_id == 'Observation':
+            ids = next_pk_batch(Observation, 'observation_id', len(values))
+            Observation.objects.bulk_create([
+                Observation(observation_id=pk, person=self.person, observation_concept=concept,
+                            observation_date=self.day, observation_type_concept_id=type_id,
+                            value_as_number=value, observation_source_value=concept.concept_code)
+                for pk, value in zip(ids, values)])
+        else:
+            ids = next_pk_batch(Measurement, 'measurement_id', len(values))
+            Measurement.objects.bulk_create([
+                Measurement(measurement_id=pk, person=self.person, measurement_concept=concept,
+                            measurement_date=self.day, measurement_type_concept_id=type_id,
+                            value_as_number=value, measurement_source_value=concept.concept_code)
+                for pk, value in zip(ids, values)])
+        if in_history:
+            WearableUpload.objects.create(
+                person=self.person, device_type=device_type, filename='earlier',
+                samples_created=len(values),
+                sample_summary=[{'metric': metric_key, 'date': self.day.isoformat(), 'value': value}
+                                for value in values])
+
+    # -- what a sync writes ---------------------------------------------------
+
+    def test_a_sync_writes_rows_and_records_itself(self):
+        from omop_core.models import Measurement, Observation, WearableUpload
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+
+        resp, fetch = self._sync(
+            [self._sample('steps', 9200.0), self._sample('resting_hr', 52.0),
+             self._sample('sleep_duration', 7.5), self._sample('hrv_rmssd', 48.0)],
+            body={'api_key': f'  {self.KEY} ', 'days': 7, 'end_date': self.day.isoformat()})
+
+        start = self.day - timedelta(days=6)
+        fetch.assert_called_once_with(self.KEY, start, self.day)
+        self.assertEqual(resp.data, {
+            'samples_created': 4, 'duplicates_skipped': 0, 'replaced': 0,
+            'unmapped_samples': 0, 'unmapped_metrics': [],
+            'start_date': start.isoformat(), 'end_date': self.day.isoformat(),
+            'datasets_failed': [], 'key_saved': False,
+        })
+
+        # Routed by the concept's domain, typed and coded as the file upload does.
+        steps = Observation.objects.get(
+            person=self.person, observation_concept=self.wearable_concepts['steps'])
+        self.assertEqual(float(steps.value_as_number), 9200.0)
+        self.assertEqual(steps.observation_date, self.day)
+        self.assertEqual(steps.observation_type_concept_id, WEARABLE_TYPE_CONCEPT_ID)
+        # Filed under Garmin's own code, as a hospital's result is under its (#2835).
+        self.assertEqual(steps.observation_source_value, 'steps')
+        self.assertEqual(steps.unit_source_value, '/d')
+        hr = Measurement.objects.get(
+            person=self.person, measurement_concept=self.wearable_concepts['resting_hr'])
+        self.assertEqual(float(hr.value_as_number), 52.0)
+        self.assertEqual(hr.measurement_type_concept_id, WEARABLE_TYPE_CONCEPT_ID)
+
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'garmin')
+        self.assertEqual(upload.filename,
+                         f'Garmin Connect sync {start.isoformat()} to {self.day.isoformat()}')
+        self.assertEqual(upload.samples_created, 4)
+        self.assertEqual(upload.uploaded_by, self.identity)
+        self.assertEqual(len(upload.sample_summary), 4)
+        self.assertNotIn(self.KEY, json.dumps(upload.sample_summary) + upload.filename)
+        # Each entry names the row the sync wrote for it.
+        by_metric = {entry['metric']: entry for entry in upload.sample_summary}
+        self.assertEqual(by_metric['steps']['row_id'], steps.observation_id)
+        self.assertEqual(by_metric['steps']['row_table'], 'observation')
+        self.assertEqual(by_metric['resting_hr']['row_id'], hr.measurement_id)
+        self.assertEqual(by_metric['resting_hr']['row_table'], 'measurement')
+
+    def test_the_range_defaults_to_thirty_days_ending_yesterday(self):
+        resp, fetch = self._sync([])
+        today = timezone.now().date()
+        fetch.assert_called_once_with(
+            self.KEY, today - timedelta(days=30), today - timedelta(days=1))
+        self.assertEqual(resp.data['samples_created'], 0)
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(resp.data['end_date'], (today - timedelta(days=1)).isoformat())
+
+    def test_data_sets_garmin_did_not_return_are_named(self):
+        resp, _ = self._sync([self._sample('steps', 9200.0)], failed=['sleep', 'hrv'])
+        self.assertEqual(resp.data['datasets_failed'], ['sleep', 'hrv'])
+        self.assertEqual(resp.data['samples_created'], 1)
+
+    def test_an_artifact_value_is_not_written(self):
+        resp, _ = self._sync([self._sample('spo2', 12.0), self._sample('resting_hr', 52.0)])
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertEqual(self._values('spo2'), [])
+
+    def test_a_metric_with_no_garmin_mapping_is_kept_unresolved_and_queued(self):
+        from omop_core.models import Measurement, SourceCodeConceptMapping
+        resp, _ = self._sync([self._sample('body_mass', 70.0), self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertEqual(resp.data['unmapped_samples'], 0)
+        self.assertEqual((resp.data['unresolved_samples'], resp.data['unresolved_metrics']),
+                         (1, ['body_mass']))
+        row = Measurement.objects.get(person=self.person, measurement_source_value='body_mass')
+        self.assertEqual((row.measurement_concept_id, float(row.value_as_number)), (0, 70.0))
+        # The code joins the mapping queue, as a hospital's unmapped code does.
+        queued = SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin', source_code='body_mass')
+        self.assertEqual((queued.status, queued.target_concept_id, queued.omop_table, queued.metric_key),
+                         ('proposed', None, 'measurement', 'body_mass'))
+
+    # -- a day's total replaces what Garmin uploads wrote for the day ---------
+
+    def test_a_day_total_replaces_the_partial_rows_fit_uploads_stacked(self):
+        """Two .fit files gave the day 3000 and 6000 steps, which the
+        derivation sums. The API's 9200 is the day: beside those rows it would
+        read as 18200."""
+        self._stored('garmin', 'steps', [3000.0, 6000.0])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertEqual(resp.data['replaced'], 2)
+        self.assertEqual(self._values('steps'), [9200.0])
+
+    def test_a_later_sync_replaces_an_earlier_syncs_value(self):
+        """Synced before the watch had sent the whole day, then again after."""
+        self._sync([self._sample('steps', 4100.0), self._sample('resting_hr', 55.0)])
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertEqual(resp.data['replaced'], 2)
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+
+    def test_syncing_the_same_day_again_changes_nothing(self):
+        samples = [self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)]
+        self._sync(samples)
+        resp, _ = self._sync(samples)
+        self.assertEqual(resp.data['samples_created'], 0)
+        self.assertEqual(resp.data['duplicates_skipped'], 2)
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [9200.0])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+
+    def test_a_stray_garmin_row_beside_the_right_value_is_removed(self):
+        """A .fit file uploaded after a sync stacks a partial on the total; the
+        next sync keeps the total and drops the partial."""
+        self._sync([self._sample('steps', 9200.0)])
+        self._stored('garmin', 'steps', [2000.0])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['samples_created'], 0)
+        self.assertEqual(resp.data['duplicates_skipped'], 1)
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._values('steps'), [9200.0])
+
+    def test_another_days_rows_are_left_alone(self):
+        self._stored('garmin', 'steps', [3000.0])
+        other = self.day - timedelta(days=1)
+        self._sync([self._sample('steps', 9200.0, day=other)])
+        self.assertEqual(self._values('steps'), [3000.0])
+        self.assertEqual(self._values('steps', day=other), [9200.0])
+
+    def test_an_apple_upload_is_never_replaced(self):
+        self._stored('apple', 'steps', [5000.0])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [5000.0, 9200.0])
+
+    def test_a_value_both_devices_recorded_is_not_garmins_to_replace(self):
+        """Apple and a .fit file both said 58 bpm: one row, in both histories.
+        Nothing says it is Garmin's, so it stays."""
+        self._stored('apple', 'resting_hr', [58.0])
+        from omop_core.models import WearableUpload
+        WearableUpload.objects.create(
+            person=self.person, device_type='garmin', filename='day.fit',
+            sample_summary=[{'metric': 'resting_hr', 'date': self.day.isoformat(), 'value': 58.0}])
+        resp, _ = self._sync([self._sample('resting_hr', 52.0)])
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('resting_hr'), [52.0, 58.0])
+
+    def test_a_row_no_upload_recorded_is_left_alone(self):
+        self._stored('garmin', 'steps', [3000.0], in_history=False)
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [3000.0, 9200.0])
+
+    def test_a_row_marked_entered_in_error_is_neither_a_duplicate_nor_replaced(self):
+        """It is kept, and it is not a value the patient has: the day still
+        gets its row."""
+        from omop_core.models import Observation
+        self._stored('garmin', 'steps', [9200.0, 3000.0])
+        Observation.objects.filter(person=self.person, observation_date=self.day).update(
+            is_erroneous=True)
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [3000.0, 9200.0, 9200.0])
+
+    def test_a_record_switched_off_while_garmin_was_being_read_is_not_written(self):
+        from unittest import mock
+        from patient_portal.consent import RECORD_OFF
+        # Permitted when the request arrives, withdrawn by the time it writes.
+        with mock.patch('patient_portal.consent.record_permitted', side_effect=[True, False]):
+            resp, fetch = self._sync([self._sample('steps', 9200.0)], expect=403)
+        fetch.assert_called_once()
+        self.assertEqual(resp.data, {'error': RECORD_OFF, 'key_saved': False})
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_row_another_ingest_path_wrote_is_left_alone(self):
+        """Same concept, day and a value a Garmin upload also recorded, but not
+        typed as a wearable upload's row: a FHIR sync's, say."""
+        other_type = self.wearable_concepts['spo2'].concept_id
+        self._stored('garmin', 'steps', [3000.0], type_concept_id=other_type)
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [3000.0, 9200.0])
+
+    def test_the_file_upload_still_stacks(self):
+        """replace_daily is the sync's rule only: a file is a part of a day."""
+        from unittest import mock
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self._stored('garmin', 'steps', [3000.0])
+        with mock.patch('omop_core.services.wearable_parsers.parse_garmin_fit',
+                        return_value=[self._sample('steps', 6000.0)]):
+            resp = self._client_as(self.identity).post(
+                '/api/v1/patient-records/upload-wearable/',
+                data={'file': SimpleUploadedFile('day.fit', b'fit'), 'device_type': 'garmin'},
+                format='multipart')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(resp.data, {
+            'samples_created': 1, 'duplicates_skipped': 0,
+            'unmapped_samples': 0, 'unmapped_metrics': [],
+        })
+        self.assertEqual(self._values('steps'), [3000.0, 6000.0])
+
+    def test_a_replace_derives_the_record_once(self):
+        from unittest import mock
+        self._stored('garmin', 'steps', [1000.0, 2000.0, 3000.0])
+        # The signal path imports the service's function when it fires; the
+        # view holds its own reference. Deleting three rows must reach neither
+        # more than the view's one explicit call.
+        with mock.patch('patient_portal.api.views.refresh_patient_record') as refresh, \
+                mock.patch('omop_core.services.patient_record_service.refresh_patient_record') as from_signal:
+            resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['replaced'], 3)
+        refresh.assert_called_once()
+        from_signal.assert_not_called()
+
+    def test_rows_are_not_kept_without_their_history(self):
+        """The history row is how a later sync knows these rows are Garmin's.
+        If it cannot be written, neither are the rows, and nothing is removed."""
+        from unittest import mock
+        from omop_core.models import WearableUpload
+        self._stored('garmin', 'steps', [3000.0])
+        with mock.patch.object(WearableUpload.objects, 'create', side_effect=RuntimeError('db')), \
+                mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                           return_value=([self._sample('steps', 9200.0),
+                                          self._sample('resting_hr', 52.0)], [])):
+            client = self._client_as(self.identity)
+            client.raise_request_exception = False
+            resp = client.post(self.URL, {'api_key': self.KEY}, format='json')
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(self._values('steps'), [3000.0])
+        self.assertEqual(self._values('resting_hr'), [])
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).count(), 1)
+
+    def test_the_write_costs_the_same_queries_for_two_days_or_thirty(self):
+        """Flat in the days synced and in the upload history behind them."""
+        from unittest import mock
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        runs = [0]
+
+        def queries(days):
+            # New values on every run, so each run replaces the one before:
+            # the deletes and the inserts are both exercised.
+            runs[0] += 1
+            samples = [self._sample(metric, value + runs[0], day=self.day - timedelta(days=n))
+                       for n in range(days)
+                       for metric, value in (('steps', 9000.0), ('resting_hr', 50.0))]
+            with mock.patch('patient_portal.api.views.refresh_patient_record'), \
+                    CaptureQueriesContext(connection) as captured:
+                resp, _ = self._sync(samples)
+            self.assertEqual(resp.data['samples_created'], len(samples))
+            return len(captured)
+
+        queries(30)
+        thirty_days = queries(30)
+        two_days = queries(2)
+        for _ in range(8):
+            queries(30)
+        self.assertEqual(queries(30), thirty_days)
+        self.assertEqual(two_days, thirty_days)
+
+    def test_a_fit_file_uploaded_now_is_replaced_by_its_recorded_row(self):
+        """An upload made since summaries name their rows: the row is known as
+        Garmin's by its id, not by its value."""
+        from unittest import mock
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        with mock.patch('omop_core.services.wearable_parsers.parse_garmin_fit',
+                        return_value=[self._sample('steps', 3000.0)]):
+            self._client_as(self.identity).post(
+                '/api/v1/patient-records/upload-wearable/',
+                data={'file': SimpleUploadedFile('day.fit', b'fit'), 'device_type': 'garmin'},
+                format='multipart')
+        self.assertEqual(self._values('steps'), [3000.0])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._values('steps'), [9200.0])
+
+    def test_an_apple_upload_made_now_is_never_replaced(self):
+        from unittest import mock
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        with mock.patch('omop_core.services.wearable_parsers.parse_apple_health_export',
+                        return_value=[self._sample('steps', 5000.0)]):
+            self._client_as(self.identity).post(
+                '/api/v1/patient-records/upload-wearable/',
+                data={'file': SimpleUploadedFile('export.zip', b'zip'), 'device_type': 'apple'},
+                format='multipart')
+        # Even when an old Garmin upload happens to list the same value.
+        from omop_core.models import WearableUpload
+        WearableUpload.objects.create(
+            person=self.person, device_type='garmin', filename='old.fit',
+            sample_summary=[{'metric': 'steps', 'date': self.day.isoformat(), 'value': 5000.0}])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [5000.0, 9200.0])
+
+    def test_a_row_the_sync_only_found_is_not_garmins_afterwards(self):
+        """Another path wrote 9200, typed as patient-reported like a wearable
+        row. A sync that returned 9200 found it and wrote nothing, so it does
+        not list it; when Garmin later says 9300 the row is still not Garmin's
+        to remove."""
+        self._stored('garmin', 'steps', [9200.0], in_history=False)
+        first, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(first.data['duplicates_skipped'], 1)
+        resp, _ = self._sync([self._sample('steps', 9300.0)])
+        self.assertEqual(resp.data['replaced'], 0)
+        self.assertEqual(self._values('steps'), [9200.0, 9300.0])
+
+    # -- history ----------------------------------------------------------------
+
+    def test_a_sync_is_listed_and_can_be_deleted(self):
+        self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+        client = self._client_as(self.identity)
+        listed = client.get('/api/v1/patient-records/wearable-uploads/').data
+        self.assertEqual(len(listed), 1)
+        self.assertEqual(listed[0]['device_type'], 'garmin')
+        self.assertTrue(listed[0]['filename'].startswith('Garmin Connect sync '))
+        self.assertEqual(listed[0]['samples_created'], 2)
+
+        resp = client.delete(f"/api/v1/patient-records/wearable-uploads/{listed[0]['id']}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['deleted_measurements'], 2)
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(self._values('resting_hr'), [])
+
+    def test_a_sync_lists_only_what_it_wrote(self):
+        """Syncs re-read the same days. One that found everything stored
+        writes an empty summary, not the whole range again."""
+        from omop_core.models import WearableUpload
+        samples = [self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)]
+        self._sync(samples)
+        self._sync(samples + [self._sample('spo2', 97.0)])
+        first, second = WearableUpload.objects.filter(person=self.person).order_by('id')
+        self.assertEqual(len(first.sample_summary), 2)
+        self.assertEqual([entry['metric'] for entry in second.sample_summary], ['spo2'])
+        self.assertEqual(second.samples_created, 1)
+        self.assertEqual(second.duplicates_skipped, 2)
+
+    def test_deleting_one_sync_leaves_the_rows_another_sync_wrote(self):
+        """Monday's sync wrote two days. Tuesday's read both again and wrote
+        one more. Deleting Tuesday's removes its one day, not Monday's."""
+        from omop_core.models import WearableUpload
+        monday, tuesday = self.day - timedelta(days=1), self.day
+        self._sync([self._sample('steps', 8000.0, day=monday - timedelta(days=1)),
+                    self._sample('steps', 8100.0, day=monday)])
+        self._sync([self._sample('steps', 8000.0, day=monday - timedelta(days=1)),
+                    self._sample('steps', 8100.0, day=monday),
+                    self._sample('steps', 8200.0, day=tuesday)])
+        first, second = WearableUpload.objects.filter(person=self.person).order_by('id')
+        client = self._client_as(self.identity)
+
+        resp = client.delete(f'/api/v1/patient-records/wearable-uploads/{second.id}/')
+        self.assertEqual(resp.data['deleted_measurements'], 1)
+        self.assertEqual(self._values('steps', day=tuesday), [])
+        self.assertEqual(self._values('steps', day=monday), [8100.0])
+        self.assertEqual(self._values('steps', day=monday - timedelta(days=1)), [8000.0])
+
+        resp = client.delete(f'/api/v1/patient-records/wearable-uploads/{first.id}/')
+        self.assertEqual(resp.data['deleted_measurements'], 2)
+        self.assertEqual(self._values('steps', day=monday), [])
+
+    def test_an_upload_from_before_rows_were_recorded_is_still_deleted_by_value(self):
+        from omop_core.models import WearableUpload
+        self._stored('garmin', 'steps', [3000.0])
+        upload = WearableUpload.objects.get(person=self.person)
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(resp.data['deleted_measurements'], 1)
+        self.assertEqual(self._values('steps'), [])
+
+    def test_deleting_a_sync_derives_the_record_once(self):
+        from unittest import mock
+        from omop_core.models import WearableUpload
+        self._sync([self._sample('steps', 9000.0 + n, day=self.day - timedelta(days=n))
+                    for n in range(5)])
+        upload = WearableUpload.objects.get(person=self.person)
+        with mock.patch('patient_portal.api.views.refresh_patient_record') as refresh, \
+                mock.patch('omop_core.services.patient_record_service.refresh_patient_record') as from_signal:
+            resp = self._client_as(self.identity).delete(
+                f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(resp.data['deleted_measurements'], 5)
+        refresh.assert_called_once()
+        from_signal.assert_not_called()
+
+    # -- who may sync, and with what ---------------------------------------------
+
+    def test_unauthenticated_is_refused(self):
+        resp = APIClient().post(self.URL, {'api_key': self.KEY}, format='json')
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_an_account_with_no_patient_record_is_refused(self):
+        resp, fetch = self._sync([], identity=self.unlinked_identity, expect=403)
+        fetch.assert_not_called()
+
+    def test_a_token_the_patient_delegated_to_an_application_is_refused(self):
+        """An authorization-code token authenticates as the patient and passes
+        IsAuthenticated, whatever its scopes. It is not the patient at the
+        keyboard: an application holding it could write to, and replace rows
+        in, the record with a Garmin key of its own."""
+        from unittest import mock
+        from oauth2_provider.models import AccessToken, Application
+        app = Application.objects.create(
+            name='Third-party app', client_id='garmin-test-app', user=self.unlinked_identity,
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            redirect_uris='https://app.example/callback')
+        for scope in ('patient/*.read', 'patient/*.read patient/*.write'):
+            token = AccessToken.objects.create(
+                user=self.identity, application=app, token=f'delegated-{len(scope)}',
+                expires=timezone.now() + timedelta(hours=1), scope=scope)
+            with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples') as fetch:
+                resp = APIClient().post(self.URL, {'api_key': self.KEY}, format='json',
+                                        HTTP_AUTHORIZATION=f'Bearer {token.token}')
+            self.assertEqual(resp.status_code, 403, getattr(resp, 'data', None))
+            fetch.assert_not_called()
+
+    def test_a_credential_that_is_not_a_session_is_refused(self):
+        from unittest import mock
+        client = APIClient()
+        client.force_authenticate(user=self.identity)
+        with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples') as fetch:
+            resp = client.post(self.URL, {'api_key': self.KEY}, format='json')
+        self.assertEqual(resp.status_code, 403)
+        fetch.assert_not_called()
+
+    def test_a_record_that_is_switched_off_is_refused(self):
+        from unittest import mock
+        from patient_portal.consent import RECORD_OFF
+        with mock.patch('patient_portal.consent.record_permitted', return_value=False):
+            resp, fetch = self._sync([], expect=403)
+        self.assertEqual(resp.data, {'error': RECORD_OFF})
+        fetch.assert_not_called()
+
+    def test_a_sync_started_from_another_persons_page_is_refused(self):
+        """The rows go to the caller's own record. A page showing someone else
+        says so, and the sync is refused, not filed under the caller."""
+        resp, fetch = self._sync([], body={'api_key': self.KEY, 'person_id': 12345}, expect=403)
+        fetch.assert_not_called()
+        self.assertIn('your own record', resp.data['error'])
+        for own in (self.person.person_id, str(self.person.person_id)):
+            self._sync([], body={'api_key': self.KEY, 'person_id': own})
+
+    def test_get_is_not_allowed(self):
+        self.assertEqual(self._client_as(self.identity).get(self.URL).status_code, 405)
+
+    def test_a_missing_or_malformed_key_is_a_400_and_garmin_is_not_called(self):
+        for body in ({}, {'api_key': ''}, {'api_key': 'two words'}, {'api_key': 42},
+                     {'api_key': 'line\nbreak'}):
+            resp, fetch = self._sync([], body=body, expect=400)
+            fetch.assert_not_called()
+            self.assertIn('error', resp.data)
+
+    def test_a_bad_range_is_a_400_and_garmin_is_not_called(self):
+        tomorrow_plus = (timezone.now().date() + timedelta(days=2)).isoformat()
+        for extra in ({'days': 0}, {'days': 91}, {'days': 'all'},
+                      {'end_date': 'yesterday'}, {'end_date': tomorrow_plus}):
+            resp, fetch = self._sync([], body={'api_key': self.KEY, **extra}, expect=400)
+            fetch.assert_not_called()
+
+    def test_a_body_that_is_not_an_object_is_a_400(self):
+        resp, fetch = self._sync([], body=[self.KEY], expect=400)
+        fetch.assert_not_called()
+
+    def test_garmins_refusal_is_answered_with_its_status_and_writes_nothing(self):
+        from unittest import mock
+        from omop_core.models import WearableUpload
+        from omop_core.services import garmin_connect
+        for status_code, message in ((400, garmin_connect.KEY_REJECTED),
+                                     (429, garmin_connect.RATE_LIMITED),
+                                     (424, garmin_connect.UNREACHABLE),
+                                     (424, garmin_connect.TOO_SLOW),
+                                     (502, garmin_connect.UNEXPECTED)):
+            with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                            side_effect=garmin_connect.GarminSyncError(message, status_code)), \
+                    self.assertLogs('patient_portal.api.views', level='INFO') as logs:
+                resp = self._client_as(self.identity).post(
+                    self.URL, {'api_key': self.KEY}, format='json')
+            self.assertEqual(resp.status_code, status_code)
+            self.assertEqual(resp.data, {'error': message})
+            self.assertNotIn(self.KEY, '\n'.join(logs.output))
+        self.assertFalse(WearableUpload.objects.filter(person=self.person).exists())
+
+    def test_the_key_is_not_in_the_answer_or_the_logs(self):
+        # The view's own lines and the audit trail's record of the request.
+        with self.assertLogs('patient_portal.api.views', level='DEBUG') as logs, \
+                self.assertLogs('audit', level='DEBUG') as audit:
+            resp, _ = self._sync([self._sample('steps', 9200.0)])
+        self.assertNotIn(self.KEY, json.dumps(resp.data))
+        self.assertNotIn(self.KEY, '\n'.join(logs.output + audit.output))
+
+    def test_syncs_are_limited_per_user(self):
+        from unittest import mock
+        from patient_portal.api.views import GarminSyncThrottle
+        with mock.patch.object(GarminSyncThrottle, 'rate', '2/hour'):
+            self._sync([])
+            self._sync([])
+            resp, fetch = self._sync([], expect=429)
+            fetch.assert_not_called()
+            # Another user's bucket is their own.
+            self._sync([], identity=self.unlinked_identity, expect=403)
+
+
+class GarminSavedKeyTest(TestCase):
+    """The Personal API key saved for later syncs (#2834).
+
+    Saved encrypted once Garmin has accepted it and the patient asked, used
+    when a sync sends no key, returned by nothing, and removed by the patient
+    or when Garmin says it is no key of its. The Garmin read is patched, as
+    in GarminSyncEndpointTest.
+    """
+
+    URL = '/api/v1/patient-records/sync-garmin/'
+    KEY_URL = '/api/v1/patient-records/garmin-key/'
+    KEY = 'gcpk_TEST-key.0123456789'
+    OTHER_KEY = 'gcpk_OTHER-key.9876543210'
+    # Fernet keys made for each run; they protect nothing.
+    TOKEN_KEY = __import__('cryptography.fernet', fromlist=['Fernet']).Fernet.generate_key().decode()
+    NEXT_TOKEN_KEY = __import__('cryptography.fernet', fromlist=['Fernet']).Fernet.generate_key().decode()
+    WITH_KEY = override_settings(GARMIN_TOKEN_KEY=TOKEN_KEY, GARMIN_TOKEN_KEY_FALLBACKS=[])
+    NOTHING_SAVED = {'can_save': True, 'saved': False, 'saved_at': None, 'last_used_at': None}
+
+    @classmethod
+    def setUpTestData(cls):
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _client(self, identity=None):
+        c = APIClient()
+        c.force_login(identity or self.identity)
+        return c
+
+    def _sync(self, body=None, identity=None, expect=200, error=None):
+        """A sync with Garmin answering no data, or refusing with ``error``.
+        With no ``body``, the key is typed and the box left ticked."""
+        from unittest import mock
+        outcome = {'side_effect': error} if error else {'return_value': ([], [])}
+        with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples', **outcome) as fetch:
+            resp = self._client(identity).post(
+                self.URL, {'api_key': self.KEY, 'remember': True} if body is None else body, format='json')
+        self.assertEqual(resp.status_code, expect, getattr(resp, 'data', None))
+        return resp, fetch
+
+    def _row(self, person=None):
+        from omop_core.models import GarminPersonalKey
+        return GarminPersonalKey.objects.filter(person=person or self.person).first()
+
+    def _stored_key(self):
+        from omop_core.services import garmin_oauth
+        return garmin_oauth.decrypt(self._row().api_key)
+
+    def _refusal(self, upstream):
+        from omop_core.services import garmin_connect
+        if upstream in (401, 403):
+            return garmin_connect.GarminSyncError(garmin_connect.KEY_REJECTED, 400, upstream=upstream)
+        if upstream == 429:
+            return garmin_connect.GarminSyncError(garmin_connect.RATE_LIMITED, 429, upstream=upstream)
+        return garmin_connect.GarminSyncError(garmin_connect.UNREACHABLE, 424, upstream=upstream)
+
+    def _another_account(self, email='garmin-key-next@test.com'):
+        return Identity.objects.create_user(email=email, password='x')
+
+    @WITH_KEY
+    def test_a_key_garmin_accepted_is_saved_encrypted(self):
+        from omop_core.services import garmin_oauth
+        with self.assertLogs('omop_core.services.garmin_saved_key', level='INFO') as logs:
+            resp, fetch = self._sync()
+        self.assertIs(resp.data['key_saved'], True)
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+        row = self._row()
+        self.assertEqual(row.saved_by, self.identity)
+        self.assertIsNotNone(row.last_used_at)
+        # What is stored is not the key, and reads back only under the deployment's key.
+        self.assertNotIn(self.KEY, row.api_key)
+        self.assertEqual(garmin_oauth.decrypt(row.api_key), self.KEY)
+        with override_settings(GARMIN_TOKEN_KEY=''):
+            self.assertIsNone(garmin_oauth.decrypt(row.api_key))
+        self.assertNotIn(self.KEY, json.dumps(resp.data))
+        self.assertNotIn(self.KEY, '\n'.join(logs.output))
+
+    @WITH_KEY
+    def test_a_sync_that_does_not_ask_saves_nothing(self):
+        """A page from before the key could be saved says it is not stored,
+        and sends no ``remember``. It must stay true."""
+        for body in ({'api_key': self.KEY}, {'api_key': self.KEY, 'remember': False}):
+            resp, _ = self._sync(body=body)
+            self.assertIs(resp.data['key_saved'], False)
+            self.assertIsNone(self._row())
+
+    def test_nothing_is_saved_where_the_deployment_has_no_key_to_encrypt_under(self):
+        with override_settings(GARMIN_TOKEN_KEY='', GARMIN_TOKEN_KEY_FALLBACKS=[]):
+            resp, _ = self._sync()
+            self.assertIs(resp.data['key_saved'], False)
+            self.assertIsNone(self._row())
+            status_ = self._client().get(self.KEY_URL).data
+        self.assertEqual(status_, {**self.NOTHING_SAVED, 'can_save': False})
+
+    @WITH_KEY
+    def test_a_key_garmin_refused_is_not_saved(self):
+        for upstream in (401, 403, 429, 503):
+            self._sync(error=self._refusal(upstream), expect=self._refusal(upstream).status)
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_one_off_sync_leaves_a_saved_key_alone(self):
+        self._sync()
+        resp, fetch = self._sync(body={'api_key': self.OTHER_KEY, 'remember': False})
+        self.assertEqual(fetch.call_args.args[0], self.OTHER_KEY)
+        self.assertIs(resp.data['key_saved'], True)
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_remember_must_be_true_or_false(self):
+        for value in ('no', 0, None, []):
+            resp, fetch = self._sync(body={'api_key': self.KEY, 'remember': value}, expect=400)
+            fetch.assert_not_called()
+            self.assertIn('remember', resp.data['error'])
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_sync_that_sends_no_key_uses_the_saved_one(self):
+        from omop_core.models import GarminPersonalKey
+        self._sync()
+        GarminPersonalKey.objects.filter(person=self.person).update(last_used_at=None)
+        for body in ({}, {'api_key': ''}, {'api_key': '   '}, {'api_key': None, 'days': 7}):
+            resp, fetch = self._sync(body=body)
+            self.assertEqual(fetch.call_args.args[0], self.KEY)
+            self.assertIs(resp.data['key_saved'], True)
+            self.assertNotIn(self.KEY, json.dumps(resp.data))
+        self.assertIsNotNone(self._row().last_used_at)
+
+    @WITH_KEY
+    def test_no_key_sent_and_none_saved_asks_for_one(self):
+        resp, fetch = self._sync(body={}, expect=400)
+        fetch.assert_not_called()
+        self.assertIn('Enter your Garmin Connect Personal API key', resp.data['error'])
+        # A page that believed a key was saved stops offering it.
+        self.assertIs(resp.data['key_saved'], False)
+
+    @WITH_KEY
+    def test_a_new_key_replaces_the_saved_one(self):
+        from omop_core.models import GarminPersonalKey
+        self._sync()
+        self._sync(body={'api_key': self.OTHER_KEY, 'remember': True})
+        self.assertEqual(GarminPersonalKey.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(self._stored_key(), self.OTHER_KEY)
+
+    @WITH_KEY
+    def test_a_saved_key_garmin_says_is_no_key_is_removed_and_the_patient_is_told(self):
+        from omop_core.services import garmin_saved_key
+        self._sync()
+        resp, fetch = self._sync(body={}, error=self._refusal(401), expect=400)
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+        self.assertEqual(resp.data, {'error': garmin_saved_key.SAVED_KEY_REJECTED, 'key_saved': False})
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_saved_key_is_kept_when_garmin_forbids_is_busy_or_is_unreachable(self):
+        """A 403 can be this server's address being blocked, which says
+        nothing about any one patient's key."""
+        from omop_core.services import garmin_connect
+        self._sync()
+        for upstream, message in ((403, garmin_connect.KEY_REJECTED), (429, garmin_connect.RATE_LIMITED),
+                                  (503, garmin_connect.UNREACHABLE)):
+            resp, _ = self._sync(body={}, error=self._refusal(upstream), expect=self._refusal(upstream).status)
+            self.assertEqual(resp.data, {'error': message, 'key_saved': True})
+            self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_a_typed_key_garmin_refuses_does_not_cost_the_saved_one(self):
+        from omop_core.services import garmin_connect
+        self._sync()
+        resp, _ = self._sync(body={'api_key': self.OTHER_KEY, 'remember': True},
+                             error=self._refusal(401), expect=400)
+        self.assertEqual(resp.data, {'error': garmin_connect.KEY_REJECTED})
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_the_refusal_of_an_earlier_key_does_not_remove_a_later_one(self):
+        """A sync is in flight on the saved key when the patient saves another
+        in a second tab. Garmin then refuses the first."""
+        from unittest import mock
+        from omop_core.services import garmin_saved_key
+        self._sync()
+
+        def replaced_meanwhile(*_args, **_kwargs):
+            garmin_saved_key.save(self.person, self.identity, self.OTHER_KEY)
+            raise self._refusal(401)
+
+        with mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                        side_effect=replaced_meanwhile):
+            resp = self._client().post(self.URL, {}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIs(resp.data['key_saved'], True)
+        self.assertEqual(self._stored_key(), self.OTHER_KEY)
+
+    @WITH_KEY
+    def test_a_saved_key_that_cannot_be_read_is_not_saved_and_not_deleted(self):
+        """The deployment's key unset, or replaced without a fallback: the
+        saved key reads as absent, and is back when the key is."""
+        self._sync()
+        stored = self._row().api_key
+        for broken in ({'GARMIN_TOKEN_KEY': ''}, {'GARMIN_TOKEN_KEY': self.NEXT_TOKEN_KEY}):
+            with override_settings(**broken):
+                self.assertIs(self._client().get(self.KEY_URL).data['saved'], False)
+                resp, fetch = self._sync(body={}, expect=400)
+                fetch.assert_not_called()
+                self.assertIn('Enter your Garmin Connect Personal API key', resp.data['error'])
+                self.assertIs(resp.data['key_saved'], False)
+            self.assertEqual(self._row().api_key, stored)
+        resp, fetch = self._sync(body={})
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+        # A key entered under the new deployment key takes the row over.
+        with override_settings(GARMIN_TOKEN_KEY=self.NEXT_TOKEN_KEY):
+            self._sync(body={'api_key': self.OTHER_KEY, 'remember': True})
+            self.assertEqual(self._stored_key(), self.OTHER_KEY)
+
+    @WITH_KEY
+    def test_an_earlier_deployment_key_still_reads_a_saved_key(self):
+        self._sync()
+        with override_settings(GARMIN_TOKEN_KEY=self.NEXT_TOKEN_KEY,
+                               GARMIN_TOKEN_KEY_FALLBACKS=[self.TOKEN_KEY]):
+            resp, fetch = self._sync(body={})
+        self.assertEqual(fetch.call_args.args[0], self.KEY)
+
+    @WITH_KEY
+    def test_the_status_says_a_key_is_saved_and_never_what_it_is(self):
+        client = self._client()
+        self.assertEqual(client.get(self.KEY_URL).data, self.NOTHING_SAVED)
+        self._sync()
+        data = client.get(self.KEY_URL).data
+        self.assertEqual(set(data), {'can_save', 'saved', 'saved_at', 'last_used_at'})
+        self.assertIs(data['saved'], True)
+        self.assertIsNotNone(data['saved_at'])
+        self.assertNotIn(self.KEY, json.dumps(data))
+        self.assertNotIn(self._row().api_key, json.dumps(data))
+
+    @WITH_KEY
+    def test_the_patient_removes_their_saved_key(self):
+        self._sync()
+        client = self._client()
+        with self.assertLogs('omop_core.services.garmin_saved_key', level='INFO') as logs:
+            resp = client.delete(self.KEY_URL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data, self.NOTHING_SAVED)
+        self.assertIsNone(self._row())
+        self.assertIn('reason=patient', '\n'.join(logs.output))
+        # Again is the same answer, and the next sync asks for a key.
+        self.assertEqual(client.delete(self.KEY_URL).status_code, 200)
+        self._sync(body={}, expect=400)
+
+    @WITH_KEY
+    def test_a_saved_key_can_be_removed_while_the_record_is_off(self):
+        from unittest import mock
+        self._sync()
+        with mock.patch('patient_portal.consent.record_permitted', return_value=False):
+            self._sync(body={}, expect=403)
+            self.assertIsNotNone(self._row())
+            self.assertEqual(self._client().delete(self.KEY_URL).status_code, 200)
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_a_key_is_not_saved_for_a_record_switched_off_while_garmin_was_read(self):
+        from unittest import mock
+        from patient_portal.consent import RECORD_OFF
+        from omop_core.services.wearable_parsers import WearableSample
+        day = timezone.now().date() - timedelta(days=3)
+        answers = iter([True])
+        with mock.patch('patient_portal.consent.record_permitted',
+                        side_effect=lambda _person: next(answers, False)), \
+                mock.patch('omop_core.services.garmin_connect.fetch_daily_samples',
+                           return_value=([WearableSample(metric_key='steps', date=day, value=9200.0)], [])) as fetch:
+            resp = self._client().post(self.URL, {'api_key': self.KEY, 'remember': True}, format='json')
+        fetch.assert_called_once()
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertEqual(resp.data, {'error': RECORD_OFF, 'key_saved': False})
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_the_answer_says_a_key_was_saved_when_the_rows_could_not_be_written(self):
+        """Garmin accepted the key, so it is saved; the page has to learn that
+        from the failure too, or it would show no way to remove it."""
+        from unittest import mock
+        from rest_framework.response import Response
+        from patient_portal.api.views import PatientRecordViewSet
+        with mock.patch.object(PatientRecordViewSet, '_store_wearable_samples',
+                               return_value=Response({'error': 'No.'}, status=503)):
+            resp, _ = self._sync(expect=503)
+        self.assertEqual(resp.data, {'error': 'No.', 'key_saved': True})
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_one_patients_saved_key_is_nobody_elses(self):
+        from omop_core.models import Person
+        other_person = Person.objects.create(
+            person_id=self.person.person_id + 1000, gender_concept_id=0, year_of_birth=1980,
+            race_concept_id=0, ethnicity_concept_id=0)
+        other = self._another_account('garmin-key-other@test.com')
+        PatientUser.objects.create(identity=other, person=other_person)
+        self._sync()
+        self.assertIs(self._client(other).get(self.KEY_URL).data['saved'], False)
+        resp, fetch = self._sync(body={}, identity=other, expect=400)
+        fetch.assert_not_called()
+        self.assertEqual(self._client(other).delete(self.KEY_URL).status_code, 200)
+        self.assertEqual(self._stored_key(), self.KEY)
+
+    @WITH_KEY
+    def test_an_account_linked_to_the_record_later_never_syncs_with_its_predecessors_key(self):
+        """The key reads one person's Garmin account. Whoever holds the record
+        next is asked for their own, and the earlier one is removed."""
+        self._sync()
+        successor = self._another_account()
+        PatientUser.objects.filter(person=self.person).update(identity=successor)
+        self.assertEqual(self._client(successor).get(self.KEY_URL).data, self.NOTHING_SAVED)
+        self.assertIsNotNone(self._row())
+        with self.assertLogs('omop_core.services.garmin_saved_key', level='INFO') as logs:
+            resp, fetch = self._sync(body={}, identity=successor, expect=400)
+        fetch.assert_not_called()
+        self.assertIs(resp.data['key_saved'], False)
+        self.assertIsNone(self._row())
+        self.assertIn('reason=other_account', '\n'.join(logs.output))
+        # Their own key is theirs.
+        self._sync(identity=successor)
+        self.assertEqual(self._row().saved_by, successor)
+
+    @WITH_KEY
+    def test_a_key_whose_account_was_deleted_is_nobodys(self):
+        from omop_core.models import GarminPersonalKey
+        self._sync()
+        GarminPersonalKey.objects.filter(person=self.person).update(saved_by=None)
+        self.assertEqual(self._client().get(self.KEY_URL).data, self.NOTHING_SAVED)
+        resp, fetch = self._sync(body={}, expect=400)
+        fetch.assert_not_called()
+        self.assertIsNone(self._row())
+
+    @WITH_KEY
+    def test_the_status_and_removal_are_for_the_signed_in_patient(self):
+        self._sync()
+        self.assertIn(APIClient().get(self.KEY_URL).status_code, [401, 403])
+        self.assertIn(APIClient().delete(self.KEY_URL).status_code, [401, 403])
+        # A credential that is not the person's own session.
+        token = APIClient()
+        token.force_authenticate(user=self.identity)
+        self.assertEqual(token.get(self.KEY_URL).status_code, 403)
+        self.assertEqual(token.delete(self.KEY_URL).status_code, 403)
+        # An account with no patient record.
+        self.assertEqual(self._client(self.unlinked_identity).get(self.KEY_URL).status_code, 403)
+        self.assertEqual(self._client(self.unlinked_identity).delete(self.KEY_URL).status_code, 403)
+        self.assertEqual(self._client().post(self.KEY_URL, {}, format='json').status_code, 405)
+        self.assertIsNotNone(self._row())
+
+    @WITH_KEY
+    def test_a_saved_key_goes_with_the_record_and_with_the_person(self):
+        from omop_core.models import GarminPersonalKey
+        from patient_portal.erasure import withdrawal_tables
+        self.assertIn(GarminPersonalKey, [model for model, _ in withdrawal_tables()])
+        self._sync()
+        self.person.delete()
+        self.assertFalse(GarminPersonalKey.objects.exists())
 
 
 # ---------------------------------------------------------------------------
@@ -23869,12 +25045,15 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(resp.data['relocation']['rows_relocated'], 1)
         self.assertEqual(resp.data['relocation']['queued'], False)
-        # The observation is gone and a measurement carries its facts. It keeps
-        # the concept it had: a patient-page approval leaves the re-point to
-        # Generate OMOP, which now knows that concept is waiting in Measurement.
+        # The observation is gone and a measurement carries its facts, at the
+        # approved destination: the patient-page approval re-points this
+        # patient's rows after the move (#2791). The concept they came with
+        # stays recorded for the other patients, who wait for Generate OMOP.
         self.assertFalse(Observation.objects.filter(pk=row.pk).exists())
         moved = Measurement.objects.get(person=self.person, measurement_source_value='FOLATE')
-        self.assertEqual(moved.measurement_concept_id, self.minted.concept_id)
+        self.assertEqual(moved.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual((resp.data['repoint']['patient_id'], resp.data['repoint']['rows_updated']),
+                         (self.person.person_id, 1))
         mapping.refresh_from_db()
         self.assertIn(self.minted.concept_id, mapping.deferred_repoint_concept_ids)
         self.assertEqual((moved.measurement_date, moved.value_as_number, moved.unit_source_value,
@@ -24023,9 +25202,10 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.assertIsNone(resp.data['relocation'])
         self.assertTrue(Observation.objects.filter(pk=row.pk).exists())
 
-    def test_patient_source_code_save_skips_repoint(self):
-        """Saving with patient_id skips repoint entirely — Generate OMOP
-        from the patients list handles resolution for all patients."""
+    def test_patient_source_code_approval_repoints_that_patient_only(self):
+        """#2791: approving from a patient's page moves that patient's rows in
+        the request. No other patient's row moves (#1874); theirs wait for
+        Generate OMOP from the patients list."""
         other_person = Person.objects.create(
             person_id=910002, gender_concept_id=0, year_of_birth=1970,
             race_concept_id=0, ethnicity_concept_id=0,
@@ -24045,21 +25225,26 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        # No repoint — clinical rows are untouched until Generate OMOP.
-        self.assertIsNone(resp.data['repoint'])
+        # Not queued: this patient's row moved in the request, and the response
+        # says how many.
+        self.assertEqual(resp.data['repoint'], {
+            'queued': False, 'patient_id': self.person.person_id,
+            'from_concept_ids': [0, self.minted.concept_id],
+            'rows_updated': 1, 'rows_collapsed': 0, 'held': False,
+        })
         self.mapping.refresh_from_db()
+        # Still recorded, for the patients this save did not touch.
         self.assertIn(self.minted.concept_id, self.mapping.deferred_repoint_concept_ids)
         self.row.refresh_from_db()
         other_row.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
         self.assertEqual(other_row.measurement_concept_id, self.minted.concept_id)
+        self.assertEqual(PatientRecord.objects.get(person=self.person).derivation_version, 0)
 
-        # Generate OMOP resolves both patients afterward.
+        # Generate OMOP has nothing left for this patient and resolves the other.
         from omop_core.mapping.code_resolution import resolve_person_source_codes
         result = resolve_person_source_codes(self.person)
-        self.assertEqual(result['resolved'], 1)
-        self.row.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(result['resolved'], 0)
 
         result = resolve_person_source_codes(other_person)
         self.assertEqual(result['resolved'], 1)
@@ -24079,8 +25264,8 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
 
     def test_generate_omop_finishes_patient_scoped_standard_target_change(self):
-        """Patient-scoped save defers the standard-to-standard repoint;
-        Generate OMOP resolves both patients afterward."""
+        """A patient-scoped standard-to-standard change moves that patient's
+        rows; Generate OMOP finishes it for the other patient."""
         self.mapping.status = 'approved'
         self.mapping.target_concept = self.standard
         self.mapping.save(update_fields=['status', 'target_concept'])
@@ -24105,42 +25290,53 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        # No repoint — both rows untouched.
-        self.assertIsNone(resp.data['repoint'])
+        # This patient's row moved off the old standard concept; the other's did not.
+        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(resp.data['repoint']['from_concept_ids'], [self.standard.concept_id])
         self.row.refresh_from_db()
         other_row.refresh_from_db()
         self.mapping.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(self.row.measurement_concept_id, self.corrected.concept_id)
         self.assertEqual(other_row.measurement_concept_id, self.standard.concept_id)
         self.assertIn(self.standard.concept_id, self.mapping.deferred_repoint_concept_ids)
 
-        # Generate OMOP resolves both patients.
+        # Generate OMOP resolves the other patient.
         from omop_core.mapping.code_resolution import resolve_person_source_codes
-        result = resolve_person_source_codes(self.person)
-        self.assertEqual(result['resolved'], 1)
-        self.row.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.corrected.concept_id)
-
         result = resolve_person_source_codes(other_person)
         self.assertEqual(result['resolved'], 1)
         other_row.refresh_from_db()
         self.assertEqual(other_row.measurement_concept_id, self.corrected.concept_id)
 
     def test_code_mappings_approve_after_patient_save_sweeps_deferred_ids(self):
-        """Patient-tab save populates deferred_repoint_concept_ids, then
-        a Code Mappings page approve (no patient_id) sweeps and clears them."""
-        # Step 1: patient-tab save defers the repoint.
+        """Patient-tab save moves that patient's rows and leaves the concepts
+        in deferred_repoint_concept_ids for everyone else, then a Code Mappings
+        page approve (no patient_id) sweeps and clears them."""
+        other_person = Person.objects.create(
+            person_id=910004, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        other_row = Measurement.objects.create(
+            measurement_id=8892103, person=other_person,
+            measurement_concept=self.minted,
+            measurement_date=date(2026, 8, 12),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='M-PROTEIN, SERUM',
+            value_as_number=Decimal('4.1'),
+        )
+        # Step 1: patient-tab save moves this patient, defers the rest.
         resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
             'patient_id': self.person.person_id,
             'destination_concept_id': self.standard.concept_id,
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertIsNone(resp.data['repoint'])
+        self.assertEqual(resp.data['repoint']['queued'], False)
         self.mapping.refresh_from_db()
         self.assertNotEqual(self.mapping.deferred_repoint_concept_ids, [])
         self.row.refresh_from_db()
-        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+        other_row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(other_row.measurement_concept_id, self.minted.concept_id)
 
         # Step 2: Code Mappings page approve (no patient_id) clears deferred
         # and repoints the stored rows.
@@ -24152,7 +25348,9 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.mapping.refresh_from_db()
         self.assertEqual(self.mapping.deferred_repoint_concept_ids, [])
         self.row.refresh_from_db()
+        other_row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(other_row.measurement_concept_id, self.standard.concept_id)
 
     def test_repoint_marks_patient_records_for_re_derivation(self):
         """Derivation is deferred, not skipped: 12-32s per patient is too slow
@@ -33935,7 +35133,7 @@ class AnalystRoleScopeTest(TestCase):
 
     def test_every_mapping_page_is_reachable_and_writable(self):
         for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/relevance/signals/',
-                    '/api/v1/code-mappings/source-systems/'):
+                    '/api/v1/code-mappings/facility-browse/'):
             self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
         self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
                          {'can_accept': False, 'can_reject': True})
@@ -33943,8 +35141,9 @@ class AnalystRoleScopeTest(TestCase):
             'field_name': 'disease', 'display': 'Analyst choice', 'sort_order': 0,
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        # Deleting an answer takes what an analyst may not change with it: approvers only.
         self.assertEqual(self.client.delete(f"/api/v1/field-choices/{resp.data['id']}/").status_code,
-                         status.HTTP_204_NO_CONTENT)
+                         status.HTTP_403_FORBIDDEN)
         # The upload is a write the analyst may make; an empty one is a 400, not a 403.
         resp = self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
@@ -33957,7 +35156,7 @@ class AnalystRoleScopeTest(TestCase):
         self.client.force_authenticate(user=doctor)
         for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/code-mappings/',
                     '/api/v1/concept-to-code/', '/api/v1/code-mappings/reference/',
-                    '/api/v1/relevance/signals/', '/api/v1/code-mappings/source-systems/'):
+                    '/api/v1/relevance/signals/', '/api/v1/code-mappings/facility-browse/'):
             self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
         self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
                          {'can_accept': False, 'can_reject': False})
@@ -34458,3 +35657,2174 @@ class PatientDiseaseManagementFieldsTest(TestCase):
         for field in ('disease_management', 'disease_status', 'care_setting'):
             self.assertEqual(descriptor[field]['kind'], 'direct', field)
             self.assertTrue(descriptor[field]['writable'], field)
+
+
+_GARMIN_HOOK_SECRET = 'test-webhook-secret-0123456789-abcdefghij'
+# A Fernet key made for these tests: 32 bytes, URL-safe base64.
+_GARMIN_TOKEN_KEY = 'a2tra2tra2tra2tra2tra2tra2tra2tra2tra2tra2s='
+
+
+@override_settings(
+    GARMIN_CLIENT_ID='client-id', GARMIN_CLIENT_SECRET='client-secret-NOT-REAL',
+    GARMIN_WEBHOOK_SECRET=_GARMIN_HOOK_SECRET, GARMIN_REDIRECT_URI='',
+    GARMIN_TOKEN_KEY=_GARMIN_TOKEN_KEY, GARMIN_TOKEN_KEY_FALLBACKS=[],
+    APP_BASE_URL='https://promop.example.test',
+)
+class GarminOAuthEndpointTest(TestCase):
+    """A Garmin account linked by OAuth, and Garmin's push (#2802).
+
+    Garmin's own endpoints are patched: tests/test_garmin_oauth.py covers what
+    is sent to them. These cover who may connect, what a callback stores, what
+    a push writes and to whom, and disconnecting.
+    """
+
+    STATUS = '/api/v1/garmin/connection/'
+    START = '/api/v1/garmin/oauth/start/'
+    CALLBACK = '/api/v1/garmin/oauth/callback/'
+    HOOK = f'/api/v1/garmin/webhooks/{_GARMIN_HOOK_SECRET}/'
+    GARMIN_USER = 'd3315b1072421d0dd7c8f6b8e1de4df8'
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+        cls.day = timezone.now().date() - timedelta(days=2)
+        cls.other_person = Person.objects.create(person_id=99002, family_name='Other', given_name='Olga')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_identity = Identity.objects.create_user(email='olga-other@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_identity, person=cls.other_person)
+        cls.provider = Identity.objects.create_user(email='garmin-provider@test.com', password='pw')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _as(self, identity):
+        c = APIClient()
+        c.force_login(identity)
+        return c
+
+    def _tokens(self, access='access-AAAA', refresh='refresh-RRRR'):
+        from omop_core.services.garmin_oauth import Tokens
+        now = timezone.now()
+        return Tokens(access_token=access, refresh_token=refresh,
+                      access_expires_at=now + timedelta(hours=24),
+                      refresh_expires_at=now + timedelta(days=90))
+
+    def _start(self, client):
+        """Starts a consent in ``client``'s session; returns its state."""
+        from urllib.parse import parse_qs, urlsplit
+        response = client.post(self.START)
+        self.assertEqual(response.status_code, 200, getattr(response, 'data', None))
+        return parse_qs(urlsplit(response.data['authorize_url']).query)['state'][0]
+
+    def _return(self, client, garmin_user=None, permissions=('HEALTH_EXPORT',), **query):
+        """Garmin redirects ``client`` back; returns (response, the patched exchange)."""
+        from unittest import mock
+        with mock.patch('omop_core.services.garmin_oauth.exchange_code', return_value=self._tokens()) as exchange, \
+                mock.patch('omop_core.services.garmin_oauth.fetch_user_id',
+                           return_value=garmin_user or self.GARMIN_USER), \
+                mock.patch('omop_core.services.garmin_oauth.fetch_permissions', return_value=list(permissions)):
+            response = client.get(self.CALLBACK, query)
+        return response, exchange
+
+    def _consent(self, identity=None, **kwargs):
+        """The whole round trip in one browser: start, approve, come back."""
+        client = self._as(identity or self.identity)
+        return self._return(client, code='the-code', state=self._start(client), **kwargs)
+
+    def _connect(self, person=None, garmin_user=None, **fields):
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        row = GarminConnection(person=person or self.person, garmin_user_id=garmin_user or self.GARMIN_USER,
+                               permissions=['HEALTH_EXPORT'])
+        garmin_oauth.store_tokens(row, self._tokens())
+        for name, value in fields.items():
+            setattr(row, name, value)
+        row.save()
+        return row
+
+    def _push(self, body, url=None, dispatcher=None):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        with use_dispatcher(dispatcher or FakeDispatcher()) as used:
+            response = APIClient().post(url or self.HOOK, data=json.dumps(body), content_type='application/json')
+        return response, used
+
+    def _daily(self, steps, user=None, day=None, **more):
+        return {'userId': user or self.GARMIN_USER, 'userAccessToken': 'ignored',
+                'calendarDate': (day or self.day).isoformat(), 'steps': steps, **more}
+
+    def _values(self, metric_key, person=None, day=None):
+        from omop_core.models import Measurement, Observation
+        concept = self.wearable_concepts[metric_key]
+        if concept.domain_id == 'Observation':
+            rows = Observation.objects.filter(person=person or self.person, observation_concept=concept,
+                                              observation_date=day or self.day)
+        else:
+            rows = Measurement.objects.filter(person=person or self.person, measurement_concept=concept,
+                                              measurement_date=day or self.day)
+        return sorted(float(v) for v in rows.values_list('value_as_number', flat=True))
+
+    def _steps(self, person=None, day=None):
+        return self._values('steps', person=person, day=day)
+
+    # ── Status and start ────────────────────────────────────────────────────
+
+    def test_status_says_whether_it_is_set_up_and_whether_the_patient_is_connected(self):
+        response = self._as(self.identity).get(self.STATUS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'configured': True, 'connected': False, 'connected_at': None,
+                                         'last_push_at': None, 'permissions': []})
+        self._connect()
+        data = self._as(self.identity).get(self.STATUS).data
+        self.assertTrue(data['connected'])
+        self.assertEqual(data['permissions'], ['HEALTH_EXPORT'])
+        # Never a token, and never the Garmin user id.
+        self.assertEqual(set(data), {'configured', 'connected', 'connected_at', 'last_push_at', 'permissions'})
+        # A webhook secret short enough to guess is no secret: not set up.
+        for unusable in ('', '1database', 'x' * 31):
+            with override_settings(GARMIN_WEBHOOK_SECRET=unusable):
+                self.assertFalse(self._as(self.identity).get(self.STATUS).data['configured'], unusable)
+        # Nor without the key the tokens are stored under.
+        with override_settings(GARMIN_TOKEN_KEY=''):
+            self.assertFalse(self._as(self.identity).get(self.STATUS).data['configured'])
+            self.assertEqual(self._as(self.identity).post(self.START).status_code, 503)
+
+    def test_start_returns_garmins_consent_page_and_leaves_its_nonce_in_the_session(self):
+        from urllib.parse import parse_qs, urlsplit
+        from omop_core.services import garmin_oauth
+        client = self._as(self.identity)
+        response = client.post(self.START)
+        self.assertEqual(response.status_code, 200, response.data)
+        url = urlsplit(response.data['authorize_url'])
+        self.assertEqual(url.netloc, 'connect.garmin.com')
+        params = {key: values[0] for key, values in parse_qs(url.query).items()}
+        self.assertEqual(params['client_id'], 'client-id')
+        self.assertEqual(params['redirect_uri'], 'https://promop.example.test/api/v1/garmin/oauth/callback/')
+        read = garmin_oauth.read_state(params['state'])
+        self.assertEqual((read.person_id, read.identity_id), (self.person.person_id, self.identity.pk))
+        self.assertEqual(client.session['garmin_oauth_nonce'], read.nonce)
+        self.assertNotIn('client-secret-NOT-REAL', response.data['authorize_url'])
+
+    def test_only_a_signed_in_patient_may_start_read_or_end_a_connection(self):
+        for method, url in (('get', self.STATUS), ('delete', self.STATUS), ('post', self.START)):
+            # Nobody signed in.
+            self.assertIn(getattr(APIClient(), method)(url).status_code, (401, 403), (method, url))
+            # Signed in, but no patient record of their own.
+            self.assertEqual(getattr(self._as(self.provider), method)(url).status_code, 403, (method, url))
+            # A credential presented without the person at the keyboard.
+            delegated = APIClient()
+            delegated.force_authenticate(user=self.identity)
+            self.assertEqual(getattr(delegated, method)(url).status_code, 403, (method, url))
+
+    def test_start_is_refused_when_it_is_not_set_up_or_the_record_is_off(self):
+        from unittest import mock
+        with override_settings(GARMIN_CLIENT_ID=''):
+            response = self._as(self.identity).post(self.START)
+        self.assertEqual(response.status_code, 503)
+        with mock.patch('patient_portal.api.garmin_oauth.record_permitted', return_value=False):
+            self.assertEqual(self._as(self.identity).post(self.START).status_code, 403)
+
+    # ── Callback ────────────────────────────────────────────────────────────
+
+    def test_the_callback_stores_the_connection_with_its_tokens_encrypted(self):
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        client = self._as(self.identity)
+        state = self._start(client)
+        response, exchange = self._return(client, code='the-code', state=state,
+                                          permissions=('HEALTH_EXPORT', 'ACTIVITY_EXPORT'))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'], '/?garmin=connected')
+        self.assertIn('no-store', response['Cache-Control'])
+        self.assertEqual(response['Referrer-Policy'], 'no-referrer')
+        # The verifier sent with the code is the one this state's challenge came from.
+        exchange.assert_called_once_with('the-code', garmin_oauth.read_state(state).verifier)
+        row = GarminConnection.objects.get(person=self.person)
+        self.assertEqual(row.garmin_user_id, self.GARMIN_USER)
+        self.assertEqual(row.permissions, ['HEALTH_EXPORT', 'ACTIVITY_EXPORT'])
+        self.assertEqual(row.connected_by_id, self.identity.pk)
+        self.assertNotIn('access-AAAA', row.access_token)
+        self.assertNotIn('refresh-RRRR', row.refresh_token)
+        self.assertEqual(garmin_oauth.decrypt(row.access_token), 'access-AAAA')
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'refresh-RRRR')
+
+    def test_the_callback_finishes_only_in_the_browser_that_started(self):
+        """A consent link can be sent to somebody else, and a state can be read
+        from a log or a history. Neither connects anything."""
+        from omop_core.models import GarminConnection
+        starter = self._as(self.identity)
+        state = self._start(starter)
+        attempts = {
+            # The person the link was sent to approves it: not signed in here,
+            'nobody signed in': APIClient(),
+            # or signed in as themselves,
+            'another account': self._as(self.other_identity),
+            # or even the right account, in a browser that did not start it.
+            'same account, another browser': self._as(self.identity),
+        }
+        for label, client in attempts.items():
+            response, exchange = self._return(client, code='their-code', state=state)
+            self.assertEqual(response['Location'], '/?garmin=error', label)
+            exchange.assert_not_called()
+        self.assertFalse(GarminConnection.objects.exists())
+        # The browser that started can still finish,
+        response, exchange = self._return(starter, code='the-code', state=state)
+        self.assertEqual(response['Location'], '/?garmin=connected')
+        exchange.assert_called_once()
+        # once: the same return again exchanges nothing.
+        again, exchange = self._return(starter, code='the-code', state=state)
+        self.assertEqual(again['Location'], '/?garmin=error')
+        exchange.assert_not_called()
+
+    def test_a_state_from_one_consent_does_not_finish_another(self):
+        from omop_core.models import GarminConnection
+        client = self._as(self.identity)
+        first = self._start(client)
+        self._start(client)                      # a second start replaces the session's nonce
+        response, exchange = self._return(client, code='c', state=first)
+        self.assertEqual(response['Location'], '/?garmin=error')
+        exchange.assert_not_called()
+        self.assertFalse(GarminConnection.objects.exists())
+
+    def test_a_declined_or_forged_callback_connects_nothing(self):
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        client = self._as(self.identity)
+        declined, exchange = self._return(client, state=self._start(client))    # no code: the patient said no
+        self.assertEqual(declined['Location'], '/?garmin=denied')
+        exchange.assert_not_called()
+        state = self._start(client)
+        for forged in ('', 'forged', state[:-3] + 'abc',
+                       # Signed here, but for a record that is not the account's own.
+                       garmin_oauth.new_state(self.other_person.person_id, self.identity.pk)):
+            response, exchange = self._return(client, code='c', state=forged)
+            self.assertEqual(response['Location'], '/?garmin=error', forged)
+            exchange.assert_not_called()
+        self.assertFalse(GarminConnection.objects.exists())
+        self.assertEqual(client.post(self.CALLBACK).status_code, 405)
+
+    def test_the_callback_answers_with_or_without_the_final_slash(self):
+        from omop_core.models import GarminConnection
+        client = self._as(self.identity)
+        from unittest import mock
+        with mock.patch('omop_core.services.garmin_oauth.exchange_code', return_value=self._tokens()), \
+                mock.patch('omop_core.services.garmin_oauth.fetch_user_id', return_value=self.GARMIN_USER), \
+                mock.patch('omop_core.services.garmin_oauth.fetch_permissions', return_value=[]):
+            response = client.get('/api/v1/garmin/oauth/callback', {'code': 'c', 'state': self._start(client)})
+        self.assertEqual(response['Location'], '/?garmin=connected')
+        self.assertTrue(GarminConnection.objects.exists())
+
+    def test_garmin_refusing_the_code_connects_nothing(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        client = self._as(self.identity)
+        state = self._start(client)
+        with mock.patch('omop_core.services.garmin_oauth.exchange_code',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.DENIED, 400)):
+            response = client.get(self.CALLBACK, {'code': 'c', 'state': state})
+        self.assertEqual(response['Location'], '/?garmin=error')
+        self.assertFalse(GarminConnection.objects.exists())
+
+    def test_a_registration_that_is_not_kept_is_handed_back_to_garmin(self):
+        """Once the code is exchanged Garmin has registered the account. If it
+        is then not connected here, Garmin is told, or it would send pushes
+        nobody receives."""
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        # The record was switched off while the patient was on Garmin's page.
+        client = self._as(self.identity)
+        state = self._start(client)
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister, \
+                mock.patch('patient_portal.api.garmin_oauth.record_permitted', return_value=False):
+            response, _ = self._return(client, code='c', state=state)
+        self.assertEqual(response['Location'], '/?garmin=error')
+        deregister.assert_called_once_with('access-AAAA')
+        self.assertFalse(GarminConnection.objects.exists())
+        # Garmin answered the exchange and then nothing else.
+        state = self._start(client)
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister, \
+                mock.patch('omop_core.services.garmin_oauth.exchange_code', return_value=self._tokens()), \
+                mock.patch('omop_core.services.garmin_oauth.fetch_user_id',
+                           side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.UNREACHABLE)):
+            response = client.get(self.CALLBACK, {'code': 'c', 'state': state})
+        self.assertEqual(response['Location'], '/?garmin=error')
+        deregister.assert_called_once_with('access-AAAA')
+
+    def test_one_garmin_account_feeds_one_record(self):
+        from unittest import mock
+        from django.db import IntegrityError
+        from omop_core.models import GarminConnection
+        self._connect(person=self.other_person)
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            response, _ = self._consent()
+        self.assertEqual(response['Location'], '/?garmin=in_use')
+        # The other record's registration is the same Garmin account: left alone.
+        deregister.assert_not_called()
+        self.assertEqual(list(GarminConnection.objects.values_list('person_id', flat=True)),
+                         [self.other_person.person_id])
+        # Two records finishing at the same moment: the second is told, not shown an error page.
+        GarminConnection.objects.all().delete()
+        with mock.patch.object(GarminConnection, 'save', side_effect=IntegrityError('duplicate key')):
+            raced, _ = self._consent()
+        self.assertEqual(raced['Location'], '/?garmin=in_use')
+
+    def test_connecting_again_replaces_the_connection_and_a_different_account_ends_the_old_one(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        long_ago = timezone.now() - timedelta(days=40)
+        self._connect(connected_at=long_ago, last_push_at=long_ago,
+                      day_readings={'2026-01-01': {'spo2': {'s': [95.0, 1]}}})
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            same, _ = self._consent()
+            self.assertEqual(same['Location'], '/?garmin=connected')
+            deregister.assert_not_called()
+            row = GarminConnection.objects.get()
+            # Connected now; what the same account sent before still stands.
+            self.assertGreater(row.connected_at, long_ago + timedelta(days=39))
+            self.assertEqual(row.last_push_at, long_ago)
+
+            different, _ = self._consent(garmin_user='another-garmin-account')
+            self.assertEqual(different['Location'], '/?garmin=connected')
+            deregister.assert_called_once_with('access-AAAA')
+        row = GarminConnection.objects.get()
+        self.assertEqual(row.garmin_user_id, 'another-garmin-account')
+        # Nothing of the account before is said of this one.
+        self.assertIsNone(row.last_push_at)
+        self.assertEqual(row.day_readings, {})
+
+    # ── Disconnect ──────────────────────────────────────────────────────────
+
+    def test_disconnecting_tells_garmin_and_removes_the_connection(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        self._connect()
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'disconnected': True, 'garmin_notified': True})
+        deregister.assert_called_once_with('access-AAAA')
+        self.assertFalse(GarminConnection.objects.exists())
+        # Already gone: the same answer, and no call to Garmin.
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            again = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(again.data, {'disconnected': True, 'garmin_notified': False})
+        deregister.assert_not_called()
+
+    def test_disconnecting_happens_here_even_when_garmin_cannot_be_told(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        self._connect()
+        self._connect(person=self.other_person, garmin_user='olgas-garmin')
+        with mock.patch('omop_core.services.garmin_oauth.deregister',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.UNREACHABLE)):
+            response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.data, {'disconnected': True, 'garmin_notified': False})
+        # Only the caller's own.
+        self.assertEqual(list(GarminConnection.objects.values_list('garmin_user_id', flat=True)), ['olgas-garmin'])
+
+    def test_erasing_a_record_tells_garmin_first_and_never_fails_for_it(self):
+        from unittest import mock
+        from omop_core.services import garmin_oauth
+        self._connect()
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            garmin_oauth.forget(self.person)
+        deregister.assert_called_once_with('access-AAAA')
+        for failure in (garmin_oauth.GarminOAuthError(garmin_oauth.UNREACHABLE), RuntimeError('boom')):
+            with mock.patch('omop_core.services.garmin_oauth.deregister', side_effect=failure):
+                garmin_oauth.forget(self.person)          # logged, not raised
+        with mock.patch('omop_core.services.garmin_oauth.deregister') as deregister:
+            garmin_oauth.forget(self.other_person)        # no connection: nothing to tell
+        deregister.assert_not_called()
+        # Both erasure paths call it before they delete.
+        import inspect
+        from patient_portal import erasure
+        for path in (erasure.close_account, erasure.erase_record):
+            self.assertIn('_forget_garmin(person)', inspect.getsource(path), path.__name__)
+
+    def test_copy_patient_replace_refuses_a_person_with_a_garmin_connection(self):
+        from omop_core.models import GarminConnection
+        from omop_core.services import patient_transfer
+        self.assertIn((GarminConnection, 'person_id'), patient_transfer._SYSTEM_LINKS)
+
+    # ── Webhook ─────────────────────────────────────────────────────────────
+
+    def test_the_webhook_answers_only_at_its_secret_path(self):
+        self._connect()
+        body = {'dailies': [self._daily(5000)]}
+        for url in ('/api/v1/garmin/webhooks/wrong/', self.HOOK[:-2] + '/'):
+            response, _ = self._push(body, url=url)
+            self.assertEqual(response.status_code, 404, url)
+            self.assertEqual(response.content, b'')
+        # A secret short enough to guess opens nothing, even sent exactly.
+        with override_settings(GARMIN_WEBHOOK_SECRET='1database'):
+            self.assertEqual(self._push(body, url='/api/v1/garmin/webhooks/1database/')[0].status_code, 404)
+        with override_settings(GARMIN_WEBHOOK_SECRET=''):
+            self.assertEqual(self._push(body)[0].status_code, 404)
+        self.assertEqual(self._steps(), [])
+        self.assertEqual(APIClient().get(self.HOOK).status_code, 405)
+        # Not on the legacy prefix.
+        legacy = self._push(body, url=f'/api/garmin/webhooks/{_GARMIN_HOOK_SECRET}/')[0]
+        self.assertIn(legacy.status_code, (404, 405))
+        self.assertEqual(self._steps(), [])
+        # Registered without the final slash, it is the same webhook.
+        self.assertEqual(self._push(body, url=self.HOOK[:-1])[0].status_code, 200)
+        self.assertEqual(self._steps(), [5000.0])
+
+    def test_a_push_that_names_another_garmin_app_is_turned_away(self):
+        self._connect()
+
+        def push(steps, **headers):
+            return APIClient().post(self.HOOK, data=json.dumps({'dailies': [self._daily(steps)]}),
+                                    content_type='application/json', **headers)
+
+        self.assertEqual(push(4000, HTTP_GARMIN_CLIENT_ID='somebody-elses-app').status_code, 404)
+        self.assertEqual(self._steps(), [])
+        self.assertEqual(push(5000, HTTP_GARMIN_CLIENT_ID='client-id').status_code, 200)
+        # The header is not required: its absence is not a refusal.
+        self.assertEqual(push(6000).status_code, 200)
+        self.assertEqual(self._steps(), [6000.0])
+
+    def test_the_secret_is_kept_out_of_the_audit_trail_and_the_error_log(self):
+        from unittest import mock
+        from patient_portal.models import AuditEvent
+        self._connect()
+        AuditEvent.objects.all().delete()
+        with self.assertLogs('django.request', level='WARNING') as logged:
+            import logging
+            logging.getLogger('django.request').warning('marker')
+            self._push({'dailies': [self._daily(5000)]})
+            with mock.patch('patient_portal.api.garmin_oauth._ingest', side_effect=RuntimeError('db')):
+                failed, _ = self._push({'dailies': [self._daily(6000)]})
+            APIClient().post(self.HOOK, data='{not json', content_type='application/json')
+        self.assertEqual(failed.status_code, 503)
+        self.assertNotIn(_GARMIN_HOOK_SECRET, '\n'.join(logged.output))
+        paths = list(AuditEvent.objects.values_list('path', flat=True))
+        self.assertTrue(paths)
+        for path in paths:
+            self.assertNotIn(_GARMIN_HOOK_SECRET, path)
+        self.assertIn('/api/v1/garmin/webhooks/:secret/', paths)
+        from promop.sentry import redact_path
+        self.assertEqual(redact_path(f'https://promop.example.test{self.HOOK}'),
+                         'https://promop.example.test/api/v1/garmin/webhooks/:secret/')
+
+    def test_a_push_is_written_to_the_patient_connected_as_that_garmin_user(self):
+        from omop_core.models import GarminConnection, WearableUpload
+        self._connect()
+        response, dispatcher = self._push({'dailies': [
+            self._daily(8123, restingHeartRateInBeatsPerMinute=52, activeKilocalories=450),
+            self._daily(777, user='nobody-here-is-this-garmin-user'),
+        ]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [8123.0])
+        self.assertEqual(self._steps(person=self.other_person), [])
+        self.assertEqual(self._values('resting_hr'), [52.0])
+        # Derived off the request, once, for the patient who changed.
+        self.assertEqual(dispatcher.calls, [self.person.person_id])
+        self.assertIsNotNone(GarminConnection.objects.get().last_push_at)
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'garmin')
+        self.assertEqual(upload.filename, f'Garmin Connect push {timezone.now().date():%Y-%m}')
+        self.assertIsNone(upload.uploaded_by)
+        # Nothing was created for anybody else.
+        self.assertEqual(WearableUpload.objects.count(), 1)
+
+    def test_users_nobody_is_connected_as_cost_no_query_each(self):
+        from django.db import connection as db
+        from django.test.utils import CaptureQueriesContext
+        self._connect()
+
+        def queries(strangers):
+            body = {'dailies': [self._daily(1000 + n, user=f'stranger-{n}') for n in range(strangers)]}
+            with CaptureQueriesContext(db) as captured:
+                self.assertEqual(self._push(body)[0].status_code, 200)
+            return len(captured)
+
+        self.assertEqual(queries(3), queries(60))
+
+    def test_a_later_push_replaces_the_days_value_and_the_history_stays_one_row(self):
+        from omop_core.models import WearableUpload
+        self._connect()
+        self._push({'dailies': [self._daily(4000)]})
+        self._push({'dailies': [self._daily(6500)]})
+        response, dispatcher = self._push({'dailies': [self._daily(9000, restingHeartRateInBeatsPerMinute=52)]})
+        self.assertEqual(response.status_code, 200)
+        # The day's total so far, not a second row summed beside the first.
+        self.assertEqual(self._steps(), [9000.0])
+        self.assertEqual(dispatcher.calls, [self.person.person_id])
+        upload = WearableUpload.objects.get(person=self.person)
+        # The row lists what is stored, once: not every value the day passed through.
+        self.assertEqual(sorted((entry['metric'], entry['value']) for entry in upload.sample_summary),
+                         [('resting_hr', 52.0), ('steps', 9000.0)])
+        self.assertEqual(upload.samples_created, 2)
+        # The same push again changes nothing, derives nothing and adds no history.
+        response, dispatcher = self._push({'dailies': [self._daily(9000, restingHeartRateInBeatsPerMinute=52)]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [9000.0])
+        self.assertEqual(dispatcher.calls, [])
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).count(), 1)
+        # The patient can delete the pushes from the history like an upload.
+        deleted = self._as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.id}/')
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(self._steps(), [])
+        self.assertEqual(self._values('resting_hr'), [])
+        # A push after that starts a new row.
+        self._push({'dailies': [self._daily(9500)]})
+        self.assertEqual(self._steps(), [9500.0])
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).count(), 1)
+
+    def test_pulse_ox_and_respiration_are_the_days_average_across_pushes(self):
+        from omop_core.models import GarminConnection
+        self._connect()
+
+        def pulse_ox(summary, readings, **more):
+            return {'userId': self.GARMIN_USER, 'summaryId': summary, 'calendarDate': self.day.isoformat(),
+                    'timeOffsetSpo2Values': {str(n * 60): value for n, value in enumerate(readings)}, **more}
+
+        # Overnight: four readings.
+        self._push({'pulseox': [pulse_ox('night', [96, 96, 94, 94])]})
+        self.assertEqual(self._values('spo2'), [95.0])
+        # An afternoon summary of two readings joins the day; it does not become it.
+        self._push({'pulseox': [pulse_ox('afternoon', [92, 92])]})
+        self.assertEqual(self._values('spo2'), [94.0])
+        # The overnight summary sent again, grown: its earlier totals are replaced, not added twice.
+        self._push({'pulseox': [pulse_ox('night', [96, 96, 94, 94, 95, 95])]})
+        self.assertEqual(self._values('spo2'), [94.25])
+        # A reading the wearer took on the spot is not the day's monitoring.
+        self._push({'pulseox': [pulse_ox('spot', [80], onDemand=True)]})
+        self.assertEqual(self._values('spo2'), [94.25])
+        kept = GarminConnection.objects.get().day_readings[self.day.isoformat()]['spo2']
+        self.assertEqual(sorted(kept), ['afternoon', 'night'])
+
+    def test_a_day_with_no_steps_yet_and_a_day_that_cannot_be_are_not_stored(self):
+        self._connect()
+        today = timezone.now().date()
+        response, dispatcher = self._push({'dailies': [
+            # The first sync after midnight.
+            self._daily(0, day=today, distanceInMeters=0, moderateIntensityDurationInSeconds=0),
+            # A watch with the wrong year.
+            self._daily(7000, day=today + timedelta(days=400)),
+            self._daily(7000, day=today - timedelta(days=4000)),
+        ]})
+        self.assertEqual(response.status_code, 200)
+        for day in (today, today + timedelta(days=400), today - timedelta(days=4000)):
+            for metric_key in ('steps', 'distance', 'active_minutes'):
+                self.assertEqual(self._values(metric_key, day=day), [], (metric_key, day))
+        self.assertEqual(dispatcher.calls, [])
+
+    def test_a_push_leaves_another_devices_rows_alone(self):
+        from omop_core.models import Observation, WearableUpload
+        from omop_core.services.mappings import WEARABLE_TYPE_CONCEPT_ID
+        from omop_core.services.pk import next_pk_batch
+        concept = self.wearable_concepts['steps']
+        pk = next_pk_batch(Observation, 'observation_id', 1)[0]
+        Observation.objects.create(
+            observation_id=pk, person=self.person, observation_concept=concept, observation_date=self.day,
+            observation_type_concept_id=WEARABLE_TYPE_CONCEPT_ID, value_as_number=3000,
+            observation_source_value=concept.concept_code)
+        WearableUpload.objects.create(
+            person=self.person, device_type='apple', filename='export.zip', samples_created=1,
+            sample_summary=[{'metric': 'steps', 'date': self.day.isoformat(), 'value': 3000.0,
+                             'row_id': pk, 'row_table': 'observation'}])
+        self._connect()
+        self._push({'dailies': [self._daily(9000)]})
+        self.assertEqual(self._steps(), [3000.0, 9000.0])
+
+    def test_a_push_for_a_record_that_is_off_is_dropped(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        self._connect()
+        with mock.patch('patient_portal.api.garmin_oauth.record_permitted', return_value=False):
+            response, dispatcher = self._push({'dailies': [self._daily(5000)]})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [])
+        self.assertEqual(dispatcher.calls, [])
+        # Nothing was received, as far as the patient is told.
+        self.assertIsNone(GarminConnection.objects.get().last_push_at)
+
+    def test_a_deregistration_removes_the_connection_and_a_permission_change_is_recorded(self):
+        from omop_core.models import GarminConnection
+        self._connect()
+        self._connect(person=self.other_person, garmin_user='olgas-garmin')
+        response, _ = self._push({
+            'deregistrations': [{'userId': self.GARMIN_USER, 'userAccessToken': 'x'}],
+            'userPermissionsChange': [{'userId': 'olgas-garmin', 'permissions': ['ACTIVITY_EXPORT']}],
+            # Data in the same body for the user who left is not stored.
+            'dailies': [self._daily(5000)],
+        })
+        self.assertEqual(response.status_code, 200)
+        row = GarminConnection.objects.get()
+        self.assertEqual((row.person_id, row.permissions), (self.other_person.person_id, ['ACTIVITY_EXPORT']))
+        self.assertEqual(self._steps(), [])
+
+    def test_a_body_that_is_not_json_is_refused_and_one_with_nothing_in_it_is_accepted(self):
+        self._connect()
+        bad = APIClient().post(self.HOOK, data='{not json', content_type='application/json')
+        self.assertEqual(bad.status_code, 400)
+        deep = APIClient().post(self.HOOK, data='[' * 100000, content_type='application/json')
+        self.assertEqual(deep.status_code, 400)
+        # A number too long to be one is read as no number, not as a failure.
+        huge = '{"dailies":[{"userId":"%s","calendarDate":"%s","steps":%s}]}' % (
+            self.GARMIN_USER, self.day.isoformat(), '9' * 400)
+        self.assertEqual(APIClient().post(self.HOOK, data=huge, content_type='application/json').status_code, 200)
+        for body in ({}, [], {'dailies': []}, {'epochs': [{'userId': self.GARMIN_USER, 'steps': 5}]}):
+            self.assertEqual(self._push(body)[0].status_code, 200, body)
+        self.assertEqual(self._steps(), [])
+
+    def test_a_push_larger_than_a_form_is_accepted_up_to_the_webhooks_own_limit(self):
+        from unittest import mock
+        self._connect()
+        # A day of heart-rate samples, as a daily summary carries: past the form limit.
+        padding = {str(offset): 60 for offset in range(0, 86400, 15)}
+        body = {'dailies': [self._daily(5000, timeOffsetHeartRateSamples=padding)]}
+        with override_settings(DATA_UPLOAD_MAX_MEMORY_SIZE=1024):
+            self.assertEqual(self._push(body)[0].status_code, 200)
+        self.assertEqual(self._steps(), [5000.0])
+        with mock.patch('patient_portal.api.garmin_oauth.MAX_PUSH_BYTES', 1024):
+            self.assertEqual(self._push(body)[0].status_code, 413)
+
+    def test_a_failure_of_our_own_asks_garmin_to_send_the_push_again(self):
+        from unittest import mock
+        self._connect()
+        self._connect(person=self.other_person, garmin_user='olgas-garmin')
+        calls = []
+
+        def flaky(garmin_user_id, samples, readings):
+            calls.append(garmin_user_id)
+            if garmin_user_id == self.GARMIN_USER:
+                raise RuntimeError('database went away')
+            return None
+
+        with mock.patch('patient_portal.api.garmin_oauth._ingest', side_effect=flaky):
+            response, _ = self._push({'dailies': [self._daily(1), self._daily(2, user='olgas-garmin')]})
+        self.assertEqual(response.status_code, 503)
+        # The other user in the body was still handled.
+        self.assertEqual(sorted(calls), sorted([self.GARMIN_USER, 'olgas-garmin']))
+        # A server that cannot store wearable rows at all keeps the push at Garmin too.
+        from rest_framework.response import Response as DrfResponse
+        with mock.patch('patient_portal.api.views.PatientRecordViewSet._write_wearable_samples',
+                        return_value=DrfResponse({'error': 'not configured'}, status=503)):
+            response, dispatcher = self._push({'dailies': [self._daily(5000)]})
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(dispatcher.calls, [])
+
+    def test_the_record_is_derived_here_when_it_cannot_be_queued(self):
+        from unittest import mock
+        self._connect()
+
+        class Broken:
+            def dispatch(self, person):
+                raise RuntimeError('broker down')
+
+        with mock.patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            response, _ = self._push({'dailies': [self._daily(5000)]}, dispatcher=Broken())
+        self.assertEqual(response.status_code, 200)
+        refresh.assert_called_once()
+        self.assertEqual(self._steps(), [5000.0])
+
+    def test_old_tokens_are_renewed_after_the_push_is_stored(self):
+        from unittest import mock
+        from omop_core.models import GarminConnection
+        from omop_core.services import garmin_oauth
+        row = self._connect(tokens_updated_at=timezone.now() - timedelta(days=45))
+        with mock.patch('omop_core.services.garmin_oauth.refresh_tokens',
+                        return_value=self._tokens(access='access-NEW', refresh='refresh-NEW')) as refresh:
+            self._push({'dailies': [self._daily(5000)]})
+            refresh.assert_called_once_with('refresh-RRRR')
+            # Fresh now: the next push does not refresh again.
+            self._push({'dailies': [self._daily(6000)]})
+            refresh.assert_called_once()
+        row.refresh_from_db()
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'refresh-NEW')
+
+        # A push whose write fails never reaches the refresh: a refresh retires
+        # the old token at Garmin, and a rollback would lose the new one.
+        GarminConnection.objects.filter(pk=row.pk).update(tokens_updated_at=timezone.now() - timedelta(days=45))
+        with mock.patch('omop_core.services.garmin_oauth.refresh_tokens') as refresh, \
+                mock.patch('patient_portal.api.views.PatientRecordViewSet._write_wearable_samples',
+                           side_effect=RuntimeError('deadlock')):
+            self.assertEqual(self._push({'dailies': [self._daily(6500)]})[0].status_code, 503)
+        refresh.assert_not_called()
+
+        # Garmin refusing the refresh does not lose the push or the connection.
+        with mock.patch('omop_core.services.garmin_oauth.refresh_tokens',
+                        side_effect=garmin_oauth.GarminOAuthError(garmin_oauth.DENIED, 400)) as refresh:
+            response, _ = self._push({'dailies': [self._daily(7000)]})
+            self._push({'dailies': [self._daily(7500)]})
+            refresh.assert_called_once()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._steps(), [7500.0])
+        row.refresh_from_db()
+        self.assertEqual(garmin_oauth.decrypt(row.refresh_token), 'refresh-NEW')
+
+
+class OpenWearablesEndpointTest(TestCase):
+    """A phone app built on the Open Wearables SDK syncs to this site (#2810).
+
+    There is no Open Wearables server: these are the paths the SDK calls. The
+    reader and the day totals are covered in tests/test_open_wearables.py;
+    these cover who may connect, what a code and a token open, what a sync
+    writes and to whom, and how it sits beside an ``export.zip`` upload.
+    """
+
+    STATUS = '/api/v1/open-wearables/connection/'
+    CODE = '/api/v1/open-wearables/invitation-code/'
+    REDEEM = '/api/v1/invitation-code/redeem'
+    REFRESH = '/api/v1/token/refresh'
+
+    @classmethod
+    def setUpTestData(cls):
+        from patient_portal.models import PatientUser
+
+        WearableUploadEndpointTest.setUpTestData.__func__(cls)
+        cls.day = timezone.now().date() - timedelta(days=2)
+        cls.other_person = Person.objects.create(person_id=99002, family_name='Other', given_name='Olga')
+        PatientRecord.objects.create(person=cls.other_person)
+        cls.other_identity = Identity.objects.create_user(email='olga-ow@test.com', password='pw')
+        PatientUser.objects.create(identity=cls.other_identity, person=cls.other_person)
+        cls.provider = Identity.objects.create_user(email='ow-provider@test.com', password='pw')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def _as(self, identity):
+        c = APIClient()
+        c.force_login(identity)
+        return c
+
+    def _post(self, url, body, token=None):
+        headers = {'HTTP_AUTHORIZATION': f'Bearer {token}'} if token else {}
+        return APIClient().post(url, data=json.dumps(body), content_type='application/json', **headers)
+
+    def _connect(self, identity=None, time_zone='America/Denver'):
+        """Make a code as the patient and redeem it as the phone: the tokens."""
+        made = self._as(identity or self.identity).post(self.CODE, {'time_zone': time_zone}, format='json')
+        self.assertEqual(made.status_code, 201, getattr(made, 'data', None))
+        redeemed = self._post(self.REDEEM, {'code': made.data['code']})
+        self.assertEqual(redeemed.status_code, 200, redeemed.content)
+        return redeemed.json()
+
+    def _record(self, kind, value, start, unit='count', end=None, record_id=None, **more):
+        return {'id': record_id or f'{kind}-{start}', 'type': kind, 'startDate': start,
+                'endDate': end or start, 'value': value, 'unit': unit, **more}
+
+    def _steps_records(self, *values, day=None):
+        day = day or self.day
+        # Midday in Denver, so the UTC instant and the local day agree.
+        return [self._record('HKQuantityTypeIdentifierStepCount', value, f'{day.isoformat()}T{18 + index:02d}:00:00Z',
+                             record_id=f'steps-{day}-{index}')
+                for index, value in enumerate(values)]
+
+    def _sync(self, tokens, records=(), sleep=(), provider='apple', dispatcher=None, user_id=None):
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        body = {'provider': provider, 'sdkVersion': '1.0.0', 'syncTimestamp': '2026-11-23T10:00:00Z',
+                'data': {'records': list(records), 'sleep': list(sleep), 'workouts': []}}
+        with use_dispatcher(dispatcher or FakeDispatcher()) as used:
+            response = self._post(f'/api/v1/sdk/users/{user_id or tokens["user_id"]}/sync', body,
+                                  token=tokens['access_token'])
+        return response, used
+
+    def _values(self, metric_key, person=None, day=None):
+        from omop_core.models import Measurement, Observation
+        concept = self.wearable_concepts[metric_key]
+        if concept.domain_id == 'Observation':
+            rows = Observation.objects.filter(person=person or self.person, observation_concept=concept,
+                                              observation_date=day or self.day)
+        else:
+            rows = Measurement.objects.filter(person=person or self.person, measurement_concept=concept,
+                                              measurement_date=day or self.day)
+        return sorted(float(v) for v in rows.values_list('value_as_number', flat=True))
+
+    # ── The patient: status, code, disconnect ───────────────────────────────
+
+    def test_status_before_and_after_a_phone_connects(self):
+        before = self._as(self.identity).get(self.STATUS)
+        self.assertEqual(before.status_code, 200)
+        self.assertEqual(before.data['connected'], False)
+        self.assertEqual(before.data['devices'], 0)
+        self.assertTrue(before.data['enabled'])
+        self._connect()
+        after = self._as(self.identity).get(self.STATUS).data
+        self.assertEqual((after['connected'], after['devices'], after['code_pending']), (True, 1, False))
+        # Never a token, the SDK user id or the code.
+        self.assertEqual(set(after), {'enabled', 'connected', 'devices', 'code_pending', 'code_expires_at',
+                                      'last_connected_at', 'last_sync_at', 'providers', 'host'})
+        self.assertIsNone(after['code_expires_at'])
+        self.assertIsNotNone(after['last_connected_at'])
+
+    def test_a_code_is_eight_characters_shown_once_and_stored_as_a_digest(self):
+        from omop_core.models import OpenWearablesConnection
+        made = self._as(self.identity).post(self.CODE, {'time_zone': 'Europe/Warsaw'}, format='json')
+        self.assertEqual(made.status_code, 201)
+        code = made.data['code']
+        self.assertRegex(code, r'^[A-HJ-NP-Z2-9]{8}$')
+        row = OpenWearablesConnection.objects.get(person=self.person)
+        self.assertNotIn(code, (row.code_hash, str(row.user_id)))
+        self.assertEqual(len(row.code_hash), 64)
+        self.assertEqual(row.time_zone, 'Europe/Warsaw')
+        self.assertEqual(made.data['code_expires_in'], 900)
+        status = self._as(self.identity).get(self.STATUS).data
+        self.assertTrue(status['code_pending'])
+        # The pending code is named by its expiry, never by the code.
+        self.assertEqual(status['code_expires_at'], made.data['code_expires_at'])
+        self.assertNotIn('code', status)
+
+    def test_a_time_zone_that_is_not_one_is_not_kept(self):
+        from omop_core.models import OpenWearablesConnection
+        for zone in ('Mars/Olympus', '../../etc/passwd', 12, None):
+            self._as(self.identity).post(self.CODE, {'time_zone': zone}, format='json')
+            self.assertEqual(OpenWearablesConnection.objects.get(person=self.person).time_zone, '')
+
+    def test_only_a_signed_in_patient_makes_a_code(self):
+        self.assertIn(APIClient().post(self.CODE, {}, format='json').status_code, (401, 403))
+        self.assertEqual(self._as(self.provider).post(self.CODE, {}, format='json').status_code, 403)
+        service = APIClient()
+        service.force_authenticate(user=Identity.objects.create(issuer='urn:service', sub='ow'),
+                                   token='service-token')
+        self.assertEqual(service.post(self.CODE, {}, format='json').status_code, 403)
+
+    def test_a_record_that_is_off_gets_no_code(self):
+        from unittest import mock
+        with mock.patch('patient_portal.api.open_wearables.record_permitted', return_value=False):
+            response = self._as(self.identity).post(self.CODE, {}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+    @override_settings(OPEN_WEARABLES_SYNC_ENABLED=False)
+    def test_switched_off_the_routes_are_not_there(self):
+        self.assertFalse(self._as(self.identity).get(self.STATUS).data['enabled'])
+        self.assertEqual(self._as(self.identity).post(self.CODE, {}, format='json').status_code, 404)
+        self.assertEqual(self._post(self.REDEEM, {'code': 'ABCDEFGH'}).status_code, 404)
+        self.assertEqual(self._post(self.REFRESH, {'refresh_token': 'x'}).status_code, 404)
+
+    def test_disconnecting_signs_every_phone_out_and_keeps_the_values(self):
+        from omop_core.models import OpenWearablesConnection
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(4000))
+        self.assertEqual(self._values('steps'), [4000.0])
+        response = self._as(self.identity).delete(self.STATUS)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.data['connected'])
+        self.assertFalse(OpenWearablesConnection.objects.filter(person=self.person).exists())
+        self.assertEqual(self._values('steps'), [4000.0])
+        again, _ = self._sync(tokens, self._steps_records(100, day=self.day - timedelta(days=1)))
+        self.assertEqual(again.status_code, 401)
+        self.assertEqual(self._post(self.REFRESH, {'refresh_token': tokens['refresh_token']}).status_code, 401)
+
+    # ── The phone: codes and tokens ─────────────────────────────────────────
+
+    def test_redeeming_answers_in_the_sdks_shape_and_works_once(self):
+        made = self._as(self.identity).post(self.CODE, {}, format='json').data
+        first = self._post(self.REDEEM, {'code': made['code'].lower()})
+        self.assertEqual(first.status_code, 200)
+        data = first.json()
+        self.assertEqual(set(data), {'access_token', 'token_type', 'refresh_token', 'expires_in', 'user_id'})
+        self.assertEqual((data['token_type'], data['expires_in']), ('bearer', 3600))
+        self.assertEqual(first['Cache-Control'], 'no-store')
+        self.assertNotIn('sessionid', first.cookies)
+        self.assertEqual(self._post(self.REDEEM, {'code': made['code']}).status_code, 404)
+
+    def test_every_code_that_does_not_work_gets_one_answer(self):
+        from omop_core.models import OpenWearablesConnection
+        made = self._as(self.identity).post(self.CODE, {}, format='json').data
+        OpenWearablesConnection.objects.update(code_expires_at=timezone.now() - timedelta(seconds=1))
+        answers = [self._post(self.REDEEM, body) for body in (
+            {'code': made['code']}, {'code': 'ZZZZZZZZ'}, {'code': 'short'}, {'code': 7}, {}, [], 'x')]
+        self.assertEqual({r.status_code for r in answers}, {404})
+        self.assertEqual(len({r.content for r in answers}), 1)
+
+    def test_a_new_code_replaces_the_one_before_it(self):
+        first = self._as(self.identity).post(self.CODE, {}, format='json').data['code']
+        second = self._as(self.identity).post(self.CODE, {}, format='json').data['code']
+        self.assertEqual(self._post(self.REDEEM, {'code': first}).status_code, 404)
+        self.assertEqual(self._post(self.REDEEM, {'code': second}).status_code, 200)
+
+    def test_refresh_gives_a_working_access_token_and_keeps_the_refresh_token(self):
+        tokens = self._connect()
+        response = self._post(self.REFRESH, {'refresh_token': tokens['refresh_token']})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(set(data), {'access_token', 'token_type', 'expires_in'})
+        synced, _ = self._sync({**tokens, 'access_token': data['access_token']}, self._steps_records(1200))
+        self.assertEqual(synced.status_code, 202)
+        self.assertEqual(self._post(self.REFRESH, {'refresh_token': tokens['refresh_token']}).status_code, 200)
+
+    def test_a_refresh_token_that_is_not_one_is_a_401(self):
+        self._connect()
+        for token in ('owr_' + 'A' * 64, 'nope', 5, None):
+            self.assertEqual(self._post(self.REFRESH, {'refresh_token': token}).status_code, 401)
+
+    def test_an_access_token_expires(self):
+        from unittest import mock
+        tokens = self._connect()
+        with mock.patch('omop_core.services.open_wearables.ACCESS_TOKEN_SECONDS', -1):
+            response, _ = self._sync(tokens, self._steps_records(1000))
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_token_opens_only_its_own_users_paths(self):
+        mine = self._connect()
+        hers = self._connect(self.other_identity)
+        response, _ = self._sync(mine, self._steps_records(9999), user_id=hers['user_id'])
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self._values('steps', person=self.other_person), [])
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_token_is_not_a_login(self):
+        tokens = self._connect()
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {tokens["access_token"]}')
+        self.assertIn(client.get(f'/api/v1/patient-records/{self.person.person_id}/').status_code, (401, 403))
+        self.assertIn(client.get(self.STATUS).status_code, (401, 403))
+
+    def test_no_token_or_a_made_up_one_is_a_401(self):
+        tokens = self._connect()
+        url = f'/api/v1/sdk/users/{tokens["user_id"]}/sync'
+        body = {'provider': 'apple', 'data': {'records': self._steps_records(500)}}
+        self.assertEqual(self._post(url, body).status_code, 401)
+        self.assertEqual(self._post(url, body, token='not-a-token').status_code, 401)
+        self.assertEqual(self._values('steps'), [])
+
+    def test_the_sixth_phone_signs_the_oldest_out(self):
+        from omop_core.models import OpenWearablesDevice
+        first = self._connect()
+        for _ in range(4):
+            self._connect()
+        before = self._as(self.identity).get(self.STATUS).data
+        self._connect()
+        after = self._as(self.identity).get(self.STATUS).data
+        # The count does not move; when a phone last joined does.
+        self.assertEqual((before['devices'], after['devices']), (5, 5))
+        self.assertGreater(after['last_connected_at'], before['last_connected_at'])
+        self.assertEqual(OpenWearablesDevice.objects.filter(connection__person=self.person).count(), 5)
+        self.assertEqual(self._post(self.REFRESH, {'refresh_token': first['refresh_token']}).status_code, 401)
+
+    def test_signing_out_in_the_app_ends_that_phone_only(self):
+        one, two = self._connect(), self._connect()
+        url = f'/api/v1/users/{one["user_id"]}/connections/apple'
+        response = APIClient().delete(url, HTTP_AUTHORIZATION=f'Bearer {one["access_token"]}')
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(self._sync(one, self._steps_records(100))[0].status_code, 401)
+        self.assertEqual(self._sync(two, self._steps_records(100))[0].status_code, 202)
+
+    # ── The phone: a sync ───────────────────────────────────────────────────
+
+    def test_a_days_records_become_the_days_value_like_an_export(self):
+        tokens = self._connect()
+        response, used = self._sync(tokens, self._steps_records(3000, 2500, 1500))
+        self.assertEqual(response.status_code, 202, response.content)
+        data = response.json()
+        self.assertEqual((data['status_code'], data['user_id']), (202, tokens['user_id']))
+        self.assertEqual((data['stored'], data['repeated'], data['rejected']), (3, 0, 0))
+        self.assertEqual(self._values('steps'), [7000.0])
+        self.assertEqual(used.calls, [self.person.person_id])
+        status = self._as(self.identity).get(self.STATUS).data
+        self.assertEqual(status['providers'], ['apple'])
+        self.assertIsNotNone(status['last_sync_at'])
+
+    def test_both_spellings_of_the_path_answer(self):
+        tokens = self._connect()
+        body = {'provider': 'apple', 'data': {'records': self._steps_records(10)}}
+        for suffix in ('', '/'):
+            response = self._post(f'/api/v1/sdk/users/{tokens["user_id"]}/sync{suffix}', body,
+                                  token=tokens['access_token'])
+            self.assertEqual(response.status_code, 202)
+
+    def test_a_record_sent_twice_is_counted_once(self):
+        tokens = self._connect()
+        records = self._steps_records(3000, 2500)
+        self._sync(tokens, records)
+        again, used = self._sync(tokens, records)
+        self.assertEqual(again.json()['repeated'], 2)
+        self.assertEqual(again.json()['stored'], 0)
+        self.assertEqual(self._values('steps'), [5500.0])
+        self.assertEqual(used.calls, [])
+
+    def test_a_later_batch_for_the_day_replaces_the_row_and_folds_the_history(self):
+        from omop_core.models import WearableUpload
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(3000))
+        late = [self._record('HKQuantityTypeIdentifierStepCount', 800, f'{self.day.isoformat()}T22:00:00Z',
+                             record_id='late')]
+        self._sync(tokens, late)
+        self.assertEqual(self._values('steps'), [3800.0])
+        upload = WearableUpload.objects.get(person=self.person)
+        self.assertEqual(upload.device_type, 'apple')
+        self.assertRegex(upload.filename, r'^Open Wearables sync \(iPhone\) \d{4}-\d{2}$')
+        self.assertEqual([(e['metric'], e['value']) for e in upload.sample_summary], [('steps', 3800.0)])
+
+    def test_a_mean_metric_is_the_mean_and_units_are_converted(self):
+        tokens = self._connect()
+        at = f'{self.day.isoformat()}T18:00:00Z'
+        self._sync(tokens, [
+            self._record('HKQuantityTypeIdentifierRestingHeartRate', 58, at, 'bpm', record_id='r1'),
+            self._record('HKQuantityTypeIdentifierRestingHeartRate', 62, at, 'bpm', record_id='r2'),
+            self._record('HKQuantityTypeIdentifierDistanceWalkingRunning', 1500, at, 'm', record_id='d1'),
+            self._record('HKQuantityTypeIdentifierActiveEnergyBurned', 320, at, 'Cal', record_id='e1'),
+            self._record('HKQuantityTypeIdentifierOxygenSaturation', 0.97, at, '%', record_id='o1'),
+        ])
+        self.assertEqual(self._values('resting_hr'), [60.0])
+        self.assertEqual(self._values('distance'), [1.5])
+        self.assertEqual(self._values('active_energy'), [320.0])
+        self.assertEqual(self._values('spo2'), [97.0])
+
+    def test_what_cannot_be_read_is_counted_and_the_rest_is_kept(self):
+        tokens = self._connect()
+        at = f'{self.day.isoformat()}T18:00:00Z'
+        response, _ = self._sync(tokens, [
+            *self._steps_records(1000),
+            self._record('HKQuantityTypeIdentifierDistanceWalkingRunning', 2, at, 'furlong', record_id='bad-unit'),
+            self._record('HKQuantityTypeIdentifierHeartRate', 71, at, 'bpm', record_id='general-hr'),
+            self._record('HKQuantityTypeIdentifierStepCount', 'many', at, record_id='bad-value'),
+            self._record('HKQuantityTypeIdentifierStepCount', 5, 'yesterday', record_id='bad-time'),
+            'not a record',
+        ])
+        data = response.json()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(data['stored'], 1)
+        self.assertEqual(data['rejected'], 4)
+        self.assertEqual(data['unrecognized'], ['HKQuantityTypeIdentifierHeartRate'])
+        self.assertEqual(self._values('steps'), [1000.0])
+        self.assertEqual(self._values('distance'), [])
+
+    def test_sleep_is_the_time_asleep(self):
+        tokens = self._connect()
+        night = self.day.isoformat()
+        def stage(name, start, end, sid):
+            return {'id': sid, 'stage': name, 'startDate': f'{night}T{start}:00Z', 'endDate': f'{night}T{end}:00Z'}
+        self._sync(tokens, sleep=[
+            stage('in_bed', '07:30', '14:30', 's0'), stage('light', '08:00', '11:00', 's1'),
+            stage('deep', '11:00', '12:30', 's2'), stage('awake', '12:30', '12:45', 's3'),
+            stage('rem', '12:45', '14:15', 's4'),
+        ])
+        # 01:00 to 07:15 in Denver, less a quarter of an hour awake.
+        self.assertEqual(self._values('sleep_duration'), [6.0])
+
+    def test_a_stage_belongs_to_the_day_it_started_on_as_in_an_export(self):
+        tokens = self._connect()
+        night = self.day.isoformat()
+        self._sync(tokens, sleep=[
+            # 23:00 the evening before in Denver, then on past midnight.
+            {'id': 'a', 'stage': 'light', 'startDate': f'{night}T06:00:00Z', 'endDate': f'{night}T07:30:00Z'},
+            {'id': 'b', 'stage': 'deep', 'startDate': f'{night}T07:30:00Z', 'endDate': f'{night}T09:30:00Z'},
+        ])
+        self.assertEqual(self._values('sleep_duration', day=self.day - timedelta(days=1)), [1.5])
+        self.assertEqual(self._values('sleep_duration'), [2.0])
+
+    def test_a_late_evening_record_belongs_to_that_evening(self):
+        tokens = self._connect(time_zone='America/Denver')
+        # 05:30 UTC is 22:30 or 23:30 the evening before in Denver.
+        record = self._record('HKQuantityTypeIdentifierStepCount', 400,
+                              f'{self.day.isoformat()}T05:30:00Z', record_id='evening')
+        self._sync(tokens, [record])
+        self.assertEqual(self._values('steps', day=self.day - timedelta(days=1)), [400.0])
+        self.assertEqual(self._values('steps'), [])
+        # The record's own offset, when HealthKit kept one, wins over the browser's zone.
+        own = self._record('HKQuantityTypeIdentifierStepCount', 50, f'{self.day.isoformat()}T05:30:00Z',
+                           record_id='own-offset', zoneOffset='+02:00')
+        self._sync(tokens, [own])
+        self.assertEqual(self._values('steps'), [50.0])
+
+    def test_a_body_that_cannot_be_read_is_refused_and_stores_nothing(self):
+        tokens = self._connect()
+        url = f'/api/v1/sdk/users/{tokens["user_id"]}/sync'
+        for body, status_code in ((['a list'], 400), ({'provider': 'apple'}, 400),
+                                  ({'provider': 'fitbit', 'data': {}}, 400),
+                                  ({'provider': 'apple', 'data': {'records': 'x'}}, 400)):
+            self.assertEqual(self._post(url, body, token=tokens['access_token']).status_code, status_code, body)
+        raw = APIClient().post(url, data='{not json', content_type='application/json',
+                               HTTP_AUTHORIZATION=f'Bearer {tokens["access_token"]}')
+        self.assertEqual(raw.status_code, 400)
+        self.assertEqual(self._values('steps'), [])
+
+    def test_too_many_records_or_too_large_a_body_is_a_413(self):
+        from unittest import mock
+        tokens = self._connect()
+        with mock.patch('omop_core.services.open_wearables.MAX_ITEMS', 2):
+            response, _ = self._sync(tokens, self._steps_records(1, 2, 3))
+        self.assertEqual(response.status_code, 413)
+        with mock.patch('omop_core.services.open_wearables.MAX_SYNC_BYTES', 50):
+            response, _ = self._sync(tokens, self._steps_records(1))
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(self._values('steps'), [])
+
+    def _approve_health_connect(self, metric_key='steps', code='StepsRecord'):
+        from omop_core.models import SourceCodeConceptMapping
+        concept = self.wearable_concepts[metric_key]
+        # The queue row a first sync left for the code, if there is one: a
+        # code has one global mapping row.
+        mapping, _created = SourceCodeConceptMapping.objects.update_or_create(
+            source_vocabulary_id='HealthConnect', source_code=code, organization=None,
+            defaults=dict(
+                metric_key=metric_key, target_concept=concept,
+                destination_vocabulary_id=concept.vocabulary_id, domain_id=concept.domain_id,
+                omop_table=concept.domain_id.lower(), status='approved', origin='import'))
+        return mapping
+
+    def test_samsung_health_is_read_as_android(self):
+        """A Galaxy phone's SDK reads Samsung Health unless the app chose Health Connect."""
+        self._approve_health_connect()
+        tokens = self._connect()
+        records = [self._record('STEP_COUNT', 4000, f'{self.day.isoformat()}T18:00:00Z', zoneOffset='Z')]
+        response, _ = self._sync(tokens, records, provider='samsung')
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual((response.json()['stored'], response.json()['days_written']), (1, 1))
+        self.assertEqual(self._values('steps'), [4000.0])
+        self.assertEqual(self._as(self.identity).get(self.STATUS).data['providers'], ['samsung'])
+
+    def test_the_seeded_health_connect_mappings_cover_all_but_hrv_once_approved(self):
+        """Which Android metrics a curator can switch on by approving the seed."""
+        from django.core.management import call_command
+        from omop_core.models import SourceCodeConceptMapping
+        from omop_core.services import open_wearables
+        from omop_core.services.mappings import resolve_wearable_mappings
+        call_command('seed_hl7_phr_mappings', verbosity=0)
+        self.assertEqual(resolve_wearable_mappings('android'), {})
+        # A curator approves each seeded row at its metric's concept (the
+        # fixture's concepts are not the ones the seed looks up by code).
+        for row in SourceCodeConceptMapping.objects.filter(source_vocabulary_id='HealthConnect'):
+            concept = self.wearable_concepts.get(row.metric_key)
+            if concept is not None:
+                row.target_concept, row.status = concept, 'approved'
+                row.save(update_fields=['target_concept', 'status'])
+        resolved = set(resolve_wearable_mappings('android'))
+        read = set(open_wearables._ANDROID_TYPE_MAP.values()) | {'sleep_duration'}
+        # No Health Connect code is seeded for HRV RMSSD: a curator adds one,
+        # with metric key hrv_rmssd, to have it stored.
+        self.assertEqual(read - resolved, {'hrv_rmssd'})
+
+    def test_two_approved_rows_for_a_metric_resolve_to_the_later_one(self):
+        from omop_core.services.mappings import resolve_wearable_mappings
+        self._approve_health_connect()
+        newer = self._approve_health_connect(code='StepsRecordV2')
+        newer.target_concept = self.wearable_concepts['flights_climbed']
+        newer.save(update_fields=['target_concept'])
+        self.assertEqual(resolve_wearable_mappings('android')['steps'], self.wearable_concepts['flights_climbed'])
+
+    def test_health_connect_is_kept_unresolved_until_its_mapping_is_approved(self):
+        """Counted and stored from the first sync (#2835), so nothing is lost
+        while the mapping waits; the next sync after approval accepts it."""
+        from omop_core.models import Observation, PatientSourceCode, WearableUpload
+        tokens = self._connect()
+        records = [self._record('STEP_COUNT', 4000, f'{self.day.isoformat()}T18:00:00Z', record_id='hc-1')]
+        waiting, _ = self._sync(tokens, records, provider='google')
+        self.assertEqual(waiting.status_code, 202)
+        self.assertEqual((waiting.json()['unmapped'], waiting.json()['stored']), (0, 1))
+        self.assertEqual(self._values('steps'), [])
+        row = Observation.objects.get(person=self.person, observation_source_value='StepsRecord')
+        self.assertEqual((row.observation_concept_id, float(row.value_as_number)), (0, 4000.0))
+        self.assertTrue(PatientSourceCode.objects.filter(
+            person=self.person, source_vocabulary_id='HealthConnect', source_value='StepsRecord').exists())
+
+        # Approved here without the API, whose re-point would resolve the row
+        # at once: the phone's next record for the day does it instead.
+        self._approve_health_connect()
+        more = [self._record('STEP_COUNT', 500, f'{self.day.isoformat()}T19:00:00Z', record_id='hc-2')]
+        approved, _ = self._sync(tokens, more, provider='health_connect')
+        self.assertEqual(approved.json()['stored'], 1)
+        self.assertEqual(self._values('steps'), [4500.0])
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 1)
+        self.assertEqual(WearableUpload.objects.filter(person=self.person).first().device_type, 'android')
+        self.assertEqual(self._as(self.identity).get(self.STATUS).data['providers'], ['health_connect'])
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_proposed_health_connect_mapping_makes_the_phones_days_provisional(self):
+        from omop_core.models import Observation
+        # As Athena ships it: a proposal's destination has to be a standard concept.
+        Concept.objects.filter(pk=self.wearable_concepts['steps'].pk).update(standard_concept='S')
+        mapping = self._approve_health_connect()
+        mapping.status = 'proposed'
+        mapping.save()
+        tokens = self._connect()
+        records = [self._record('STEP_COUNT', 4000, f'{self.day.isoformat()}T18:00:00Z', record_id='hc-1')]
+
+        proposed, _ = self._sync(tokens, records, provider='health_connect')
+
+        self.assertEqual((proposed.json()['unmapped'], proposed.json()['stored']), (0, 1))
+        rows = Observation.objects.filter(
+            person=self.person, observation_concept=self.wearable_concepts['steps'])
+        # A curated proposal nobody scored stands at the floor.
+        self.assertEqual([(float(r.value_as_number), r.confidence) for r in rows], [(4000.0, 70)])
+
+    def test_a_record_that_is_off_stores_nothing_and_does_not_fail_the_phone(self):
+        from unittest import mock
+        tokens = self._connect()
+        with mock.patch('patient_portal.api.open_wearables.record_permitted', return_value=False):
+            response, used = self._sync(tokens, self._steps_records(3000))
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(self._values('steps'), [])
+        self.assertEqual(used.calls, [])
+
+    def test_a_failure_of_this_servers_own_is_a_503_and_leaves_nothing_behind(self):
+        from unittest import mock
+        from omop_core.models import OpenWearablesDay
+        tokens = self._connect()
+        with mock.patch('patient_portal.api.views.PatientRecordViewSet._write_wearable_samples',
+                        side_effect=RuntimeError('db')):
+            response, _ = self._sync(tokens, self._steps_records(3000))
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(OpenWearablesDay.objects.exists())
+        retried, _ = self._sync(tokens, self._steps_records(3000))
+        self.assertEqual(retried.status_code, 202)
+        self.assertEqual(self._values('steps'), [3000.0])
+
+    def test_when_queueing_the_derivation_fails_it_runs_in_the_request(self):
+        from unittest import mock
+        tokens = self._connect()
+
+        class Broken:
+            def dispatch(self, person):
+                raise RuntimeError('broker down')
+
+        with mock.patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+            response, _ = self._sync(tokens, self._steps_records(3000), dispatcher=Broken())
+        self.assertEqual(response.status_code, 202)
+        refresh.assert_called_once()
+
+    def test_status_logs_and_unknown_providers(self):
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(100))
+        auth = {'HTTP_AUTHORIZATION': f'Bearer {tokens["access_token"]}'}
+        state = APIClient().get(f'/api/v1/sdk/users/{tokens["user_id"]}/sync/status?provider=apple', **auth)
+        self.assertEqual(state.status_code, 200)
+        data = state.json()
+        self.assertEqual((data['provider'], data['historicalSyncCompleted'], data['dataTypes']), ('apple', None, []))
+        self.assertTrue(data['syncedUntil'].startswith(self.day.isoformat()))
+        empty = APIClient().get(f'/api/v1/sdk/users/{tokens["user_id"]}/sync/status?provider=google', **auth)
+        self.assertEqual((empty.json()['provider'], empty.json()['syncedUntil']), ('health_connect', None))
+        self.assertEqual(APIClient().get(
+            f'/api/v1/sdk/users/{tokens["user_id"]}/sync/status?provider=fitbit', **auth).status_code, 400)
+        logged = self._post(f'/api/v1/sdk/users/{tokens["user_id"]}/logs', {'events': ['x']},
+                            token=tokens['access_token'])
+        self.assertEqual(logged.status_code, 202)
+        self.assertEqual(self._post(f'/api/v1/sdk/users/{tokens["user_id"]}/logs', {}).status_code, 401)
+
+    # ── Beside the export.zip upload ────────────────────────────────────────
+
+    def _export(self, steps, day=None):
+        day = day or self.day
+        return WearableUploadEndpointTest._upload_apple(self, f"""<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierStepCount" startDate="{day.isoformat()} 10:00:00 -0700"
+          endDate="{day.isoformat()} 10:05:00 -0700" value="{steps}"/>
+</HealthData>
+""")
+
+    _client_as = WearableUploadEndpointTest._client_as
+    _make_apple_zip = WearableUploadEndpointTest._make_apple_zip
+
+    def test_a_sync_replaces_what_an_earlier_export_stored_for_the_day(self):
+        self._export(6400)
+        self.assertEqual(self._values('steps'), [6400.0])
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(3000, 3500))
+        self.assertEqual(self._values('steps'), [6500.0])
+
+    def test_an_export_after_a_sync_leaves_the_synced_day_alone(self):
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(3000, 3500))
+        other_day = self.day - timedelta(days=5)
+        result = self._export(6400)
+        self.assertEqual(result['samples_created'], 0)
+        self.assertEqual(self._values('steps'), [6500.0])
+        # A day the phone never sent is the file's to fill.
+        self._export(4100, day=other_day)
+        self.assertEqual(self._values('steps', day=other_day), [4100.0])
+
+    def test_a_garmin_value_for_the_same_day_is_another_devices_and_stays(self):
+        from django.db import transaction
+        from omop_core.services.wearable_parsers import WearableSample
+        from patient_portal.api.views import PatientRecordViewSet
+        with transaction.atomic():
+            PatientRecordViewSet()._write_wearable_samples(
+                None, self.person, 'garmin', [WearableSample('steps', self.day, 5100.0)], 'activity.fit', False)
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(3000))
+        self.assertEqual(self._values('steps'), [3000.0, 5100.0])
+
+    def test_erasing_the_record_signs_the_phones_out(self):
+        from omop_core.models import OpenWearablesConnection
+        from patient_portal.erasure import erase_record
+        tokens = self._connect()
+        erase_record(self.person, actor=self.identity)
+        self.assertFalse(OpenWearablesConnection.objects.filter(person=self.person).exists())
+        self.assertEqual(self._sync(tokens, self._steps_records(100))[0].status_code, 401)
+
+    # ── Review of #2821 ─────────────────────────────────────────────────────
+
+    def test_one_impossible_record_does_not_fail_the_batch(self):
+        tokens = self._connect()
+        bad = self._record('HKQuantityTypeIdentifierStepCount', 5, '0001-01-01T00:00:00Z', record_id='distant-past')
+        response, _ = self._sync(tokens, [*self._steps_records(1000), bad])
+        self.assertEqual(response.status_code, 202, response.content)
+        self.assertEqual((response.json()['stored'], response.json()['rejected']), (1, 1))
+        self.assertEqual(self._values('steps'), [1000.0])
+
+    def test_a_day_outside_the_plausible_range_is_counted_and_not_written(self):
+        tokens = self._connect()
+        response, _ = self._sync(tokens, self._steps_records(150000))
+        data = response.json()
+        self.assertEqual((data['stored'], data['days_written']), (1, 0))
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_working_code_or_token_is_never_refused_for_other_peoples_junk(self):
+        from unittest import mock
+        from patient_portal.api import open_wearables as routes
+        made = self._as(self.identity).post(self.CODE, {}, format='json').data
+        tokens = self._connect(self.other_identity)
+        with mock.patch.object(routes.RedeemFailureThrottle, 'rate', '2/hour'), \
+                mock.patch.object(routes.RefreshFailureThrottle, 'rate', '2/hour'):
+            junk = [self._post(self.REDEEM, {'code': 'ZZZZZZZZ'}).status_code for _ in range(4)]
+            bad = [self._post(self.REFRESH, {'refresh_token': 'owr_' + 'A' * 64}).status_code for _ in range(4)]
+            self.assertEqual(junk, [404, 404, 429, 429])
+            self.assertEqual(bad, [401, 401, 429, 429])
+            # Same address, a real code and a real token: both still work.
+            self.assertEqual(self._post(self.REDEEM, {'code': made['code']}).status_code, 200)
+            self.assertEqual(self._post(self.REFRESH, {'refresh_token': tokens['refresh_token']}).status_code, 200)
+
+    def test_a_patients_phones_share_one_budget(self):
+        from unittest import mock
+        from patient_portal.api import open_wearables as routes
+        one, two = self._connect(), self._connect()
+        with mock.patch.object(routes.ConnectionThrottle, 'rate', '2/hour'):
+            self.assertEqual(self._sync(one, self._steps_records(1))[0].status_code, 202)
+            self.assertEqual(self._sync(two, [])[0].status_code, 202)
+            limited, _ = self._sync(one, [])
+        self.assertEqual(limited.status_code, 429)
+        self.assertIn('Retry-After', limited)
+
+    def test_the_time_zone_is_fixed_once_a_day_has_been_counted(self):
+        from omop_core.models import OpenWearablesConnection
+        tokens = self._connect(time_zone='America/Denver')
+        evening = self._record('HKQuantityTypeIdentifierStepCount', 400,
+                               f'{self.day.isoformat()}T05:30:00Z', record_id='evening')
+        self._sync(tokens, [evening])
+        # A new code made while travelling, and the app sends the record again.
+        again = self._connect(time_zone='Europe/London')
+        self.assertEqual(OpenWearablesConnection.objects.get(person=self.person).time_zone, 'America/Denver')
+        response, _ = self._sync(again, [evening])
+        self.assertEqual(response.json()['repeated'], 1)
+        self.assertEqual(self._values('steps', day=self.day - timedelta(days=1)), [400.0])
+        self.assertEqual(self._values('steps'), [])
+
+    def test_a_file_with_more_of_the_day_than_the_phone_sent_takes_its_place(self):
+        """The phone stopped syncing part way through the day."""
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(2000))
+        result = self._export(9000)
+        self.assertEqual(result['samples_created'], 1)
+        self.assertEqual(self._values('steps'), [9000.0])
+        # The phone comes back with a little more of that day: still less than the file.
+        late = [self._record('HKQuantityTypeIdentifierStepCount', 500, f'{self.day.isoformat()}T21:00:00Z',
+                             record_id='late')]
+        self._sync(tokens, late)
+        self.assertEqual(self._values('steps'), [9000.0])
+        # ... and then with the rest of it, which is now more.
+        rest = [self._record('HKQuantityTypeIdentifierStepCount', 7000, f'{self.day.isoformat()}T22:00:00Z',
+                             record_id='rest')]
+        self._sync(tokens, rest)
+        self.assertEqual(self._values('steps'), [9500.0])
+
+    def test_a_running_total_does_not_take_a_day_below_what_a_file_stored(self):
+        """A backfill that starts in the middle of a day the patient already uploaded."""
+        self._export(9000)
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(1200))
+        self.assertEqual(self._values('steps'), [9000.0])
+
+    def test_for_an_averaged_metric_the_sync_stands_and_a_later_file_is_skipped(self):
+        tokens = self._connect()
+        at = f'{self.day.isoformat()}T18:00:00Z'
+        self._sync(tokens, [self._record('HKQuantityTypeIdentifierRestingHeartRate', 58, at, 'bpm', record_id='r')])
+        WearableUploadEndpointTest._upload_apple(self, f"""<?xml version="1.0" encoding="UTF-8"?>
+<HealthData>
+  <Record type="HKQuantityTypeIdentifierRestingHeartRate" startDate="{self.day.isoformat()} 10:00:00 -0700"
+          endDate="{self.day.isoformat()} 10:00:00 -0700" value="71"/>
+</HealthData>
+""")
+        self.assertEqual(self._values('resting_hr'), [58.0])
+
+    def test_a_synced_day_whose_row_is_gone_no_longer_blocks_a_file(self):
+        from omop_core.models import Observation
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(6500))
+        Observation.objects.filter(person=self.person, observation_date=self.day).update(is_erroneous=True)
+        result = self._export(6400)
+        self.assertEqual(result['samples_created'], 1)
+        self.assertEqual(Observation.objects.filter(
+            person=self.person, observation_date=self.day, is_erroneous=False).count(), 1)
+
+    def test_deleting_the_syncs_history_row_deletes_its_days_for_good(self):
+        from omop_core.models import OpenWearablesDay, WearableUpload
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(3000, 2500))
+        upload = WearableUpload.objects.get(person=self.person)
+        response = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+        self.assertIn(response.status_code, (200, 204), getattr(response, 'data', None))
+        self.assertEqual(self._values('steps'), [])
+        self.assertTrue(OpenWearablesDay.objects.get(metric_key='steps', day=self.day).closed)
+        # One more record for that day does not bring the whole day back.
+        late = [self._record('HKQuantityTypeIdentifierStepCount', 10, f'{self.day.isoformat()}T23:00:00Z',
+                             record_id='after-delete')]
+        response, _ = self._sync(tokens, late)
+        self.assertEqual(response.json()['late'], 1)
+        self.assertEqual(self._values('steps'), [])
+        # Another day is unaffected, and connecting again starts afresh.
+        other = self.day - timedelta(days=1)
+        self._sync(tokens, self._steps_records(700, day=other))
+        self.assertEqual(self._values('steps', day=other), [700.0])
+        self._as(self.identity).delete(self.STATUS)
+        fresh = self._connect()
+        self._sync(fresh, self._steps_records(3000, 2500))
+        self.assertEqual(self._values('steps'), [5500.0])
+
+    def test_with_a_worker_a_burst_of_batches_is_one_derivation(self):
+        from unittest import mock
+        from omop_core.services.derivation_jobs import CeleryDispatcher, use_dispatcher
+        from patient_portal.api import open_wearables as routes
+        tokens = self._connect()
+        with mock.patch('omop_core.tasks.refresh_patient_record_task.apply_async') as queued:
+            for index, steps in enumerate((1000, 500, 250)):
+                record = self._record('HKQuantityTypeIdentifierStepCount', steps,
+                                      f'{self.day.isoformat()}T{18 + index}:00:00Z', record_id=f'burst-{index}')
+                self._sync(tokens, [record], dispatcher=CeleryDispatcher())
+        self.assertEqual(self._values('steps'), [1750.0])
+        queued.assert_called_once_with(args=[self.person.person_id], countdown=routes.DERIVE_AFTER_SECONDS)
+        self.assertGreater(routes.DERIVE_AFTER_SECONDS, routes.DERIVE_QUIET_SECONDS)
+
+    def test_closing_dormant_days_is_a_command(self):
+        from django.core.management import call_command
+        from omop_core.models import OpenWearablesDay
+        from omop_core.services import open_wearables
+        tokens = self._connect()
+        self._sync(tokens, self._steps_records(3000))
+        OpenWearablesDay.objects.update(updated_at=timezone.now() - open_wearables.CLOSE_AFTER - timedelta(days=1))
+        out = io.StringIO()
+        call_command('close_open_wearables_days', stdout=out)
+        self.assertIn('Closed 1 day total(s).', out.getvalue())
+        self.assertEqual(OpenWearablesDay.objects.get().seen, {})
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True, PROVISIONAL_CONFIDENCE_FLOOR=70)
+class WearableSourceCodesTest(RunsRepointJobsMixin, TestCase):
+    """Wearable readings come in as source codes and are resolved as a hospital's are (#2835).
+
+    A row carries its device's code, the patient's inventory says which device,
+    and the mapping decides the rest: approved is an accepted row, a qualifying
+    proposal a provisional one, anything else an unresolved row that waits.
+    The Garmin Connect read is patched, as in ``GarminSyncEndpointTest``.
+    """
+
+    URL = GarminSyncEndpointTest.URL
+    KEY = GarminSyncEndpointTest.KEY
+
+    @classmethod
+    def setUpTestData(cls):
+        GarminSyncEndpointTest.setUpTestData.__func__(cls)
+        cls.admin = Identity.objects.create_user(
+            email='wearable-codes-admin@test.com', password='pw', is_staff=True)
+        # As Athena ships them: the LOINC concepts are standard, the local
+        # wearable ones (HK-Wearable) are not. A proposal's destination has to
+        # be one or the other for a row to be written from it.
+        Concept.objects.filter(
+            concept_id__in=[c.concept_id for c in cls.wearable_concepts.values()],
+            vocabulary_id='LOINC').update(standard_concept='S')
+        for concept in cls.wearable_concepts.values():
+            concept.refresh_from_db()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    _client_as = GarminSyncEndpointTest._client_as
+    _sample = GarminSyncEndpointTest._sample
+    _sync = GarminSyncEndpointTest._sync
+
+    def _mapping(self, metric_key):
+        from omop_core.models import SourceCodeConceptMapping
+        return SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='Garmin', source_code=metric_key)
+
+    def _propose(self, metric_key, confidence=None):
+        """The seeded Garmin mapping as a proposal, as a new device's mappings start."""
+        mapping = self._mapping(metric_key)
+        mapping.status = 'proposed'
+        mapping.suggestion_confidence = confidence
+        mapping.save()
+        return mapping
+
+    def _decide(self, mapping, **changes):
+        """A curator's save through the API, with its re-point run in place."""
+        resp = self._client_as(self.admin).patch(
+            f'/api/v1/code-mappings/{mapping.pk}/', changes, format='json')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        return resp
+
+    def _rows(self, code, person=None):
+        """(value, concept id, confidence) of a person's rows filed under a device code."""
+        from omop_core.models import Measurement, Observation
+        rows = [
+            (float(value), concept_id, confidence)
+            for value, concept_id, confidence in Measurement.objects.filter(
+                person=person or self.person, measurement_source_value=code,
+            ).values_list('value_as_number', 'measurement_concept_id', 'confidence')
+        ] + [
+            (float(value), concept_id, confidence)
+            for value, concept_id, confidence in Observation.objects.filter(
+                person=person or self.person, observation_source_value=code,
+            ).values_list('value_as_number', 'observation_concept_id', 'confidence')
+        ]
+        return sorted(rows)
+
+    def _month(self, metric_key, value):
+        """Ten days of a metric, enough for a 30-day summary."""
+        return [self._sample(metric_key, value + i, self.day - timedelta(days=i)) for i in range(10)]
+
+    def _cid(self, metric_key):
+        return self.wearable_concepts[metric_key].concept_id
+
+    # -- what an import stores ------------------------------------------------
+
+    def test_an_approved_mapping_stores_an_accepted_row_under_the_device_code(self):
+        from omop_core.models import PatientSourceCode
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertNotIn('unresolved_samples', resp.data)
+        self.assertNotIn('provisional_samples', resp.data)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), None)])
+        # The patient's inventory says they hold the code under Garmin's vocabulary.
+        self.assertEqual(
+            sorted(PatientSourceCode.objects.filter(person=self.person).values_list(
+                'source_vocabulary_id', 'source_value', 'omop_table', 'occurrence_count', 'source_unit')),
+            [('Garmin', 'resting_hr', 'measurement', 1, '/min'), ('Garmin', 'steps', 'observation', 1, '/d')])
+
+    def test_a_proposed_mapping_makes_provisional_rows(self):
+        self._propose('steps')                              # curated, nobody scored it
+        self._propose('resting_hr', confidence=0.85)
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self.assertEqual(resp.data['samples_created'], 2)
+        self.assertEqual(resp.data['provisional_samples'], 2)
+        # Both found a proposal: nothing this upload stored is still waiting.
+        self.assertNotIn('unresolved_samples', resp.data)
+        # Unscored stands at the floor; null would read as an accepted row.
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), 85)])
+
+    def test_a_proposal_to_a_local_wearable_concept_qualifies(self):
+        """RMSSD has no LOINC: its concept is local and not standard, and still a destination."""
+        self.assertEqual(self.wearable_concepts['hrv_rmssd'].vocabulary_id, 'HK-Wearable')
+        self._propose('hrv_rmssd')
+        self._sync([self._sample('hrv_rmssd', 48.0)])
+
+        self.assertEqual(self._rows('hrv_rmssd'), [(48.0, self._cid('hrv_rmssd'), 70)])
+
+    def test_a_proposal_scored_below_the_floor_leaves_the_reading_unresolved(self):
+        self._propose('steps', confidence=0.55)
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['samples_created'], 1)
+        self.assertNotIn('provisional_samples', resp.data)
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=False)
+    def test_with_provisional_data_off_a_proposed_mapping_keeps_the_reading_unresolved(self):
+        self._propose('steps')
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['unresolved_samples']), (1, 1))
+        self.assertNotIn('provisional_samples', resp.data)
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+    def test_a_proposal_with_no_destination_or_for_one_hospital_makes_nothing_provisional(self):
+        org = Organization.objects.create(name='Wearable Codes Hospital', slug='wearable-codes-hospital')
+        steps = self._propose('steps')
+        steps.organization = org
+        steps.save()
+        resting = self._propose('resting_hr')
+        resting.target_concept = None
+        resting.save()
+
+        self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, 0, None)])
+
+    def test_a_resync_of_a_provisional_day_replaces_it_and_stays_provisional(self):
+        self._propose('steps')
+        self._sync([self._sample('steps', 4000.0)])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+    def test_a_resync_of_an_unresolved_day_replaces_it(self):
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 4000.0)])
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+    def test_a_row_stored_before_rows_carried_their_code_is_still_found_as_stored(self):
+        from omop_core.models import Observation
+        concept = self.wearable_concepts['steps']
+        GarminSyncEndpointTest._stored(self, 'garmin', 'steps', [9200.0])
+
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['duplicates_skipped']), (0, 1))
+        self.assertEqual(Observation.objects.filter(person=self.person, observation_concept=concept).count(), 1)
+
+    # -- the rows follow the mapping, by the resolver's own rules -------------
+
+    def test_approving_the_mapping_accepts_its_provisional_rows(self):
+        mapping = self._propose('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+        self._decide(mapping, status='approved')
+
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+        self.patient_rec.refresh_from_db()
+        self.assertEqual(self.patient_rec.derivation_version, 0)
+
+    def test_approving_the_mapping_resolves_its_unresolved_rows(self):
+        mapping = self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+
+        self._decide(mapping, status='approved')
+
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+    def test_rejecting_the_proposal_reverts_its_rows_and_keeps_the_readings(self):
+        mapping = self._propose('steps')
+        self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0)])
+
+        self._decide(mapping, status='rejected')
+
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+        self.assertEqual(self._rows('resting_hr'), [(52.0, self._cid('resting_hr'), None)])
+
+    def test_unapproving_keeps_accepted_rows_and_later_readings_are_provisional(self):
+        mapping = self._mapping('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self._decide(mapping, status='proposed')
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+        self._sync([self._sample('steps', 7000.0, self.day - timedelta(days=1))])
+        self.assertEqual(self._rows('steps'),
+                         [(7000.0, self._cid('steps'), 70), (9200.0, self._cid('steps'), None)])
+
+    def test_the_next_import_resolves_rows_a_bulk_update_left_waiting(self):
+        from omop_core.models import SourceCodeConceptMapping
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        # update() fires no signal and queues no re-point.
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin', source_code='steps').update(status='approved')
+
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual(resp.data['duplicates_skipped'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+    def test_generate_omop_resolves_a_wearable_code_like_any_other(self):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.models import Observation, SourceCodeConceptMapping
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin', source_code='steps').update(status='approved')
+
+        with use_dispatcher(FakeDispatcher()):
+            outcome = resolve_person_source_codes(self.person)
+
+        self.assertEqual(outcome['resolved'], 1)
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+        # No empty row is made for an inventory entry: a wearable row is its reading.
+        self.assertEqual(Observation.objects.filter(person=self.person).count(), 1)
+
+    # -- a device's code is not a hospital's of the same spelling -------------
+
+    def _hospital_spo2(self, status='approved', confidence=None):
+        """A hospital's local SPO2 code (the same letters as Garmin's ``spo2``), mapped elsewhere."""
+        from omop_core.models import SourceCodeConceptMapping
+        return SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.3.4.5', source_code='SPO2', omop_table='measurement',
+            target_concept=self.wearable_concepts['vo2_max'], status=status,
+            suggestion_confidence=confidence)
+
+    def test_a_hospitals_mapping_does_not_answer_for_a_devices_code(self):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        self._propose('spo2', confidence=0.2)               # Garmin's own does not qualify
+        self._sync([self._sample('spo2', 97.0)])
+        self._hospital_spo2(status='approved')
+
+        with use_dispatcher(FakeDispatcher()):
+            resolve_person_source_codes(self.person)
+
+        self.assertEqual(self._rows('spo2'), [(97.0, 0, None)])
+
+    def test_a_hospitals_proposal_neither_answers_for_nor_blocks_a_devices_code(self):
+        self._hospital_spo2(status='proposed', confidence=0.95)
+        self._propose('spo2')
+
+        self._sync([self._sample('spo2', 97.0)])
+
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), 70)])
+
+    def test_a_devices_mapping_answers_only_for_a_holder_of_its_code(self):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.models import Measurement
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        from omop_core.services.pk import next_pk
+        # Another patient with a hospital's unresolved SPO2 result and no Garmin inventory.
+        other = Person.objects.create(person_id=99002, family_name='Hospital', given_name='Hal')
+        PatientRecord.objects.create(person=other)
+        Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'), person=other,
+            measurement_concept_id=0, measurement_date=self.day, value_as_number=91,
+            measurement_type_concept_id=32817, measurement_source_value='spo2')
+        mapping = self._propose('spo2')
+        self._sync([self._sample('spo2', 97.0)])
+
+        # Generate OMOP for the other patient, a qualifying Garmin proposal in place...
+        with use_dispatcher(FakeDispatcher()):
+            resolve_person_source_codes(other)
+        self.assertEqual(self._rows('spo2', other), [(91.0, 0, None)])
+        # ...and the approval's own re-point across every patient.
+        self._decide(mapping, status='approved')
+        self.assertEqual(self._rows('spo2', other), [(91.0, 0, None)])
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), None)])
+
+    # -- the 30-day metrics ---------------------------------------------------
+
+    def _record(self):
+        resp = self._client_as(self.admin).get(f'/api/v1/patient-records/{self.person.person_id}/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        return resp.data['patient_info']
+
+    def test_a_metric_from_provisional_rows_is_marked_and_one_from_accepted_rows_is_not(self):
+        self._propose('steps', confidence=0.85)
+        self._sync(self._month('steps', 9000.0) + self._month('resting_hr', 50.0))
+
+        self.patient_rec.refresh_from_db()
+        # The approved record holds accepted data only.
+        self.assertIsNone(self.patient_rec.median_daily_steps_30d)
+        self.assertEqual(self.patient_rec.resting_heart_rate_avg_30d, 54)
+
+        record = self._record()
+        self.assertEqual(record['median_daily_steps_30d'], 9004)
+        self.assertEqual(record['resting_heart_rate_avg_30d'], 54)
+        self.assertEqual(record['provisional_fields'].get('median_daily_steps_30d'), 85)
+        self.assertNotIn('resting_heart_rate_avg_30d', record['provisional_fields'])
+
+    def test_an_unresolved_reading_feeds_no_metric_at_all(self):
+        self._propose('steps', confidence=0.2)
+        self._sync(self._month('steps', 9000.0))
+
+        record = self._record()
+        self.assertIsNone(record['median_daily_steps_30d'])
+        self.assertNotIn('median_daily_steps_30d', record['provisional_fields'])
+
+    def test_approval_turns_the_provisional_metric_into_an_accepted_one(self):
+        from omop_core.services.patient_record_service import refresh_patient_record
+        mapping = self._propose('steps')
+        self._sync(self._month('steps', 9000.0))
+        self.assertEqual(self._record()['provisional_fields'].get('median_daily_steps_30d'), 70)
+
+        self._decide(mapping, status='approved')
+        refresh_patient_record(self.person)
+
+        record = self._record()
+        self.assertEqual(record['median_daily_steps_30d'], 9004)
+        self.assertNotIn('median_daily_steps_30d', record['provisional_fields'])
+
+    def test_a_provisional_wearable_metric_does_not_stop_the_patient_confirming_their_record(self):
+        from omop_core.services.provisional_record import attestation_blockers
+        self._propose('steps')
+        self._sync(self._month('steps', 9000.0))
+
+        self.patient_rec.refresh_from_db()
+        self.assertEqual(attestation_blockers(self.patient_rec), [])
+
+    # -- the Source Codes tab -------------------------------------------------
+
+    def _codes(self):
+        resp = self._client_as(self.admin).get(
+            f'/api/v1/patient-records/{self.person.person_id}/source-codes/')
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        return {entry['source_code']: entry for entry in resp.data['source_codes']}
+
+    def test_the_source_codes_tab_lists_each_device_code_and_what_its_rows_are(self):
+        self._propose('steps', confidence=0.85)
+        self._propose('spo2', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0), self._sample('steps', 8000.0, self.day - timedelta(days=1)),
+                    self._sample('resting_hr', 52.0), self._sample('spo2', 97.0)])
+
+        codes = self._codes()
+        self.assertEqual(set(codes), {'steps', 'resting_hr', 'spo2'})
+        steps = codes['steps']
+        self.assertEqual(
+            (steps['source_vocabulary_id'], steps['omop_table'], steps['mapping_status'],
+             steps['mapping_id'], steps['mapping_target_concept_id'], steps['row_count']),
+            ('Garmin', 'observation', 'proposed', self._mapping('steps').pk, self._cid('steps'), 2))
+        self.assertEqual(steps['wearable'], {
+            'device': 'garmin', 'source': 'Garmin', 'metric_key': 'steps', 'rows': 2,
+            'accepted_rows': 0, 'provisional_rows': 2, 'unresolved_rows': 0, 'confidence': 85,
+            'first_date': (self.day - timedelta(days=1)).isoformat(), 'last_date': self.day.isoformat(),
+            'status': 'provisional',
+            'fields': [{'name': 'median_daily_steps_30d', 'label': 'Median Daily Steps'},
+                       {'name': 'activity_trend_30d', 'label': 'Activity Trend'}],
+        })
+        self.assertEqual(
+            {key: codes['resting_hr']['wearable'][key]
+             for key in ('status', 'accepted_rows', 'provisional_rows', 'unresolved_rows', 'confidence')},
+            {'status': 'accepted', 'accepted_rows': 1, 'provisional_rows': 0, 'unresolved_rows': 0,
+             'confidence': None})
+        self.assertEqual(
+            (codes['spo2']['wearable']['status'], codes['spo2']['wearable']['unresolved_rows']),
+            ('unresolved', 1))
+
+    def test_a_code_with_rows_of_both_kinds_says_mixed(self):
+        mapping = self._mapping('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self._decide(mapping, status='proposed')
+        self._sync([self._sample('steps', 7000.0, self.day - timedelta(days=1))])
+
+        wearable = self._codes()['steps']['wearable']
+        self.assertEqual((wearable['status'], wearable['accepted_rows'], wearable['provisional_rows'],
+                          wearable['confidence']), ('mixed', 1, 1, 70))
+
+    def test_a_hospital_code_carries_no_wearable_block(self):
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='GLU', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+        self._sync([self._sample('steps', 9200.0)])
+
+        codes = self._codes()
+        self.assertNotIn('wearable', codes['GLU'])
+        self.assertIn('wearable', codes['steps'])
+
+    def test_describing_the_codes_costs_the_same_queries_whatever_their_number(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from omop_core.services import wearable_rows
+        self._sync([self._sample('resting_hr', 52.0)])
+        few = [{'source_value': 'resting_hr', 'source_code': 'resting_hr', 'source_code_id': 1,
+                'source_vocabulary_id': 'Garmin', 'omop_table': 'measurement'}]
+        with CaptureQueriesContext(connection) as one:
+            wearable_rows.describe(self.person, few)
+        self._sync(self._month('resting_hr', 40.0) + self._month('spo2', 88.0)
+                   + self._month('respiratory_rate', 12.0))
+        many = [{'source_value': code, 'source_code': code, 'source_vocabulary_id': 'Garmin',
+                 'source_code_id': 1, 'omop_table': 'measurement'}
+                for code in ('resting_hr', 'spo2', 'respiratory_rate')]
+        with CaptureQueriesContext(connection) as three:
+            wearable_rows.describe(self.person, many)
+        self.assertEqual(len(one), len(three))
+        self.assertEqual([entry['wearable']['rows'] for entry in many], [10, 10, 10])
+
+    def test_deleting_the_upload_removes_the_code_from_the_patients_inventory(self):
+        from omop_core.models import PatientSourceCode, WearableUpload
+        self._sync([self._sample('steps', 9200.0)])
+        upload = WearableUpload.objects.get(person=self.person)
+
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._rows('steps'), [])
+        self.assertFalse(PatientSourceCode.objects.filter(person=self.person).exists())
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True, PROVISIONAL_CONFIDENCE_FLOOR=70)
+class WearableCodesBesideOtherCodesTest(RunsRepointJobsMixin, TestCase):
+    """A device's code beside a hospital's: what other paths do to it, and it to them (#2835).
+
+    The device rules rest on the patient's source-code inventory and on a row
+    being a wearable row, and other writers touch both: the ETL's source-code
+    upload, the clinical-table fallback of the Source Codes tab, a relocation,
+    a hospital mapping of the same spelling. Each test here is one of those.
+    """
+
+    setUpTestData = classmethod(WearableSourceCodesTest.setUpTestData.__func__)
+    setUp = WearableSourceCodesTest.setUp
+    _client_as = GarminSyncEndpointTest._client_as
+    _sample = GarminSyncEndpointTest._sample
+    _sync = GarminSyncEndpointTest._sync
+    _mapping = WearableSourceCodesTest._mapping
+    _propose = WearableSourceCodesTest._propose
+    _decide = WearableSourceCodesTest._decide
+    _rows = WearableSourceCodesTest._rows
+    _cid = WearableSourceCodesTest._cid
+    _codes = WearableSourceCodesTest._codes
+    _record = WearableSourceCodesTest._record
+    URL, KEY = WearableSourceCodesTest.URL, WearableSourceCodesTest.KEY
+
+    def _generate_omop(self, person=None):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        from omop_core.services.derivation_jobs import FakeDispatcher, use_dispatcher
+        with use_dispatcher(FakeDispatcher()):
+            return resolve_person_source_codes(person or self.person)
+
+    def _hospital_row(self, code, person=None, concept_id=0, value=91):
+        """A hospital's result under a local code: an EHR row, no wearable type."""
+        from omop_core.models import Measurement
+        from omop_core.services.pk import next_pk
+        return Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'), person=person or self.person,
+            measurement_concept_id=concept_id, measurement_date=self.day, value_as_number=value,
+            measurement_type_concept_id=32817, measurement_source_value=code)
+
+    def _hospital_mapping(self, code, target, **more):
+        from omop_core.models import SourceCodeConceptMapping
+        return SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.3.4.5', source_code=code, omop_table='measurement',
+            target_concept=target, status=more.pop('status', 'approved'), **more)
+
+    def _other_patient(self):
+        other = Person.objects.create(person_id=99003, family_name='Hospital', given_name='Hana')
+        PatientRecord.objects.create(person=other)
+        return other
+
+    # -- the ETL's source-code upload ----------------------------------------
+
+    def _post_codes(self, body):
+        resp = self._client_as(self.admin).post(
+            f'/api/v1/patient-records/{self.person.person_id}/source-codes/', body, format='json')
+        self.assertIn(resp.status_code, (200, 201), getattr(resp, 'data', None))
+        return resp
+
+    def test_an_etl_replace_leaves_the_devices_inventory_and_its_rows_resolvable(self):
+        from omop_core.models import PatientSourceCode
+        mapping = self._propose('steps')
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+        self._post_codes({'replace': True, 'source_codes': [
+            {'source_value': 'GLU', 'source_vocabulary_id': 'urn:oid:1.2.3.4.5',
+             'omop_table': 'measurement', 'occurrence_count': 1}]})
+
+        self.assertEqual(
+            sorted(PatientSourceCode.objects.filter(person=self.person).values_list(
+                'source_vocabulary_id', 'source_value')),
+            [('Garmin', 'steps'), ('urn:oid:1.2.3.4.5', 'GLU')])
+        # Still the device's: Generate OMOP leaves the provisional row, approval accepts it.
+        self._generate_omop()
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+        self._decide(mapping, status='approved')
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), None)])
+
+    def test_a_chunked_etl_uploads_final_prune_leaves_the_devices_inventory(self):
+        from omop_core.models import PatientSourceCode
+        self._sync([self._sample('steps', 9200.0)])
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='OLD', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement', upload_id='run-1')
+
+        self._post_codes({'upload_id': 'run-2', 'final': True, 'source_codes': [
+            {'source_value': 'GLU', 'source_vocabulary_id': 'urn:oid:1.2.3.4.5',
+             'omop_table': 'measurement', 'occurrence_count': 1}]})
+
+        self.assertEqual(
+            sorted(PatientSourceCode.objects.filter(person=self.person).values_list('source_value', flat=True)),
+            ['GLU', 'steps'])
+
+    # -- a patient whose other codes come from the clinical tables ------------
+
+    def test_a_wearable_import_does_not_hide_the_codes_read_from_the_clinical_tables(self):
+        """No ETL inventory: the tab aggregates the clinical rows, and keeps doing so."""
+        self._hospital_row('GLU-LOCAL')
+        self._hospital_row('distance', value=3)             # a hospital's code that is also Garmin's
+        self.assertEqual(set(self._codes()), {'GLU-LOCAL', 'distance'})
+
+        self._sync([self._sample('steps', 9200.0)])
+
+        codes = self._codes()
+        self.assertEqual(set(codes), {'GLU-LOCAL', 'distance', 'steps'})
+        self.assertIn('wearable', codes['steps'])
+        self.assertEqual(codes['steps']['row_count'], 1)
+        # Read from the clinical tables, they are nobody's device code.
+        self.assertNotIn('wearable', codes['GLU-LOCAL'])
+        self.assertNotIn('wearable', codes['distance'])
+
+    def test_the_patient_lists_unmapped_count_still_reads_the_clinical_tables(self):
+        from omop_core.services.patient_list_context import annotate_context
+        self._hospital_row('GLU-LOCAL')
+        self._hospital_row('NA-LOCAL')
+
+        def count():
+            return annotate_context(PatientRecord.objects.filter(pk=self.patient_rec.pk)).get(
+            ).unmapped_source_code_count
+        self.assertEqual(count(), 2)
+
+        self._sync([self._sample('steps', 9200.0)])         # approved: nothing more is unmapped
+
+        self.assertEqual(count(), 2)
+
+    # -- codes that share a spelling ------------------------------------------
+
+    def test_a_holder_of_the_code_under_a_device_and_a_hospital_is_answered_by_neither(self):
+        from omop_core.models import PatientSourceCode
+        self._propose('spo2', confidence=0.2)
+        self._sync([self._sample('spo2', 97.0)])
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='spo2', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+        self._hospital_mapping('spo2', self.wearable_concepts['vo2_max'])
+
+        self._generate_omop()
+
+        self.assertEqual(self._rows('spo2'), [(97.0, 0, None)])
+
+    def test_a_hospitals_spelling_in_another_case_is_another_code(self):
+        from omop_core.models import PatientSourceCode
+        self._sync([self._sample('spo2', 97.0)])            # Garmin's, approved
+        self._hospital_row('SPO2')
+        PatientSourceCode.objects.create(
+            person=self.person, source_value='SPO2', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+        hospital = self._hospital_mapping('SPO2', self.wearable_concepts['vo2_max'])
+
+        self._generate_omop()
+
+        # Each row by its own inventory entry: the hospital's to the hospital's mapping.
+        self.assertEqual(self._rows('SPO2'), [(91.0, hospital.target_concept_id, None)])
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), None)])
+
+    def test_a_hospital_mappings_repoint_leaves_a_device_holders_accepted_row(self):
+        self._sync([self._sample('spo2', 97.0)])
+        hospital = self._hospital_mapping('SPO2', self.wearable_concepts['spo2'])
+
+        self._decide(hospital, target_concept_id=self._cid('vo2_max'), status='approved')
+
+        self.assertEqual(self._rows('spo2'), [(97.0, self._cid('spo2'), None)])
+
+    def test_no_empty_row_is_made_at_a_devices_concept_for_a_hospitals_inventory_code(self):
+        from omop_core.models import Measurement, PatientSourceCode
+        other = self._other_patient()
+        PatientSourceCode.objects.create(
+            person=other, source_value='spo2', source_vocabulary_id='urn:oid:1.2.3.4.5',
+            omop_table='measurement')
+
+        self._generate_omop(other)                           # Garmin's spo2 mapping is approved
+
+        self.assertFalse(Measurement.objects.filter(person=other).exists())
+
+    def test_a_queued_device_code_is_not_an_import_row_whose_description_is_a_row_key(self):
+        from omop_core.models import SourceCodeConceptMapping
+        self._sync([self._sample('body_mass', 70.0)])
+        queued = SourceCodeConceptMapping.objects.get(source_vocabulary_id='Garmin', source_code='body_mass')
+        self.assertNotEqual(queued.origin, 'import')
+
+    # -- a mapping that moves table -------------------------------------------
+
+    def test_moving_a_devices_mapping_to_another_table_moves_only_its_holders_wearable_rows(self):
+        from omop_core.models import Measurement, Observation
+        other = self._other_patient()
+        hospital_row = self._hospital_row('SPO2', person=other, concept_id=self._cid('vo2_max'))
+        self._sync([self._sample('spo2', 97.0)])
+
+        self._decide(self._mapping('spo2'), domain_id='Observation', omop_table='observation')
+
+        self.assertTrue(Measurement.objects.filter(pk=hospital_row.pk).exists())
+        self.assertFalse(Observation.objects.filter(person=other).exists())
+        self.assertEqual(
+            [float(v) for v in Observation.objects.filter(
+                person=self.person, observation_source_value='spo2').values_list('value_as_number', flat=True)],
+            [97.0])
+
+    def test_a_resync_after_the_mapping_moved_table_replaces_the_day_once(self):
+        from omop_core.models import Measurement, Observation
+        self._sync([self._sample('steps', 5000.0)])
+        self._decide(self._mapping('steps'), domain_id='Measurement', omop_table='measurement')
+        self.assertEqual(Measurement.objects.filter(
+            person=self.person, measurement_source_value='steps').count(), 1)
+
+        resp, _ = self._sync([self._sample('steps', 8000.0)])
+
+        self.assertEqual(resp.data['replaced'], 1)
+        self.assertEqual(self._rows('steps'), [(8000.0, self._cid('steps'), None)])
+        self.assertFalse(Observation.objects.filter(person=self.person).exists())
+
+    def test_deleting_an_upload_whose_rows_were_relocated_still_removes_them(self):
+        from omop_core.models import WearableUpload
+        self._sync([self._sample('steps', 5000.0)])
+        self._decide(self._mapping('steps'), domain_id='Measurement', omop_table='measurement')
+        upload = WearableUpload.objects.get(person=self.person)
+
+        resp = self._client_as(self.identity).delete(
+            f'/api/v1/patient-records/wearable-uploads/{upload.pk}/')
+
+        self.assertEqual(resp.status_code, 200, getattr(resp, 'data', None))
+        self.assertEqual(self._rows('steps'), [])
+
+    # -- what an import reports, and what it survives -------------------------
+
+    def test_an_upload_counts_its_own_provisional_and_waiting_rows_apart(self):
+        self._propose('steps')                               # qualifies: provisional
+        self._propose('resting_hr', confidence=0.2)          # below the floor: waits
+        # An earlier upload's waiting rows are not this upload's to count.
+        self._sync([self._sample('steps', 100.0 + i, self.day - timedelta(days=10 + i)) for i in range(4)])
+
+        resp, _ = self._sync([self._sample('steps', 9200.0), self._sample('resting_hr', 52.0),
+                              self._sample('spo2', 97.0)])
+
+        self.assertEqual(resp.data['samples_created'], 3)
+        self.assertEqual(resp.data['provisional_samples'], 1)
+        self.assertEqual((resp.data['unresolved_samples'], resp.data['unresolved_metrics']), (1, ['resting_hr']))
+
+    def test_an_upload_that_stores_nothing_new_says_it_settled_earlier_rows(self):
+        from omop_core.models import SourceCodeConceptMapping
+        self._propose('steps', confidence=0.2)
+        self._sync([self._sample('steps', 9200.0)])
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='Garmin', source_code='steps').update(status='approved')
+
+        resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['settled_rows']), (0, 1))
+        self.assertNotIn('unresolved_samples', resp.data)
+
+    def test_a_resolver_that_fails_costs_the_resolving_and_never_the_readings(self):
+        from unittest import mock
+        self._propose('steps')
+        with mock.patch('omop_core.mapping.code_resolution.resolve_person_source_codes',
+                        side_effect=RuntimeError('resolver down')):
+            resp, _ = self._sync([self._sample('steps', 9200.0)])
+
+        self.assertEqual((resp.data['samples_created'], resp.data['unresolved_samples']), (1, 1))
+        self.assertEqual(self._rows('steps'), [(9200.0, 0, None)])
+        # The next import picks it up.
+        self._sync([self._sample('steps', 9200.0)])
+        self.assertEqual(self._rows('steps'), [(9200.0, self._cid('steps'), 70)])
+
+    # -- the trend's placeholder ----------------------------------------------
+
+    def test_an_accepted_no_trend_does_not_hide_a_provisional_trend(self):
+        self._propose('steps', confidence=0.85)
+        steps = [self._sample('steps', 6000.0 + 100 * i, self.day - timedelta(days=29 - i)) for i in range(30)]
+        resting = [self._sample('resting_hr', 50.0 + i, self.day - timedelta(days=i)) for i in range(10)]
+        self._sync(resting)
+        self.patient_rec.refresh_from_db()
+        self.assertEqual(self.patient_rec.activity_trend_30d, 'insufficient_data')
+
+        self._sync(steps)
+
+        record = self._record()
+        self.assertIn(record['activity_trend_30d'], ('improving', 'stable', 'declining'))
+        self.assertEqual(record['provisional_fields'].get('activity_trend_30d'), 85)

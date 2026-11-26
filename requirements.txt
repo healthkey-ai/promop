@@ -37,6 +37,9 @@ sentry-sdk[django]==2.69.1
 redis==5.2.1
 
 python-fitparse>=2.0.0
+# Garmin's own client for the Garmin Connect Personal API: the Wearables tab's
+# "Sync from Garmin Connect" (omop_core/services/garmin_connect.py, #2794).
+garmin-connect-personal-api-python==1.1.0
 
 # Vector similarity search for code-mapping suggest
 pgvector>=0.3.6
@@ -59,10 +62,10 @@ factory-boy==3.3.3
 pypdf==6.21.4
 
 # PROlog survey runner, installed as a Django app (prolog_surveys). Public repo,
-# pinned by commit, which is the release tagged v0.6.0. A tag is mutable — a
+# pinned by commit, which is the release tagged v0.10.1. A tag is mutable — a
 # force-push moves it and the next rebuild installs different code, including
 # different migrations, with no diff here to show for it; the app contributes
 # migrations to this database and start.sh migrates on every deploy, so that is
 # not a risk worth carrying for readability. Bump both together.
 # See docs/prolog-surveys.md.
-prolog @ git+https://github.com/healthkey-ai/prolog@54948fb4eff9bd829511bf923df9f91641b1b0fd#subdirectory=backend  # v0.6.0
+prolog @ git+https://github.com/phrame-org/prolog@6b1c5a452dbdfaada8143ef4a5f946223d640db5#subdirectory=backend  # v0.10.1

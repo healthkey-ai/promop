@@ -320,6 +320,12 @@ class PublicVoteExportView(_PublicVoteView):
         if scope and not usable:
             return Response({'detail': 'The source systems of this link are no longer available.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        # That target maps *to* the CDISC BC system, which then has no codes of
+        # its own. Beside other systems it is left out, as the signed-in
+        # download leaves it out; alone it is still refused, since the file
+        # would be empty. A visitor cannot change the share's systems (#2799).
+        if destination == export.DEST_CDISC_BC and len(usable) > 1:
+            usable = [system for system in usable if system != export.CDISC_BC_VOCABULARY]
         try:
             with public_errors(export.SourceTargetError, field='detail'):
                 filename, content_type, content = export.export_file(

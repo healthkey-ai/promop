@@ -3,6 +3,8 @@ import Field from './Field';
 import { today } from '@/api/clinicalFacts';
 import type { VocabSource } from '@/hooks/useVocabulary';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { useFieldMembership } from './DiseaseProfile';
+import type { OptionInput } from './utils';
 
 interface Props {
   label: string;
@@ -12,7 +14,7 @@ interface Props {
   /** Choices for a select. The descriptor's own `options` win when it has them:
    *  those are the curated set the server resolves a concept from, so a local
    *  list could offer a value the write would then fail to code. */
-  options?: string[];
+  options?: OptionInput[];
   vocabSource?: VocabSource | null;
   /** Mark a control the API has no field for at all — distinct from one it
    *  refuses to write. See #646. */
@@ -28,6 +30,8 @@ interface Props {
    *  one reason — repeating the same paragraph beside 25 boxes buries it. The
    *  tab states it once instead. */
   showReason?: boolean;
+  /** Mark a value that is not a proposal "Accepted" (the Wearables tab, #2835). */
+  showAccepted?: boolean;
 }
 
 /**
@@ -57,8 +61,12 @@ export default function ClinicalField({
   date,
   onDateChange,
   showReason = true,
+  showAccepted,
 }: Props) {
-  const writable = !!descriptor?.writable;
+  const empty = value === undefined || value === null || value === ''
+    || (Array.isArray(value) && value.length === 0);
+  const membership = useFieldMembership(descriptor, !empty);
+  const writable = !!descriptor?.writable && membership.member;
   // A tab that shares one date across its fields passes it in — a blood panel is
   // drawn once. A tab whose results come from different specimens, as a pathology
   // report's do, can leave it out and get a date per field rather than one date
@@ -66,7 +74,8 @@ export default function ClinicalField({
   const [ownDate, setOwnDate] = useState(today());
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
-  const curated = descriptor?.options?.map((o) => o.value);
+  // The stored text is the option's value; a renamed answer shows its new label.
+  const curated = descriptor?.options?.map((o) => (o.label && o.label !== o.value ? { value: o.value, label: o.label } : o.value));
   const choices = curated ?? options;
   // `multiple` is the descriptor saying several answers are stored at once,
   // comma-joined — SCT history is "autologous SCT,tandem SCT". Rendering that as
@@ -75,9 +84,13 @@ export default function ClinicalField({
     ? (descriptor?.multiple ? 'multiselect' : 'select')
     : type;
 
+  // The record's disease does not own this field and it holds no value: nothing to show.
+  if (membership.hidden) return null;
+
   if (!writable) {
     const reason =
-      descriptor?.reason
+      (membership.member ? undefined : `Not part of the ${membership.label} record.`)
+      ?? descriptor?.reason
       ?? (absent
         // Not a PatientRecord column at all: the API neither returns it nor
         // accepts it, so the box could never show a value and never save one.
@@ -95,6 +108,7 @@ export default function ClinicalField({
           onChange={onChange}
           readOnly
           precision={precision}
+          showAccepted={showAccepted}
         />
         {showReason && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
@@ -116,6 +130,7 @@ export default function ClinicalField({
         vocabSource={vocabSource}
         onChange={onChange}
         precision={precision}
+        showAccepted={showAccepted}
       />
       {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
         <div className="mt-1 flex items-center gap-2">

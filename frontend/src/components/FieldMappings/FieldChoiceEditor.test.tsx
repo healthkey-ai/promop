@@ -54,7 +54,7 @@ describe("FieldChoiceEditor", () => {
     mockGet.mockResolvedValueOnce({ data: choices }).mockResolvedValue({
       data: [{ ...choices[0], codes: [otherCode] }, choices[1]],
     });
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: "Remove code SNOMED:307618003 from Follicular Lymphoma" }));
     await waitFor(() => expect(mockDelete).toHaveBeenCalledWith(
       "/v1/field-choices/1/codes/", { params: { code_id: 1 } },
@@ -70,7 +70,7 @@ describe("FieldChoiceEditor", () => {
     mockGet.mockResolvedValueOnce({ data: MOCK_CHOICES }).mockResolvedValue({
       data: [{ ...MOCK_CHOICES[0], codes: [] }, MOCK_CHOICES[1]],
     });
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: "Remove code SNOMED:307618003 from Follicular Lymphoma" }));
     await waitFor(() => expect(screen.queryByText("SNOMED:307618003")).not.toBeInTheDocument());
     expect(screen.getByText("Follicular Lymphoma")).toBeInTheDocument();
@@ -79,7 +79,7 @@ describe("FieldChoiceEditor", () => {
 
   it("keeps the code visible and reports a failed removal", async () => {
     mockDelete.mockRejectedValueOnce(new Error("Request failed"));
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: "Remove code SNOMED:307618003 from Follicular Lymphoma" }));
     expect(await screen.findByText("Failed to remove code.")).toBeInTheDocument();
     expect(screen.getByText("SNOMED:307618003")).toBeInTheDocument();
@@ -89,7 +89,7 @@ describe("FieldChoiceEditor", () => {
   it("prevents duplicate code removals while the request is pending", async () => {
     let resolveDelete!: (value: unknown) => void;
     mockDelete.mockReturnValueOnce(new Promise((resolve) => { resolveDelete = resolve; }));
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     const remove = await screen.findByRole("button", { name: "Remove code SNOMED:307618003 from Follicular Lymphoma" });
     fireEvent.click(remove);
     expect(remove).toBeDisabled();
@@ -101,15 +101,15 @@ describe("FieldChoiceEditor", () => {
 
   it("cancels whole-choice deletion without changing the choice or its codes", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     fireEvent.click(await screen.findByRole("button", { name: "Delete choice Follicular Lymphoma" }));
-    expect(confirm).toHaveBeenCalledWith('Delete the entire choice "Follicular Lymphoma" and all of its codes?');
+    expect(confirm).toHaveBeenCalledWith('Delete the entire choice "Follicular Lymphoma" and all of its codes? To stop offering it and keep its history, retire it instead.');
     expect(mockDelete).not.toHaveBeenCalled();
     expect(screen.getByText("SNOMED:307618003")).toBeInTheDocument();
   });
 
   it("renders existing choices", async () => {
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     await waitFor(() => {
       expect(screen.getByText("Follicular Lymphoma")).toBeInTheDocument();
     });
@@ -118,7 +118,7 @@ describe("FieldChoiceEditor", () => {
   });
 
   it("calls API to add choice", async () => {
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     await waitFor(() => {
       expect(screen.getByText("Follicular Lymphoma")).toBeInTheDocument();
     });
@@ -136,7 +136,7 @@ describe("FieldChoiceEditor", () => {
   it("calls API to delete choice", async () => {
     // Mock window.confirm
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} />);
+    render(<FieldChoiceEditor fieldName="disease" onClose={vi.fn()} canApprove />);
     await waitFor(() => {
       expect(screen.getByText("Follicular Lymphoma")).toBeInTheDocument();
     });

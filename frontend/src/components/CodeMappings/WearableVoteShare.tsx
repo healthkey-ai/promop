@@ -3,7 +3,7 @@ import { Share2 } from "lucide-react";
 import api from "@/api/axios";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
 import type { WearableSourceSystem } from "./codeMappingTypes";
-import WearableSourceSystemSelect from "./WearableSourceSystemSelect";
+import { WearableSourceSystemBoxes } from "./WearableSourceSystemSelect";
 
 interface VoteShare {
   id: number;
@@ -72,7 +72,7 @@ function VoteShareDialog({ onClose, systems }: { onClose: () => void; systems: W
   const [title, setTitle] = useState("");
   const [note, setNote] = useState("");
   const [expires, setExpires] = useState("");
-  const [source, setSource] = useState("");
+  const [sources, setSources] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<VoteShare | null>(null);
@@ -120,10 +120,10 @@ function VoteShareDialog({ onClose, systems }: { onClose: () => void; systems: W
     try {
       const response = await api.post<VoteShare>(SHARES, {
         title: title.trim(), note: note.trim(), ...(expires ? { expires_at: expires } : {}),
-        ...(source ? { source_vocabularies: [source] } : {}),
+        ...(sources.length ? { source_vocabularies: sources } : {}),
       });
       setCreated(response.data);
-      setTitle(""); setNote(""); setExpires(""); setSource("");
+      setTitle(""); setNote(""); setExpires(""); setSources([]);
       await load();
     } catch (err) {
       setError(detailOf(err) ?? "The share could not be created. Try again.");
@@ -241,6 +241,14 @@ function VoteShareDialog({ onClose, systems }: { onClose: () => void; systems: W
               onChange={(event) => setNote(event.target.value)}
               className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
           </div>
+          {systems.length > 0 && (
+            <fieldset>
+              <legend className="text-xs font-medium text-slate-700">Source code systems on the page</legend>
+              <div className="mt-1 flex flex-wrap gap-x-1">
+                <WearableSourceSystemBoxes systems={systems} value={sources} onChange={setSources} disabled={busy} />
+              </div>
+            </fieldset>
+          )}
           <div className="flex flex-wrap items-end gap-3">
             <div>
               <label htmlFor="vote-share-expires" className="text-xs font-medium text-slate-700">Expires (optional)</label>
@@ -248,15 +256,6 @@ function VoteShareDialog({ onClose, systems }: { onClose: () => void; systems: W
                 onChange={(event) => setExpires(event.target.value)}
                 className="mt-1 block rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
             </div>
-            {systems.length > 0 && (
-              <div>
-                <label htmlFor="vote-share-systems" className="text-xs font-medium text-slate-700">Source code system</label>
-                <div className="mt-1">
-                  <WearableSourceSystemSelect id="vote-share-systems" systems={systems} value={source}
-                    onChange={setSource} disabled={busy} />
-                </div>
-              </div>
-            )}
             <button type="submit" disabled={busy}
               className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60">
               {busy ? "Creating…" : "Create link"}

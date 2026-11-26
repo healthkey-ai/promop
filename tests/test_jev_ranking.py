@@ -32,19 +32,19 @@ def _candidates():
 
 
 class TestRankingModelConstants:
-    def test_default_is_anthropic(self):
-        assert DEFAULT_RANKING_MODEL == 'anthropic'
+    def test_default_is_jev(self):
+        assert DEFAULT_RANKING_MODEL == 'jev'
 
     def test_both_models_in_set(self):
         assert RANKING_MODELS == {'anthropic', 'jev', 'both'}
 
 
 class TestRankCandidatesDispatch:
-    def test_routes_to_anthropic_by_default(self):
+    def test_routes_to_anthropic_when_asked(self):
         with patch('omop_core.mapping.suggestions.rank_candidates') as mock_rank:
             mock_rank.return_value = (_candidates()[0], 'high confidence: test', [{'concept_id': 100, 'concept_name': 'HbA1c', 'confidence': 0.85, 'ranker': 'anthropic'}])
             chosen, note, alts, timings = rank_candidates_dispatch(
-                'HbA1c', _candidates(), 'Hemoglobin A1c',
+                'HbA1c', _candidates(), 'Hemoglobin A1c', ranking_model='anthropic',
             )
             mock_rank.assert_called_once()
             assert chosen['concept_id'] == 100

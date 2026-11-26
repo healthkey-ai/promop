@@ -8,7 +8,7 @@ from typing import Callable
 import sentry_sdk
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
-from promop.sentry import redact_path
+from promop.sentry import redact_path, redact_secret_segments
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
@@ -93,8 +93,9 @@ def _classify_event_type(request):
     path = request.path
     method = request.method
 
-    # Access to the audit trail itself is auditable (TI.2.2#04).
-    if '/audit-events' in path:
+    # Access to the audit trail itself is auditable (TI.2.2#04), through the
+    # API or the admin.
+    if '/audit-events' in path or path.startswith('/admin/patient_portal/auditevent'):
         return AuditEvent.EVENT_AUDIT_REVIEW
     # Emergency-access authorization (TI.2.3#04).
     if '/break-glass' in path:
@@ -116,6 +117,10 @@ def _classify_event_type(request):
         return AuditEvent.EVENT_AUTH
     if 'consent' in path:
         return AuditEvent.EVENT_CONSENT
+    # A professional confirming a patient's provisional values writes the record: an update
+    # of it, though it is a POST (#2870).
+    if path.endswith('/confirm-provisional/'):
+        return AuditEvent.EVENT_UPDATE
     if method == 'GET':
         return AuditEvent.EVENT_VIEW
     if method == 'POST':
@@ -143,6 +148,12 @@ def _get_client_id(request):
             _AUDIT_CLIENT_ID_MAX_LENGTH,
         )
     return _bounded_text(token, _AUDIT_CLIENT_ID_MAX_LENGTH)
+
+
+def _detail_person(request):
+    detail = getattr(request, 'audit_detail', None)
+    person_id = detail.get('person_id') if isinstance(detail, dict) else None
+    return str(person_id) if person_id is not None else None
 
 
 def _get_resource_id(request):
@@ -214,12 +225,16 @@ class AuditLogMiddleware:
             entry = {
                 'event': _classify_event_type(request),
                 'method': request.method,
-                'path': request.path,
+                # Never the webhook's secret segment: this row is kept for years
+                # and read by staff and service tokens.
+                'path': redact_secret_segments(request.path),
                 'status_code': response.status_code,
                 'client_id': _get_client_id(request),
                 'user_id': str(user.pk) if authed else None,
                 'user_email': (getattr(user, 'email', '') or None) if authed else None,
-                'resource_id': _get_resource_id(request),
+                # The URL's id, or the person a view names in its note (the
+                # member's own export has no id in its URL).
+                'resource_id': _get_resource_id(request) or _detail_person(request),
                 'ip_address': (
                     request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
                     or request.META.get('REMOTE_ADDR')
@@ -293,6 +308,42 @@ _FORCE_CHANGE_EXEMPT_SUFFIXES = (
 
 
 _PUBLIC_VOTE_PREFIX = '/api/v1/public/mapping-votes/'
+
+
+class StaffSessionMiddleware:
+    """Staff sessions (docs/staff-sign-in.md):
+
+    - a provider sign-in ends at its deadline (``STAFF_SESSION_HOURS`` from the
+      sign-in, not from the last request), whatever the cookie says;
+    - once staff passwords are off (``STAFF_PASSWORD_SIGN_IN``), a staff
+      session that began with a password is signed out: switching passwords
+      off must end the sessions they made, not only refuse new ones.
+
+    A provider sign-in marks its session, so it never costs a query here; a
+    member's session costs one only while staff passwords are off and the
+    deployment has staff roles."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        from django.conf import settings
+
+        user = getattr(request, 'user', None)
+        if user is not None and user.is_authenticated:
+            from django.contrib.auth import logout
+
+            from patient_portal.staff_sign_in import STAFF_UNTIL_KEY, is_role_staff
+
+            until = request.session.get(STAFF_UNTIL_KEY)
+            if until is not None:
+                if time.time() > until:
+                    logout(request)
+            elif not settings.STAFF_PASSWORD_SIGN_IN and (
+                user.is_staff or user.is_superuser or (settings.STAFF_ROLES and is_role_staff(user))
+            ):
+                logout(request)
+        return self.get_response(request)
 
 
 class ForcePasswordChangeMiddleware:

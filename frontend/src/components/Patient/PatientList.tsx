@@ -1,16 +1,19 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
+import { Upload, UserPlus, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
 import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
+import AddPatientDialog from './AddPatientDialog';
+import { loadPage } from '@/utils/loadPage';
 
 import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from '@/utils/download';
+import { otherRoleMarker } from '@/utils/roleDescriptions';
 
 interface Patient {
   person_id: number;
@@ -32,6 +35,9 @@ interface Patient {
   location_summary?: string | null;
   contact_available?: boolean;
   demographics_redacted?: boolean;
+  /** The other roles this patient's sign-in account holds (staff, org_admin,
+   *  doctor, analyst), sent only to a reader who may know them (#2838). */
+  other_roles?: string[];
 }
 
 const ALL_FILTER_VALUE = "all";
@@ -137,6 +143,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addNotice, setAddNotice] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
@@ -145,8 +153,21 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
   const [search, setSearch] = useState("");
-  const [diseaseCategoryFilter, setDiseaseCategoryFilter] = useState(ALL_FILTER_VALUE);
-  const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
+  // Sticky: kept with the other saved choices, until the reader changes them.
+  // A saved choice the list no longer offers (a category or disease since removed) is
+  // applied as All once the options are known, and kept until the reader picks another.
+  const categoryOffered = preferences.disease_category === ALL_FILTER_VALUE
+    || !filterOptions.disease_categories
+    || filterOptions.disease_categories.some((cat) => cat.value === preferences.disease_category);
+  const diseaseCategoryFilter = categoryOffered ? preferences.disease_category : ALL_FILTER_VALUE;
+  const diseaseOffered = preferences.disease === ALL_FILTER_VALUE
+    || !filterOptions.diseases_by_category
+    || (filterOptions.diseases_by_category[diseaseCategoryFilter] ?? []).includes(preferences.disease);
+  const diseaseFilter = categoryOffered && diseaseOffered ? preferences.disease : ALL_FILTER_VALUE;
+  const setDiseaseCategoryFilter = (value: string) => setPreferences((previous) => ({
+    ...previous, disease_category: value, disease: ALL_FILTER_VALUE,
+  }));
+  const setDiseaseFilter = (value: string) => setPreferences((previous) => ({ ...previous, disease: value }));
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
   const { page, pageSize, setPage, setPageSize } = useLocalPagination(10);
@@ -154,7 +175,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const fetchPatients = useCallback(async (): Promise<boolean> => {
     try {
       setLoading(true);
-      const response = await api.get<PaginatedPatientsResponse>("/patient-info/", {
+      // The v1 list: the same rows as the legacy path, plus what was added
+      // since that path was frozen (`other_roles`, #2838).
+      const response = await api.get<PaginatedPatientsResponse>("/v1/patient-records/", {
         params: {
           page,
           page_size: pageSize,
@@ -431,6 +454,15 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               Upload
             </button>
           )}
+          {canAdministerOrganizations && (
+            <button
+              onClick={() => setAddDialogOpen(true)}
+              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+            >
+              <UserPlus size={16} />
+              Add patient
+            </button>
+          )}
           <div className="ml-auto flex gap-2">
             {canAdministerOrganizations && (
               <button
@@ -510,7 +542,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               onChange={(e) => {
                 resetToFirstPage();
                 setDiseaseCategoryFilter(e.target.value);
-                setDiseaseFilter(ALL_FILTER_VALUE);
               }}
               className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
             >
@@ -690,6 +721,18 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   </td>
                   {canOpen && <td className="px-4 py-3 font-medium" onClick={openPatient(patient.person_id)}>
                     <span className="block w-28 truncate" title={patient.patient_name || undefined}>{patient.demographics_redacted ? 'Withheld' : patient.patient_name || 'Not recorded'}</span>
+                    {!!patient.other_roles?.length && (
+                      <span className="mt-1 flex flex-wrap gap-1">
+                        {patient.other_roles.map((role) => {
+                          const marker = otherRoleMarker(role);
+                          return (
+                            <span key={role} title={marker.title} className="whitespace-nowrap rounded bg-purple-100 px-1.5 py-0.5 text-xs font-medium text-purple-700 dark:bg-purple-950 dark:text-purple-200">
+                              {marker.label}
+                            </span>
+                          );
+                        })}
+                      </span>
+                    )}
                   </td>}
                   <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.demographics_redacted ? 'Withheld' : patient.age ?? 'Not recorded'}
@@ -749,6 +792,21 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         />
       </div>
 
+      {addNotice && <p role="status" className="fixed bottom-4 right-4 z-50 rounded-md bg-emerald-600 px-4 py-2 text-sm text-white shadow-lg">{addNotice}</p>}
+      {addDialogOpen && (
+        <AddPatientDialog
+          onClose={() => setAddDialogOpen(false)}
+          onCreated={({ personId, forSelf, message }) => {
+            setAddDialogOpen(false);
+            setAddNotice(message);
+            // Their own record: the account just gained its patient link, and
+            // what is offered only on one's own record (device uploads and
+            // syncs) depends on it, so the page is loaded afresh (#2818).
+            if (forSelf) loadPage(`/patient/${personId}`);
+            else void fetchPatients();
+          }}
+        />
+      )}
       {deleteDialogOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">

@@ -19,9 +19,10 @@ mapping as the patient:
 
 A mapping writes only what an answer gives: a skipped or unanswered question,
 an option the mapping does not list, or a rule whose ``when`` does not hold
-writes nothing, and never clears a field. Applying a response again writes the
-same values, so a retry or a backfill is safe; a later response overwrites
-what an earlier one wrote.
+writes nothing. A field is cleared only where the mapping says an answer
+clears it (``clears``, below). Applying a response again writes the same
+values, so a retry or a backfill is safe; a later response overwrites what an
+earlier one wrote.
 
 A mapping file (JSON, ``mapping_version`` 1)::
 
@@ -53,9 +54,28 @@ A mapping file (JSON, ``mapping_version`` 1)::
 Record rules take their value from exactly one of: ``answer`` (a question key;
 ``values`` maps an option to the value written, and is required for a choice;
 a date answer is written as its first day, with its precision in
-``precision_field`` when named), ``value`` (a constant), or ``submitted_on``
-(the submission's date). ``when`` is a list of PROlog conditions, evaluated
-with PROlog's own engine, so it means what ``visible_if`` means.
+``precision_field`` when named), ``value`` (a constant), ``submitted_on``
+(the submission's date), or ``sum`` (a number added up from several answers:
+a list of terms, each ``{"answer", "values"}`` mapping an option to a number,
+with its own ``when``; written when at least one term counts). ``when`` is a
+list of PROlog conditions, evaluated with PROlog's own engine, so it means what
+``visible_if`` means.
+
+A date rule may list the options of its question that clear the field
+(``"clears": ["not_sure"]``): answering one of them empties the field, and its
+precision, when the value there is the patient's own (their change was the
+last to it); a value anyone else gave stays. A line may do the same for when
+the disease came back after it (``"clears": {"progression_date":
+["not_sure"]}``), removing only the progression the patient reported; its
+start and end dates cannot be cleared, since a line needs a start and a line
+with no end is one still received. A ``sum`` totals what the response itself
+answers: it suits a questionnaire that restates the whole history each time.
+A term may map an option to ``null``, an answer that leaves the total unknown:
+then nothing is written. A line's ``clears_when`` clears a date when PROlog
+conditions hold (``{"progression_date": [{"question": "q_back", "op": "eq",
+"value": "no"}]}``: the patient now says it never came back). A clear never
+empties what was written after the response was submitted, so applying an
+older response again (a retry, a backfill) leaves newer answers alone.
 
 A line's ``line`` is its number, ``"next"`` (a new line after the person's
 last one: a treatment reported later) or ``"latest"`` (their last line: a
@@ -75,6 +95,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -87,7 +108,9 @@ logger = logging.getLogger(__name__)
 
 MAPPING_VERSION = 1
 QUESTIONNAIRE = 'questionnaire'
-_RECORD_SOURCES = ('answer', 'value', 'submitted_on')
+_RECORD_SOURCES = ('answer', 'value', 'submitted_on', 'sum')
+# Line dates an answer may clear: a line needs its start, and one with no end is still received.
+_LINE_CLEARABLE = ('progression_date',)
 _LINE_DATES = ('start_date', 'end_date', 'progression_date')
 _TARGETS = ('next', 'latest')
 
@@ -150,10 +173,10 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
         if not isinstance(rule, dict) or rule.get('field') not in fields:
             fail(f'{where}: field must be a PatientRecord field')
         if sum(1 for k in _RECORD_SOURCES if k in rule) != 1:
-            fail(f'{where}: give exactly one of answer, value, submitted_on')
+            fail(f'{where}: give exactly one of answer, value, submitted_on, sum')
         if rule.get('precision_field') is not None and rule['precision_field'] not in fields:
             fail(f'{where}: precision_field must be a PatientRecord field')
-        _check_when(rule, where, fail)
+        _check_value_rule(rule, where, fail)
     numbers = set()
     detail_fields = _detail_fields()
     for i, line in enumerate(mapping.get('therapy_lines', [])):
@@ -177,15 +200,47 @@ def check_mapping(mapping: Any, *, source: str = 'mapping') -> None:
             if not isinstance(rule, dict) or rule.get('field') not in detail_fields:
                 fail(f'{where}.details[{j}]: field must be a line detail ({", ".join(sorted(detail_fields))})')
             if sum(1 for k in _RECORD_SOURCES if k in rule) != 1:
-                fail(f'{where}.details[{j}]: give exactly one of answer, value, submitted_on')
+                fail(f'{where}.details[{j}]: give exactly one of answer, value, submitted_on, sum')
             if rule.get('precision_field') is not None and rule['precision_field'] not in detail_fields:
                 fail(f'{where}.details[{j}]: precision_field must be a line detail')
-            _check_when(rule, f'{where}.details[{j}]', fail)
+            _check_value_rule(rule, f'{where}.details[{j}]', fail)
         outcome = line.get('outcome')
         if outcome is not None and (not isinstance(outcome, dict) or 'answer' not in outcome
                                     or not isinstance(outcome.get('values'), dict)):
             fail(f'{where}: outcome needs an answer and values')
+        clears = line.get('clears', {})
+        if not isinstance(clears, dict) or any(
+                key not in _LINE_CLEARABLE or not line.get(key) or not _option_list(options)
+                for key, options in clears.items()):
+            fail(f'{where}: clears maps a mapped {" or ".join(_LINE_CLEARABLE)} to the options that clear it')
+        clears_when = line.get('clears_when', {})
+        if not isinstance(clears_when, dict) or any(
+                key not in _LINE_CLEARABLE or not line.get(key) or not isinstance(conds, list) or not conds
+                for key, conds in clears_when.items()):
+            fail(f'{where}: clears_when maps a mapped {" or ".join(_LINE_CLEARABLE)} to the conditions that clear it')
+        for key, conds in clears_when.items():
+            _check_when({'when': conds}, f'{where}.clears_when.{key}', fail)
         _check_when(line, where, fail)
+
+
+def _option_list(value) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(o, str) for o in value)
+
+
+def _check_value_rule(rule: dict, where: str, fail) -> None:
+    """A record or detail rule's ``clears`` and ``sum``, and its ``when``."""
+    if 'clears' in rule and ('answer' not in rule or 'values' in rule or not _option_list(rule['clears'])):
+        fail(f'{where}: clears lists the options of a date answer that clear the field')
+    if 'sum' in rule:
+        terms = rule['sum']
+        if not isinstance(terms, list) or not terms or not all(
+                isinstance(t, dict) and isinstance(t.get('answer'), str) and isinstance(t.get('values'), dict)
+                and all(v is None or (isinstance(v, int) and not isinstance(v, bool)) for v in t['values'].values())
+                for t in terms):
+            fail(f'{where}: sum is a list of terms, each an answer and the whole number (or null: unknown) each option counts')
+        for k, term in enumerate(terms):
+            _check_when(term, f'{where}.sum[{k}]', fail)
+    _check_when(rule, where, fail)
 
 
 def _check_when(rule: dict, where: str, fail) -> None:
@@ -226,6 +281,13 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
                 options(rule['answer'], rule['values'], where)
             else:
                 question(rule['answer'], where)
+            if 'clears' in rule:
+                options(rule['answer'], rule['clears'], f'{where}.clears')
+                if (questions.get(rule['answer']) or {}).get('type') not in (None, 'date'):
+                    problems.append(f'{where}.clears: {rule["answer"]!r} is not a date question')
+        for k, term in enumerate(rule.get('sum', [])):
+            options(term['answer'], term['values'], f'{where}.sum[{k}]')
+            conditions(term, f'{where}.sum[{k}]')
         conditions(rule, where)
 
     for i, rule in enumerate(mapping.get('record', [])):
@@ -241,6 +303,10 @@ def check_against_definition(mapping: dict[str, Any], definition: dict[str, Any]
         for key in ('names', *_LINE_DATES):
             if line.get(key):
                 question(line[key], f'{where}.{key}')
+        for key, cleared_by in line.get('clears', {}).items():
+            options(line[key], cleared_by, f'{where}.clears.{key}')
+        for key, conds in line.get('clears_when', {}).items():
+            conditions({'when': conds}, f'{where}.clears_when.{key}')
         conditions(line, where)
     return problems
 
@@ -303,6 +369,15 @@ def _values(rules: list[dict], answers: dict[str, dict], submitted_on: dt.date) 
             patch[field_name] = rule['value']
         elif rule.get('submitted_on'):
             patch[field_name] = submitted_on.isoformat()
+        elif 'sum' in rule:
+            counted = [term['values'][option] for term in rule['sum']
+                       if _holds(term, answers) and (option := _option(answers, term['answer'])) in term['values']]
+            if counted and None not in counted:  # an unknown term leaves the total unknown
+                patch[field_name] = sum(counted)
+        elif _option(answers, rule['answer']) in rule.get('clears', ()):
+            patch[field_name] = None
+            if rule.get('precision_field'):
+                patch[rule['precision_field']] = None
         else:
             given = answers.get(rule['answer']) or {}
             if 'values' in rule:
@@ -343,9 +418,16 @@ def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
         if line['line'] != 'latest' and 'source_value' not in kwargs:
             continue  # a line that may be new is written only with its treatment
         detail = _values(line.get('details', []), answers, submitted_on)
+        clears: list[str] = []
         for key in _LINE_DATES:
             if line.get(key) and (dated := answer_date(answers.get(line[key]))) is not None:
                 kwargs[key], detail[f'{key}_precision'] = dated
+            elif (_option(answers, line.get(key) or '') in line.get('clears', {}).get(key, ())
+                  or (key in line.get('clears_when', {}) and _holds({'when': line['clears_when'][key]}, answers))):
+                # The patient no longer gives the date: what they had said is
+                # removed after the line is written (_clear_own_progression).
+                detail[f'{key}_precision'] = None
+                clears.append(key)
         outcome = line.get('outcome')
         if outcome and (value := outcome['values'].get(_option(answers, outcome['answer']))):
             kwargs['outcome'] = value
@@ -353,7 +435,7 @@ def therapy_lines(mapping: dict[str, Any], answers: dict[str, dict],
             continue
         if line.get('disease'):
             kwargs['disease'] = line['disease']
-        lines.append({'index': index, 'target': line['line'], 'kwargs': kwargs, 'detail': detail})
+        lines.append({'index': index, 'target': line['line'], 'kwargs': kwargs, 'detail': detail, 'clears': clears})
     return lines
 
 
@@ -414,6 +496,7 @@ class Applied:
     response_id: str
     fields: list[str] = field(default_factory=list)
     lines: list[int] = field(default_factory=list)
+    retracted: list[int] = field(default_factory=list)
 
 
 def apply_response(response) -> Applied | None:
@@ -446,10 +529,17 @@ def apply_response(response) -> Applied | None:
     if account is None:
         logger.info('survey_record_mapping: response %s has no patient account to write as', response.pk)
         return None
+    from patient_portal.consent import record_permitted
+    if not record_permitted(person):
+        logger.info('survey_record_mapping: response %s: the record is off (permission withdrawn); not written',
+                    response.pk)
+        return None
 
     answers = {a.question_key: a.value for a in response.answers.all()}
     submitted_on = response.submitted_at.date()
     patch = record_patch(mapping, answers, submitted_on)
+    record = PatientRecord.objects.filter(person=person).first()
+    patch = _own_clears_only(mapping, patch, record, account.identity, response.submitted_at)
     lines = therapy_lines(mapping, answers, submitted_on)
     applied = Applied(str(response.pk), sorted(patch))
     with transaction.atomic():
@@ -486,6 +576,8 @@ def apply_response(response) -> Applied | None:
                             )
                             if result.episode is not None:
                                 _write_detail(result.episode, write['detail'], write['reference'])
+                                if 'progression_date' in write.get('clears', ()):
+                                    _clear_own_progression(person, write['line_number'], result.episode, response)
                     except TherapyLineValidationError as exc:
                         # A line the writer refuses (no start date, a future one, an
                         # end before the start, a cancer the record does not have) is
@@ -496,11 +588,116 @@ def apply_response(response) -> Applied | None:
                     if result.episode is not None:
                         applied.lines.append(write['line_number'])
             refresh_patient_record(person)
+        if getattr(response, 'revises_id', None):
+            # An update (PROlog's revisable surveys) started from the record as it
+            # stood (survey_record_revision): a numbered treatment it no longer
+            # gives is one the patient took out, so their own line is retracted.
+            applied.retracted = _retract_removed_lines(person, mapping, lines, response)
+            if applied.retracted:
+                refresh_patient_record(person)
     logger.info(
-        'survey_record_mapping: response %s wrote fields %s and lines %s',
-        applied.response_id, applied.fields, applied.lines,
+        'survey_record_mapping: response %s wrote fields %s and lines %s; retracted lines %s',
+        applied.response_id, applied.fields, applied.lines, applied.retracted,
     )
     return applied
+
+
+def _own_clears_only(mapping: dict[str, Any], patch: dict[str, Any], record, identity, submitted_at) -> dict[str, Any]:
+    """``patch`` with each field it clears kept only where the record's value is
+    the patient's own and older than the response: the last change to it was
+    theirs, to what it holds now, before ``submitted_at``. A value from anyone
+    else (a clinician, an import) stays, with its precision, and so does one
+    written since (a later questionnaire, when an older response is applied again)."""
+    from omop_core.models import RecordRevision
+
+    precision_of = {r['field']: r['precision_field'] for r in mapping.get('record', []) if r.get('precision_field')}
+    kept = dict(patch)
+    for field_name, value in patch.items():
+        if value is not None or field_name in precision_of.values() or record is None:
+            continue
+        now = getattr(record, field_name, None)
+        if now is None or now == '':
+            continue  # nothing to clear
+        last = RecordRevision.objects.filter(patient_record=record, field=field_name).order_by('-changed_at', '-pk').first()
+        if (last is None or last.changed_by != str(identity.pk) or last.new_value != str(now)
+                or last.changed_at > submitted_at):
+            kept.pop(field_name)
+            if field_name in precision_of:
+                kept.pop(precision_of[field_name], None)
+    return kept
+
+
+def _clear_own_progression(person, line_number: int, episode, response) -> None:
+    """Remove when the disease came back after this line, as the patient had
+    said it (typed patient self-report); a clinical progression stays, and so
+    does the line's whole progression when a response submitted after this one
+    has written the line (this one is being applied again)."""
+    from omop_core.services.episode_service import _line_observations
+    from omop_core.services.omop_projection import PATIENT_SELF_REPORT_TYPE
+    from prolog_surveys.models import SurveyResponse
+
+    detail = getattr(episode, 'detail', None)
+    writers = set()
+    for ref in getattr(detail, 'source_references', None) or []:
+        try:
+            writers.add(uuid.UUID(ref.split(':', 1)[0]))
+        except ValueError:
+            continue  # not a response's reference
+    writers.discard(response.pk)
+    if writers and SurveyResponse.objects.filter(pk__in=writers, submitted_at__gt=response.submitted_at).exists():
+        return
+    _line_observations(person, f'LOT-{line_number}-progression', episode, False).filter(
+        observation_type_concept_id=PATIENT_SELF_REPORT_TYPE).delete()
+
+
+def _retract_removed_lines(person, mapping: dict[str, Any], given: list[dict[str, Any]], response) -> list[int]:
+    """Retract the patient's own lines that the mapping numbers (for the cancer
+    each rule names) and an update did not give, and that this questionnaire
+    wrote (one of the patient's responses to it is among the line's sources).
+    A line another questionnaire added (a check-in's next line, perhaps after
+    the update started) is not this update's to take out; nor is a line from
+    the EHR or a clinician (_writable_line). Retracting keeps the row for audit."""
+    from prolog_surveys.models import SurveyResponse
+
+    from omop_core.services.episode_service import retract_therapy_line
+    from omop_core.signals import suppress_patient_record_refresh
+
+    from omop_core.services.therapy_errors import TherapyLineValidationError
+
+    # By the rule that gave each line: apply_response may drop a line's cancer
+    # (a record naming none yet), so the line's own fields cannot say which rule.
+    kept = {line['index'] for line in given}
+    removed = [(rule.get('disease'), rule['line']) for index, rule in enumerate(mapping.get('therapy_lines', []))
+               if isinstance(rule.get('line'), int) and index not in kept]
+    from omop_core.services.disease_episodes import primary_disease_slug
+
+    if not primary_disease_slug(person):
+        # As the lines were written: a record naming no cancer yet files them all
+        # under the primary cancer, whichever it becomes.
+        removed = [(None, number) for _, number in removed]
+    existing: dict[str | None, dict[int, Any]] = {}
+    mine: set[str] | None = None
+    retracted = []
+    with suppress_patient_record_refresh():
+        for disease, number in removed:
+            if disease not in existing:
+                try:
+                    existing[disease] = _existing_lines(person, disease)
+                except TherapyLineValidationError:
+                    existing[disease] = {}  # a cancer the record does not have: nothing to take out
+            episode = existing[disease].get(number)
+            if episode is None or not _writable_line(person, {'line_number': number, 'disease': disease}):
+                continue
+            if mine is None:
+                mine = {str(pk) for pk in SurveyResponse.objects.filter(
+                    participant_id=person.person_id, survey_version__survey=response.survey_version.survey,
+                ).values_list('pk', flat=True)}
+            sources = getattr(getattr(episode, 'detail', None), 'source_references', None) or []
+            if not any(reference.split(':', 1)[0] in mine for reference in sources):
+                continue
+            retract_therapy_line(person, episode)
+            retracted.append(number)
+    return retracted
 
 
 def _write_detail(episode, detail: dict[str, Any], reference: str) -> None:
@@ -542,6 +739,12 @@ def run_response(response_id) -> None:
 
     try:
         response = SurveyResponse.objects.select_related('survey_version__survey').get(pk=response_id)
+    except SurveyResponse.DoesNotExist:
+        # Erased after it was submitted (the member closed their account or
+        # withdrew their record's permission): there is nothing to write.
+        logger.info('survey_record_mapping: response %s no longer exists; nothing to write', response_id)
+        return
+    try:
         apply_response(response)
     except Exception:
         logger.exception(

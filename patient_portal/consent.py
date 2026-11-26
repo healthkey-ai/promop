@@ -17,10 +17,10 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
-from omop_core.models import PatientRecord
+from omop_core.models import PatientRecord, Person
 from patient_portal.models import (
     ConsentEvent,
     ConsentLedgerEntry,
@@ -225,6 +225,30 @@ def has_consent(person, key: str) -> bool:
     return purpose.available_in(record_country(person))
 
 
+RECORD_OFF = ('You withdrew the permission your record depends on, so nothing can be added to it. '
+              'Give the permission again to start a new record.')
+
+
+def record_permitted(person) -> bool:
+    """Whether the member's record may be written on their behalf.
+
+    False while the member's latest answer to a purpose the record depends on
+    (``erases_record_on_withdrawal``) is anything but a grant: they withdrew
+    it (and their answers were erased then, patient_portal.erasure), or they
+    said no or "ask me later" and never agreed. Nothing they send is kept
+    until they give it. True where no active purpose is marked, or the member
+    has not answered one (a hospital's patient, a deployment without the
+    flag). One query: it runs on every questionnaire request.
+    """
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose__is_active=True,
+                                    purpose__erases_record_on_withdrawal=True)
+        .order_by('purpose_id', '-recorded_at', '-id').distinct('purpose_id')
+        .values_list('decision', flat=True)
+    )
+    return all(decision == ConsentEvent.GRANTED for decision in latest)
+
+
 def persons_granting(key: str) -> set[int]:
     """The ids of every person whose latest answer to the active purpose
     ``key`` is a grant, in two queries, for enforcement over a cohort (a
@@ -277,6 +301,7 @@ def record_consent(
     person, purpose: ConsentPurpose | str, decision: str, *, version: str | None = None,
     language: str = DEFAULT_LANGUAGE, frequency: str = '', recorded_by=None,
     source: str = ConsentEvent.MEMBER, recorded_at=None, email: str | None = None,
+    requested_on=None, note: str = '',
 ) -> ConsentEvent:
     """Append one answer and its ledger entry, in one transaction.
 
@@ -287,9 +312,33 @@ def record_consent(
     grant that stands. A ``migration``, ``staff`` or ``system`` source may
     pass any version the purpose has, so a decision carried over from an
     earlier form keeps its own version, or none to mean the current one.
+
+    One person's answers are recorded one at a time (an advisory lock held
+    to the end of the transaction), so a grant that needs another purpose
+    cannot race the withdrawal of that purpose on a second device.
     """
     if isinstance(purpose, str):
         purpose = ConsentPurpose.objects.get(key=purpose)
+    with transaction.atomic():
+        _lock_answers_of(person)
+        return _record_consent(
+            person, purpose, decision, version=version, language=language, frequency=frequency,
+            recorded_by=recorded_by, source=source, recorded_at=recorded_at, email=email,
+            requested_on=requested_on, note=note,
+        )
+
+
+def _lock_answers_of(person) -> None:
+    """Hold this person's consent lock to the end of the transaction (re-entrant)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('patient_portal.consent'), %s)",
+            [person.pk % 2147483647],
+        )
+
+
+def _record_consent(person, purpose, decision, *, version, language, frequency, recorded_by, source,
+                    recorded_at, email, requested_on=None, note='') -> ConsentEvent:
     if source == ConsentEvent.MEMBER:
         if not purpose.is_active:
             raise ValidationError(f'{purpose.key} is not active.')
@@ -297,8 +346,26 @@ def record_consent(
             raise ValidationError(f'{purpose.key} is not available in your country.')
     if decision not in purpose.allowed_decisions():
         raise ValidationError(f'{purpose.key} does not take the answer {decision!r}.')
-    if decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER:
-        latest = latest_events(person).get(purpose.id)
+    # A purpose that depends on another applies only while that one is
+    # granted; a migration replays history and is not held to it.
+    if decision == ConsentEvent.GRANTED and purpose.requires and source != ConsentEvent.MIGRATION:
+        if not _granted(person, purpose.requires):
+            raise ValidationError(f'{purpose.key} needs {purpose.requires} to be granted first.')
+    when = recorded_at or timezone.now()
+    member_withdrawal = decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose=purpose).order_by('-recorded_at', '-id').first()
+    )
+    # Any answer that ends a standing grant ends it, "declined" as much as
+    # "withdrawn"; for a purpose the record depends on, the record goes too.
+    # Only an answer that becomes the member's position does: an older one,
+    # back-dated behind the grant, ends nothing. A migration replays history,
+    # it is not a member withdrawing now, so it never erases.
+    ends_grant = (
+        source != ConsentEvent.MIGRATION and latest is not None and latest.decision == ConsentEvent.GRANTED
+        and decision != ConsentEvent.GRANTED and when >= latest.recorded_at
+    )
+    if member_withdrawal:
         if latest is None or latest.decision != ConsentEvent.GRANTED:
             raise ValidationError(f'{purpose.key} is not granted, so there is nothing to withdraw.')
     texts = list(purpose.texts.all())
@@ -321,19 +388,105 @@ def record_consent(
     else:
         frequency = ''
 
-    when = recorded_at or timezone.now()
     addr = _ledger_email(person, email, purpose.key)
     with transaction.atomic():
         event = ConsentEvent.objects.create(
             person=person, purpose=purpose, text=text, version=version, language=text.language,
             decision=decision, frequency=frequency, source=source, recorded_by=recorded_by, recorded_at=when,
+            requested_on=requested_on, note=note[:500],
         )
         ConsentLedgerEntry.objects.create(
             email=addr, kind=ConsentLedgerEntry.CONSENT,
             key=purpose.key, version=version, language=text.language, decision=decision,
-            frequency=frequency, recorded_at=when,
+            frequency=frequency, recorded_at=when, requested_on=requested_on,
         )
+        # The record depends on this permission: its health answers go now,
+        # with the answer that ends it, or neither is kept.
+        if ends_grant and purpose.erases_record_on_withdrawal:
+            from patient_portal.erasure import erase_record
+            erase_record(person, actor=recorded_by, purpose=purpose.key)
+        # What depends on it stops with it, on the record and in the ledger.
+        if ends_grant:
+            _withdraw_dependents(person, purpose, when=when, recorded_by=recorded_by, email=addr,
+                                 requested_on=requested_on)
     return event
+
+
+def _granted(person, key: str) -> bool:
+    latest = (
+        ConsentEvent.objects.filter(person=person, purpose__key=key)
+        .order_by('-recorded_at', '-id').values_list('decision', flat=True).first()
+    )
+    return latest == ConsentEvent.GRANTED
+
+
+def _withdraw_dependents(person, purpose: ConsentPurpose, *, when, recorded_by, email, requested_on=None) -> None:
+    """Withdraw each purpose that requires ``purpose`` and is still granted,
+    under the version the member granted, as a system event. Each in turn
+    withdraws its own dependents."""
+    dependents = list(ConsentPurpose.objects.filter(requires=purpose.key).prefetch_related('texts'))
+    if not dependents:
+        return
+    latest = latest_events(person)
+    for dependent in dependents:
+        standing = latest.get(dependent.id)
+        if standing is None or standing.decision != ConsentEvent.GRANTED:
+            continue
+        # Never behind the grant it ends: a back-dated withdrawal of the
+        # required purpose must still end a dependent granted after it.
+        record_consent(
+            person, dependent, ConsentEvent.WITHDRAWN, version=standing.version, language=standing.language,
+            recorded_by=recorded_by, source=ConsentEvent.SYSTEM, recorded_at=max(when, standing.recorded_at),
+            email=email, requested_on=requested_on,
+        )
+
+
+def requires_depth(purposes) -> dict[str, int]:
+    """How many ``requires`` steps each purpose is from one that requires
+    nothing. Raises ValueError on a cycle."""
+    by_key = {p.key: p for p in purposes}
+    depth: dict[str, int] = {}
+    for start in by_key:
+        chain, key = [], start
+        while key in by_key and key not in depth:
+            if key in chain:
+                raise ValueError(' requires '.join([*chain[chain.index(key):], key]))
+            chain.append(key)
+            key = by_key[key].requires
+        base = depth.get(key, -1) if key in by_key else -1
+        for i, k in enumerate(reversed(chain), start=1):
+            depth[k] = base + i
+    return depth
+
+
+def withdraw_orphaned_dependents(*, recorded_by=None) -> int:
+    """Withdraw every grant of a purpose whose required purpose is not
+    granted for that person: what a withdrawal now does, applied to answers
+    given before ``requires`` was set. Returns how many were withdrawn."""
+    count = 0
+    for purpose in ConsentPurpose.objects.exclude(requires='').order_by('id'):
+        required = ConsentPurpose.objects.filter(key=purpose.requires).first()
+        if required is None:
+            continue
+        holding = _latest_decisions(purpose)
+        supported = {pid for pid, decision in _latest_decisions(required).items() if decision == ConsentEvent.GRANTED}
+        for person_id in sorted(pid for pid, d in holding.items() if d == ConsentEvent.GRANTED and pid not in supported):
+            person = Person.objects.get(person_id=person_id)
+            standing = latest_events(person)[purpose.id]
+            record_consent(person, purpose, ConsentEvent.WITHDRAWN, version=standing.version,
+                           language=standing.language, recorded_by=recorded_by, source=ConsentEvent.SYSTEM,
+                           recorded_at=max(timezone.now(), standing.recorded_at))
+            count += 1
+    return count
+
+
+def _latest_decisions(purpose: ConsentPurpose) -> dict[int, str]:
+    rows = (
+        ConsentEvent.objects.filter(purpose=purpose)
+        .order_by('person_id', '-recorded_at', '-id').distinct('person_id')
+        .values_list('person_id', 'decision')
+    )
+    return dict(rows)
 
 
 def record_decisions(person, items, *, language: str = DEFAULT_LANGUAGE, recorded_by=None,
@@ -343,6 +496,19 @@ def record_decisions(person, items, *, language: str = DEFAULT_LANGUAGE, recorde
     the PHR consent view and by sign-up; the caller's transaction makes the
     batch all or nothing."""
     events = []
+    # Whatever order the client sent: what ends a grant goes first, a
+    # dependent before what it requires (so its own withdrawal is not
+    # pre-empted by the cascade); then grants, what is required before what
+    # requires it, at any depth.
+    depth = requires_depth(ConsentPurpose.objects.all())
+
+    def order(pair):
+        purpose, item = pair
+        granting = item.get('decision') == ConsentEvent.GRANTED
+        d = depth.get(purpose.key, 0)
+        return (granting, d if granting else -d)
+
+    items = sorted(items, key=order)
     for purpose, item in items:
         frequency = item.get('frequency') or ''
         events.append(record_consent(
@@ -395,3 +561,113 @@ def accept_document(
             key=document.key, version=version, language=text.language, decision=ACCEPTED, recorded_at=when,
         )
     return acceptance
+
+
+# ------------------------------------------------------------------ history
+
+
+def consent_history(person, *, include_legacy: bool = False) -> list[dict]:
+    """Every answer and acceptance the member has, newest first: what it was
+    (``kind`` consent or document, its ``key`` and the ``title`` of the
+    wording answered), the decision, the version and language, the frequency,
+    who recorded it (``source``) and when, and for a change staff recorded on
+    the member's behalf when they asked and staff's note (``requested_on``,
+    ``note``). The history endpoint (its own fields), the record
+    export's PDF and its FHIR Consent resources all read this. ``current`` is
+    true on the row that is the member's position for that key.
+
+    ``include_legacy`` adds the legacy flags (``PatientConsent``: data
+    sharing, which the HealthKit switch still sets, clinical trial, research)
+    as kind ``legacy``, each the member's current position with no version:
+    the record export does, so an access request sees every choice held."""
+    events = [
+        {
+            'kind': 'consent', 'key': e.purpose.key, 'title': e.text.title if e.text else e.purpose.key,
+            'decision': e.decision, 'version': e.version, 'language': e.language, 'frequency': e.frequency,
+            'source': e.source, 'recorded_at': e.recorded_at, 'order': e.id,
+            'requested_on': e.requested_on, 'note': e.note,
+        }
+        for e in ConsentEvent.objects.filter(person=person).select_related('purpose', 'text')
+    ]
+    acceptances = [
+        {
+            'kind': 'document', 'key': a.document.key, 'title': a.text.title if a.text else a.document.name,
+            'decision': ACCEPTED, 'version': a.version, 'language': a.language, 'frequency': '',
+            'source': a.source, 'recorded_at': a.accepted_at, 'order': a.id, 'requested_on': None, 'note': '',
+        }
+        for a in DocumentAcceptance.objects.filter(person=person).select_related('document', 'text')
+    ]
+    legacy = []
+    if include_legacy:
+        from patient_portal.models import PatientConsent
+
+        legacy = [
+            {
+                'kind': 'legacy', 'key': c.consent_type, 'title': c.get_consent_type_display(),
+                'decision': ConsentEvent.GRANTED if c.consent_granted else ConsentEvent.DECLINED,
+                'version': '', 'language': '', 'frequency': '', 'source': ConsentEvent.MEMBER,
+                'recorded_at': c.consent_date, 'order': c.id, 'requested_on': None, 'note': '',
+            }
+            for c in PatientConsent.objects.filter(patient_user__person=person)
+        ]
+    rows = sorted(events + acceptances + legacy, key=lambda r: (r['recorded_at'], r['order']), reverse=True)
+    seen = set()
+    for row in rows:
+        row['current'] = (row['kind'], row['key']) not in seen
+        seen.add((row['kind'], row['key']))
+        del row['order']
+    return rows
+
+
+# A member's current answer stands (active), a yes or a no as provision.type
+# says; "ask me later" is proposed; an answer a later one replaced is inactive.
+_SYSTEMS = {
+    'consent': 'urn:promop:consent-purpose',
+    'document': 'urn:promop:legal-document',
+    'legacy': 'urn:promop:legacy-consent',
+}
+
+
+def consent_fhir_resources(person, patient_ref: str) -> list[dict]:
+    """The member's answers and acceptances as FHIR R4 Consent resources, one
+    per row of ``consent_history``, for their own record export: a full
+    access request includes what they agreed to."""
+    import uuid
+
+    resources = []
+    for row in consent_history(person, include_legacy=True):
+        system = _SYSTEMS[row['kind']]
+        permits = row['decision'] in (ConsentEvent.GRANTED, ACCEPTED)
+        if not row['current']:
+            status = 'inactive'
+        else:
+            status = 'proposed' if row['decision'] == ConsentEvent.ASK_LATER else 'active'
+        versioned = f"{system}:{row['key']}" + (f":{row['version']}" if row['version'] else '')
+        resources.append({
+            'resourceType': 'Consent',
+            'id': str(uuid.uuid4()),
+            'status': status,
+            'scope': {'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/consentscope',
+                                  'code': 'patient-privacy', 'display': 'Privacy Consent'}]},
+            'category': [{'coding': [{'system': 'http://loinc.org', 'code': '59284-0', 'display': 'Patient Consent'}]}],
+            'patient': {'reference': patient_ref},
+            'dateTime': row['recorded_at'].isoformat(),
+            # The wording answered, by version (Coding.version would be the
+            # code system's, not the text's).
+            'policy': [{'uri': versioned}],
+            'policyRule': {
+                'coding': [{'system': system, 'code': row['key']}],
+                'text': row['title'] + (f" (version {row['version']})" if row['version'] else '')
+                        + f": {row['decision']}" + (f", {row['frequency']}" if row['frequency'] else ''),
+            },
+            'provision': {'type': 'permit' if permits else 'deny'},
+        })
+        # A change staff recorded for the member: when they asked, and how.
+        extension = []
+        if row['requested_on']:
+            extension.append({'url': 'urn:promop:consent-requested-on', 'valueDate': row['requested_on'].isoformat()})
+        if row['note']:
+            extension.append({'url': 'urn:promop:consent-note', 'valueString': row['note']})
+        if extension:
+            resources[-1]['extension'] = extension
+    return resources

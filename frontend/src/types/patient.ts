@@ -18,6 +18,9 @@ export interface PatientInfo {
   provisional_fields?: Record<string, number>;
   /** Of a list field holding approved and proposed items, the proposed ones. */
   provisional_items?: Record<string, unknown[]>;
+  /** For a professional who may confirm the proposals (#2870), from the v1 record read only:
+   *  the marked fields the server will confirm, and why it will not confirm the others. */
+  provisional_confirm?: { confirmable: string[]; skipped: Record<string, string> };
   email?: string;
   
   // General
@@ -299,6 +302,8 @@ export interface PatientInfo {
   disease_slug?: string | null;
   /** Every cancer on the record, primary first (derived, read-only). */
   disease_slugs?: string[];
+  /** The Disease Categories whose extension the record has, primary first. Sent only when the record has more than one cancer. */
+  disease_categories?: string[];
   validated?: boolean | null;
   validated_by?: string | null;
   validation_date?: string | null;

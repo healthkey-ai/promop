@@ -22,6 +22,8 @@ database by this project's migrations, and every response is bound to an
 | `promop/urls.py` | `api/v1/prolog/` → the runner's own tree (`health/`, `run/…`) |
 | `patient_portal.services.prolog_participant_id` | `PROLOG_PARTICIPANT_RESOLVER` — the signed-in patient's `person_id`, or `None` |
 | `patient_portal.services.create_unidentified_person` | `PROLOG_PARTICIPANT_FACTORY` — mints the person for a respondent who is not signed in |
+| `patient_portal.prolog_facts.facts_for` | `PROLOG_FACTS_PROVIDER` — the facts a questionnaire declares that promop knows about the signed-in patient (see "What v0.7.0 added") |
+| `patient_portal.survey_record_revision.revision_answers` | `PROLOG_REVISION_ANSWERS_PROVIDER` — the answers an update of a revisable questionnaire starts from: the patient's last answers, with what their record says differently now read back through the questionnaire's record mapping, so an update never resubmits answers later questionnaires have overtaken (see survey-record-mapping_architecture.md, "Updating answers"). From PROlog v0.10.0 |
 | `REST_FRAMEWORK.DEFAULT_THROTTLE_RATES` | the `run.*` scopes, per hashed client key |
 | `RUNNER_DIST` | the built runner front end, when `PROLOG_RUNNER_DIST` names one |
 
@@ -177,6 +179,87 @@ The app accepts a range of Django and DRF versions rather than pinning against
 this project's, so a PRomop dependency bump does not need a matching PROlog
 release. The reverse is not true: PROlog's floor is Django 5.2.6 / DRF 3.15.2 and
 Python 3.12, and its ceiling excludes Django 6.
+
+### What v0.10.1 added
+
+No migration, no setting. The runner no longer trusts the response id the
+browser kept on an account questionnaire: its intro and completion pages ask
+`GET /api/run/surveys/<slug>/status/` where the signed-in patient stands (the
+response a start resumes, their last submission, whether the active version
+offers "Update my answers") and rewrite the kept id from the answer. A
+patient whose answers were given on an older, non-revisable version is offered
+the update; a new browser or a second device finds their place. The endpoint
+sits under the runner's existing `/api/run/` mount.
+
+### What v0.10.0 added
+
+No migration. One setting, which promop sets:
+
+- **`PROLOG_REVISION_ANSWERS_PROVIDER`** (RUN-4): what an update of a revisable
+  questionnaire starts from. promop's is
+  `patient_portal.survey_record_revision.revision_answers`: the patient's last
+  answers, with what their record says differently now read back through the
+  questionnaire's record mapping, so an update never resubmits answers that
+  later questionnaires have overtaken; nothing else is changed or guessed
+  (survey-record-mapping_architecture.md, "Updating answers"). PROlog checks
+  every answer it returns, and starts from the last answers if it fails.
+- Host calls (this provider and `PROLOG_FACTS_PROVIDER`) run in a savepoint,
+  before the survey version's start lock: a failing or slow provider no longer
+  breaks or holds up the start.
+
+### What v0.9.0 added
+
+`prolog_surveys` migration `0005` (a nullable `revises` column on the
+response), and two opt-in features, both off until a deployment's content asks
+for them:
+
+- **Revisable surveys** (`participation.revisable`, RUN-4): a questionnaire a
+  patient keeps up to date, such as a profile. Once they have submitted it,
+  starting it again (from the intro's or completion page's **Update my
+  answers**, on any device) gives them a new response holding their last
+  answers that are still valid in the active version; the submitted one never
+  changes, and the new one names it in `revises` (also an export column). The
+  record mappings apply the update like any submitted response.
+  `withdraw_consent … --erase-response` erases an erased response's updates
+  too. A revisable survey needs signed-in participants (`anonymous: false`,
+  `resume: "account"`).
+- **The theme's `exit_url`**: the deployment's home page. Every question then
+  offers **Save and exit**, and the completion page **Back to home**. A path on
+  the same site (`/…`) or an http(s) URL.
+
+### What v0.8.0 added
+
+One setting, no migration:
+
+- **`PROLOG_STATS_MIN_COUNT`** (RUN-24): the smallest count PROlog's survey
+  report and its admin statistics show. A count from 1 to N−1 reads "fewer
+  than N", and a second count is hidden wherever one could be worked out from
+  a total. Rates and averages over a hidden count are hidden too. 0, the
+  default, shows every count. A deployment whose privacy policy promises no
+  figure for a small group sets it: `PROLOG_STATS_MIN_COUNT=20` in the
+  environment, which `promop/settings.py` reads. A value that isn't a whole
+  number of 0 or more stops startup (PROlog's system check
+  `prolog_surveys.E003` refuses it too).
+
+### What v0.7.0 added
+
+**Facts about the participant** (PROlog DEF-14, RUN-23), and `prolog_surveys`
+migration `0004` (a `facts` column on the response):
+
+- A questionnaire may declare facts and show a question, a section or a branch
+  of an `any` group only when one holds:
+  `{"fact": "latest_therapy_line_response", "op": "eq", "value": "not_assessed"}`.
+- PROlog asks `PROLOG_FACTS_PROVIDER` once, when a signed-in patient starts
+  their own response; never for an invitation link or a respondent who is not
+  signed in. The response keeps the facts for its life. The runner is served
+  the definition with each fact condition settled, never the facts.
+- promop's catalogue (`patient_portal/prolog_facts.py`):
+
+  | Fact | Values | From |
+  |---|---|---|
+  | `latest_therapy_line_response` | `assessed`, `not_assessed` | the latest line of therapy for the primary cancer: `TherapyLineDetail.response_assessed`, which a record mapping writes from the patient's answer about the line's response |
+
+  A fact promop cannot tell is left out, so every condition on it is false.
 
 ### What v0.6.0 added
 

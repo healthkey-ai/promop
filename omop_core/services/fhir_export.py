@@ -342,7 +342,7 @@ def _build_encounter(visit: VisitOccurrence, patient_ref: str) -> dict[str, Any]
 # Main export function
 # ---------------------------------------------------------------------------
 
-def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict[str, Any]:
+def build_fhir_bundle(person: Person, add_resources=None) -> dict[str, Any]:
     """
     Build a FHIR R4 Bundle of type "searchset" from a patient's OMOP data.
 
@@ -351,19 +351,23 @@ def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict
     to its corresponding FHIR resource.
 
     Rows written from a proposed, not yet approved, mapping carry a
-    ``confidence`` and are left out: an export must not present a guess as the
-    patient's record. ``include_provisional=True`` adds them.
+    ``confidence`` and are always left out: provisional data is never exported,
+    and there is no switch to include it. It lives in the PHR, which is the
+    patient's source of truth; a patient who approves a value makes it real and
+    it then exports like any other row.
 
     Args:
         person: An OMOP Person model instance.
-        include_provisional: also export provisional rows.
+        add_resources: Optional ``callable(patient_ref) -> list of resources`` added
+            to the bundle: the member's own export adds their Consent
+            resources (patient_portal.consent.consent_fhir_resources).
 
     Returns:
         A JSON-serializable dict representing a FHIR R4 Bundle.
     """
     entries: list[dict[str, Any]] = []
     # One kwargs dict for the five clinical tables; visits carry no confidence.
-    real = {} if include_provisional else {"confidence__isnull": True}
+    real = {"confidence__isnull": True}
 
     # Patient resource
     patient_resource = _build_patient(person)
@@ -430,6 +434,9 @@ def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict
     for visit in visits:
         entries.append(_make_entry(_build_encounter(visit, patient_ref)))
 
+    for resource in (add_resources(patient_ref) if add_resources else []):
+        entries.append(_make_entry(resource))
+
     return {
         "resourceType": "Bundle",
         "type": "searchset",
@@ -443,7 +450,7 @@ def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict
     }
 
 
-def serialize_signed_fhir_bundle(person: Person) -> tuple[bytes, str, str]:
+def serialize_signed_fhir_bundle(person: Person, add_resources=None) -> tuple[bytes, str, str]:
     """Build, serialize, digest, and sign a FHIR bundle for content integrity.
 
     Returns ``(body_bytes, sha256_hex, hmac_signature_hex)`` where the digest and
@@ -456,7 +463,7 @@ def serialize_signed_fhir_bundle(person: Person) -> tuple[bytes, str, str]:
     import json as _json
     from patient_portal.api.fhir.integrity import export_signature, sha256_hex
 
-    bundle = build_fhir_bundle(person)
+    bundle = build_fhir_bundle(person, add_resources)
     # Canonical, deterministic serialization so the digest is reproducible.
     body_bytes = _json.dumps(
         bundle, sort_keys=True, separators=(',', ':'), default=str

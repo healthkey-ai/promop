@@ -3,6 +3,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.utils import timezone
 from django.db.models import F, Q
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
@@ -2241,6 +2242,31 @@ class SourceCodeConceptMapping(models.Model):
         max_length=12, choices=SUGGESTION_OUTCOME_CHOICES, blank=True, default='', db_index=True,
         help_text='Immutable first curator disposition of a machine suggestion.',
     )
+    suggestion_fallback = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            'The stored suggestion is the first retrieval candidate, written '
+            'because no ranking model could be reached. It is not the model\'s '
+            'answer, so its outcome is recorded and never scored (#2743).'
+        ),
+    )
+    suggestion_auto_approved = models.BooleanField(
+        default=False, db_default=False,
+        help_text=(
+            'Suggest approved the stored suggestion itself, at a confidence '
+            'at or above the approver\'s threshold (#1532). suggestion_outcome '
+            'stays the curator\'s first disposition, so a later review says '
+            'whether the auto-approval held (#2856).'
+        ),
+    )
+    auto_approved_confidence = models.FloatField(
+        null=True, blank=True,
+        help_text=(
+            'The ranker confidence (0-1) the suggestion had when Suggest '
+            'auto-approved it. suggestion_confidence is live and a later save '
+            'clears or replaces it; this is what the analytics bands read (#2856).'
+        ),
+    )
     SUGGESTED_ACTION_CHOICES = [('reject', 'Reject')]
     suggested_action = models.CharField(
         max_length=12, choices=SUGGESTED_ACTION_CHOICES, blank=True,
@@ -2611,6 +2637,11 @@ class MappingSuggestionReview(models.Model):
     suggestion_outcome = models.CharField(
         max_length=12, choices=SourceCodeConceptMapping.SUGGESTION_OUTCOME_CHOICES,
     )
+    # As on the mapping: a review of a fallback is kept and never scored.
+    suggestion_fallback = models.BooleanField(default=False, db_default=False)
+    # As on the mapping: the reviewed suggestion had been auto-approved (#2856).
+    suggestion_auto_approved = models.BooleanField(default=False, db_default=False)
+    auto_approved_confidence = models.FloatField(null=True, blank=True)
     archived_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -3503,7 +3534,7 @@ class SupportiveTherapyCourse(models.Model):
 class WearableUpload(models.Model):
     """Tracks each wearable file upload so patients can review upload history."""
     person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='wearable_uploads')
-    device_type = models.CharField(max_length=10)  # 'garmin' | 'apple'
+    device_type = models.CharField(max_length=10)  # 'garmin' | 'apple' | 'android' | 'oura'
     filename = models.CharField(max_length=255)
     samples_created = models.IntegerField(default=0)
     duplicates_skipped = models.IntegerField(default=0)
@@ -3520,6 +3551,195 @@ class WearableUpload(models.Model):
 
     def __str__(self):
         return f'{self.device_type} upload {self.filename} ({self.samples_created} samples)'
+
+
+class GarminConnection(models.Model):
+    """A patient's Garmin Connect account, linked by OAuth (#2802).
+
+    The patient approved this deployment's Garmin Connect Developer Program app
+    on Garmin's consent page; Garmin then pushes that account's summaries here,
+    each naming ``garmin_user_id``. That id is how a push finds its patient, so
+    one Garmin account is linked to at most one record.
+
+    The tokens are stored encrypted (``garmin_oauth.encrypt``, a key derived
+    from SECRET_KEY) and are needed for one thing after connecting: telling
+    Garmin the patient disconnected. They never leave the server.
+
+    System data: it belongs to this deployment's app registration, so it is
+    never copied between instances, and it goes with the person.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='garmin_connection',
+    )
+    garmin_user_id = models.CharField(max_length=64, unique=True)
+    access_token = models.TextField(blank=True, default='')
+    refresh_token = models.TextField(blank=True, default='')
+    access_expires_at = models.DateTimeField(null=True, blank=True)
+    refresh_expires_at = models.DateTimeField(null=True, blank=True)
+    tokens_updated_at = models.DateTimeField(null=True, blank=True)
+    # What the patient granted on the consent page, e.g. ["HEALTH_EXPORT"].
+    permissions = models.JSONField(default=list, blank=True)
+    connected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='garmin_connections',
+    )
+    # Set again when the patient connects again: it is this account's link.
+    connected_at = models.DateTimeField(default=timezone.now)
+    # When Garmin last pushed data for this account that was stored.
+    last_push_at = models.DateTimeField(null=True, blank=True)
+    # Pulse ox and respiration arrive as readings in several summaries a day,
+    # over several pushes. The totals per summary are kept for the last days,
+    # {day: {metric: {summary: [sum, count]}}}, so the day's stored value is
+    # the mean of all of them and not of whichever push came last.
+    day_readings = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        db_table = 'garmin_connection'
+
+    def __str__(self):
+        return f'Garmin connection for person {self.person_id}'
+
+
+class GarminPersonalKey(models.Model):
+    """A patient's Garmin Connect Personal API key, saved for later syncs (#2834).
+
+    The patient pasted it into the Wearables tab to sync by key (#2794) and
+    left "Save this key for next time" ticked. ``api_key`` is never the key
+    itself: it is the key encrypted under ``GARMIN_TOKEN_KEY``
+    (``garmin_oauth.encrypt``), a key that is in no database, so a dump holds
+    nothing Garmin would accept. A deployment without that key saves nothing.
+
+    The key is read for one thing, a sync started by the account that saved
+    it (``saved_by``), and is returned by no endpoint. The patient removes it
+    from the tab; it is also removed when Garmin says it is no key of its,
+    and it goes with the person or their record. The rules are in
+    ``omop_core/services/garmin_saved_key.py``.
+
+    System data: a credential, never copied between instances.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='garmin_personal_key',
+    )
+    api_key = models.TextField()
+    saved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='garmin_personal_keys',
+    )
+    saved_at = models.DateTimeField(default=timezone.now)
+    # When a sync last read it and Garmin accepted it.
+    last_used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'garmin_personal_key'
+
+    def __str__(self):
+        return f'Saved Garmin key for person {self.person_id}'
+
+
+class OpenWearablesConnection(models.Model):
+    """A patient's link to a phone app built on the Open Wearables SDK (#2810).
+
+    The SDK posts HealthKit and Health Connect records to fixed paths under
+    ``{host}/api/v1/``. This deployment serves those paths itself, so there is
+    no Open Wearables server: the app's "host" is this site. ``user_id`` is
+    the id the SDK is signed in with and puts in every path. It is random and
+    says nothing about the person.
+
+    A phone joins with a short code the patient makes on the Wearables tab
+    (``code_hash``, single use, minutes to live), which the app exchanges for
+    tokens (``OpenWearablesDevice``).
+
+    System data: never copied between instances, and it goes with the person.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='open_wearables_connection',
+    )
+    user_id = models.UUIDField(unique=True, editable=False)
+    # The pending connection code, as a keyed digest; '' when there is none.
+    code_hash = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    code_expires_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='open_wearables_connections',
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    # When a sync last stored or confirmed data.
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    # {provider: ISO instant of the newest record received}: where the SDK
+    # resumes a live sync from, as its sync status endpoint reports it.
+    synced_until = models.JSONField(default=dict, blank=True)
+    # The IANA zone the patient's browser was in when they made the code.
+    # HealthKit rarely says where a record was taken, and a step at 23:30
+    # belongs to that evening, not to the next day in UTC.
+    time_zone = models.CharField(max_length=64, blank=True, default='')
+
+    class Meta:
+        db_table = 'open_wearables_connection'
+
+    def __str__(self):
+        return f'Open Wearables connection for person {self.person_id}'
+
+
+class OpenWearablesDevice(models.Model):
+    """One phone signed in to a connection: the refresh token it holds.
+
+    Only a digest of the token is kept. Removing the row signs the phone out:
+    its access tokens name this row and stop working with it.
+    """
+    connection = models.ForeignKey(
+        OpenWearablesConnection, on_delete=models.CASCADE, related_name='devices',
+    )
+    refresh_hash = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = 'open_wearables_device'
+
+    def __str__(self):
+        return f'Open Wearables device {self.pk} of connection {self.connection_id}'
+
+
+class OpenWearablesDay(models.Model):
+    """What the phone has sent so far for one metric on one day.
+
+    The SDK sends raw records, a day's worth in many batches and sometimes the
+    same record twice (a retry, a re-export after a reinstall). Only the day's
+    value is stored as patient data, so this keeps the running total and count
+    and, while the day is open, the short key and value of each record counted
+    (``seen``): a repeat is then harmless, and a record a Health Connect
+    writer updated in place moves the total by the difference. No record's
+    time is kept.
+
+    A day nothing more is expected for is closed (``close_idle_days``): its
+    keys are dropped and later records for it are ignored, so the keys do not
+    accumulate. Deleting the sync's history row closes its days too.
+    """
+    connection = models.ForeignKey(
+        OpenWearablesConnection, on_delete=models.CASCADE, related_name='days',
+    )
+    device_type = models.CharField(max_length=10)       # 'apple' | 'android'
+    metric_key = models.CharField(max_length=40)
+    day = models.DateField()
+    total = models.FloatField(default=0)
+    count = models.PositiveIntegerField(default=0)
+    seen = models.JSONField(default=dict, blank=True)
+    closed = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'open_wearables_day'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['connection', 'device_type', 'metric_key', 'day'],
+                name='uq_open_wearables_day',
+            ),
+        ]
+        indexes = [models.Index(fields=['closed', 'updated_at'], name='ix_ow_day_open_age')]
+
+    def __str__(self):
+        return f'{self.device_type} {self.metric_key} {self.day} of connection {self.connection_id}'
 
 
 class TherapyHistoryAttestation(models.Model):
@@ -4628,8 +4848,12 @@ def _provisional_columns():
 def confidence_field_names():
     """The PatientRecord fields that carry a confidence: every derived field
     that is a real column, except a JSON one with no reader that can run over
-    provisional rows alone (``PROVISIONAL_JSON_FIELDS`` lists the JSON ones that do)."""
-    from omop_core.derived_fields import _OMOP_DERIVED_FIELDS, PROVISIONAL_JSON_FIELDS
+    provisional rows alone (``PROVISIONAL_JSON_FIELDS`` lists the JSON ones that do),
+    and the JSON objects whose keys carry a confidence each
+    (``PROVISIONAL_OBJECT_FIELDS``: ``custom_fields``, whose confidence is JSON too)."""
+    from omop_core.derived_fields import (
+        _OMOP_DERIVED_FIELDS, PROVISIONAL_JSON_FIELDS, PROVISIONAL_OBJECT_FIELDS,
+    )
     names = []
     for name in dict.fromkeys(_OMOP_DERIVED_FIELDS):
         try:
@@ -4640,7 +4864,17 @@ def confidence_field_names():
             continue
         if not isinstance(field, models.JSONField) or name in PROVISIONAL_JSON_FIELDS:
             names.append(name)
+    names.extend(name for name in PROVISIONAL_OBJECT_FIELDS if name not in names)
     return names
+
+
+def _confidence_column(name):
+    """The confidence column of PatientRecord field *name*: a percentage, or for a
+    JSON object field (``custom_fields``) an object of percentages by key."""
+    from omop_core.derived_fields import PROVISIONAL_OBJECT_FIELDS
+    if name in PROVISIONAL_OBJECT_FIELDS:
+        return models.JSONField(null=True, blank=True)
+    return models.PositiveSmallIntegerField(null=True, blank=True)
 
 
 class PatientRecordProvisional(models.Model):
@@ -4657,16 +4891,58 @@ class PatientRecordProvisional(models.Model):
 
 class PatientRecordConfidence(models.Model):
     """The confidence (0-100) of each provisional value in PatientRecordProvisional,
-    under the same column name. Null means the value is approved, or absent."""
+    under the same column name. Null means the value is approved, or absent.
+
+    ``custom_fields`` is the one JSON column: ``{field_name: percent}`` for the
+    created fields (``CustomPatientField``) whose value in
+    ``PatientRecordProvisional.custom_fields`` is a proposal (#2857)."""
     person = models.OneToOneField(
         Person, on_delete=models.CASCADE, primary_key=True, related_name='patient_record_confidence',
     )
-    locals().update({
-        name: models.PositiveSmallIntegerField(null=True, blank=True) for name in confidence_field_names()
-    })
+    locals().update({name: _confidence_column(name) for name in confidence_field_names()})
 
     class Meta:
         db_table = 'patient_record_confidence'
+
+
+class ProposalRejection(models.Model):
+    """A user's explicit rejection of the value a proposal gives one field (#2671).
+
+    The record shows a proposed value on a field it leaves empty. Clearing that
+    field is how the user says the proposal is wrong; the record has nothing to
+    clear, so the answer is kept here, per person and field, and the provisional
+    pass leaves the field empty (``provisional_record.held_rejections``).
+
+    ``origins`` are the provisional rows that decided the field when it was
+    rejected, as sorted ``[table, source_value, concept_id]`` triples. The
+    rejection holds while every row that decides the field now is one of them:
+    new readings of the same code under the same concept stay rejected, while a
+    code that is now mapped to another concept, or a different code that now
+    feeds the field, is a new proposal and is shown again. It deletes nothing:
+    the mapping and the clinical rows are untouched, and the user can still type
+    a value of their own. A row is not removed when the field is later approved or
+    typed over: it simply has no proposal to hold, and is ignored.
+
+    ``rejected_by`` is the Identity id (as text) of whoever rejected, so a doctor
+    rejecting for a patient leaves a trace; ``rejected_at`` is when. Both describe
+    the last rejection of the field, and neither means anything on another instance
+    (``copy_patient`` clears ``rejected_by``).
+    """
+    person = models.ForeignKey(Person, on_delete=models.CASCADE, related_name='proposal_rejections')
+    # A column's name, or ``custom_fields.<name>`` for a created field (a name is up to 100).
+    field_name = models.CharField(max_length=120)
+    origins = models.JSONField(default=list)
+    rejected_by = models.CharField(max_length=120, blank=True, default='')
+    rejected_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'proposal_rejection'
+        constraints = [
+            models.UniqueConstraint(fields=['person', 'field_name'], name='uq_proposal_rejection_field'),
+        ]
+
+    def __str__(self):
+        return f'{self.person_id} {self.field_name}'
 
 
 class FieldConceptMapping(models.Model):
@@ -5001,10 +5277,49 @@ class FieldDiseaseMembership(models.Model):
 
 
 class FieldChoice(models.Model):
-    """One allowed value for a PatientRecord field (curator-managed)."""
+    """One allowed value for a PatientRecord field (curator-managed).
+
+    Identity is ``(field_name, context_key, code)``, not the display text
+    (#1224): ``display`` is the label a person reads and a curator may change
+    it, ``code`` is what the value is called everywhere else and never changes
+    with the label. ``context_key`` separates answers that share a field but
+    not a meaning (stage ``I`` in the ISS system and in Ann Arbor); it is
+    blank for a value with one meaning. Which diseases offer a value is
+    ``FieldChoiceDisease``; no rows there means every disease.
+
+    ``value`` is the canonical storage value, blank when it is the display
+    text, which is what a row seeded before this held. ``value_type`` says how
+    ``value`` is read (``text``, ``integer``, ``decimal`` or ``boolean``).
+    Earlier display texts, and any other spelling a source uses, are
+    ``FieldChoiceAlias`` rows. A retired value stays so stored data resolves,
+    and is no longer offered. Writers go through
+    ``omop_core.services.field_choices``.
+    """
+    VALUE_TYPE_CHOICES = [
+        ('text', 'Text'), ('integer', 'Integer'),
+        ('decimal', 'Decimal'), ('boolean', 'Boolean'),
+    ]
+
     field_name = models.CharField(max_length=100, db_index=True)
     display = models.CharField(max_length=200)
     sort_order = models.IntegerField(default=0)
+    code = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='Stable identifier within the field and context; never changes with the label.',
+    )
+    context_key = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='Separates answers of one field that mean different things (a staging system); blank when there is one meaning.',
+    )
+    value = models.CharField(
+        max_length=200, blank=True, default='',
+        help_text='Canonical storage value; blank means the display text.',
+    )
+    value_type = models.CharField(max_length=10, choices=VALUE_TYPE_CHOICES, default='text')
+    retired_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When the value stopped being offered. It still resolves stored data.',
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
     )
@@ -5012,11 +5327,230 @@ class FieldChoice(models.Model):
 
     class Meta:
         db_table = 'field_choice'
-        unique_together = [('field_name', 'display')]
         ordering = ['field_name', 'sort_order', 'display']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'context_key', 'display'],
+                name='uq_field_choice_display',
+            ),
+            models.UniqueConstraint(
+                fields=['field_name', 'context_key', 'code'],
+                name='uq_field_choice_code',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.field_name}: {self.display}"
+
+    @property
+    def stored_value(self) -> str:
+        """The text written to the PatientRecord column for this choice."""
+        return self.value or self.display
+
+    def save(self, *args, **kwargs):
+        if not self.code:
+            from omop_core.services.field_choices import next_code
+            self.code = next_code(self)
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'code' not in update_fields:
+                kwargs['update_fields'] = [*update_fields, 'code']
+        super().save(*args, **kwargs)
+
+
+class FieldChoiceAlias(models.Model):
+    """Another spelling of a choice: an earlier label or a source's wording.
+
+    ``field_name`` and ``context_key`` repeat the choice's own so the
+    database can hold the rule that one spelling names one choice within a
+    field and context. ``alias_key`` is the spelling folded for comparison
+    (case and runs of whitespace); ``alias`` keeps it as written.
+    """
+    choice = models.ForeignKey(FieldChoice, related_name='aliases', on_delete=models.CASCADE)
+    field_name = models.CharField(max_length=100)
+    context_key = models.CharField(max_length=100, blank=True, default='')
+    alias = models.CharField(max_length=200)
+    alias_key = models.CharField(max_length=200)
+    source = models.CharField(
+        max_length=20, default='curator',
+        help_text='"label" for an earlier display text, "migration" for one seeded from it, else "curator".',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_choice_alias'
+        ordering = ['field_name', 'alias_key']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'context_key', 'alias_key'],
+                name='uq_field_choice_alias',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.choice_id}: {self.alias}"
+
+
+class FieldChoiceDisease(models.Model):
+    """A disease that offers a choice; a choice with no rows is offered to all.
+
+    ``disease`` is a ``DiseaseCategoryChoice`` code held as text, as on
+    ``FieldDiseaseMembership``, and ``Other`` is refused: its profile is the
+    base record. A choice is part of a disease's record only through these
+    rows, so changing them never changes a stored value.
+    """
+    choice = models.ForeignKey(FieldChoice, related_name='disease_scope', on_delete=models.CASCADE)
+    disease = models.CharField(max_length=30, help_text='DiseaseCategoryChoice code, e.g. MM.')
+
+    class Meta:
+        db_table = 'field_choice_disease'
+        ordering = ['choice_id', 'disease']
+        constraints = [
+            models.UniqueConstraint(fields=['choice', 'disease'], name='uq_field_choice_disease'),
+        ]
+        indexes = [models.Index(fields=['disease'], name='ix_field_choice_disease')]
+
+    def __str__(self):
+        return f"{self.choice_id}: {self.disease}"
+
+
+class FieldValueConceptMapping(models.Model):
+    """The standard concept an allowed answer means, and who decided it (#1224).
+
+    One row is one decision about one ``FieldChoice`` in one ``role``:
+
+    * ``value_as_concept``: the answer is the value of the field's question
+      (``value_as_concept_id`` on a measurement or observation);
+    * ``main_concept``: the answer is itself the fact (a condition, procedure
+      or drug occurrence's concept);
+    * ``context_recipe``: the answer only has meaning with a question of its
+      own, ``question_concept``, which is validated with the answer.
+
+    ``outcome`` is ``mapped`` (a ``target_concept``) or ``no_equivalent``, a
+    reviewed statement that the answer has no standard concept, which has no
+    target and still lets the value be saved. ``status`` follows the field
+    mapper's review states, plus ``superseded`` for an approved decision a
+    later approval replaced. At most one row per choice and role is approved,
+    and at most one is an open proposal, so a change is proposed beside the
+    decision in force and takes its place only when approved; the database
+    holds both rules. An approved ``mapped`` row has a target.
+
+    ``vocabulary_id`` / ``concept_code`` are the target as text, so a transfer
+    re-resolves it by code and never by this instance's concept id.
+    ``vocabulary_release`` is the vocabulary version the target was checked
+    against. Every transition is a ``FieldValueConceptMappingRevision``.
+    Writers go through ``omop_core.services.field_value_mappings``.
+    """
+    ROLE_CHOICES = [
+        ('value_as_concept', 'Answer is the value'),
+        ('main_concept', 'Answer is the fact'),
+        ('context_recipe', 'Answer with its own question'),
+    ]
+    OUTCOME_CHOICES = [('mapped', 'Mapped'), ('no_equivalent', 'No standard equivalent')]
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'), ('approved', 'Approved'),
+        ('rejected', 'Rejected'), ('superseded', 'Superseded'),
+    ]
+
+    choice = models.ForeignKey(FieldChoice, related_name='value_mappings', on_delete=models.CASCADE)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='value_as_concept')
+    outcome = models.CharField(max_length=15, choices=OUTCOME_CHOICES, default='mapped')
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default='proposed')
+    target_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+    )
+    vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    concept_code = models.CharField(max_length=50, blank=True, default='')
+    question_concept = models.ForeignKey(
+        Concept, on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+        help_text='context_recipe only: the question this answer belongs to.',
+    )
+    question_vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    question_concept_code = models.CharField(max_length=50, blank=True, default='')
+    source_resolution = models.CharField(
+        max_length=20, blank=True, default='',
+        help_text=('How a proposal that came from a coded association resolved: "resolved", '
+                   '"unresolved" (concept not loaded), "invalid" or "non_standard". Blank for a curator\'s.'),
+    )
+    rationale = models.TextField(blank=True, default='')
+    vocabulary_release = models.CharField(max_length=255, blank=True, default='')
+    provenance = models.CharField(max_length=100, blank=True, default='')
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    revision = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_value_concept_mapping'
+        ordering = ['choice_id', 'role', 'id']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['choice', 'role'], condition=Q(status='approved'),
+                name='uq_fvcm_one_approved',
+            ),
+            models.UniqueConstraint(
+                fields=['choice', 'role'], condition=Q(status='proposed'),
+                name='uq_fvcm_one_proposed',
+            ),
+            models.CheckConstraint(
+                condition=Q(outcome='mapped') | (Q(target_concept__isnull=True) & Q(concept_code='')),
+                name='ck_fvcm_no_equivalent_has_no_target',
+            ),
+            models.CheckConstraint(
+                condition=~Q(status='approved', outcome='mapped', target_concept__isnull=True),
+                name='ck_fvcm_approved_has_target',
+            ),
+            models.CheckConstraint(
+                condition=Q(role='context_recipe') | Q(question_concept__isnull=True),
+                name='ck_fvcm_question_only_for_recipe',
+            ),
+        ]
+        indexes = [models.Index(fields=['status'], name='ix_fvcm_status')]
+
+    def __str__(self):
+        target = f'{self.vocabulary_id}:{self.concept_code}' if self.outcome == 'mapped' else 'no equivalent'
+        return f'{self.choice_id} {self.role} → {target} ({self.status})'
+
+
+class FieldValueConceptMappingRevision(models.Model):
+    """One transition of a ``FieldValueConceptMapping``, kept for audit.
+
+    A snapshot, so it holds the concept as ids and codes with no foreign key:
+    a vocabulary reload must not cascade into or block the record. Append only;
+    it belongs to the instance it happened on and is not copied.
+    """
+    mapping = models.ForeignKey(FieldValueConceptMapping, related_name='revisions', on_delete=models.CASCADE)
+    revision = models.PositiveIntegerField()
+    action = models.CharField(max_length=20)
+    status = models.CharField(max_length=12)
+    outcome = models.CharField(max_length=15)
+    role = models.CharField(max_length=20)
+    concept_id = models.BigIntegerField(null=True, blank=True)
+    vocabulary_id = models.CharField(max_length=20, blank=True, default='')
+    concept_code = models.CharField(max_length=50, blank=True, default='')
+    question_concept_id = models.BigIntegerField(null=True, blank=True)
+    rationale = models.TextField(blank=True, default='')
+    vocabulary_release = models.CharField(max_length=255, blank=True, default='')
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    changed_by_label = models.CharField(max_length=100, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'field_value_concept_mapping_revision'
+        ordering = ['mapping_id', 'revision', 'id']
+        constraints = [
+            models.UniqueConstraint(fields=['mapping', 'revision'], name='uq_fvcm_revision'),
+        ]
+
+    def __str__(self):
+        return f'{self.mapping_id} r{self.revision} {self.action}'
 
 
 class FieldChoiceCode(models.Model):
@@ -5111,6 +5645,15 @@ class RecordRevision(models.Model):
     field = models.CharField(max_length=100)
     old_value = models.TextField(null=True, blank=True)
     new_value = models.TextField(null=True, blank=True)
+    SOURCE_CONFIRMED_FROM_PROPOSAL = 'confirmed_from_proposal'
+    source = models.CharField(
+        max_length=30, blank=True, default='', db_default='',
+        help_text=(
+            "How the value came to be written when that is not a plain edit: "
+            "'confirmed_from_proposal' is a professional confirming a provisional value "
+            "the record showed (#2870), as against the patient entering it. Blank for a typed edit."
+        ),
+    )
 
     class Meta:
         db_table = 'record_revision'
@@ -5968,6 +6511,13 @@ class SourceCodeResolveRun(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # The run's heartbeat: every save that moves it (a progress save, a state
+    # change) stamps it, so a run whose worker died is told from one that is
+    # slow (``close_stale_runs``). Adding the column stamped every existing run
+    # with the migration's time, so those runs, orphaned ones included, count as
+    # silent from the deploy; a null (never written by this code) falls back to
+    # ``created_at``.
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         db_table = 'source_code_resolve_run'

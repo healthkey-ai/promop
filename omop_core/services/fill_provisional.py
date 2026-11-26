@@ -48,7 +48,7 @@ from django.utils import timezone
 from omop_core.mapping import suggestions
 from omop_core.mapping.code_resolution import (
     _DOMAIN_FOR_TABLE, CLINICAL_TABLES, NO_MATCHING_CONCEPT_ID, SOURCE_CODE_MAX,
-    _confidence_percent, _usable_destination, choose_proposal, normalize_omop_table,
+    _confidence_percent, choose_proposal, normalize_omop_table, proposal_percent,
 )
 from omop_core.models import (
     Concept, PatientRecordConfidence, PatientRecordProvisional, PatientSourceCode, Person,
@@ -413,10 +413,22 @@ def rederive(person):
     if marks is not None:
         for name in confidence_field_names():
             value = getattr(marks, name, None)
-            if value is not None and name not in NEVER_OVERLAID:
+            if isinstance(value, dict):
+                # An object field (created fields): one entry per key, as the record read names them.
+                fields.update({f'{name}.{key}': percent for key, percent in value.items()})
+            elif value is not None and name not in NEVER_OVERLAID:
                 fields[name] = value
     return {'provisional_fields': fields, 'changed': changed,
             'provisional': PatientRecordProvisional.objects.filter(person=person).first()}
+
+
+def _shown_value(provisional, name):
+    """The provisional value of a mark, a created field's (``custom_fields.<key>``) included."""
+    container, _, key = name.partition('.')
+    if key:
+        values = getattr(provisional, container, None)
+        return values.get(key, '') if isinstance(values, dict) else ''
+    return getattr(provisional, name, '')
 
 
 def person_state(person) -> dict:
@@ -514,10 +526,12 @@ def proposal_report(codes) -> dict:
             continue
         scored = [(r, _confidence_percent(r.suggestion_confidence))
                   for r in proposals if r.suggestion_confidence is not None]
+        # The resolver's own statement of what qualifies, a wearable device's
+        # unscored curated proposal included (#2835).
         qualifying = [
             (r.target_concept_id, percent, canonical_source_vocabulary(r.source_vocabulary_id))
-            for r, percent in scored
-            if percent >= floor and _usable_destination(r.target_concept, code.table)]
+            for r in proposals
+            if (percent := proposal_percent(r, code.table)) is not None]
         if qualifying:
             status['provisional' if choose_proposal(qualifying, code.held or None) else 'conflict'] += 1
         elif any(percent >= floor for _r, percent in scored):
@@ -662,6 +676,6 @@ def run(person_id, *, ranker='jev', limit=None, tables=None, dry_run=False, skip
         + (f': {", ".join(changed[:25])}{" ..." if len(changed) > 25 else ""}' if changed else '') + '.')
     log(f'  patient_record_provisional: {len(fields)} provisional field(s) on the record.')
     for name, percent in sorted(fields.items(), key=lambda item: -item[1])[:12]:
-        value = f' = {str(getattr(provisional, name, ""))[:40]}' if show_values and provisional else ''
+        value = f' = {str(_shown_value(provisional, name))[:40]}' if show_values and provisional else ''
         log(f'    {name}: {percent}%{value}')
     return summary

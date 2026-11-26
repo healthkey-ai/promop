@@ -17,6 +17,8 @@ interface Props {
   /** A refusal for this control: the server's 400 under `diseases`, or the dialog's own. */
   error?: string;
   disabled?: boolean;
+  /** Wording for what is scoped, when it is not a field (an answer, #1225). */
+  words?: { legend: string; base: string; disease: string; tip: string };
 }
 
 /**
@@ -25,7 +27,7 @@ interface Props {
  * and nothing else: it changes no stored value and no mapping.
  */
 export function FieldScopeControl({
-  scope, diseases, options, optionsIncomplete = false, onChange, error, disabled,
+  scope, diseases, options, optionsIncomplete = false, onChange, error, disabled, words,
 }: Props) {
   const id = useId();
   const errorId = `${id}-error`;
@@ -54,7 +56,7 @@ export function FieldScopeControl({
       aria-describedby={error ? errorId : undefined}
     >
       <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-        Scope — whose record this field is part of
+        {words?.legend ?? "Scope — whose record this field is part of"}
       </legend>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-slate-700">
         <label className="inline-flex items-center gap-2">
@@ -65,7 +67,7 @@ export function FieldScopeControl({
             disabled={disabled}
             onChange={() => onChange("base", diseases)}
           />
-          Base record (every patient)
+          {words?.base ?? "Base record (every patient)"}
         </label>
         <label className="inline-flex items-center gap-2">
           <input
@@ -75,9 +77,9 @@ export function FieldScopeControl({
             disabled={disabled}
             onChange={() => onChange("disease", diseases)}
           />
-          Disease-specific
+          {words?.disease ?? "Disease-specific"}
         </label>
-        <HelpTip tip={TIP} />
+        <HelpTip tip={words?.tip ?? TIP} />
       </div>
       {scope === "disease" && (
         <div role="group" aria-label="Disease Categories" className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm">

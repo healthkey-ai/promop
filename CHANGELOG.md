@@ -8,6 +8,223 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Wearables: upload an Oura Ring export** — an "Oura Ring" section on the
+  Wearables tab, directly below Garmin, takes the data export Oura's Membership
+  Hub sends (the zip, or any of its CSV files). Steps, active minutes and
+  energy, sleep duration, HRV (RMSSD), resting heart rate, breathing rate,
+  blood oxygen and VO2 max become ordinary source codes under a new `Oura`
+  vocabulary, seeded as *proposed* mappings, so the readings are provisional
+  until a curator approves them. Its uploads list collapsed in the section. The
+  file layout is Oura's documented API V2 one and has not been checked against
+  a real export (#2889). See
+  [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-ring-export).
+- **PHR therapy: whether a line's response had been assessed** —
+  `GET /api/v1/phr/therapy/` returns `response_assessed` beside each line's
+  other detail: false when the patient said their response had not been
+  assessed yet, true when they gave one (its type is the line's `outcome` when
+  known), absent otherwise or on a line from the record. A patient app can now
+  show "not assessed yet" instead of a blank response (#2894).
+
+- **Wearables: each 30-day value links to its OMOP rows and charts its history** —
+  every 30-day aggregate on the Wearables tab has a chart icon to its right that
+  opens a popup chart of the metric's daily values over time, with the 30 days
+  the aggregate covers shaded and accepted and provisional days told apart. For
+  staff and org admins a second icon opens the OMOP tab at the concept group the
+  rows are in (a list in the popup when they are in several). New
+  `GET /api/v1/patient-records/<id>/wearable-metric/?field=`; the chart is for
+  anyone who may read the record, the groups only for those who see the OMOP tab
+  (#2887).
+- **Wearables: each device's uploads sit in its own section, collapsed** — the
+  Wearables tab's one "Upload History" block is gone. Garmin's uploads are an
+  "Uploads (N)" row at the bottom of the Garmin section, Apple Health's and
+  Android's at the bottom of the Phone health app section, each closed until
+  opened and each upload still opening to its samples and deleting as before.
+  An upload with no section on the page stays reachable in a closed block of
+  its own (#2861).
+- **OMOP tab: measurements and observations by concept; a wearable code opens to its readings** —
+  the OMOP tab lists Measurements and Observations right after Person, one
+  collapsed entry per concept (name, code, vocabulary, rows, latest and
+  earliest moment), rows at concept 0 under an Unresolved heading by source
+  value, and a purple watch on a group of a wearable's rows. Opening a concept
+  reads its rows, newest first, a page at a time
+  (`GET /api/v1/patient-records/<id>/omop-rows/`); every table section folds.
+  On the Source Codes tab an arrow under **every** source code (wearable or
+  not, in the Wearables, Unmapped, Proposed and Approved sections; measurement,
+  observation, condition, drug and procedure codes) opens the rows stored for
+  it, closed until asked (`GET /api/v1/patient-records/<id>/source-code-rows/`).
+  Wearable rows store only a date, and are shown as such (#2863). See
+  [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#reading-the-rows-back).
+
+- **A closed account's partner token no longer opens a new account** — a
+  Firebase or PHR-host token stays valid after the account it opened is
+  closed, and the next request carrying it used to provision a new, empty
+  account. The deletion log now keeps a keyed digest of the closed sign-in,
+  and a partner sign-in whose account was closed within
+  `ACCOUNT_CLOSED_BLOCK_SECONDS` (a day by default, `0` for off) gets a 401
+  "This account was closed." (#2851). See
+  [member erasure](docs/member_erasure_architecture.md#a-closed-accounts-partner-token).
+
+- **Erasures survive a backup restore** — `manage.py export_erasures` writes
+  the deletion log (the audit trail's signed `ERASE` rows) as JSON lines to
+  keep outside the database, and `manage.py replay_erasures <file>` erases
+  again, after a restore, whoever the export says was erased and the
+  restored database does not know about: accounts are closed again,
+  withdrawals are put back and their records erased. Every line must carry
+  this deployment's signature or nothing is replayed; a row made after the
+  entry (a reused id) is never touched; a second run does nothing (#2852).
+  See [member erasure](docs/member_erasure_architecture.md#after-a-restore-from-a-backup).
+
+- **Wearables: readings come in as source codes, provisional or accepted by
+  their mapping** — a device import (Garmin, Apple Health, a phone's sync)
+  now files each row under the device's own code (`steps` under `Garmin`)
+  and records it in the patient's source-code inventory, so a wearable code
+  is resolved exactly as a hospital's is (#2835). An approved mapping gives
+  accepted rows; a proposed one gives provisional rows while
+  `PROVISIONAL_DATA_ENABLED` is on; with neither the reading is stored
+  unresolved and waits, where it used to be dropped. Approving the mapping
+  accepts its rows and rejecting it reverts them, through the same re-point
+  as any other code. A wearable device's curated proposal qualifies with no
+  ranker's score, at the confidence floor. The Source Codes tab opens with a
+  Wearables section saying what each device code's rows are, and each 30-day
+  metric on the Wearables tab is marked Accepted or Provisional. Migration
+  0371 re-files the wearable rows already stored.
+
+- **Patients: a record whose patient also works here is marked, and the
+  Patient role links to the record** — a patient whose sign-in account also
+  holds another role (a staff account, or an org admin, doctor or analyst
+  grant) now shows "Staff", "Also org admin", "Also doctor" or "Also analyst"
+  under the name on the Patients list. Staff see every such role; an org
+  admin sees the roles granted at the organizations they administer by a
+  direct grant; nobody else is told, a record whose demographics are
+  withheld is never marked, and the grant every sign-up at a public demo
+  organization receives is not counted. On My Profile the Patient role links to the
+  account's own record, and on an organization's Access Grants a patient
+  grant links to its record when the reader can open it (it is shown as
+  "Patient" there, no longer as a Doctor/Analyst choice with a Premium box
+  the server refuses). The new fields are
+  on `/api/v1/` only (#2838).
+- **Garmin Connect sync: the Personal API key is saved for next time** — the
+  sync by key used the key once and kept it nowhere, so a patient pasted it
+  for every sync. A key Garmin has accepted is now saved, encrypted under
+  `GARMIN_TOKEN_KEY`, and the next sync needs no key in the field. "Save this
+  key for next time" starts ticked and can be unticked for a one-off sync;
+  "Remove saved key" deletes it. Nothing returns the key, only the account
+  that saved it can sync with it, it is removed when Garmin says it is no
+  longer valid, and it is erased with the record. A deployment without
+  `GARMIN_TOKEN_KEY` saves nothing. Syncing still happens only when the
+  patient presses Sync (#2834).
+- **Wearables: sync Apple Health and Health Connect from a phone app, with
+  no extra server** — PRomop now answers the paths the Open Wearables mobile
+  SDK calls (`/api/v1/sdk/users/{id}/sync`, `/api/v1/token/refresh` and the
+  rest), so an app built on that SDK is pointed at a PRomop deployment and
+  syncs straight into the patient's record (#2810). The patient makes a
+  one-time code under "Phone health app" on the Wearables tab and types it
+  into the app. The SDK's raw records become one value per metric per day by
+  the `export.zip` parser's rule, each record counted once. Between a sync
+  and an upload for the same day, the larger figure stands for a summed
+  metric and the sync's for an averaged one. HealthKit works as installed;
+  Android (Health Connect or Samsung Health) is written once its mappings are
+  approved. `OPEN_WEARABLES_SYNC_ENABLED=false` switches it off.
+- **OMOP writes: resolve the code and upsert in one call** —
+  `POST /api/v1/{measurements,observations,conditions,drug-exposures,procedures}/upsert_if_mapped/`
+  takes the bulk write's rows without a concept, resolves each row's source
+  code as `code-mappings/lookup/` does, and writes the rows that have an
+  approved mapping (#2813). A code with none is queued for curators and its
+  rows are left out; the response lists them. One round trip where a producer
+  made two.
+
+- **Wearables: connect a Garmin account by OAuth** — where a deployment has a
+  Garmin Connect Developer Program app (`GARMIN_CLIENT_ID`,
+  `GARMIN_CLIENT_SECRET`, `GARMIN_WEBHOOK_SECRET`, `GARMIN_TOKEN_KEY`), the Wearables tab gains
+  "Garmin account": the patient approves access once on Garmin's page and
+  Garmin then pushes their daily summaries, sleep, HRV, pulse ox, respiration
+  and VO2 max to `POST /api/v1/garmin/webhooks/<secret>/`, written through the
+  same writer and replace-the-day rule as the key-based sync (#2802). Tokens
+  are stored encrypted under a key of their own and used only to tell Garmin
+  about a disconnect.
+
+- **Wearables: sync from Garmin Connect with the patient's own Personal API
+  key** — the Wearables tab gains "Sync from Garmin Connect": paste a Garmin
+  Connect Personal API key, pick 7, 30 or 90 days, and the daily steps,
+  distance, active minutes, calories, resting heart rate, respiration, SpO2,
+  overnight HRV, sleep and VO2 max are written as the `.fit` upload writes them
+  (`POST /api/v1/patient-records/sync-garmin/`, #2794). The key is used for that
+  one request and stored nowhere. A day's total from the API replaces the rows
+  earlier Garmin uploads wrote for that day, so steps and sleep are not counted
+  twice. The panel shows only to a patient on their own record. Adds
+  `garmin-connect-personal-api-python`.
+
+- **Wearable upload history records the rows each upload wrote** — deleting an
+  upload now removes the rows that upload wrote and no others (a row another
+  upload had already stored used to go too), in one transaction with one
+  re-derivation instead of one per row; history from before is still matched
+  by value. The history row is saved with the rows, so an upload whose history
+  cannot be saved writes nothing (#2794).
+
+- **Patient invitations never accepted are deleted after a retention period**
+  — `PATIENT_INVITATION_RETENTION_DAYS` (0, the default, keeps them) and
+  `purge_unaccepted_invitations` (run daily; `--days`, `--dry-run`): an
+  invitation last sent more than N days ago and expired or cancelled goes, and
+  what it did to a person who never made an account is undone: the address it
+  put there is removed, or the one it replaced restored; an address the record
+  already held stays, and so does the person (#2786). Invitations record when
+  they were last sent and whether they set the address (migration
+  `patient_portal` 0031); each run writes an audit event.
+
+- **The member's record export includes their permissions and contact
+  choices** — the PDF gains a "Permissions and contact choices" section (the
+  answers now, the documents accepted, every answer with who recorded it), and
+  the FHIR file one R4 `Consent` per answer and acceptance, with the legacy
+  `PatientConsent` flags (the HealthKit data-sharing switch) too, so a full
+  access request is answered. The staff export is unchanged (#2784).
+
+- **A consent purpose that requires another** (`requires`, migration
+  `patient_portal` 0030) — it cannot be granted while the purpose it requires
+  is not, and is withdrawn with it (a `system` event, in the history and the
+  ledger) when that grant ends: withdrawing "My record" switches off the
+  permissions that depend on it. See
+  [Consent v2](docs/consent-v2.md#a-purpose-that-requires-another) (#2782).
+
+- **`INVITE_TTL_DAYS`** — how long a patient invitation link lasts, in days
+  (default 7, as before; 1 to 90, anything else stops startup), from the
+  environment. The invitation's expiry and the email's "This link expires in
+  N days" follow it; org (staff) invitations keep 7 days (#2780).
+
+- **Facts about the patient for questionnaires** — with PROlog 0.7.0 a
+  questionnaire may declare facts and show a question only when one holds;
+  promop supplies them (`PROLOG_FACTS_PROVIDER`,
+  `patient_portal.prolog_facts`) when a signed-in patient starts a response.
+  The first is `latest_therapy_line_response`: whether the response of their
+  latest line of therapy had been assessed, from the new
+  `TherapyLineDetail.response_assessed` (migration `omop_oncology` 0012),
+  which a record mapping writes from the patient's answer. A check-in can then
+  ask about that response again. See
+  [PROlog surveys](docs/prolog-surveys.md#what-v070-added).
+
+- **Nothing is added to a record while its permission is withdrawn** —
+  `consent.record_permitted(person)` is false while a member's latest answer
+  to an `erases_record_on_withdrawal` purpose is anything but a grant (they
+  withdrew it, or said no and never agreed), until they give it.
+  Meanwhile PROlog account questionnaires refuse to start, record mappings
+  write nothing, the member's own record patches (other than their name), PHR
+  writes, patient sync and wearable uploads are refused with 403 (an auto-save
+  that changes nothing is not); deletes and
+  the consent endpoints stay open. See `docs/member_erasure_architecture.md`.
+
+- **Withdrawing the permission a record depends on deletes the health
+  answers** — a consent purpose marked `erases_record_on_withdrawal` (consent
+  file or admin) deletes, when withdrawn, the member's questionnaire responses,
+  every clinical row, journal entries and documents, and rebuilds the record
+  from what is left; the account, membership, sign-up facts and permission
+  history stay. Any answer that ends the grant does it, not only "withdrawn";
+  a back-dated or migrated answer does not, and a token that may only read
+  cannot make one (`MemberWritePermission` on the member's consent endpoints).
+  Closing an account now also deletes the provenance of what it deleted.
+  Each erasure, and each account closed, writes its own audit-trail entry
+  (`method` `ERASE`) naming the person and who asked, with no content, from
+  any caller; uploaded documents' stored files are deleted once it commits. See
+  `docs/member_erasure_architecture.md`.
+
 - **Questionnaire answers can write the patient's own record** — a deployment
   supplies record mappings (`PROLOG_RECORD_MAPPING_DIRS`, JSON, one per survey
   and its reviewed versions) naming which answers fill which `PatientRecord`
@@ -205,6 +422,22 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Wearables: one Garmin section** — the linked Garmin account and the sync
+  by Personal API key sat apart on the Wearables tab, with the phone app's
+  panel between them and nothing to say how they differ. They are now one
+  "Garmin" section: "Automatic updates" (connect the account once and Garmin
+  sends each new day by itself, from the day you connect) and under it "Sync
+  past days" (up to 90 past days, read when you ask, with a key that is not
+  stored). The phone health app follows the section (#2832).
+- **PROlog 0.8.0** (from 0.7.0) — `PROLOG_STATS_MIN_COUNT` (RUN-24): small
+  numbers are not shown in PROlog's survey report and admin; promop reads
+  `PROLOG_STATS_MIN_COUNT` from the environment (0 shows every count; a value
+  that is not a whole number of 0 or more stops startup). No migrations, no
+  dependency changes. See
+  [PROlog surveys](docs/prolog-surveys.md#what-v080-added).
+- **PROlog 0.7.0** (from 0.6.0) — facts about the participant, supplied by
+  the host (DEF-14, RUN-23), and `prolog_surveys` migration `0004` (the
+  response's facts). See [PROlog surveys](docs/prolog-surveys.md#what-v070-added).
 - **PROlog 0.6.0** (from 0.5.0) — `participation.repeatable`: a repeatable
   instrument (a regular check-in) starts a new response after a finished one,
   saying when the last was completed, instead of showing it as completed. No
@@ -308,6 +541,30 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Wearables: file upload, upload history and delete only on your own
+  record** — the three act on the signed-in person's own record, but the tab
+  showed them on every record: an account that is a patient and also staff,
+  an org admin or a doctor could upload a `.fit` on somebody else's page, be
+  told it was uploaded there, and have the rows land on their own record,
+  beside their own upload history under that patient's name. The controls
+  now show only on your own record, and the server refuses an upload that
+  names another record (#2819).
+
+- **Wearables: the Garmin panels show on your own record in the provider
+  console** — an account that is a patient and also staff, an org admin or a
+  doctor never gets patient mode, so "Sync from Garmin Connect" and "Garmin
+  account" were hidden on its own record although the server allowed both.
+  They now show wherever the page is the signed-in person's own record, and
+  the return from Garmin's consent page lands on that record (#2816).
+
+- **A reset request's response time no longer says whether the account
+  exists** — only an existing account waited for the mail provider, so the
+  time to answer told an address with an account from one without. The email
+  is now handed to a Celery worker (`patient_portal.send_password_reset`,
+  given only the account's id) when there is a broker, which retries a failing
+  mail provider; when the broker cannot take it, or there is none, it is sent
+  inline, and the request never fails over it.
+
 - **Password-reset emails name the app the account belongs to** — like the
   verification email, a reset email names the installation's org and signs off
   as it, and its link goes to the installation's `/reset-password` page where
@@ -322,6 +579,11 @@ All notable changes to PRomop are documented here.
   completing a reset now each have their own limit (`password_reset`,
   `password_reset_confirm`), and both count a signed-in caller too: the views
   take no authentication, as an anonymous rate limit skips anyone signed in.
+- **A member who had answered a questionnaire could not close their
+  account** — `DELETE /api/v1/patient-records/me/` failed with a server error,
+  because a survey response protects its participant. Closing an account now
+  takes the admin delete's path (`patient_portal.erasure.close_account`), which
+  removes the responses first.
 
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only

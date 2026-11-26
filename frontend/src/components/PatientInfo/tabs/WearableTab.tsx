@@ -1,7 +1,16 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useWritableFields } from '@/hooks/useWritableFields';
-import ClinicalField from '../ClinicalField';
+import { MetricField } from './WearableMetricTools';
+import { WearableMetricProvider } from './wearableMetricContext';
+import type { OmopFocus } from '@/components/Patient/omopRows';
+import ProvisionalBadge from '../ProvisionalBadge';
 import Section from '../Section';
+import GarminAccountLink from './GarminAccountLink';
+import GarminConnectSync from './GarminConnectSync';
+import OpenWearablesLink from './OpenWearablesLink';
+import OuraUpload from './OuraUpload';
+import UploadsList, { type UploadRecord } from './UploadsList';
+import { pendingClause } from './wearableResult';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 
 const ACTIVITY_TREND_OPTIONS = ['improving', 'stable', 'declining', 'insufficient_data'];
@@ -12,6 +21,27 @@ interface Props {
   // all wearable fields are read-only (derived from OMOP, not user-editable).
   onChange?: (field: string, value: unknown) => void;
   onRefresh?: () => void;
+  /**
+   * True when the signed-in person is the patient of this record. A Garmin
+   * Connect sync is filed under whoever is signed in, so the panel is offered
+   * nowhere else: not to a clinician on a patient's page, not in a read-only
+   * embed.
+   */
+  canSyncOwnDevice?: boolean;
+  /**
+   * Opens the OMOP tab at a concept group. Passed only where that tab is
+   * offered (staff and org admins outside patient mode); without it a 30-day
+   * value has its chart and no link to rows (#2887).
+   */
+  onOpenOmopRows?: (focus: OmopFocus) => void;
+  /**
+   * True when the page is the signed-in person's own record. A file upload,
+   * the upload history and its deletes all act on the caller's own record,
+   * wherever they are used from, so they are offered nowhere else (#2819):
+   * on somebody else's page an upload would land on the viewer's record
+   * while the page reported it on the patient's.
+   */
+  ownRecord?: boolean;
 }
 
 const METRIC_LABELS: Record<string, string> = {
@@ -35,14 +65,17 @@ const METRIC_LABELS: Record<string, string> = {
   body_mass: 'Body Mass',
 };
 
-interface UploadRecord {
-  id: number;
-  device_type: string;
-  filename: string;
-  samples_created: number;
-  duplicates_skipped: number;
-  sample_summary: { metric: string; date: string; value: number }[];
-  uploaded_at: string;
+/** What the upload history calls the device an upload came from. */
+const DEVICE_LABELS: Record<string, string> = {
+  garmin: 'Garmin',
+  apple: 'Apple',
+  android: 'Android',
+  oura: 'Oura',
+};
+
+/** A device type the list does not name is shown as the server sent it. */
+function deviceLabel(deviceType: string): string {
+  return Object.prototype.hasOwnProperty.call(DEVICE_LABELS, deviceType) ? DEVICE_LABELS[deviceType] : deviceType;
 }
 
 function formatSyncDate(raw: unknown): string {
@@ -84,24 +117,35 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh }: Props) {
+export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false, onOpenOmopRows }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors } = useWritableFields(personId);
   const noData = !formData?.wearable_last_sync_at;
+  const garminHeadingId = useId();
   const [uploading, setUploading] = useState(false);
+  // A Garmin Connect sync in flight: uploads and deletes wait for it, as it
+  // waits for them.
+  const [syncing, setSyncing] = useState(false);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Which section's upload the result and error above belong to, so each is
+  // shown beside the button that was used.
+  const [messageAt, setMessageAt] = useState<'top' | 'oura'>('top');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const dragCounter = useRef(0);
 
   // Upload history
   const [uploads, setUploads] = useState<UploadRecord[]>([]);
-  const [uploadsLoading, setUploadsLoading] = useState(true);
+  // The history is the caller's own, so it is read only on their own record.
+  const [uploadsLoading, setUploadsLoading] = useState(ownRecord);
   const [expandedUpload, setExpandedUpload] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  // Whether the phone-app panel is on the page: it offers nothing, and draws
+  // nothing, where connecting a phone is not set up. Null until it has asked.
+  const [phonePanelShown, setPhonePanelShown] = useState<boolean | null>(null);
 
   const fetchUploads = useCallback(async () => {
     try {
@@ -119,6 +163,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
   // reads to the linter as a synchronous setState, and left a real window
   // where a slow request could resolve against a gone component.
   useEffect(() => {
+    if (!ownRecord) return undefined;
     let cancelled = false;
     (async () => {
       try {
@@ -133,7 +178,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [ownRecord]);
 
   const handleDelete = useCallback(async (uploadId: number) => {
     if (!confirm('Delete this upload and its associated measurements?')) return;
@@ -144,26 +189,37 @@ export default function WearableTab({ formData, onRefresh }: Props) {
       if (expandedUpload === uploadId) setExpandedUpload(null);
       if (onRefresh) onRefresh();
     } catch {
+      // A refusal is told in the section the upload is listed in.
+      setMessageAt(uploads.find(u => u.id === uploadId)?.device_type === 'oura' ? 'oura' : 'top');
+      setUploadResult(null);
       setUploadError('Failed to delete upload. Please try again.');
     } finally {
       setDeletingId(null);
     }
-  }, [expandedUpload, onRefresh]);
+  }, [expandedUpload, onRefresh, uploads]);
 
   /** Upload a list of files with a given device type. Shared by file-picker and drag-and-drop. */
-  const uploadFiles = useCallback(async (files: File[], deviceType: string) => {
+  const uploadFiles = useCallback(async (files: File[], deviceType: string, at: 'top' | 'oura' = 'top') => {
     setUploading(true);
+    setMessageAt(at);
     setUploadResult(null);
     setUploadError(null);
 
     let totalCreated = 0;
     let totalDuplicates = 0;
+    let totalProvisional = 0;
+    let totalUnresolved = 0;
+    let totalSettled = 0;
+    let storedFiles = 0;
 
     try {
       for (const file of files) {
         const payload = new FormData();
         payload.append('file', file);
         payload.append('device_type', deviceType);
+        // The record this page shows: the server refuses one that is not the
+        // caller's own, so an upload is never filed under somebody else's page.
+        if (personId != null) payload.append('person_id', String(personId));
 
         const res = await clinicalClient().post(clinicalUrl('/v1/patient-records/upload-wearable/'), payload, {
           headers: { 'Content-Type': 'multipart/form-data' },
@@ -171,26 +227,41 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
         totalCreated += res.data.samples_created || 0;
         totalDuplicates += res.data.duplicates_skipped || 0;
+        totalProvisional += res.data.provisional_samples || 0;
+        totalUnresolved += res.data.unresolved_samples || 0;
+        totalSettled += res.data.settled_rows || 0;
+        storedFiles += 1;
       }
 
+      const pending = pendingClause({
+        provisional_samples: totalProvisional, unresolved_samples: totalUnresolved,
+      });
       setUploadResult(
         `Uploaded ${totalCreated} sample${totalCreated !== 1 ? 's' : ''}` +
-        (totalDuplicates > 0 ? ` (${totalDuplicates} duplicate${totalDuplicates !== 1 ? 's' : ''} skipped)` : '')
+        (totalDuplicates > 0 ? ` (${totalDuplicates} duplicate${totalDuplicates !== 1 ? 's' : ''} skipped)` : '') +
+        (pending ? `. ${pending}` : '')
       );
 
-      // Refresh upload history and patient record
+      // Refresh upload history and patient record. The record is re-read when
+      // rows were stored, and also when the upload settled earlier readings
+      // whose mapping has been approved or proposed since (#2835).
       fetchUploads();
-      if (totalCreated > 0 && onRefresh) {
+      if ((totalCreated > 0 || totalSettled > 0) && onRefresh) {
         onRefresh();
       }
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
         || 'Upload failed. Please try again.';
-      setUploadError(msg);
+      setUploadError(storedFiles > 0
+        ? `${msg} ${storedFiles} of ${files.length} files were stored before it failed.` : msg);
+      if (storedFiles > 0) {
+        fetchUploads();
+        if (onRefresh) onRefresh();
+      }
     } finally {
       setUploading(false);
     }
-  }, [onRefresh, fetchUploads]);
+  }, [onRefresh, fetchUploads, personId]);
 
   const handleUploadClick = () => {
     if (fileInputRef.current) {
@@ -206,11 +277,15 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     // Auto-detect device type from file extensions
     const types = new Set(fileList.map(f => detectDeviceType(f.name)));
     if (types.has(null)) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Unsupported file type. Please select .fit (Garmin) or .zip (Apple Health) files.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     if (types.size > 1) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Please upload one type at a time (.fit or .zip).');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
@@ -229,10 +304,10 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     e.preventDefault();
     e.stopPropagation();
     dragCounter.current += 1;
-    if (e.dataTransfer.types.includes('Files')) {
+    if (ownRecord && e.dataTransfer.types.includes('Files')) {
       setDragOver(true);
     }
-  }, []);
+  }, [ownRecord]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -254,7 +329,7 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     dragCounter.current = 0;
     setDragOver(false);
 
-    if (uploading) return;
+    if (!ownRecord || uploading || syncing) return;
 
     const files = Array.from(e.dataTransfer.files);
 
@@ -265,6 +340,8 @@ export default function WearableTab({ formData, onRefresh }: Props) {
       const html = e.dataTransfer.getData('text/html');
 
       if (uriList || html) {
+        setMessageAt('top');
+        setUploadResult(null);
         setUploadError(
           'Files dragged from the Garmin MTP device cannot be read directly by the browser. ' +
           'Please copy the files to a local folder first (e.g. Desktop), then drag them from there.'
@@ -277,20 +354,53 @@ export default function WearableTab({ formData, onRefresh }: Props) {
     const types = new Set(files.map(f => detectDeviceType(f.name)));
 
     if (types.has(null)) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Unsupported file type. Please drop .fit (Garmin) or .zip (Apple Health) files.');
       return;
     }
 
     if (types.size > 1) {
+      setMessageAt('top');
+      setUploadResult(null);
       setUploadError('Please drop files of one type at a time (.fit or .zip, not both).');
       return;
     }
 
     const deviceType = types.values().next().value as string;
     await uploadFiles(files, deviceType);
-  }, [uploading, uploadFiles]);
+  }, [ownRecord, uploading, syncing, uploadFiles]);
+
+  // Each upload sits in the section of its device (#2861): Garmin's in the
+  // Garmin section, Apple Health's and Android's in the phone-app section.
+  // One that has no such section on this page is not lost: it goes to a
+  // collapsed block of its own.
+  const PHONE_DEVICES = ['apple', 'android'];
+  const garminUploads = canSyncOwnDevice ? uploads.filter(u => u.device_type === 'garmin') : [];
+  const phoneUploads = canSyncOwnDevice && phonePanelShown
+    ? uploads.filter(u => PHONE_DEVICES.includes(u.device_type))
+    : [];
+  // Oura's sit in the Oura section, which is offered wherever an upload is.
+  const ouraUploads = ownRecord ? uploads.filter(u => u.device_type === 'oura') : [];
+  const placed = new Set([...garminUploads, ...phoneUploads, ...ouraUploads].map(u => u.id));
+  // The phone uploads wait while the panel has not said whether it is there,
+  // rather than show here for a moment and then move.
+  const waiting = canSyncOwnDevice && phonePanelShown === null;
+  const leftoverUploads = uploads.filter(
+    u => !placed.has(u.id) && !(waiting && PHONE_DEVICES.includes(u.device_type)));
+  const uploadsProps = {
+    deviceLabel,
+    metricLabel: (metric: string) => METRIC_LABELS[metric] || metric,
+    formatValue: formatMetricValue,
+    expandedUpload,
+    onToggleUpload: (id: number) => setExpandedUpload(expandedUpload === id ? null : id),
+    onDelete: handleDelete,
+    deletingId,
+    busy: syncing,
+  };
 
   return (
+    <WearableMetricProvider value={{ personId, onOpenOmopRows }}>
     <div
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
@@ -311,11 +421,11 @@ export default function WearableTab({ formData, onRefresh }: Props) {
       )}
 
       {/* Upload controls */}
-      <div className="mb-4 flex items-center gap-3">
+      {ownRecord && <div className="mb-4 flex items-center gap-3">
         <button
           type="button"
           onClick={handleUploadClick}
-          disabled={uploading}
+          disabled={uploading || syncing}
           className="inline-flex items-center gap-2 rounded-md bg-portal-brand px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-portal-brand/90 disabled:opacity-50"
         >
           {uploading ? (
@@ -338,121 +448,118 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
         <span className="text-xs text-gray-400">or drag &amp; drop files here</span>
 
-        {uploadResult && (
+        {messageAt === 'top' && uploadResult && (
           <span className="text-sm text-green-600">{uploadResult}</span>
         )}
-        {uploadError && (
+        {messageAt === 'top' && uploadError && (
           <span className="text-sm text-red-600">{uploadError}</span>
         )}
-      </div>
+      </div>}
 
       {/* Hidden file input — accepts both .fit and .zip; device type auto-detected */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".fit,.zip"
-        multiple
-        className="hidden"
-        onChange={handleFileChange}
-      />
+      {ownRecord && (
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".fit,.zip"
+          multiple
+          className="hidden"
+          onChange={handleFileChange}
+        />
+      )}
 
-      {/* Upload history */}
-      {!uploadsLoading && uploads.length > 0 && (
-        <Section title="Upload History">
-          <div className="divide-y divide-gray-100">
-            {uploads.map(upload => (
-              <div key={upload.id}>
-                <button
-                  type="button"
-                  onClick={() => setExpandedUpload(expandedUpload === upload.id ? null : upload.id)}
-                  className="flex w-full items-center gap-3 px-2 py-2.5 text-left text-sm hover:bg-gray-50 rounded"
-                >
-                  <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600">
-                    {upload.device_type === 'garmin' ? 'Garmin' : 'Apple'}
-                  </span>
-                  <span className="flex-1 truncate text-gray-700">{upload.filename}</span>
-                  <span className="text-xs text-gray-500">
-                    {upload.samples_created} sample{upload.samples_created !== 1 ? 's' : ''}
-                  </span>
-                  <span className="text-xs text-gray-400">
-                    {new Date(upload.uploaded_at).toLocaleDateString()}
-                  </span>
-                  <svg
-                    className={`h-4 w-4 text-gray-400 transition-transform ${expandedUpload === upload.id ? 'rotate-180' : ''}`}
-                    fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-                  >
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); handleDelete(upload.id); }}
-                  disabled={deletingId === upload.id}
-                  className="ml-1 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
-                  title="Delete upload"
-                >
-                  {deletingId === upload.id ? (
-                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                  ) : (
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  )}
-                </button>
+      {/* Somebody else's record: nothing here can add to it. */}
+      {!ownRecord && (
+        <p className="mb-4 text-sm text-gray-500">
+          Wearable data is added by the patient, from their own record.
+        </p>
+      )}
 
-                {expandedUpload === upload.id && upload.sample_summary.length > 0 && (
-                  <div className="mb-2 ml-2 rounded border border-gray-100 bg-gray-50">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-gray-200 text-left text-xs text-gray-500">
-                          <th className="px-3 py-1.5 font-medium">Metric</th>
-                          <th className="px-3 py-1.5 font-medium">Date</th>
-                          <th className="px-3 py-1.5 font-medium text-right">Value</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {upload.sample_summary.map((sample, idx) => (
-                          <tr key={idx} className="border-b border-gray-100 last:border-0">
-                            <td className="px-3 py-1.5 text-gray-700">
-                              {METRIC_LABELS[sample.metric] || sample.metric}
-                            </td>
-                            <td className="px-3 py-1.5 text-gray-500">{sample.date}</td>
-                            <td className="px-3 py-1.5 text-right text-gray-700">
-                              {formatMetricValue(sample.metric, sample.value)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            ))}
+      {/* Garmin, in one place (#2832): the account linked once, where this
+          deployment has a Garmin app, after which Garmin sends each day by
+          itself (#2802); and under it the sync by Personal API key, which
+          reads past days through Garmin's API when asked (#2794). */}
+      {canSyncOwnDevice && (
+        <section aria-labelledby={garminHeadingId} className="mb-4 rounded-md border border-gray-200 px-4 pt-3 pb-2">
+          <h3 id={garminHeadingId} className="text-sm font-medium text-portal-text-primary">Garmin</h3>
+          <div className="divide-y divide-gray-200">
+            <GarminAccountLink disabled={uploading || syncing || deletingId !== null} />
+            <GarminConnectSync
+              personId={personId}
+              disabled={uploading || deletingId !== null}
+              metricLabels={METRIC_LABELS}
+              onBusyChange={setSyncing}
+              onSynced={(changed) => {
+                fetchUploads();
+                if (changed && onRefresh) onRefresh();
+              }}
+            />
+            {!uploadsLoading && <UploadsList {...uploadsProps} uploads={garminUploads} name="garmin" />}
           </div>
-        </Section>
+        </section>
+      )}
+
+      {/* An Oura Ring export (#2889): the file Oura's Membership Hub sends. */}
+      {ownRecord && (
+        <OuraUpload
+          disabled={uploading || syncing || deletingId !== null}
+          uploading={uploading && messageAt === 'oura'}
+          result={messageAt === 'oura' ? uploadResult : null}
+          error={messageAt === 'oura' ? uploadError : null}
+          onFiles={(files) => void uploadFiles(files, 'oura', 'oura')}
+        >
+          {!uploadsLoading && <UploadsList {...uploadsProps} uploads={ouraUploads} name="oura" />}
+        </OuraUpload>
+      )}
+
+      {/* A phone app built on Open Wearables, connected with a one-time code:
+          it then sends what it reads from Apple Health or Health Connect. */}
+      {canSyncOwnDevice && (
+        <OpenWearablesLink
+          disabled={uploading || syncing || deletingId !== null}
+          onShownChange={setPhonePanelShown}
+        >
+          {!uploadsLoading && <UploadsList {...uploadsProps} uploads={phoneUploads} name="phone" />}
+        </OpenWearablesLink>
+      )}
+
+      {/* Uploads with no section above to sit in (#2861): a device whose panel
+          is not offered on this page, as on the embedded page. Collapsed, and
+          still reachable, so no upload is hidden. */}
+      {ownRecord && !uploadsLoading && leftoverUploads.length > 0 && (
+        <div className="mb-4 rounded-md border border-gray-200 px-4">
+          <UploadsList {...uploadsProps} uploads={leftoverUploads} name="other" />
+        </div>
       )}
 
       {noData && !uploadsLoading && uploads.length === 0 && (
         <p className="mb-4 text-sm text-gray-500 italic">
-          No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.
+          {ownRecord
+            ? <>No wearable data synced yet. Upload or drag &amp; drop wearable data files to contribute to your record.</>
+            : 'No wearable data synced yet.'}
         </p>
       )}
 
       <Section title="Data Coverage">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-portal-text-primary">Last Sync</label>
+            <div className="flex items-center gap-1.5">
+              <label className="text-sm font-medium text-portal-text-primary">Last Sync</label>
+              {/* Both are read from the same readings as the values below, so
+                  they are provisional when all of those are (#2835). */}
+              <ProvisionalBadge name="wearable_last_sync_at" fromDevice />
+            </div>
             <p className="text-sm text-gray-700 py-1.5">
               {formatSyncDate(formData?.wearable_last_sync_at) || '\u2014'}
             </p>
           </div>
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-portal-text-primary">
-              Coverage Ratio (30 days)
-            </label>
+            <div className="flex items-center gap-1.5">
+              <label className="text-sm font-medium text-portal-text-primary">
+                Coverage Ratio (30 days)
+              </label>
+              <ProvisionalBadge name="wearable_coverage_ratio_30d" fromDevice />
+            </div>
             <p className="text-sm text-gray-700 py-1.5">
               {formData?.wearable_coverage_ratio_30d != null
                 ? `${(Number(formData.wearable_coverage_ratio_30d) * 100).toFixed(0)}%`
@@ -465,36 +572,44 @@ export default function WearableTab({ formData, onRefresh }: Props) {
       <div className="mb-5 rounded-md border border-border bg-muted/40 px-4 py-3">
         <p className="text-xs text-muted-foreground">
           Every value below is a 30-day aggregate over device readings, so none of
-          them is typed in: a clinician does not enter a median. Upload device
-          data above and these follow.
+          them is typed in: a clinician does not enter a median.{' '}
+          {ownRecord
+            ? 'Upload device data above and these follow.'
+            : 'They follow from the device data the patient adds.'}
+          {' '}Each value is marked Accepted or Provisional. Provisional means the
+          readings behind it have been stored and are not yet confirmed.
         </p>
       </div>
 
       <Section title="Activity (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Median Daily Steps"
             name="median_daily_steps_30d"
             descriptor={descriptors.median_daily_steps_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.median_daily_steps_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Active Minutes / Day"
             name="active_minutes_per_day_30d"
             descriptor={descriptors.active_minutes_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.active_minutes_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Activity Trend"
             name="activity_trend_30d"
             descriptor={descriptors.activity_trend_30d}
             showReason={false}
+            // "Insufficient data" is the absence of a trend, not a reading to accept.
+            showAccepted={formData?.activity_trend_30d !== 'insufficient_data'}
             type="select"
             value={formData?.activity_trend_30d}
             options={ACTIVITY_TREND_OPTIONS}
@@ -505,11 +620,12 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       <Section title="Cardiovascular (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Resting Heart Rate (bpm)"
             name="resting_heart_rate_avg_30d"
             descriptor={descriptors.resting_heart_rate_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.resting_heart_rate_avg_30d}
             onChange={() => {}}
@@ -517,20 +633,22 @@ export default function WearableTab({ formData, onRefresh }: Props) {
           {/* SDNN and RMSSD are distinct statistics and are shown as
               distinct fields. A patient normally has one or the other
               depending on their device, not both. */}
-          <ClinicalField
+          <MetricField
             label="HRV SDNN (ms)"
             name="hrv_sdnn_avg_30d"
             descriptor={descriptors.hrv_sdnn_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.hrv_sdnn_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="HRV RMSSD (ms)"
             name="hrv_rmssd_avg_30d"
             descriptor={descriptors.hrv_rmssd_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.hrv_rmssd_avg_30d}
             onChange={() => {}}
@@ -540,29 +658,32 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       <Section title="Respiratory (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Min SpO&#8322; (%)"
             name="oxygen_saturation_min_30d"
             descriptor={descriptors.oxygen_saturation_min_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.oxygen_saturation_min_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Avg SpO&#8322; (%)"
             name="oxygen_saturation_avg_30d"
             descriptor={descriptors.oxygen_saturation_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.oxygen_saturation_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Respiratory Rate (breaths/min)"
             name="respiratory_rate_avg_30d"
             descriptor={descriptors.respiratory_rate_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.respiratory_rate_avg_30d}
             onChange={() => {}}
@@ -572,11 +693,12 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       <Section title="Sleep (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Avg Sleep Duration (hours)"
             name="sleep_duration_hours_avg_30d"
             descriptor={descriptors.sleep_duration_hours_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.sleep_duration_hours_avg_30d}
             onChange={() => {}}
@@ -586,29 +708,32 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       <Section title="Fitness (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="VO&#8322; Max (mL/kg/min)"
             name="vo2_max_avg_30d"
             descriptor={descriptors.vo2_max_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.vo2_max_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Distance (km/day)"
             name="distance_km_per_day_30d"
             descriptor={descriptors.distance_km_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.distance_km_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Flights Climbed / Day"
             name="flights_climbed_per_day_30d"
             descriptor={descriptors.flights_climbed_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.flights_climbed_per_day_30d}
             onChange={() => {}}
@@ -618,38 +743,42 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       <Section title="Gait & Mobility (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Walking Speed (km/hr)"
             name="walking_speed_avg_30d"
             descriptor={descriptors.walking_speed_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_speed_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Step Length (cm)"
             name="walking_step_length_avg_30d"
             descriptor={descriptors.walking_step_length_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_step_length_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Double Support (%)"
             name="walking_double_support_pct_avg_30d"
             descriptor={descriptors.walking_double_support_pct_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_double_support_pct_avg_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Walking Heart Rate (bpm)"
             name="walking_hr_avg_30d"
             descriptor={descriptors.walking_hr_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.walking_hr_avg_30d}
             onChange={() => {}}
@@ -659,29 +788,32 @@ export default function WearableTab({ formData, onRefresh }: Props) {
 
       <Section title="Energy & Body (30-Day)">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField
+          <MetricField
             label="Active Energy (kcal/day)"
             name="active_energy_per_day_30d"
             descriptor={descriptors.active_energy_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.active_energy_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Basal Energy (kcal/day)"
             name="basal_energy_per_day_30d"
             descriptor={descriptors.basal_energy_per_day_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.basal_energy_per_day_30d}
             onChange={() => {}}
           />
-          <ClinicalField
+          <MetricField
             label="Body Mass (kg)"
             name="body_mass_avg_30d"
             descriptor={descriptors.body_mass_avg_30d}
             showReason={false}
+            showAccepted
             type="number"
             value={formData?.body_mass_avg_30d}
             onChange={() => {}}
@@ -689,5 +821,6 @@ export default function WearableTab({ formData, onRefresh }: Props) {
         </div>
       </Section>
     </div>
+    </WearableMetricProvider>
   );
 }

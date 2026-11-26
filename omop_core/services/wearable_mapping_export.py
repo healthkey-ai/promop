@@ -54,6 +54,7 @@ SOURCE_LABELS = {
     'Apple': 'HealthKit',
     'HealthConnect': 'Health Connect',
     'Garmin': 'Garmin',
+    'Oura': 'Oura Ring',
     'OpenWearables': 'OpenWearables',
     'HL7-PHR': 'HL7 PHR',
     CDISC_BC_VOCABULARY: 'CDISC BC',

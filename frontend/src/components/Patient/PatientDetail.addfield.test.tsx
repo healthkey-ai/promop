@@ -4,8 +4,8 @@
  * and org admins outside patient mode, and the fields added that way shown
  * last on their tab.
  */
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import PatientDetail, { PatientDetailRoute } from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -26,7 +26,12 @@ vi.mock('@/components/PatientInfo/tabs/DiseaseTab', () => ({ default: () => <div
 vi.mock('@/components/PatientInfo/tabs/TreatmentTab', () => ({ default: () => <div>treatment fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/LabsTab', () => ({ default: () => <div>lab fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/GenomicsTab', () => ({ default: () => <div>genomics fields</div> }));
-vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({ default: () => <div>behavior fields</div> }));
+// Behavior also stands in for anything that re-reads the record mid-edit.
+vi.mock('@/components/PatientInfo/tabs/BehaviorTab', () => ({
+  default: ({ onRefresh }: { onRefresh?: () => void }) => (
+    <div>behavior fields<button onClick={onRefresh}>Refresh patient</button></div>
+  ),
+}));
 vi.mock('@/components/PatientInfo/tabs/WearableTab', () => ({ default: () => <div>wearable fields</div> }));
 vi.mock('@/components/PatientInfo/tabs/ClinicalSummaryTab', () => ({ default: () => <div>history</div> }));
 vi.mock('./PatientOmopTab', () => ({ default: () => <div>omop rows</div> }));
@@ -51,6 +56,9 @@ const CUSTOM_FIELDS = [
   custom(3, 'frailty_index', 'Frailty index', 'labs'),
 ];
 
+// What the server lets this caller write on this patient.
+const writable = { kind: 'direct', writable: true, target: 'patient_record', custom: true };
+let descriptors: Record<string, unknown>;
 let record: Record<string, unknown>;
 // Disease Category management's mapping of disease names to categories.
 let diseaseMappings: Array<{ disease_name: string; category: string }>;
@@ -60,15 +68,17 @@ beforeEach(() => {
   __resetWritableFieldsCache();
   __resetDiseaseCategoryCaches();
   diseaseMappings = [];
+  descriptors = { m_protein_note: writable, her2_note: writable, frailty_index: writable };
+  (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {} });
   record = {
     person_id: 101, patient_name: 'Ada Lovelace', disease: 'Multiple Myeloma',
     custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Fit' },
   };
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
-    if (url.includes('writable-fields')) return Promise.resolve({ data: {} });
+    if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
     if (url.includes('custom-patient-fields')) return Promise.resolve({ data: CUSTOM_FIELDS });
     if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
-    if (url.includes('/patient-info/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
+    if (url.includes('/v1/patient-records/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
     return Promise.resolve({ data: [] });
   });
 });
@@ -124,27 +134,89 @@ describe('PatientDetail — Add Field', () => {
     ]);
   });
 
-  it("uses Disease Category management's category for the record's disease over the editor's name match", async () => {
-    // The editor shows a diffuse large B-cell lymphoma on its lymphoma tab;
-    // the record's category is DLBCL, not FL.
+  it('has one disease tab for a record with more than one cancer, and an Add Field link for each', async () => {
+    diseaseMappings = [{ disease_name: 'Multiple Myeloma', category: 'MM' }];
+    record = { ...record, disease_categories: ['MM', 'PC'], disease_slugs: ['multiple-myeloma', 'prostate-cancer'] };
+    await renderPatient(ORG_ADMIN);
+    openTab('Diseases');
+    expect(screen.getByText('disease fields')).toBeInTheDocument();
+    const links = screen.getAllByRole('link', { name: /^Add Field to / });
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      '/field-mappings?new=1&tab=disease&disease=MM',
+      '/field-mappings?new=1&tab=disease&disease=PC',
+      '/field-mappings?new=1&tab=disease&disease=MM',
+      '/field-mappings?new=1&tab=disease&disease=PC',
+    ]);
+  });
+
+  it('shows the disease tab for the cancer that has an extension when the primary has none', async () => {
+    diseaseMappings = [{ disease_name: 'Glioblastoma', category: 'Other' }];
+    record = { ...record, disease: 'Glioblastoma', disease_categories: ['MM'] };
+    await renderPatient(DOCTOR);
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .getByRole('button', { name: 'Multiple Myeloma' })).toBeInTheDocument();
+  });
+
+  it("picks the disease tab by Disease Category management's category, not the name match", async () => {
+    // The old name match showed a diffuse large B-cell lymphoma on the follicular
+    // tab; the record's category is DLBCL, which has no hand-authored section, so
+    // its tab is the category's own and a field added there is scoped to DLBCL.
     record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma' };
     diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
     await renderPatient(STAFF);
-    openTab('Follicular Lymphoma');
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .queryByRole('button', { name: 'Follicular Lymphoma' })).toBeNull();
+    openTab('DLBCL');
     await waitFor(() => expect(hrefs()).toEqual([
       '/field-mappings?new=1&tab=disease&disease=DLBCL',
       '/field-mappings?new=1&tab=disease&disease=DLBCL',
     ]));
   });
 
-  it("names no disease for a record Disease Category management maps to Other", async () => {
+  it('reads a disease name with stray spaces as the server does', async () => {
+    record = { ...record, disease: ' Diffuse Large B-Cell Lymphoma ' };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    await renderPatient(STAFF);
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .queryByRole('button', { name: 'Follicular Lymphoma' })).toBeNull();
+    openTab('DLBCL');
+  });
+
+  it('gives a category with no field yet a tab to the people who can add one, and to no one else', async () => {
+    record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma' };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    await renderPatient(DOCTOR);
+    const tabs = () => within(screen.getByRole('navigation', { name: 'Patient info tabs' }));
+    expect(tabs().queryByRole('button', { name: 'DLBCL' })).toBeNull();
+  });
+
+  it('shows everyone the tab of a category once a field is placed on its extension', async () => {
+    record = { ...record, disease: 'Diffuse Large B-Cell Lymphoma', custom_fields: { cd20_note: 'positive' } };
+    diseaseMappings = [{ disease_name: 'Diffuse large B-cell lymphoma', category: 'DLBCL' }];
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: descriptors });
+      if (url.includes('custom-patient-fields')) {
+        return Promise.resolve({ data: [...CUSTOM_FIELDS, custom(4, 'cd20_note', 'CD20 note', 'disease', ['DLBCL'])] });
+      }
+      if (url.includes('disease-category-mappings')) return Promise.resolve({ data: diseaseMappings });
+      if (url.includes('/v1/patient-records/101/')) return Promise.resolve({ data: { patient_info: { ...record }, user: null } });
+      return Promise.resolve({ data: [] });
+    });
+    await renderPatient(DOCTOR);
+    await waitFor(() => expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .getByRole('button', { name: 'DLBCL' })).toBeInTheDocument());
+    openTab('DLBCL');
+    expect(await screen.findByText('CD20 note')).toBeInTheDocument();
+    expect(screen.queryByText('M protein note')).toBeNull();
+  });
+
+  it('has no disease tab for a record Disease Category management maps to Other', async () => {
     record = { ...record, disease: 'Mantle Cell Lymphoma' };
     diseaseMappings = [{ disease_name: 'Mantle Cell Lymphoma', category: 'Other' }];
     await renderPatient(STAFF);
-    openTab('Mantle Cell Lymphoma');
-    await waitFor(() => expect(hrefs()).toEqual([
-      '/field-mappings?new=1&tab=disease', '/field-mappings?new=1&tab=disease',
-    ]));
+    expect(within(screen.getByRole('navigation', { name: 'Patient info tabs' }))
+      .queryByRole('button', { name: 'Mantle Cell Lymphoma' })).toBeNull();
+    expect(hrefs()).toEqual(['/field-mappings?new=1&tab=general', '/field-mappings?new=1&tab=general']);
   });
 
   it('has no Add Field on tabs that hold no PatientRecord fields', async () => {
@@ -196,6 +268,20 @@ describe('PatientDetail — Add Field', () => {
     openTab('General');
     expect(screen.getByRole('heading', { level: 2, name: 'General' })).toBeInTheDocument();
   });
+
+  it("opens on the Wearables tab when Garmin's consent page sends the patient back (#2802)", async () => {
+    render(
+      <MemoryRouter initialEntries={['/patient/101?garmin=connected']}>
+        <Routes>
+          <Route path="/patient/:personId" element={<PatientDetailRoute user={STAFF} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByText('Ada Lovelace');
+    expect(screen.getByRole('heading', { level: 2, name: /Wearable/ })).toBeInTheDocument();
+    openTab('General');
+    expect(screen.getByRole('heading', { level: 2, name: 'General' })).toBeInTheDocument();
+  });
 });
 
 describe('PatientDetail — added fields', () => {
@@ -205,7 +291,7 @@ describe('PatientDetail — added fields', () => {
     openTab('Multiple Myeloma');
     const added = await screen.findByTestId('custom-patient-fields');
     expect(within(added).getByText('M protein note')).toBeInTheDocument();
-    expect(within(added).getByText('IgG kappa')).toBeInTheDocument();
+    expect(within(added).getByDisplayValue('IgG kappa')).toBeInTheDocument();
     // Another disease's field is not part of this record.
     expect(screen.queryByText('HER2 note')).not.toBeInTheDocument();
     const fields = screen.getByText('disease fields');
@@ -227,7 +313,7 @@ describe('PatientDetail — added fields', () => {
     await renderPatient(DOCTOR);
     openTab('Labs');
     expect(await screen.findByText('Frailty index')).toBeInTheDocument();
-    expect(screen.getByText('Fit')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Fit')).toBeInTheDocument();
     openTab('Breast Cancer');
     expect(await screen.findByText('HER2 note')).toBeInTheDocument();
     expect(screen.queryByText('M protein note')).not.toBeInTheDocument();
@@ -245,5 +331,133 @@ describe('PatientDetail — added fields', () => {
     await screen.findByText('M protein note');
     const reads = (api.get as ReturnType<typeof vi.fn>).mock.calls.filter(([url]) => String(url).includes('custom-patient-fields'));
     expect(reads).toHaveLength(1);
+  });
+});
+
+/** Editing an added field (#2669): it saves with the record, under custom_fields. */
+describe('PatientDetail — editing an added field', () => {
+  afterEach(() => vi.useRealTimers());
+
+  const patches = () => (api.patch as ReturnType<typeof vi.fn>).mock.calls;
+
+  it('saves an edit through the record PATCH, sending only the field that was edited', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    await waitFor(() => expect(input).toBeEnabled());
+
+    fireEvent.change(input, { target: { value: 'IgA lambda' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Not the object the editor holds: its other keys are the server's, as
+    // they were when the record was read.
+    expect(patches()[0]).toEqual(['/patient-info/101/', {
+      custom_fields: { m_protein_note: 'IgA lambda' },
+    }]);
+    expect(screen.getByDisplayValue('IgA lambda')).toBeInTheDocument();
+
+    // A later save of something else does not send the added field again.
+    openTab('Labs');
+    fireEvent.change(await screen.findByDisplayValue('Fit'), { target: { value: 'Frail' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(2));
+    expect(patches()[1][1]).toEqual({ custom_fields: { frailty_index: 'Frail' } });
+  });
+
+  it('sends two fields edited before one save together', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'IgA' } });
+    openTab('Labs');
+    fireEvent.change(await screen.findByDisplayValue('Fit'), { target: { value: 'Frail' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches().length).toBeGreaterThan(0));
+    expect(Object.assign({}, ...patches().map(([, body]) => body.custom_fields))).toEqual({
+      m_protein_note: 'IgA', frailty_index: 'Frail',
+    });
+  });
+
+  it("keeps an unsaved edit and takes everyone else's values when the record is re-read", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'IgA lambda' } });
+
+    // Before the save goes out, someone else's value for another added field
+    // arrives with a re-read of the record.
+    record = { ...record, custom_fields: { m_protein_note: 'IgG kappa', frailty_index: 'Robust' } };
+    const reads = () => (api.get as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([url]) => String(url).includes('/v1/patient-records/101/')).length;
+    const before = reads();
+    openTab('Behavior');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh patient' }));
+    await waitFor(() => expect(reads()).toBe(before + 1));
+
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    // Only the field edited here: the stale copy of the other one is not sent back.
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: 'IgA lambda' } });
+    openTab('Labs');
+    expect(await screen.findByDisplayValue('Robust')).toBeInTheDocument();
+    openTab('Multiple Myeloma');
+    expect(await screen.findByDisplayValue('IgA lambda')).toBeInTheDocument();
+  });
+
+  it('sends null for a value that was cleared', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    await waitFor(() => expect(input).toBeEnabled());
+
+    fireEvent.change(input, { target: { value: '' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: null } });
+  });
+
+  it("shows the server's reason when it refuses an added field's value", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    (api.patch as ReturnType<typeof vi.fn>).mockRejectedValue({ response: { status: 400, data: {
+      custom_fields: { m_protein_note: ['Enter text.'] },
+    } } });
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    fireEvent.change(await screen.findByDisplayValue('IgG kappa'), { target: { value: 'x' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    expect(await screen.findByText(/m_protein_note: Enter text\./)).toBeInTheDocument();
+  });
+
+  it('offers no input to a caller the server does not let write', async () => {
+    descriptors = { m_protein_note: {
+      kind: 'direct', writable: false, read_only_for_caller: true,
+      reason: 'You have read-only access to this patient record.',
+    } };
+    await renderPatient(DOCTOR);
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    expect(input).toBeDisabled();
+    expect(await screen.findByTestId('reason-m_protein_note')).toHaveTextContent('read-only access');
+  });
+
+  it('lets the patient edit an added field on their own record', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(
+      <MemoryRouter>
+        <PatientDetail personIdOverride="101" patientMode user={DOCTOR} />
+      </MemoryRouter>,
+    );
+    await screen.findByText('general fields');
+    openTab('Multiple Myeloma');
+    const input = await screen.findByDisplayValue('IgG kappa');
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: 'IgG kappa, stable' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    expect(patches()[0][1]).toEqual({ custom_fields: { m_protein_note: 'IgG kappa, stable' } });
   });
 });

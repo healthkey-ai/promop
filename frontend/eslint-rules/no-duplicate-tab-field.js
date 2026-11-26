@@ -35,6 +35,9 @@
 import { basename } from 'node:path';
 
 /** file -> the field keys it renders. Module scope: one entry per lint run. */
+// The components that render one field of a tab: ClinicalField, and MetricField, which
+// is ClinicalField with a 30-day wearable value's tools beside it (#2887).
+const FIELD_COMPONENTS = new Set(['ClinicalField', 'MetricField']);
 const fieldsByFile = new Map();
 
 /**
@@ -166,7 +169,7 @@ export default {
         } else if (collection?.value?.type === 'JSXExpressionContainer') {
           reportBlind(collection, 'unreadable', collection.value.expression);
         }
-        if (node.name.type !== 'JSXIdentifier' || node.name.name !== 'ClinicalField') return;
+        if (node.name.type !== 'JSXIdentifier' || !FIELD_COMPONENTS.has(node.name.name)) return;
         const attr = node.attributes.find(
           (a) => a.type === 'JSXAttribute' && a.name.name === 'name',
         );

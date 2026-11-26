@@ -57,8 +57,15 @@ class PhrView(APIView):
     # (SharedRecordMixin).
     show_provisional = False
 
+    # A write here adds to the member's record, so it is refused while the
+    # permission the record depends on is withdrawn (consent.record_permitted).
+    # Views that manage the permissions themselves set this False. Deleting is
+    # always allowed: removing data never goes against a withdrawal.
+    writes_record = True
+
     def resolve(self, request):
-        """(person, record, None), or (None, None, a 404) when the caller has no record."""
+        """(person, record, None), or (None, None, a 404) when the caller has no
+        record, or a 403 for a write while their record is off."""
         link = (
             PatientUser.objects.filter(identity=request.user, is_active=True)
             .select_related('person')
@@ -66,6 +73,10 @@ class PhrView(APIView):
         )
         if link is None:
             return None, None, Response({'detail': 'No record.'}, status=404)
+        if self.writes_record and request.method in ('POST', 'PUT', 'PATCH'):
+            from patient_portal.consent import RECORD_OFF, record_permitted
+            if not record_permitted(link.person):
+                return None, None, Response({'detail': RECORD_OFF}, status=403)
         return link.person, PatientRecord.objects.filter(person=link.person).first(), None
 
     def get(self, request):
@@ -318,11 +329,16 @@ def _spread(record) -> str | None:
     return None
 
 
-def _primary_fields(stage_field, risk) -> tuple[str, ...]:
+def _primary_fields(stage_field, risk, slug='') -> tuple[str, ...]:
     """The record fields the primary cancer entry is built from."""
     return ('disease', 'histologic_type', stage_field, *([risk[0]] if risk else []),
             'metastasis_status', 'bone_only_metastasis_status', 'metastatic_status',
-            *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status')
+            *(f for f, _ in BIOMARKER_FIELDS), 'diagnosis_date', 'condition_clinical_status',
+            # The created field the spread is read from, for a blood cancer only
+            # (``_spread``): a proposal is marked by its name in the object (#2857), as
+            # a pending edit of it is named. A solid tumour's spread is its metastasis
+            # fields, so a proposed hematologic_spread there says nothing shown.
+            *(['custom_fields.hematologic_spread'] if slug in HEMATOLOGIC_CANCERS else []))
 
 
 def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, Any] | None:
@@ -348,7 +364,7 @@ def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, 
         'transitions': transitions,
         'source': source(kind, record.facility_name if kind == RECORD else None, record.diagnosis_date),
         # The lowest confidence among the fields shown here that are proposals.
-        'confidence': _confidence(record, _primary_fields(stage_field, risk)),
+        'confidence': _confidence(record, _primary_fields(stage_field, risk, slug)),
     }
     return {k: v for k, v in item.items() if v not in (None, [], '')}
 

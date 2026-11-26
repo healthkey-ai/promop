@@ -86,7 +86,7 @@ beforeEach(() => {
   __resetWritableFieldsCache();
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
     if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
-    if (url.includes('/patient-info/')) {
+    if (/\/v1\/patient-records\/\d+\//.test(url)) {
       return Promise.resolve({
         data: { patient_info: { ...PATIENT }, user: null, patient_name: PATIENT.patient_name },
       });
@@ -190,7 +190,7 @@ describe('PatientDetail save — the edit, not the record', () => {
   it('does not PATCH at all when the descriptor cannot be fetched', async () => {
     (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
       if (url.includes('writable-fields')) return Promise.reject(new Error('offline'));
-      if (url.includes('/patient-info/')) {
+      if (/\/v1\/patient-records\/\d+\//.test(url)) {
         return Promise.resolve({
           data: { patient_info: { ...PATIENT }, user: null, patient_name: PATIENT.patient_name },
         });

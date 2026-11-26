@@ -3,6 +3,7 @@ Patient invitation views — staff/providers invite a patient to claim their own
 record; the patient sets a password and becomes a PHR Account Holder (PH.1).
 
 Endpoints (registered in v1_urls.py):
+  POST /api/v1/patients/                           - org admin: create a record, optionally invite or claim it
   POST /api/v1/patients/{person_id}/invite/        - staff/provider: create + email invite
   GET  /api/v1/patients/{person_id}/invitations/   - staff/provider: list invites for a patient
   GET  /api/v1/patient-invitations/lookup/?token=  - public: validate a token, return invitee email
@@ -13,6 +14,7 @@ import secrets
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.core.mail import send_mail
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
@@ -26,13 +28,11 @@ from rest_framework.views import APIView
 
 from omop_core.models import Person, PatientRecord, GroupAccess
 from patient_portal.models import Identity, PatientInvitation, PatientUser
-from .permissions import get_request_org, is_service_token
+from omop_core.services.access import get_admin_orgs
+from .permissions import get_request_org, is_service_token, is_machine_request
 from .serializers import PatientInvitationSerializer
 
 logger = logging.getLogger(__name__)
-
-INVITE_TTL_DAYS = 7
-
 
 class PatientInvitationEmailError(Exception):
     """Raised when an invitation email cannot be handed to the email backend."""
@@ -43,6 +43,10 @@ def _patient_display_name(person) -> str:
     return name or f"Patient {person.person_id}"
 
 
+def _days(n: int) -> str:
+    return '1 day' if n == 1 else f'{n} days'
+
+
 def _send_patient_invitation_email(invitation) -> None:
     accept_url = f"{settings.APP_BASE_URL}/accept-patient-invite?token={invitation.token}"
     subject = "You've been invited to access your health record on PROMOP"
@@ -51,7 +55,7 @@ def _send_patient_invitation_email(invitation) -> None:
         f"Your care team has invited you to access your health record on PROMOP.\n\n"
         f"Click the link below to create your account and set a password:\n\n"
         f"  {accept_url}\n\n"
-        f"This link expires in {INVITE_TTL_DAYS} days.\n\n"
+        f"This link expires in {_days(settings.INVITE_TTL_DAYS)}.\n\n"
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
         f"— The HealthKey team"
     )
@@ -113,66 +117,197 @@ class PatientInviteView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # A patient who already has an active account cannot be re-invited.
-        if PatientUser.objects.filter(person=person, is_active=True).exists():
-            return Response(
-                {'error': 'This patient already has an active account.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        refusal = _invitation_refusal(person, email)
+        if refusal is not None:
+            return refusal
+        return _issue_invitation(request, person, patient_record, email)
 
-        # Reject if the email already belongs to an existing account — the
-        # invite would be sent but acceptance would fail with "account already
-        # exists", wasting time and confusing both parties.
-        existing_identity = Identity.objects.filter(
-            email__iexact=email,
+
+def _invitation_refusal(person, email):
+    """A 400 Response when ``email`` cannot be invited for ``person``, else None."""
+    # A patient who already has an active account cannot be re-invited.
+    if person is not None and PatientUser.objects.filter(person=person, is_active=True).exists():
+        return Response(
+            {'error': 'This patient already has an active account.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Reject if the email already belongs to an existing account — the
+    # invite would be sent but acceptance would fail with "account already
+    # exists", wasting time and confusing both parties.
+    existing_identity = Identity.objects.filter(email__iexact=email).first()
+    if existing_identity and existing_identity.has_usable_password():
+        return Response(
+            {'error': 'This email is already associated with an existing account. '
+                      'Use a different email address.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
+def _issue_invitation(request, person, patient_record, email, *, address_for_invitation=False):
+    """Store the email on the Person, create or refresh the invitation, send it.
+
+    ``address_for_invitation``: the person was just created with this address
+    in order to invite them, so it is the invitation's, not the record's."""
+    with transaction.atomic():
+        invitation = PatientInvitation.objects.select_for_update().filter(
+            person=person, accepted_at__isnull=True, cancelled_at__isnull=True,
         ).first()
-        if existing_identity and existing_identity.has_usable_password():
-            return Response(
-                {'error': 'This email is already associated with an existing account. '
-                          'Use a different email address.'},
-                status=status.HTTP_400_BAD_REQUEST,
+        # Whether an invitation put this address on the person, and what it
+        # replaced: an address the record already held is the hospital's.
+        earlier = invitation or PatientInvitation.objects.filter(
+            person=person, accepted_at__isnull=True, email__iexact=email, set_person_email=True,
+        ).order_by('-sent_at').first()
+        if (person.email or '').lower() != email.lower():
+            set_person_email, replaced_email = True, person.email
+            if earlier is not None and earlier.set_person_email:
+                replaced_email = earlier.replaced_email  # the address before any invitation
+        elif earlier is not None and earlier.set_person_email:
+            set_person_email, replaced_email = True, earlier.replaced_email
+        elif address_for_invitation:
+            set_person_email, replaced_email = True, None
+        else:
+            set_person_email, replaced_email = False, None
+        if person.email != email:
+            person.email = email
+            person.save(update_fields=['email'])
+
+        if patient_record is None:
+            patient_record = PatientRecord.objects.create(person=person)
+        from omop_core.services.patient_record_service import refresh_patient_record
+        refresh_patient_record(person)
+
+        token = secrets.token_hex(32)  # 64 hex chars
+        now = timezone.now()
+        expires_at = now + timezone.timedelta(days=settings.INVITE_TTL_DAYS)
+        if invitation:
+            invitation.email = email
+            invitation.token = token
+            invitation.invited_by = request.user
+            invitation.sent_at = now
+            invitation.expires_at = expires_at
+            invitation.set_person_email, invitation.replaced_email = set_person_email, replaced_email
+            invitation.save(update_fields=['email', 'token', 'invited_by', 'sent_at', 'expires_at',
+                                           'set_person_email', 'replaced_email'])
+        else:
+            invitation = PatientInvitation.objects.create(
+                person=person, email=email, token=token, invited_by=request.user, sent_at=now,
+                expires_at=expires_at, set_person_email=set_person_email, replaced_email=replaced_email,
             )
 
-        with transaction.atomic():
-            person_update_fields = []
-            if person.email != email:
-                person.email = email
-                person_update_fields.append('email')
-            if person_update_fields:
-                person.save(update_fields=person_update_fields)
+    email_warning = None
+    try:
+        _send_patient_invitation_email(invitation)
+    except PatientInvitationEmailError:
+        email_warning = 'Invitation was created, but the email could not be sent.'
 
-            if patient_record is None:
-                patient_record = PatientRecord.objects.create(person=person)
-            from omop_core.services.patient_record_service import refresh_patient_record
+    data = PatientInvitationSerializer(invitation).data
+    if email_warning:
+        data['email_warning'] = email_warning
+    return Response(data, status=status.HTTP_201_CREATED)
+
+
+class PatientCreateView(APIView):
+    """An org admin creates a patient record, and invites the patient or claims it.
+
+    Body: ``organization`` (slug; may be omitted when the caller administers
+    exactly one), ``given_name``, ``family_name``, ``email``, and either
+    ``invite: true`` (email the patient a link to set their own password) or
+    ``for_self: true`` (the admin's own record: linked to their account, with
+    the ``patient`` role granted at the organization -- roles are additive, so
+    the admin role is kept). Neither flag creates a bare record.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from omop_core.models import Organization
+        user = request.user
+        if is_machine_request(request):
+            return Response({'error': 'Not permitted.'}, status=status.HTTP_403_FORBIDDEN)
+        data = request.data if isinstance(request.data, dict) else {}
+        orgs = get_admin_orgs(user).filter(is_active=True)
+        if not orgs.exists():
+            return Response({'error': 'Organization admin access is required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        slug = (data.get('organization') or '').strip()
+        if slug:
+            org = orgs.filter(slug=slug).first()
+            if org is None:
+                return Response({'error': 'You cannot add patients to this organization.'},
+                                status=status.HTTP_403_FORBIDDEN)
+        else:
+            choices = list(orgs[:2])
+            if len(choices) != 1:
+                return Response({'error': 'Select an organization.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            org = choices[0]
+
+        for_self = data.get('for_self') is True
+        invite = data.get('invite') is True
+        if for_self and invite:
+            return Response({'error': 'A record for yourself is not invited by email.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        given_name = str(data.get('given_name') or '').strip()[:100]
+        family_name = str(data.get('family_name') or '').strip()[:100]
+        email = str(data.get('email') or '').strip().lower()
+
+        if for_self:
+            if PatientUser.objects.filter(identity=user).exists():
+                return Response({'error': 'You already have a patient record.'},
+                                status=status.HTTP_409_CONFLICT)
+            given_name = given_name or (getattr(user, 'name', '') or '').split(' ')[0]
+            email = email or (user.email or '').strip().lower()
+            # Only a verified address may sit on a Person that email matching reads.
+            if email != (user.email or '').strip().lower() or not getattr(user, 'has_verified_email', False):
+                email = ''
+        elif invite:
+            if not email:
+                return Response({'error': 'An email address is required to invite the patient.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            try:
+                validate_email(email)
+            except ValidationError:
+                return Response({'error': 'Enter a valid email address.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        if not for_self and not (given_name or family_name or email):
+            return Response({'error': 'Enter a name or an email address.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        if invite:
+            # Refuse before anything is written: an unusable address leaves no stray record.
+            refusal = _invitation_refusal(None, email)
+            if refusal is not None:
+                return refusal
+
+        from omop_core.services.patient_record_service import refresh_patient_record
+        from omop_core.services.pk import next_pk
+        with transaction.atomic():
+            person = Person.objects.create(
+                person_id=next_pk(Person, 'person_id'),
+                year_of_birth=1900,
+                gender_source_value='unknown',
+                race_source_value='unknown',
+                ethnicity_source_value='unknown',
+                given_name=given_name or None,
+                family_name=family_name or None,
+                email=email or None,
+            )
+            record = PatientRecord.objects.create(person=person, organization=org)
+            if for_self:
+                PatientUser.objects.create(identity=user, person=person)
+                GroupAccess.objects.get_or_create(identity=user, org=org, role='patient')
             refresh_patient_record(person)
 
-            token = secrets.token_hex(32)  # 64 hex chars
-            expires_at = timezone.now() + timezone.timedelta(days=INVITE_TTL_DAYS)
-            invitation = PatientInvitation.objects.select_for_update().filter(
-                person=person, accepted_at__isnull=True, cancelled_at__isnull=True,
-            ).first()
-            if invitation:
-                invitation.email = email
-                invitation.token = token
-                invitation.invited_by = request.user
-                invitation.expires_at = expires_at
-                invitation.save(update_fields=['email', 'token', 'invited_by', 'expires_at'])
-            else:
-                invitation = PatientInvitation.objects.create(
-                    person=person, email=email, token=token,
-                    invited_by=request.user, expires_at=expires_at,
-                )
-
-        email_warning = None
-        try:
-            _send_patient_invitation_email(invitation)
-        except PatientInvitationEmailError:
-            email_warning = 'Invitation was created, but the email could not be sent.'
-
-        data = PatientInvitationSerializer(invitation).data
-        if email_warning:
-            data['email_warning'] = email_warning
-        return Response(data, status=status.HTTP_201_CREATED)
+        result = {'person_id': person.person_id, 'organization': org.slug, 'invited': False}
+        if invite:
+            invited = _issue_invitation(request, person, record, email, address_for_invitation=True)
+            result['invited'] = True
+            result['invitation'] = invited.data
+            if invited.data.get('email_warning'):
+                result['email_warning'] = invited.data['email_warning']
+        return Response(result, status=status.HTTP_201_CREATED)
 
 
 def _find_local_or_any_identity(email):
@@ -181,7 +316,20 @@ def _find_local_or_any_identity(email):
     Preference order: local with usable password → local placeholder → any issuer.
     Returns None if no identity exists for this email.
     """
-    identities = list(Identity.objects.filter(email__iexact=email).order_by('id'))
+    from django.conf import settings
+
+    # A provider-made staff account is never claimed: it has no usable
+    # password and must not gain one or a patient record, so its holder gets a
+    # member account of their own. A local staff account still counts here, so
+    # the "an account already exists" refusal applies to it as before: a second
+    # local account on the same address would break password sign-in for both.
+    from django.db.models import Q
+
+    staff = Q(is_staff=True) | Q(is_superuser=True) | Q(groups__name__in=settings.STAFF_ROLES)
+    identities = list(
+        Identity.objects.filter(email__iexact=email).exclude(staff & ~Q(issuer='urn:local'))
+        .distinct().order_by('id')
+    )
     return (
         next((i for i in identities if i.issuer == 'urn:local' and i.has_usable_password()), None)
         or next((i for i in identities if i.issuer == 'urn:local'), None)

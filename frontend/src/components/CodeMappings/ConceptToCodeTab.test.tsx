@@ -13,6 +13,9 @@ vi.mock('@/api/axios', () => ({ default: {
   delete: (...args: unknown[]) => remove(...args), patch: (...args: unknown[]) => patch(...args),
   put: (...args: unknown[]) => put(...args),
 } }));
+// The source code systems the Wearables row offers; a test sets its own.
+let wearableSystems: { id: string; label: string }[] = [];
+vi.mock('./wearableSourceSystems', () => ({ useWearableSourceSystems: () => wearableSystems }));
 const concept = {
   concept_id: 123, concept_name: 'Serum albumin', concept_code: 'A1', vocabulary_id: 'LOINC', domain_id: 'Measurement',
   fields: [{ field_name: 'albumin', status: 'approved', omop_table: 'measurement' }],
@@ -33,6 +36,7 @@ const run = (state = 'success') => ({
 beforeEach(() => {
   // The tab remembers the chosen domain (#2656): one test's choice is not the next one's.
   localStorage.clear();
+  wearableSystems = [];
   get.mockReset(); post.mockReset();
   get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept])
     : url === '/v1/concept-to-code/axis-variant-walk/' ? { active: null, last: null, completed: null, patients_since: 0, walked_at: null } : page([source]) }));
@@ -692,10 +696,37 @@ describe('the Wearables domain and the remembered domain (#2656)', () => {
     expect(screen.getByLabelText('Concept scope')).toBeEnabled();
     fireEvent.change(domain, { target: { value: 'wearables' } });
     await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', page: 1 }));
-    // Wearables is its own scope, so the scope choice is set aside while it is chosen.
-    expect(screen.getByLabelText('Concept scope')).toBeDisabled();
     fireEvent.change(domain, { target: { value: 'measurement' } });
     expect(screen.getByLabelText('Concept scope')).toBeEnabled();
+  });
+
+  it('lists every wearable concept by default and narrows to patient field concepts when asked (#2808)', async () => {
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await screen.findByRole('button', { name: 'Serum albumin' });
+    const scope = screen.getByLabelText('Concept scope') as HTMLSelectElement;
+    const options = () => Array.from(scope.options).map(option => option.textContent);
+    expect(scope).toHaveValue('fields');
+    expect(options()).toEqual(['Patient field concepts', 'All standard concepts']);
+
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    // Its own scope, starting on all of them: the dropdown works and says what the list holds.
+    expect(scope).toBeEnabled();
+    expect(scope).toHaveValue('all');
+    expect(options()).toEqual(['Patient field concepts', 'All wearable concepts']);
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', scope: 'all', page: 1 }));
+
+    fireEvent.change(scope, { target: { value: 'fields' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', scope: 'fields', page: 1 }));
+
+    // The other domains keep their own choice, and Wearables keeps this one.
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    expect(scope).toHaveValue('fields');
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'measurement', scope: 'fields' }));
+    fireEvent.change(scope, { target: { value: 'all' } });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    expect(scope).toHaveValue('fields');
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    expect(scope).toHaveValue('all');
   });
 
   it('restores the domain an account chose, and only for that account', async () => {
@@ -1072,8 +1103,10 @@ describe('categories on the concept list (#2690, #2699)', () => {
     expect(stored(7)).toEqual({ domain: 'measurement', expanded: { wearables: ['Sleep', ''], measurement: ['Activity'] } });
     fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
     await waitFor(() => expect(shownRows()).toEqual(['concept-row-3', 'concept-row-4']));
-    // Folding everything leaves nothing to remember for the domain.
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse all' }));
+    // Folding everything leaves nothing to remember for the domain. Wearables
+    // has no Collapse all (#2795): each header folds its own category.
+    fireEvent.click(header(/^Sleep/));
+    fireEvent.click(header(/^Uncategorized/));
     expect(stored(7)).toEqual({ domain: 'wearables', expanded: { measurement: ['Activity'] } });
     again.unmount();
 
@@ -1117,6 +1150,55 @@ describe('categories on the concept list (#2690, #2699)', () => {
     expect(listParams()[0]).not.toHaveProperty('order');
   });
 
+  it('opens Wearables by category whatever the other domains use, and keeps its own choice (#2795)', async () => {
+    localStorage.setItem('promop-concept-to-code:7', JSON.stringify({ domain: 'measurement', order: 'priority' }));
+    const first = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
+
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    expect(screen.getByLabelText('Concept order')).toHaveValue('category');
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', view: 'categories' }));
+    expect(lastListParams()).not.toHaveProperty('order');
+    await loaded();
+    // Going to Wearables changed neither order.
+    expect(stored(7)).toEqual({ domain: 'wearables', order: 'priority' });
+
+    // Priority chosen here is Wearables' own, and the other domains keep theirs.
+    fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'priority' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables', order: 'priority' }));
+    expect(stored(7)).toEqual({ domain: 'wearables', order: 'priority', wearables_order: 'priority' });
+    first.unmount();
+
+    const again = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await screen.findByTestId('concept-row-1');
+    expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
+    fireEvent.change(screen.getByLabelText('Concept order'), { target: { value: 'category' } });
+    await loaded();
+    expect(stored(7)).toEqual({ domain: 'wearables', order: 'priority' });
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'measurement' } });
+    expect(screen.getByLabelText('Concept order')).toHaveValue('priority');
+    again.unmount();
+  });
+
+  it('offers no Expand all or Collapse all under Wearables (#2795)', async () => {
+    render(<ConceptToCodeTab canWrite canApprove userId={7} />);
+    await loaded();
+    expect(screen.getByRole('button', { name: 'Expand all' })).toBeInTheDocument();
+    expect(screen.getByText('Categories are folded: open one to see its concepts, or Expand all.')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Concept domain'), { target: { value: 'wearables' } });
+    await waitFor(() => expect(lastListParams()).toMatchObject({ domain: 'wearables' }));
+    await loaded();
+    expect(screen.queryByRole('group', { name: 'Categories' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Expand all' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Collapse all' })).not.toBeInTheDocument();
+    expect(screen.getByText('Categories are folded: open one to see its concepts.')).toBeInTheDocument();
+    // A category still opens from its own header.
+    fireEvent.click(header(/^Sleep/));
+    await waitFor(() => expect(shownRows()).toEqual(['concept-row-3']));
+  });
+
   it('ignores a stored order or opened set of the wrong shape, keeping what is well formed', async () => {
     const key = 'promop-concept-to-code:7';
     localStorage.setItem(key, JSON.stringify({ domain: 'wearables', order: 'sideways', expanded: ['Sleep'] }));
@@ -1128,7 +1210,7 @@ describe('categories on the concept list (#2690, #2699)', () => {
     first.unmount();
 
     // One domain's entry is a string, another's holds a number, a third is no domain.
-    localStorage.setItem(key, JSON.stringify({ domain: 'wearables', order: 'priority', expanded: {
+    localStorage.setItem(key, JSON.stringify({ domain: 'measurement', order: 'priority', wearables_order: 'sideways', expanded: {
       wearables: 'Sleep', measurement: [1], sideways: ['Activity'], condition: ['Activity'] } }));
     const second = render(<ConceptToCodeTab canWrite canApprove userId={7} />);
     await screen.findByTestId('concept-row-1');
@@ -1268,7 +1350,8 @@ describe('Download and Share on the Concept tab under Wearables', () => {
 
     await chooseDomain('wearables');
     const download = await screen.findByRole('group', { name: 'Download all wearable mappings' });
-    expect(within(download).getAllByRole('button')).toHaveLength(2);
+    // From (waiting for the systems here), CSV and Word.
+    expect(within(download).getAllByRole('button')).toHaveLength(3);
     expect(screen.getByRole('button', { name: 'Share' })).toBeInTheDocument();
 
     await chooseDomain('measurement');
@@ -1293,6 +1376,29 @@ describe('Download and Share on the Concept tab under Wearables', () => {
     fireEvent.click(screen.getByRole('button', { name: /CSV/ }));
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/code-mappings/wearables-export/', expect.objectContaining({
       params: { file_format: 'csv' } })));
+  });
+
+  it('reads From the source systems, To the target, CSV and Word, then Share (#2795)', async () => {
+    URL.createObjectURL = vi.fn(() => 'blob:x'); URL.revokeObjectURL = vi.fn();
+    wearableSystems = [{ id: 'Apple', label: 'HealthKit' }, { id: 'HealthConnect', label: 'Health Connect' },
+      { id: 'Garmin', label: 'Garmin' }, { id: 'HL7-PHR', label: 'HL7 PHR' }];
+    render(<ConceptToCodeTab canWrite canApprove />);
+    await chooseDomain('wearables');
+    const row = await screen.findByRole('group', { name: 'Wearable mappings' });
+    // No sentence before the controls; the Share button keeps its one word.
+    expect(row).not.toHaveTextContent('Download all wearable mappings');
+    expect(row).toHaveTextContent(/^From\s*All source systems\s*To\s*OMOP conceptCDISC Biomedical Concept\s*CSV\s*Word\s*Share$/);
+    expect(within(row).getAllByRole('button').map(button => button.textContent?.trim()))
+      .toEqual(['All source systems', 'CSV', 'Word', 'Share']);
+
+    // Several systems at once: the HL7 PHR codes beside HealthKit's and Health Connect's.
+    await userEvent.click(within(row).getByRole('button', { name: /^Source code systems:/ }));
+    for (const system of ['HL7 PHR', 'HealthKit', 'Health Connect']) await userEvent.click(screen.getByLabelText(system));
+    get.mockClear();
+    get.mockResolvedValue({ data: new Blob(['a']), headers: {} });
+    await userEvent.click(within(row).getByRole('button', { name: 'Download all wearable mappings as CSV' }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/code-mappings/wearables-export/', expect.objectContaining({
+      params: { file_format: 'csv', sources: 'Apple,HealthConnect,HL7-PHR' } })));
   });
 
   it('opens the share dialog from the Concept tab', async () => {

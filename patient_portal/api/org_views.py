@@ -99,11 +99,11 @@ from patient_portal.models import Identity, PatientUser
 from omop_core.models import Person, PatientRecord
 from .permissions import (
     IsStaffPermission, IsStaffOrOrgAdmin, IsStaffOrAccessAdmin,
-    OrgAdminTokenScopePermission,
+    OrgAdminTokenScopePermission, is_interactive_session, is_machine_request,
 )
 from .serializers import (
     OrganizationSerializer, OrgTrustSerializer,
-    OrgInvitationSerializer, GroupAccessSerializer,
+    OrgInvitationSerializer, GroupAccessSerializer, GroupAccessV1Serializer,
 )
 
 
@@ -711,10 +711,12 @@ class OrgAccessListView(APIView):
             return [IsStaffOrAccessAdmin(), OrgAdminTokenScopePermission()]
         return [IsStaffOrAccessAdmin()]
 
+    def _grants(self, org):
+        return GroupAccess.objects.filter(org=org).select_related('identity', 'org').order_by('id')
+
     def get(self, request, slug):
         org = _get_org(slug)
-        grants = GroupAccess.objects.filter(org=org).select_related('identity').order_by('id')
-        return Response(GroupAccessSerializer(grants, many=True).data)
+        return Response(GroupAccessSerializer(self._grants(org), many=True).data)
 
     def post(self, request, slug):
         """Add a second role for an account that already holds a grant here.
@@ -766,6 +768,29 @@ class OrgAccessListView(APIView):
         grant = _grant_org_access(held[0].identity, org, role, request.user,
                                   redirect_url=normalized_redirect_url)
         return Response(GroupAccessSerializer(grant).data, status=status.HTTP_201_CREATED)
+
+
+class OrgAccessListV1View(OrgAccessListView):
+    """The access grants on /api/v1/, where a patient grant names its record.
+
+    Each ``patient`` grant carries ``person_id``: the record the account's
+    sign-in link names, when the reader can open it (#2838), so the page can
+    link the Patient role to the record. Null for every other role, for a
+    patient with no linked record, for a record the reader cannot open, and
+    for any reader that is not a signed-in person. The legacy registration
+    keeps the frozen shape.
+    """
+
+    def get(self, request, slug):
+        from omop_core.services.account_roles import patient_record_links
+        org = _get_org(slug)
+        grants = list(self._grants(org))
+        links = {}
+        if is_interactive_session(request) and not is_machine_request(request):
+            links = patient_record_links(request.user, grants)
+        return Response(GroupAccessV1Serializer(
+            grants, many=True, context={'patient_record_links': links},
+        ).data)
 
 
 class OrgAccessDetailView(APIView):

@@ -5,6 +5,8 @@ import SelectControl from '../controls/SelectControl';
 import Section from '../Section';
 import FlipiAssessment from '../FlipiAssessment';
 import GelfAssessment from '../GelfAssessment';
+import { MarkedControl } from '../ProvisionalBadge';
+import { DiseaseProfileContext } from '../DiseaseProfile';
 import {
   STAGE_OPTIONS, HISTOLOGIC_TYPE_OPTIONS,
   MENOPAUSAL_OPTIONS, TUMOR_STAGE_OPTIONS, NODES_STAGE_OPTIONS,
@@ -20,7 +22,22 @@ import {
 interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
+  /** The hand-authored section to render: the one for the record's Disease Category. */
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
+  /** The record's Disease Category and its name. With them, a field the category
+   *  does not own renders read-only and marked, or not at all when it is empty (#2332). */
+  category?: string;
+  categoryLabel?: string;
+  /** Every cancer the record has, when it has more than one (#2182): each draws its own
+   *  section under its own name. Fewer than two is the single `diseaseType` above. */
+  categories?: DiseaseCategoryView[];
+}
+
+export interface DiseaseCategoryView {
+  code: string;
+  label: string;
+  /** The hand-authored section its extension has, `other` when it has none. */
+  diseaseType: Props['diseaseType'];
 }
 
 const PRECISION_OPTIONS = [
@@ -66,7 +83,7 @@ function DatePrecisionPicker({
   );
 }
 
-function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>) {
+function BreastCancerSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -161,9 +178,17 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Ann Arbor Stage" name="stage" descriptor={descriptors.stage} type="select" value={formData?.stage} options={STAGE_OPTIONS} onChange={onChange} />
           <ClinicalField label="Tumor Grade" name="tumor_grade" descriptor={descriptors.tumor_grade} type="select" value={formData?.tumor_grade} options={FL_TUMOR_GRADE_OPTIONS} onChange={onChange} vocabSource={flGradeSource} />
-          <div className="sm:col-span-2"><GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} /></div>
           <div className="sm:col-span-2">
-            <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
+            <MarkedControl name="gelf_criteria_options" label="GELF criteria">
+              <GelfAssessment value={formData?.gelf_criteria_options} descriptor={descriptors.gelf_criteria_options} onChange={onChange} />
+            </MarkedControl>
+          </div>
+          <div className="sm:col-span-2">
+            {/* The score is what the control shows while the factor checklist is empty. The
+                checklist (flipi_score_options) is not a column that holds a proposal. */}
+            <MarkedControl name="flipi_score" via="the risk factors below">
+              <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
+            </MarkedControl>
           </div>
           <ClinicalField label="Bulky Disease" name="bulky_disease" descriptor={descriptors.bulky_disease} type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
           <ClinicalField label="Fever" name="b_symptom_fever" descriptor={descriptors.b_symptom_fever} type="select" value={formData?.b_symptom_fever} options={YES_NO_OPTIONS} onChange={onChange} />
@@ -366,7 +391,7 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
   );
 }
 
-export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
+function DiseaseSections({ formData, onChange, diseaseType, category, categoryLabel }: Props) {
   const diseaseSection = (() => {
     switch (diseaseType) {
       case 'breast':
@@ -384,10 +409,39 @@ export default function DiseaseTab({ formData, onChange, diseaseType }: Props) {
     }
   })();
 
-  return (
+  const sections = (
     <>
       {diseaseSection}
       {diseaseType === 'breast' && <StagingBiomarkersSection formData={formData} onChange={onChange} />}
+    </>
+  );
+  if (category === undefined) return sections;
+  return (
+    <DiseaseProfileContext.Provider value={{ category, label: categoryLabel || category }}>
+      {sections}
+    </DiseaseProfileContext.Provider>
+  );
+}
+
+export default function DiseaseTab(props: Props) {
+  const { categories, formData, onChange } = props;
+  if (!categories || categories.length < 2) return <DiseaseSections {...props} />;
+  return (
+    <>
+      {categories.map((c) => (
+        <section key={c.code} data-testid={`disease-${c.code}`} aria-label={c.label}
+          className="mt-8 border-t border-portal-border pt-8 first:mt-0 first:border-0 first:pt-0">
+          <h2 className="mb-4 text-xl font-semibold text-portal-text-primary">{c.label}</h2>
+          {c.diseaseType === 'other' ? (
+            <p className="text-sm text-portal-text-secondary">
+              The fields added for {c.label} are listed under Additional fields below.
+            </p>
+          ) : (
+            <DiseaseSections formData={formData} onChange={onChange} diseaseType={c.diseaseType}
+              category={c.code} categoryLabel={c.label} />
+          )}
+        </section>
+      ))}
     </>
   );
 }

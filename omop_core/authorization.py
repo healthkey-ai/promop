@@ -87,13 +87,71 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
     ).exists() or _administers_patient(actor_identity, target_person_id)
 
 
+def accessible_person_ids(actor_identity, person_ids) -> set:
+    """The subset of ``person_ids`` the actor may read.
+
+    ``can_access_patient`` for many patients at once, in a fixed number of
+    queries: a list that offers a link to each record it names must not ask
+    once per row (#2838). The paths are the same three, and
+    ``tests/test_account_roles.py`` holds the two to one answer: change one
+    and change the other.
+    """
+    from patient_portal.models import PatientUser
+
+    from .models import PatientGroupMembership, PatientRecord
+    from .services.access import get_admin_orgs
+
+    wanted = {person_id for person_id in person_ids if person_id is not None}
+    if actor_identity is None or not wanted:
+        return set()
+    if getattr(actor_identity, 'is_staff', False):
+        return wanted
+
+    # 1. Self-access, and 2. a verified personal representative.
+    found = set(PatientUser.objects.filter(
+        identity=actor_identity, person_id__in=wanted,
+    ).values_list('person_id', flat=True))
+    found.update(PersonalRepresentative.objects.filter(
+        representative=actor_identity, person_id__in=wanted,
+        verification_status='VERIFIED',
+    ).values_list('person_id', flat=True))
+
+    # 3. Professional access: the groups and organizations of the actor's
+    # active curation grants, and the organizations it administers.
+    group_ids, org_ids = set(), set()
+    for group_id, org_id in GroupAccess.objects.filter(
+        identity=actor_identity, role__in=_READ_ROLES,
+    ).filter(
+        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now()),
+    ).values_list('group_id', 'org_id'):
+        group_ids.add(group_id)
+        org_ids.add(org_id)
+    group_ids.discard(None)
+    org_ids.discard(None)
+    org_ids.update(get_admin_orgs(actor_identity).values_list('id', flat=True))
+    if group_ids:
+        found.update(PatientGroupMembership.objects.filter(
+            group_id__in=group_ids, person_id__in=wanted,
+        ).values_list('person_id', flat=True))
+    if org_ids:
+        found.update(PatientRecord.objects.filter(
+            organization_id__in=org_ids, person_id__in=wanted,
+        ).values_list('person_id', flat=True))
+    return found
+
+
 def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """Return True if the actor may write (create/update/delete) patient data.
 
     Doctors and org_admins, including scoped trust admins, may write; since
     #2416 that is the same set that may read, an analyst holding neither.
-    Self-access and personal representatives can always write their own data.
+    Self-access and personal representatives write the record on the member's
+    behalf, so they may not while the permission it depends on is withdrawn
+    (``consent.record_permitted``): one gate for every endpoint that asks
+    this. Staff and professionals act on the care relationship, not on that
+    permission.
     """
+    from patient_portal.consent import record_permitted
     from patient_portal.models import PatientUser
 
     # No actor (e.g. a userless OAuth client_credentials token) may write.
@@ -106,7 +164,7 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
     # Patients can write their own record
     try:
         if actor_identity.patient_user.person_id == target_person_id:
-            return True
+            return record_permitted(target_person_id)
     except PatientUser.DoesNotExist:
         pass
 
@@ -116,9 +174,20 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
         person_id=target_person_id,
         verification_status='VERIFIED',
     ).exists():
-        return True
+        return record_permitted(target_person_id)
 
     # Professional access: only doctor / org_admin roles may write
+    return has_professional_write(actor_identity, target_person_id)
+
+
+def has_professional_write(actor_identity, target_person_id: int) -> bool:
+    """Whether the actor writes this patient *as a professional*: a doctor or org_admin
+    grant that reaches them, or an admin of their organization (a trust included).
+
+    The third path of ``can_write_patient``, on its own: a caller that has already
+    excluded the account's own and its represented records (one that must not treat
+    them as the professional's) asks only this.
+    """
     return _professional_grants(
         actor_identity, target_person_id, _WRITE_ROLES,
     ).exists() or _administers_patient(actor_identity, target_person_id)

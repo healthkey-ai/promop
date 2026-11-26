@@ -472,6 +472,7 @@ def test_all_three_concept_fks_are_reresolved_by_code():
         source_concept=source_c, target_concept=target,
         suggested_target_concept=suggested,
         suggestion_outcome='overridden', suggestion_model_version='v0.2',
+        suggestion_fallback=True,
     )
     payload = read_payload('default', tables=('code_mappings',))
     _wipe_code_mappings()
@@ -491,6 +492,8 @@ def test_all_three_concept_fks_are_reresolved_by_code():
     assert stats.warnings == []
     assert row.suggestion_outcome == 'overridden'
     assert row.suggestion_model_version == 'v0.2'
+    # The mark that keeps this outcome out of the scores travels with it (#2743).
+    assert row.suggestion_fallback is True
 
 
 def test_unresolvable_concept_is_nulled_not_carried_as_a_stale_id():

@@ -18,9 +18,14 @@ type identifiers; Garmin exports FIT message/field pairs. Both are translated to
 Apple export.zip ──► parse_apple_health_export ──┐
                      (_APPLE_TYPE_MAP)           │
                                                  ├──► WearableSample ──► one concept ──► Measurement
-Garmin .fit ────────► parse_garmin_fit ──────────┘   (metric_key,       (LOINC or       or Observation
-                     (FIT message handlers)           date, value)       HK-Wearable)    (by domain_id)
+Garmin .fit ────────► parse_garmin_fit ──────────┤   (metric_key,       (LOINC or       or Observation
+                     (FIT message handlers)      │    date, value)       HK-Wearable)    (by domain_id)
+Garmin Connect API ─► fetch_daily_samples ───────┘
+                     (daily summaries)
 ```
+
+The third input is not a third device: it is Garmin again, read through the Garmin Connect
+Personal API instead of from a file. See [Garmin Connect sync](#garmin-connect-sync).
 
 `WearableSample` (`omop_core/services/wearable_parsers.py:18`) is the normalization contract —
 `(metric_key, date, value)`, nothing else. The consequence is that **a metric is stored
@@ -455,6 +460,414 @@ starts sending HealthKit, Health Connect or HL7 PHR codes finds a curated mappin
 
 ---
 
+## Oura Ring export
+
+Oura's cloud API is OAuth-gated and not built here. What is built is the
+export a member requests from Oura's Membership Hub (Export data; Oura says it
+can take up to ten days): a zip of CSV files that follows the Oura API V2 data
+models, durations in seconds (#2889). It is a file upload, so it sits with the
+Garmin and Apple Health uploads, in its own **Oura Ring** section of the
+Wearables tab directly below Garmin (`OuraUpload.tsx`), with its own collapsed
+uploads list. The section has its own button because a `.zip` on the top
+Upload button and drop zone is read as Apple Health.
+
+`POST /api/v1/patient-records/upload-wearable/` takes `device_type=oura` and a
+`.zip` or a single `.csv`; `parse_oura_export` (`oura_parser.py`) returns the
+same `WearableSample`s as the other parsers, and everything after that is the
+shared writer: the device's own code (the metric key behind `oura_`, so a bare
+`steps` stays Garmin's) under the `Oura` vocabulary, the patient's inventory entry, and the resolver.
+
+| File (any folder, any case, `_` ignored) | Columns | Metric |
+|---|---|---|
+| `dailyactivity` | `steps` | `steps` |
+| | `high_activity_time` + `medium_activity_time` (s) | `active_minutes` |
+| | `active_calories` | `active_energy` |
+| `sleepmodel` | `total_sleep_duration` (s), the day's sessions added | `sleep_duration` |
+| | `average_hrv`, of the longest session | `hrv_rmssd` |
+| | `lowest_heart_rate`, of the longest session | `resting_hr` |
+| | `average_breath`, of the longest session | `respiratory_rate` |
+| `dailyspo2` | `spo2_percentage`, a number or its `average` | `spo2` |
+| `vo2max` | `vo2_max` | `vo2_max` |
+
+- Oura's HRV is RMSSD and is stored as `hrv_rmssd`, never `hrv_sdnn`
+  ([Gap G](#gap-g--hrv-conflated-sdnn-with-rmssd--fixed-438)).
+- `deleted` and `rest` sleep sessions are skipped; Oura writes 0 where it has
+  no figure, so a 0 HRV, heart rate or breathing rate is not stored.
+- `equivalent_walking_distance` is an estimate from activity, not a distance
+  walked, so it is not stored as `distance`. Scores, temperature, stress and
+  the heart-rate series are not read.
+- **Not verified against a real export.** The names are Oura's documented API
+  V2 ones; a file or column that is absent is skipped, never guessed, and the
+  separator (`;` or `,`) is detected per file.
+- **Mappings.** `seed_wearable_device_mappings` seeds nine `Oura` rows at the
+  concepts Garmin's use, **proposed** (`origin_system` `hk-wearables-oura`):
+  an Oura reading is provisional or unresolved until a curator approves the
+  mapping. `Oura` is one of `WEARABLE_DEVICE_VOCABULARIES`, so the device-code
+  rules under [Row shape written today](#row-shape-written-today) hold for it,
+  and the Code Mapping Wearables tab lists its rows.
+- Zip limits: 200 files, 50 MB per CSV, 150 MB in all uncompressed, checked
+  before anything is read.
+- An Oura day is a total that Oura revises, so the upload is written with
+  `replace_daily=True` (a later export replaces the days an earlier one wrote,
+  as a Garmin sync does). A day with no steps, activity or calories is not
+  stored; a day repeated in a file is the later row; a plain `sleep` file is
+  read only when there is no `sleepmodel`.
+
+## Garmin Connect sync
+
+A Garmin patient can sync from the Wearables tab instead of downloading `.fit` files (#2794).
+Garmin lets any Garmin Connect user create a read-only **Personal API key** for their own account
+(Garmin Connect on the web: Settings, Account, Personal API Token) and publishes a Python client,
+`garmin-connect-personal-api-python`. The patient pastes the key, picks 7, 30 or 90 days, and the
+server reads one summary per day.
+
+```
+POST /api/v1/patient-records/sync-garmin/
+     {"api_key": "...", "remember": true, "days": 30, "end_date": "2026-11-22", "person_id": 16813}
+  200 {"samples_created": 210, "duplicates_skipped": 30, "replaced": 12,
+       "unmapped_samples": 0, "unmapped_metrics": [],
+       "start_date": "2026-10-24", "end_date": "2026-11-22", "datasets_failed": [],
+       "key_saved": true}
+```
+
+Code: `omop_core/services/garmin_connect.py` reads Garmin and returns `WearableSample`s;
+`PatientRecordViewSet.sync_garmin` is the endpoint; `_store_wearable_samples` is the writer it
+shares with `upload_wearable`, so concepts, artifact bounds, domain routing, the type concept and
+the upload history are the file upload's own. The sync is a `WearableUpload` row with
+`device_type` `garmin` and a filename of `Garmin Connect sync <start> to <end>`, listed and
+deletable like a file.
+
+- **Who.** The person, signed in (a session or a partner token, `is_interactive_session`), with
+  an account linked to a patient record that is not switched off. A service credential is
+  refused, and so is an OAuth token the patient delegated to an application, which could
+  otherwise write to their record with a key of its own. `GarminSyncThrottle` allows 20
+  attempts an hour per user.
+- **Whose record.** The rows go to the caller's own record. The tab therefore shows its Garmin
+  section (this sync under "Sync past days", beneath the linked account's "Automatic updates", #2832)
+  only to a person on their own record (`canSyncOwnDevice`: patient mode, or a provider-console
+  page whose person is the one the account's patient link names, `roles.isOwnRecord`, #2816, so
+  an org admin who is also a patient gets it on their own page; a read-only embed and a
+  clinician on a patient's page get none), and sends the `person_id` the page is
+  showing: the server answers 403 when that is not the caller's own, so a sync started from
+  someone else's page is refused and not filed quietly under the caller.
+  The file upload follows the same rule (#2819): the Upload button, the drop zone, the upload
+  history and its deletes are offered only on the person's own record (`ownRecord`; the
+  embedded patient page passes it, where the host does not set `federated`, which hides the
+  tab), the history is not read anywhere else, and
+  `upload-wearable` refuses a `person_id` that is not the caller's own with a 403. On somebody
+  else's record the tab shows the wearable fields and says the patient adds the data.
+- **The key is saved for the next sync, encrypted, where the patient lets it be (#2834).** Once
+  Garmin has accepted a key the server keeps it under `GARMIN_TOKEN_KEY` (the Fernet key the
+  linked account's tokens use, which is in no database) when the request says `remember: true`,
+  which the tab sends while "Save this key for next time" is ticked. The default is false, so a
+  page loaded before this existed, which says the key is not stored, stays right. A later sync
+  then sends no key and the saved one is used, by the account that saved it and no other. No
+  endpoint returns it: `GET /api/v1/patient-records/garmin-key/` says only
+  `{can_save, saved, saved_at, last_used_at}`, and `DELETE` there ("Remove saved key") deletes it.
+  It is also removed when Garmin answers 401 to a sync that used it, and with the person or their
+  record. A key that cannot be decrypted reads as not saved and is left in place. Every sync
+  answer carries `key_saved`, failures included, so the tab knows where the key stands. A
+  deployment with no `GARMIN_TOKEN_KEY` saves nothing: the key is then used for the one sync and
+  dropped, as it was before. Nothing syncs on a schedule; a saved key is read only by a sync its
+  patient starts.
+- **The key is in no log line, error message or queued task.** That is why the sync runs inside the
+  request and not on a worker, where the key would sit in the broker. Garmin's own
+  `PersonalApiAuthenticator` is not used, because it caches the bearer token in a plaintext file
+  with no way to turn that off; `_exchange_key` makes the same request and holds the token in
+  memory. Garmin's error text is never relayed: a failure is reported by status alone. The key
+  goes only to an `https` base URL, and the token request follows no redirect. In the browser
+  the field is a text input drawn as dots, not a password field, so no password manager offers
+  to fill or save it, and it is emptied when a sync succeeds.
+- **Bounded, because it is in the request.** At most 90 days (`MAX_SYNC_DAYS`). No call is
+  started after 15 seconds (`SYNC_BUDGET_SECONDS`), half of gunicorn's 30, because the write and
+  the record's re-derivation come after; each call has 3 seconds to connect and 6 per read. It
+  is a budget checked between calls, not a hard stop. `end_date` defaults to yesterday, since
+  today's summary is still filling in; the tab sends the browser's own yesterday, which the
+  server's clock cannot know.
+- **What ends a sync, and what does not.** Nothing is written when the sync ends early. A key
+  Garmin refuses is a 400 with fixed wording and a rate limit a 429. Garmin unreachable, erring
+  or slow is a 424, not a 5xx: it is the patient's to retry, and this deployment reports its own
+  5xx responses as errors. An answer the reader cannot parse is a 502, because that one means
+  Garmin changed. The daily summaries are required. HRV, sleep and VO2 max are read after them;
+  one that fails, is refused (a 403: the account lacks it), or runs out of time is named in
+  `datasets_failed` and the rest is kept.
+- **Ranged calls go in 28-day chunks**, the shortest limit the API documents (steps and stress;
+  sleep allows 31, daily summaries a year), newest first, so the days lost to the budget are the
+  oldest.
+
+| Metric key | Personal API field |
+|---|---|
+| `steps` | daily summary `movement.steps.value` |
+| `distance` | daily summary `movement.steps.distanceInMeters`, stored in km |
+| `active_minutes` | daily summary `intensityMinutes.moderate + vigorous` |
+| `active_energy` | daily summary `calories.burnedActive` |
+| `basal_energy` | daily summary `calories.burnedResting` |
+| `resting_hr` | daily summary `heartRate.restingValue` |
+| `respiratory_rate` | daily summary `respiration.avgValue` |
+| `spo2` | daily summary `pulseOx.avgValue` |
+| `hrv_rmssd` | HRV daily summary `lastNightAvg` (Garmin's overnight HRV is RMSSD, Gap G) |
+| `sleep_duration` | daily sleep summary `sleepTimeSeconds`, stored in hours; naps are apart |
+| `vo2_max` | daily VO2 max `generic.vo2MaxPreciseValue`, else `vo2MaxValue`, else cycling |
+
+A day whose summary says `includesWellnessData: false` is skipped whole: a day the watch recorded
+no all-day data for is not a day of zero steps. Floors climbed and weight are in the API too, but
+have no approved `Garmin` mapping, so they wait on Gap A.
+
+### The upload history names the rows
+
+Each `sample_summary` entry written since #2794 carries `row_id` and `row_table`: the row that
+upload wrote for the sample, or a null `row_id` when it wrote none (a duplicate, an artifact, an
+unmapped metric). A sync lists only the samples it wrote a row for, because it re-reads the same
+days every time and listing what was already stored would grow the history by the whole range on
+each sync. Entries from before have neither key.
+
+- **Deleting an upload** removes the rows its entries name and no others. Syncs overlap, and a
+  value an upload only found already stored belongs to the upload that wrote it. An entry
+  without `row_id` is matched by concept, date and value, as it always was. The delete is one
+  transaction and one derivation.
+- The history row is written in the same transaction as the rows, for the file upload too.
+
+### A day's total replaces what Garmin uploads wrote for the day
+
+The derivation sums steps, active minutes and sleep over a day's rows, because a day reaches the
+file upload as several `.fit` files. The API's value is already the day's total, so written
+beside those rows it would double the day. The sync therefore replaces them
+(`replace_daily=True`), on evidence, since a row records no device (#442):
+
+- A stored row is **Garmin's** when a `garmin` upload's history names it (`row_id`). For
+  history from before rows were named, it is Garmin's when it carries the wearable type concept
+  and its `(metric, date, value)` is listed by a `garmin` upload and by no other device's, and
+  no other device's history names the row.
+- For each incoming value, one stored row that already says the same is kept (counted in
+  `duplicates_skipped`); Garmin's other rows for that metric and day are deleted (counted in
+  `replaced`); the value is inserted when no row says it.
+- Nothing else is touched: an Apple upload's row, a row another ingest path wrote, a row no
+  upload history accounts for, a row marked entered in error, or a value both devices recorded.
+
+So a later sync also corrects an earlier one made before the watch had sent the whole day. The
+file upload still stacks. The write holds a lock on the patient's `person` row
+(`FOR NO KEY UPDATE`) from before it reads what is stored, so two syncs at once cannot both plan
+against the old rows, and it asks again under that lock whether the record is switched off. The
+history is read unnested in SQL, for the days being written only.
+
+**Known limits.**
+
+- A `.fit` file uploaded for a day *after* that day was synced stacks a partial on the total
+  again, until the next sync removes it. Preventing that needs the device on the row (#442).
+- Deleting a sync does not bring back the rows it replaced.
+- The record is re-derived inside the request, as for a file upload. For a patient whose
+  derivation is slow the request can outlive gunicorn's 30 seconds after the rows are written;
+  the rows and their history are then in place and the next derivation catches the record up.
+- A sync holds a web worker while it reads Garmin, and nothing caps how many run at once.
+- Nothing ties a key to the patient: a sync with somebody else's key files their data, as an
+  upload of somebody else's `.fit` file does.
+
+## Garmin account by OAuth
+
+The sync above pulls with a key the patient pastes. A deployment that holds a Garmin Connect
+Developer Program app offers a second way (#2802): the patient approves the app once on Garmin's
+consent page, and Garmin then **pushes** their data to this server whenever their watch syncs with
+Garmin Connect. The Starter tier of the program is push only, so there is no on-demand read and no
+history: data starts with the first sync after connecting.
+
+```
+Wearables tab ── POST garmin/oauth/start/ ──► Garmin consent page
+                                                   │ (patient approves)
+record page ◄── /?garmin=connected ◄── GET garmin/oauth/callback/?code&state
+                                                   │ code → tokens, user id, permissions
+                                                   ▼
+                                           GarminConnection (per patient)
+
+watch ─► Garmin Connect ─► POST garmin/webhooks/<secret>/ ─► read_push ─► the shared writer
+                           {"dailies":[{userId, ...}], ...}   by userId     (replace_daily)
+```
+
+### Setting it up
+
+| Variable | What |
+|---|---|
+| `GARMIN_CLIENT_ID`, `GARMIN_CLIENT_SECRET` | the app's consumer key and secret from the developer portal |
+| `GARMIN_WEBHOOK_SECRET` | a random string of at least 32 characters: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `GARMIN_TOKEN_KEY` | the key patients' Garmin tokens, and a saved Personal API key (#2834), are stored under: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+
+In the developer portal, register the redirect URL `<APP_BASE_URL>/api/v1/garmin/oauth/callback/`
+and, for each push type (Dailies, Sleeps, HRV, Pulse Ox, Respiration, User Metrics,
+Deregistrations, User Permissions), the URL
+`<APP_BASE_URL>/api/v1/garmin/webhooks/<GARMIN_WEBHOOK_SECRET>/`, with delivery set to push. The
+Wearables tab's Garmin section shows "Automatic updates" (Connect Garmin) only when all four
+variables are set; without them it holds the key sync, "Sync past days", alone (#2832). A webhook secret shorter
+than 32 characters counts as unset: the URL is the webhook's only credential.
+
+### What a push becomes
+
+| Push type | Field | Metric key | Note |
+|---|---|---|---|
+| `dailies` | `steps` | `steps` | |
+| `dailies` | `distanceInMeters` | `distance` | stored in km |
+| `dailies` | `moderateIntensityDurationInSeconds` + `vigorousIntensityDurationInSeconds` | `active_minutes` | minutes |
+| `dailies` | `activeKilocalories` | `active_energy` | |
+| `dailies` | `bmrKilocalories` | `basal_energy` | |
+| `dailies` | `restingHeartRateInBeatsPerMinute` | `resting_hr` | |
+| `sleeps` | deep + light + REM seconds, else `durationInSeconds` | `sleep_duration` | hours |
+| `hrv` | `lastNightAvg` | `hrv_rmssd` | Garmin's overnight HRV is RMSSD (#438) |
+| `pulseox` | `timeOffsetSpo2Values` | `spo2` | the day's mean, see below; on-demand readings left out |
+| `allDayRespiration` | `timeOffsetEpochToBreaths` | `respiratory_rate` | the day's mean, see below |
+| `userMetrics` | `vo2Max` | `vo2_max` | |
+
+An entry's day is its `calendarDate`, else the local day its `startTimeInSeconds` falls on; a day
+more than a year old or after tomorrow is dropped. Garmin sends a day's summary again as the day
+goes on; each one replaces the last through the same
+[replace rule](#a-days-total-replaces-what-garmin-uploads-wrote-for-the-day) the sync uses. A daily
+summary with no steps yet (the first sync after midnight) stores no steps, distance, active minutes
+or active energy: it is not a day of zero movement. Other push types are answered and ignored.
+
+Pulse ox and respiration arrive as readings in several summaries across a day, over several pushes,
+so one push is never the day's average. Each summary's sum and count are kept on the connection for
+14 days, by Garmin's `summaryId`, and the stored value is the mean of every reading held for the
+day; a summary sent again, grown, replaces its own earlier totals.
+
+A month's pushes fold into one row of the upload history, "Garmin Connect push <YYYY-MM>", which
+lists each metric and day once with the value now stored. Deleting it removes that month's pushed
+rows.
+
+These field names are Garmin's published Health API names. The full specification sits behind the
+developer portal, so check the reader against the portal's sample pushes before relying on a type.
+
+### Limits
+
+- A push carries no signature. The webhook answers only at its secret path and routes by Garmin
+  user id to the patient connected as that user; entries for anyone else are dropped. The secret is
+  kept out of the audit trail and Sentry, but the platform's access log records request paths:
+  treat that log as secret.
+- Connecting finishes only in the browser that started it, signed in to this site. A patient signed
+  in through a partner host cannot connect.
+- The tokens are stored encrypted under `GARMIN_TOKEN_KEY` and used only to tell Garmin when a
+  patient disconnects, or when their record is erased.
+- No history, no activities, body composition or stress. A `.fit` upload after a push for the same
+  day stacks beside it, as it does after a sync (#442).
+
+## Phone sync through the Open Wearables SDK
+
+Apple HealthKit and Google Health Connect can only be read by an app on the
+phone. [Open Wearables](https://github.com/the-momentum/open-wearables)
+publishes SDKs for that (Swift, Kotlin, Flutter, React Native), built to talk
+to an Open Wearables server. PRomop does not run one. It answers the SDK's own
+paths itself, so the SDK is configured with a PRomop deployment as its host
+and syncs straight into the patient's record (#2810).
+
+### For the people writing the app
+
+1. Add the Open Wearables SDK for your platform and configure it with the
+   deployment's address: `configure(host: "https://<deployment>")`. The SDK
+   appends `/api/v1/...` itself.
+2. Ask the patient for the connection code they see on the Wearables tab of
+   their record, and exchange it:
+
+   ```http
+   POST https://<deployment>/api/v1/invitation-code/redeem
+   Content-Type: application/json
+
+   {"code": "A3K9M7X2"}
+   ```
+
+   ```json
+   {"access_token": "...", "token_type": "bearer", "refresh_token": "owr_...",
+    "expires_in": 3600, "user_id": "0b0c9a2e-..."}
+   ```
+
+   The code works once and lasts 15 minutes. Any code that does not work is a
+   404.
+3. Sign the SDK in with what came back:
+   `signIn(userId: user_id, accessToken: access_token, refreshToken: refresh_token, apiKey: nil)`.
+   From there the SDK requests HealthKit or Health Connect permission, syncs,
+   and refreshes its access token on its own.
+4. Ask the SDK only for the types PRomop stores (the table below). Heart-rate
+   samples in particular are large and are not read; a page of them over
+   32 MB is refused, and the SDK sends a refused page again for ever.
+
+There is no API key and no app secret: the patient's code is the only
+credential an app is ever given, and its tokens can do one thing, add wearable
+values to that patient's record.
+
+### What the SDK calls
+
+| Call | Answer |
+|---|---|
+| `POST /api/v1/sdk/users/{user_id}/sync` with `Authorization: Bearer <access_token>` | 202 `{status_code, response, user_id, stored, repeated, late, unmapped, rejected, unrecognized}` |
+| `POST /api/v1/token/refresh` `{refresh_token}` | 200 `{access_token, token_type, expires_in}`; 401 when the token no longer works. The refresh token is not replaced |
+| `GET /api/v1/sdk/users/{user_id}/sync/status?provider=apple` | 200 `{provider, historicalSyncCompleted: null, syncedUntil, dataTypes: []}` |
+| `POST /api/v1/sdk/users/{user_id}/logs` | 202; the body is not read or kept |
+| `DELETE /api/v1/users/{user_id}/connections/{provider}` | 204; this phone is signed out |
+
+`provider` is `apple`, `health_connect` (or its older name `google`) or
+`samsung`. The Android SDK reads one store and picks Samsung Health on a
+Galaxy phone unless the app chooses Health Connect; both are read the same
+way here.
+
+### What a sync becomes
+
+The body is the SDK's `SyncRequest`: `data.records` (one per HealthKit or
+Health Connect sample), `data.sleep` (one per sleep stage) and
+`data.workouts`.
+
+| In the body | Becomes |
+|---|---|
+| a record whose `type` is a HealthKit identifier in `_APPLE_TYPE_MAP`, or one of the Health Connect names below | one reading for that metric on the record's local day |
+| `STEP_COUNT`, `RESTING_HEART_RATE`, `HEART_RATE_VARIABILITY` (RMSSD), `OXYGEN_SATURATION`, `RESPIRATORY_RATE`, `VO2_MAX`, `FLOORS_CLIMBED`, `ACTIVE_CALORIES_BURNED`, `WEIGHT` | steps, resting heart rate, HRV RMSSD, SpO2, respiratory rate, VO2 max, flights climbed, active energy, body mass |
+| `DISTANCE` (Android) | not stored: it is walking, running and cycling together |
+| a sleep stage `sleeping`, `light`, `deep` or `rem` | hours of sleep on the day the stage started; `in_bed` and `awake` are not sleep |
+| any other record type, and every workout | not stored; record types are listed back in `unrecognized` |
+
+Readings are added up per device, metric and day, each record once, and the
+day's value follows the `export.zip` parser's rule: the sum for steps, active
+minutes, sleep, distance, flights and the two energies, the mean for
+everything else. A record sent again changes nothing; a Health Connect record
+sent again at a new value moves the day by the difference. That value is
+written through the wearable writer, so the row, its unit and its place in the
+upload history are those of the [row shape](#row-shape-written-today) below.
+
+The iPhone SDK does not send Apple Exercise Time or Walking Heart Rate
+Average, so active minutes and walking heart rate come only from an
+`export.zip`.
+
+Units are converted for the metrics that arrive in more than one: distance
+(`m`, `km`, `mi` to km), walking speed (`m/s` to km/hr), step length (`m` to
+cm), energy (`Cal`, `kcal`, `kJ` to kcal), weight (`kg`, `g`, `lb` to kg),
+exercise time (`min`, `s`, `h` to min). A percentage sent as a fraction is
+multiplied by 100. Anything else is rejected and counted.
+
+### Beside the file uploads
+
+- For an averaged metric the sync's value for a day stands, and an
+  `export.zip` uploaded later skips that metric and day.
+- For a summed metric the larger figure for the day stands, whichever arrived
+  first: a phone's running total is partial until it has sent the whole day.
+- Another device's value for the same day is left alone.
+- Deleting a sync's row from the upload history removes those days for good;
+  the phone's later records for them are ignored until it is disconnected and
+  connected again.
+
+### Limits
+
+- Android records are stored from the first sync, unresolved or provisional
+  until the `HealthConnect` mappings are approved (#2835). A day already
+  stored is resolved by that approval, by Generate OMOP, or by the phone's
+  next record, not by the same records sent again. HRV (RMSSD) has no seeded
+  mapping: its first reading queues `HeartRateVariabilityRmssdRecord`.
+- A day's steps are every source's samples added up, as in the export parser,
+  so an iPhone and a Watch together can be counted twice (#2823).
+- Distance, walking speed and step length are converted to the stored unit
+  here and not by the export parser, so the two can differ for the same
+  records.
+- The general heart rate series is not read, so resting heart rate comes only
+  from the watch's own resting value.
+- A sleep stage is filed under the day it started on, as in the export
+  parser, so a night that begins before midnight is split.
+- The day a record belongs to is taken from the patient's browser time zone
+  when the record gives no offset; the zone is the one they first connected
+  in and does not follow them when they travel.
+- Not verified against a live phone.
+
 ## Derived values (not directly exported by either device)
 
 Two metrics are computed rather than read, and this is where the two adapters deliberately
@@ -501,30 +914,116 @@ a summary.
 
 ## Row shape written today
 
-Per `views.py:3746` (observation) and `:3759` (measurement):
+A reading comes in as a **source code**, as a hospital's result does (#2835).
+The importer (`_write_wearable_samples` in `patient_portal/api/views.py`, with
+`omop_core/services/wearable_rows.py`) files the row under the device's own
+code and records the code in the patient's source-code inventory; what the
+row's concept is, and whether it is accepted or provisional, is the mapping's
+to say, through the same resolver every other code goes through.
 
 | Column | Value | Notes |
 |---|---|---|
-| `person_id` | uploading patient's Person | resolved from `request.user` via `PatientUser` |
-| `measurement_concept_id` / `observation_concept_id` | concept via `_cc_by_vocab(vocab, code)` | skipped if unresolved, but **logged and counted** |
-| `measurement_date` / `observation_date` | sample date | date only; no `_datetime` — Gap D |
-| `*_type_concept_id` | 32865 *Patient self-report* | no fallback — missing concept returns HTTP 503 |
+| `person_id` | the patient's Person | |
+| `*_source_value` | the **device's code**: Garmin's metric key (`steps`), the HealthKit identifier, the Health Connect record type | cut to the 50-character column; the mapping and the inventory keep the whole code |
+| `measurement_concept_id` / `observation_concept_id` | the approved mapping's concept; else 0 until a mapping answers | a qualifying proposal's concept on a provisional row |
+| `confidence` | null on an accepted or unresolved row; the proposal's percent on a provisional one | a curated, unscored device proposal stands at `PROVISIONAL_CONFIDENCE_FLOOR` |
+| `measurement_date` / `observation_date` | sample date | date only; no `_datetime` (Gap D) |
+| `*_type_concept_id` | 32865 *Patient self-report* | no fallback: a missing concept returns HTTP 503 |
 | `value_as_number` | daily aggregate, rounded to 2dp | |
-| `*_source_value` | the concept code string | lets `_get_wearable_data` match rows whose concept FK is null |
-| `unit_source_value` | UCUM string from the table above | `unit_concept_id` **not set** — Gap B |
+| `unit_source_value` | UCUM string from the table above | `unit_concept_id` **not set** (Gap B) |
 
-Unresolvable concepts are reported rather than dropped silently: `upload_wearable` logs a WARNING
-at `views.py:3650` naming the affected metrics, and the HTTP response carries `unmapped_samples`
-and `unmapped_metrics` alongside `samples_created` and `duplicates_skipped`. A missing concept is
-therefore distinguishable from "the device exported no data for this metric" — previously the two
-were identical, and every local dev database silently discarded nine metrics while returning
-HTTP 200 with a success count.
+The table is the code's mapping's (`omop_table`), which follows its concept's
+domain; a code no mapping holds yet goes where its metric usually does
+(`default_table`).
 
-Dedup is `(metric_key, date, round(value, 2))` against existing rows (`views.py:3736`), reading
-whichever table the concept's domain routes it to, so re-uploading an overlapping export is safe.
-Rows carry `_skip_patient_record_refresh = True` and `refresh_patient_record(person)` is called
-once after the bulk insert. Each upload is recorded in `WearableUpload` for patient-visible
-history.
+### Reading the rows back
+
+The patient's OMOP tab lists Measurements and Observations by concept and the
+Source Codes tab opens a device code to its stored readings (#2863); both read
+`omop_core/services/omop_row_pages.py`, newest first. A wearable row stores
+only the day (Gap D below), so its "datetime" is shown as the date and marked
+"date only". Giving a daily total a time of day (the end of the day, say) would
+be a decision about what a sample means, and is not made here.
+
+### Tracing a 30-day value to its rows (#2887)
+
+Each 30-day value on the Wearables tab has a chart icon, and for a reader who
+has the OMOP tab a link to the rows behind it. `GET
+/api/v1/patient-records/<id>/wearable-metric/?field=<30-day field>`
+(`omop_core/services/wearable_metric_series.py`) returns the metric's daily
+values (the newest 365 days, oldest first, each with its row count and whether
+it is accepted or provisional), the 30-day window the stored aggregate
+covers (it ends at the record's `wearable_last_sync_at`, as the reader sees it),
+and, for staff and org admins only, the concept groups holding the rows.
+
+- **Same rows as the derivation.** A row is behind a metric when its concept's
+  code is the metric's wearable code, or, for a row whose concept is not any
+  wearable code, when its source value is; entered-in-error rows and readings
+  outside the metric's artifact bounds are left out. A day's value comes from
+  its accepted rows, which are what the stored aggregate is computed from; a
+  day with none takes its provisional rows' value and is marked provisional,
+  and provisional rows beside accepted ones are counted, not added
+  (`provisional_rows_excluded`). Not applied: the derivation's proof of a
+  measurement's unit against its source value, and its cleared-history rule; a
+  wearable's row is stored in the unit its importer wrote.
+- **Which days the aggregate counts.** Every day has `counted`: inside the
+  30-day window, not before the derivation's recency cutoff (it reads only the
+  last 90 days while any wearable reading is that recent; `recency_cutoff`),
+  and, when the window holds accepted readings, not a provisional-only day. The
+  chart draws a window day the aggregate does not count hollow and says why.
+  The axis is time, so a gap in syncing is a gap.
+- **The day's value is the derivation's:** a total for steps, active minutes,
+  sleep, distance, flights and energy; a mean for the rest; the day's lowest
+  reading for Min SpO2. `activity_trend_30d` charts the steps.
+- **Rows never leave through the chart.** Anyone who may read the record may
+  read the daily values; the groups, which name the OMOP tab's concept groups,
+  are returned only where `omop-rows/` would be.
+- **The link** switches the patient page to the OMOP tab and opens that group
+  (`omop-rows/` reads only that group's rows). When the rows are in several
+  groups the chart's list names each.
+
+Tests: `tests/test_wearable_metric_series.py`,
+`WearableMetricTools.test.tsx`, `PatientDetail.metricrows.test.tsx`,
+`PatientOmopTab.test.tsx`.
+
+### What a mapping makes of a row
+
+| The code's mapping | The row | 30-day metrics |
+|---|---|---|
+| approved (global, this device's vocabulary and code) | **accepted**: at the mapping's concept, no confidence | read as approved data |
+| proposed with a destination, `PROVISIONAL_DATA_ENABLED` on | **provisional**: at the proposal's concept, with its confidence | shown marked Provisional, only where no accepted reading decides the metric |
+| anything else: no mapping row, no destination, rejected, a ranker's score below the floor, a hospital-scoped mapping, the switch off | **unresolved**: concept 0, kept | not read |
+
+The mapping can change afterwards and the rows follow it by the resolver's own
+rules: approval re-points unresolved rows and makes provisional ones accepted;
+rejection sends provisional rows back to unresolved and keeps the readings;
+moving a mapping between measurement and observation relocates its rows. A
+patient's next import and Generate OMOP both resolve whatever is still
+waiting. See
+[AGENTS.md](../AGENTS.md#wearables--readings-come-in-as-source-codes) for the
+three rules that keep a device's code apart from a hospital's of the same
+spelling.
+
+The HTTP response carries `samples_created` and `duplicates_skipped`, plus,
+when above zero: `provisional_samples` (of the rows this upload stored, those a
+proposal gave a concept), `unresolved_samples` / `unresolved_metrics` (those
+still waiting for a mapping; the two are counted apart) and `settled_rows`
+(stored rows, this upload's or earlier ones', that a mapping settled during
+it). `unmapped_samples` / `unmapped_metrics` now mean only a metric the device
+has no code for, which is not stored.
+
+Dedup is `(metric_key, date, round(value, 2))` against the rows already filed
+under the code, and against rows at the code's concept (those written before
+rows carried their device code, and another device's reading of the same
+metric), so re-uploading an overlapping export is safe. Rows carry
+`_skip_patient_record_refresh = True` and `refresh_patient_record(person)` is
+called once after the bulk insert. Each upload is recorded in `WearableUpload`
+for patient-visible history.
+
+Rows written before #2835 carried their destination concept's code as the
+source value. Migration `0371` re-files the ones an upload's history names and
+writes their inventory entries; older ones stay as they are and are still read
+by concept.
 
 ---
 
@@ -726,13 +1225,18 @@ What a new vendor does touch:
 | `mappings.py` | Only if the vendor measures something the 18 canonical metrics don't cover |
 
 `WearableUpload.device_type` is `max_length=10`, which accommodates `fitbit`, `whoop`, and `oura`
-without a migration.
+without a migration. Oura's file export is the worked example of a fourth adapter:
+[Oura Ring export](#oura-ring-export).
 
 **Cloud-API vendors need a sync path, not an upload path.** Apple and Garmin arrive as file
 uploads; Fitbit, Whoop, and Oura are OAuth-gated REST APIs requiring token storage, refresh
 handling, and scheduled pulls. That work sits *above* the parser boundary and is shared across
 those vendors rather than duplicated per vendor — `upload_wearable`'s `request.FILES` handling is
 the wrong entry point for them, but everything from `WearableSample` onward is reused unchanged.
+[Garmin Connect sync](#garmin-connect-sync) is the first such path and shows the split: its own
+entry point (`sync_garmin`), the shared writer (`_store_wearable_samples`). It refreshes no token
+and pulls on no schedule: the patient's key is used when they press Sync, saved encrypted between
+syncs if they choose (#2834). A vendor that needs scheduled pulls still has that work to do.
 
 **Do not map a vendor field onto a concept it doesn't mean** to make a column look populated. The
 gait metrics (`walking_step_length`, `walking_double_support_pct`, `walking_speed`,
@@ -754,7 +1258,9 @@ it was caught.
    exists there; otherwise mint via `_hk()` under `HK-Wearable`.
 3. `wearable_parsers.py` — add the Apple `_APPLE_TYPE_MAP` entry and the Garmin FIT handler;
    add the key to the sum-vs-mean list at `:346` **and** `:507` if it is cumulative.
-4. `views.py` — add the `unit_map` entry in `upload_wearable`.
+4. `views.py` — add the `unit_map` entry in `_store_wearable_samples`, the writer
+   `upload_wearable` and `sync_garmin` share. If Garmin's Personal API reports the metric, read
+   it in `garmin_connect.py` too.
 5. `patient_record_service.py` — add the 30-day aggregation in `_get_wearable_data`, including the
    `_metric_daily` call, the `_within_window` call, and both `all_valid_days` unions.
 6. `models.py` + migration — add the `PatientRecord` column.

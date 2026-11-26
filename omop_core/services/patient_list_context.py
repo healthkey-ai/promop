@@ -8,7 +8,7 @@ from rest_framework.exceptions import ValidationError
 
 from omop_core.models import Measurement, Observation, PatientSourceCode, SourceCodeConceptMapping
 from omop_core.mapping.code_resolution import CLINICAL_TABLES
-from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, WEARABLE_DEVICE_VOCABULARIES
 from patient_portal.models import PatientUser
 
 
@@ -80,8 +80,12 @@ def annotate_unmapped_source_codes(queryset):
             rows.order_by().values('person_id').annotate(total=Count(source_column, distinct=True)).values('total'),
             output_field=IntegerField(),
         ), Value(0))
+    # A wearable import lists its own codes only (#2835): a person whose whole
+    # inventory is a device's has no ETL inventory, and is counted from the
+    # clinical tables like anyone else without one.
+    from_etl = inventory.exclude(source_vocabulary_id__in=WEARABLE_DEVICE_VOCABULARIES)
     return queryset.annotate(unmapped_source_code_count=Case(
-        When(Exists(inventory), then=inventory_count), default=fallback,
+        When(Exists(from_etl), then=inventory_count), default=fallback,
         output_field=IntegerField(),
     ))
 

@@ -1,5 +1,5 @@
 from .canonical_units import canonical_unit
-from django.urls import include, path
+from django.urls import include, path, re_path
 from .co_occurring import code_mapping_co_occurring
 from .loinc_axes import (
     code_mapping_axis_variant, code_mapping_axis_variant_suggest, code_mapping_loinc_axes,
@@ -7,6 +7,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
+from . import garmin_oauth, open_wearables
 from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
@@ -17,7 +18,7 @@ from .concept_to_code import (
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
 from .source_catalog import source_catalog
-from .source_system_facilities import source_system_facilities
+from .facility_browse import facility_browse
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -73,18 +74,21 @@ from .views import (
     custom_patient_field_list,
     field_synonyms, field_synonym_detail, field_synonyms_batch,
     field_choice_list, field_choice_detail, field_choice_codes,
+    field_choice_value_mappings, field_choice_value_mapping_decide,
+    field_choice_value_mapping_revisions, field_choice_value_mapping_targets,
+    field_choice_answer_coverage, field_choice_lookup, field_choice_lookup_answer,
     field_formula_list, field_formula_detail, field_formula_test,
 )
 from .org_views import (
     OrgListCreateView, OrgDetailView,
     OrgInviteView, OrgInvitationListView, OrgInvitationDetailView,
     OrgTrustListCreateView, OrgTrustDetailView,
-    OrgAccessListView, OrgAccessDetailView, OrgVocabularyUsageView,
+    OrgAccessListV1View, OrgAccessDetailView, OrgVocabularyUsageView,
     confirm_invitation, org_invitation_lookup, org_public_info, org_signup_directory,
     OrgPatientSignupView,
 )
 from .patient_invitations import (
-    PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
+    PatientCreateView, PatientInviteView, accept_patient_invitation, patient_invitation_lookup,
 )
 from .patient_signup import PatientSignupView
 from .audit_views import AuditEventViewSet
@@ -149,6 +153,7 @@ urlpatterns = [
          name='v1-resolve-run-status'),
     path('auth/test/', auth_test, name='v1-auth-test'),
     path('patients/signup/', PatientSignupView.as_view(), name='v1-patient-signup'),
+    path('patients/', PatientCreateView.as_view(), name='v1-patient-create'),
     path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
     path('patient-invitations/lookup/', patient_invitation_lookup, name='v1-patient-invitation-lookup'),
     path('patient-invitations/accept/', accept_patient_invitation, name='v1-patient-invitation-accept'),
@@ -184,7 +189,7 @@ urlpatterns = [
     path('orgs/<slug:slug>/invitations/<int:invitation_id>/', OrgInvitationDetailView.as_view(), name='v1-org-invitation-detail'),
     path('orgs/<slug:slug>/trusts/', OrgTrustListCreateView.as_view(), name='v1-org-trust-list'),
     path('orgs/<slug:slug>/trusts/<int:trust_id>/', OrgTrustDetailView.as_view(), name='v1-org-trust-detail'),
-    path('orgs/<slug:slug>/access/', OrgAccessListView.as_view(), name='v1-org-access-list'),
+    path('orgs/<slug:slug>/access/', OrgAccessListV1View.as_view(), name='v1-org-access-list'),
     path('orgs/<slug:slug>/access/<int:access_id>/', OrgAccessDetailView.as_view(), name='v1-org-access-detail'),
     path('orgs/<slug:slug>/vocabulary/', OrgVocabularyUsageView.as_view(), name='v1-org-vocabulary-usage'),
     path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),
@@ -216,7 +221,7 @@ urlpatterns = [
     path('code-mappings/suggest-runs/latest/', code_mapping_latest_suggest_run, name='v1-code-mapping-latest-suggest-run'),
     path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
     path('code-mappings/source-catalog/', source_catalog, name='v1-source-catalog'),
-    path('code-mappings/source-systems/', source_system_facilities, name='v1-source-system-facilities'),
+    path('code-mappings/facility-browse/', facility_browse, name='v1-facility-browse'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
     path('relevance/', disease_relevance_view, name='v1-disease-relevance'),
@@ -241,6 +246,31 @@ urlpatterns = [
          name='v1-mapping-vote-share-votes-export'),
     path('code-mappings/<int:mapping_id>/votes/', mapping_votes.code_mapping_votes,
          name='v1-code-mapping-votes'),
+    # A Garmin account linked by OAuth, and Garmin's push (#2802).
+    path('garmin/connection/', garmin_oauth.connection, name='v1-garmin-connection'),
+    path('garmin/oauth/start/', garmin_oauth.oauth_start, name='v1-garmin-oauth-start'),
+    # With or without the final slash: these two are called by Garmin with
+    # exactly the URL registered there, and the site's catch-all would answer
+    # the other spelling with the app's page.
+    re_path(r'^garmin/oauth/callback/?$', garmin_oauth.oauth_callback, name='v1-garmin-oauth-callback'),
+    re_path(r'^garmin/webhooks/(?P<secret>[^/]+)/?$', garmin_oauth.webhook, name='v1-garmin-webhook'),
+    # A phone app built on the Open Wearables SDK (#2810). The first two are
+    # the signed-in patient's. The rest are the paths the SDK itself calls
+    # under {host}/api/v1/, with no final slash, so both spellings answer: a
+    # POST cannot follow the redirect that would add one.
+    path('open-wearables/connection/', open_wearables.connection, name='v1-open-wearables-connection'),
+    path('open-wearables/invitation-code/', open_wearables.invitation_code,
+         name='v1-open-wearables-invitation-code'),
+    re_path(r'^invitation-code/redeem/?$', open_wearables.redeem, name='v1-open-wearables-redeem'),
+    re_path(r'^token/refresh/?$', open_wearables.refresh, name='v1-open-wearables-refresh'),
+    re_path(r'^sdk/users/(?P<user_id>[0-9a-fA-F-]{36})/sync/?$', open_wearables.sync,
+            name='v1-open-wearables-sync'),
+    re_path(r'^sdk/users/(?P<user_id>[0-9a-fA-F-]{36})/sync/status/?$', open_wearables.sync_status,
+            name='v1-open-wearables-sync-status'),
+    re_path(r'^sdk/users/(?P<user_id>[0-9a-fA-F-]{36})/logs/?$', open_wearables.logs,
+            name='v1-open-wearables-logs'),
+    re_path(r'^users/(?P<user_id>[0-9a-fA-F-]{36})/connections/(?P<provider>[A-Za-z_]{1,32})/?$',
+            open_wearables.disconnect, name='v1-open-wearables-disconnect'),
     path('public/mapping-votes/', mapping_votes.PublicVotePageView.as_view(),
          name='v1-public-mapping-vote-page'),
     path('public/mapping-votes/export/', mapping_votes.PublicVoteExportView.as_view(),
@@ -269,7 +299,18 @@ urlpatterns = [
     path('field-synonyms/batch/', field_synonyms_batch, name='v1-field-synonyms-batch'),
     path('field-choices/', field_choice_list, name='v1-field-choice-list'),
     path('field-choices/<int:pk>/', field_choice_detail, name='v1-field-choice-detail'),
+    path('field-choices/answer-coverage/', field_choice_answer_coverage, name='v1-field-choice-answer-coverage'),
+    path('field-choices/lookup/', field_choice_lookup, name='v1-field-choice-lookup'),
+    path('field-choices/lookup/answer/', field_choice_lookup_answer, name='v1-field-choice-lookup-answer'),
     path('field-choices/<int:choice_pk>/codes/', field_choice_codes, name='v1-field-choice-codes'),
+    path('field-choices/<int:choice_pk>/value-mappings/', field_choice_value_mappings,
+         name='v1-field-choice-value-mappings'),
+    path('field-choices/<int:choice_pk>/value-mappings/targets/', field_choice_value_mapping_targets,
+         name='v1-field-choice-value-mapping-targets'),
+    path('field-choices/<int:choice_pk>/value-mappings/<int:mapping_pk>/revisions/',
+         field_choice_value_mapping_revisions, name='v1-field-choice-value-mapping-revisions'),
+    path('field-choices/<int:choice_pk>/value-mappings/<int:mapping_pk>/<str:action>/',
+         field_choice_value_mapping_decide, name='v1-field-choice-value-mapping-decide'),
     path('field-formulas/', field_formula_list, name='v1-field-formula-list'),
     path('field-formulas/test/', field_formula_test, name='v1-field-formula-test'),
     path('field-formulas/<int:pk>/', field_formula_detail, name='v1-field-formula-detail'),

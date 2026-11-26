@@ -165,6 +165,23 @@ export interface Reference {
   wearable_source_systems?: WearableSourceSystem[];
   /** Whether the proposer may not approve their own proposal (#2726). */
   separate_approver?: boolean;
+  /**
+   * The Suggest auto-approval control (#1532): offered only when `allowed` (an account that
+   * may approve), prefilled with the curator's last choice (100 until they set one).
+   */
+  suggest_auto_approve?: {
+    allowed: boolean;
+    /** False under the inline dispatcher (no worker queue): runs there approve nothing. */
+    available: boolean;
+    unavailable_reason: string;
+    threshold: number;
+    /** The curator turned it off; `threshold` is kept for when they turn it on. */
+    off: boolean;
+    min: number;
+    max: number;
+    /** The most the Anthropic ranker can score; below every threshold, so it alone approves nothing. */
+    anthropic_max_percent?: number;
+  };
 }
 
 export interface WearableSourceSystem {
@@ -172,10 +189,20 @@ export interface WearableSourceSystem {
   label: string;
 }
 
-/** An approval queued the move of stored clinical rows; a job does it. */
+/**
+ * What an approval did to stored clinical rows. From a mapping tab the move of
+ * every patient's rows is queued for a job (`queued`). From a patient's page
+ * that patient's rows move in the request (`patient_id`, `rows_updated`) and
+ * every other patient waits for Generate OMOP (#2791). `held` means another
+ * update had the patient's rows locked, so none moved and they stay queued.
+ */
 export interface RepointResult {
   queued: boolean;
   from_concept_ids: number[];
+  patient_id?: number;
+  rows_updated?: number;
+  rows_collapsed?: number;
+  held?: boolean;
 }
 
 /** What to tell the curator after a save that queued a re-point, if anything. */
@@ -183,6 +210,24 @@ export function repointBanner(sourceCode: string, repoint: RepointResult | null)
   return repoint?.queued
     ? `${sourceCode}: saved. Patient records with this code are being updated to the new concept in the background.`
     : null;
+}
+
+/** What to tell the curator after an approval saved from a patient's page, if it was one. */
+export function patientRepointBanner(sourceCode: string, repoint: RepointResult | null): string | null {
+  if (!repoint || repoint.queued || repoint.patient_id == null) return null;
+  if (repoint.held) {
+    return `${sourceCode}: approved. Another update holds this patient's rows, so none were moved. `
+      + "Run Generate OMOP for this patient once it has finished.";
+  }
+  const moved = repoint.rows_updated ?? 0;
+  // Zero is also what a guard returns that held rows back (another code
+  // system, another hospital's rows), and a code that is only in the
+  // patient's inventory has no row yet: Generate OMOP handles both.
+  return moved === 0
+    ? `${sourceCode}: approved. None of this patient's stored rows were moved. `
+      + "Run Generate OMOP to create or resolve rows for this code."
+    : `${sourceCode}: approved. ${moved} of this patient's rows ${moved === 1 ? "was" : "were"} moved to the `
+      + "approved concept. Other patients are updated when Generate OMOP runs for them.";
 }
 
 export interface MappingForm {
@@ -459,6 +504,14 @@ export type SuggestRunProgress = {
   landed_in: Record<string, number>;
   error: string;
   ranking_model?: string;
+  /** The confidence at or above which this run approved what it wrote; null when it approved nothing (#1532). */
+  auto_approve_threshold?: number | null;
+  /** How many proposals the run approved as it wrote them. */
+  auto_approved?: number;
+  /** Approvals that failed unexpectedly and were left proposed. */
+  auto_approve_errors?: number;
+  /** What the run did about auto-approval: on (with a threshold), off, or disabled with a reason. */
+  auto_approve?: { state: "on" | "off" | "disabled"; threshold: number | null; reason: string };
 };
 
 /**

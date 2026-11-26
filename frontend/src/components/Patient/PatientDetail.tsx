@@ -3,9 +3,16 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLocation, useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
-import { ProvisionalContext } from "@/components/PatientInfo/ProvisionalContext";
-import { marksOf, withoutMarks } from "@/components/PatientInfo/provisional";
+import { fetchWritableFields, LIFECYCLE, useWritableFields, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { ProvisionalContext, type ProvisionalValue } from "@/components/PatientInfo/ProvisionalContext";
+import ConfirmProvisionalBanner from "@/components/PatientInfo/ConfirmProvisionalBanner";
+import {
+  ACTIONABLE_SKIPS, confirmableFields, confirmProvisional, humanize, shownValues, skipText, type ConfirmResult,
+} from "@/components/PatientInfo/provisionalConfirm";
+import {
+  addedMark, addedMarks, attestationBlockers, diseaseTypeOf, diseaseTypeOfCategory, marksOf, rejectedProposals,
+  withoutMarks,
+} from "@/components/PatientInfo/provisional";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -25,25 +32,31 @@ import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
+import type { OmopFocus } from "./omopRows";
 import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider, returnedTab } from "@/components/PatientInfo/fieldMappingLinks";
 import AddFieldLink from "@/components/PatientInfo/AddFieldLink";
 import { CustomPatientFields } from "@/components/PatientInfo/CustomPatientFields";
-import { addedFieldTabs, recordDiseaseCategory } from "@/utils/fieldScope";
-import { useAllDiseaseMappings } from "@/hooks/useDiseaseCategories";
+import { addedFieldTabs, fieldDiseases, recordDiseaseCategories, recordDiseaseCategory } from "@/utils/fieldScope";
+import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
+import { ADDED_FIELDS, addedFieldNames, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
+import { isOwnRecord } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
 function RecordConfirmation({
   validated,
   validationDate,
+  provisionalCount,
   onConfirm,
 }: {
   validated: boolean;
   validationDate: string | null;
+  /** Values on the page still marked Provisional that the patient can confirm by editing (#2761). */
+  provisionalCount: number;
   onConfirm: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -57,20 +70,58 @@ function RecordConfirmation({
     }
   };
 
+  // What a patient confirms is what the page shows, so a value still marked
+  // Provisional (it comes from a record nobody has checked) is not covered.
+  const pending = provisionalCount > 0
+    ? `${provisionalCount} ${provisionalCount === 1 ? 'value is' : 'values are'} marked Provisional`
+    : null;
+
   if (validated) {
     return (
       <div className="mb-6 flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 px-4 py-3">
         <ShieldCheck className="h-5 w-5 text-green-600" />
         <span className="text-sm text-green-800">
           Record confirmed{validationDate ? ` on ${validationDate}` : ''}
+          {pending && (
+            <span className="block text-amber-800" data-testid="record-confirmation-pending">
+              {pending} and not covered by that confirmation. Enter your own answer in
+              each one, then you can confirm again.
+            </span>
+          )}
         </span>
-        <button
-          onClick={handleConfirm}
-          disabled={confirming}
-          className="ml-auto text-sm text-green-700 underline hover:text-green-900 disabled:opacity-50"
-        >
-          Re-confirm
-        </button>
+        {!pending && (
+          <button
+            onClick={handleConfirm}
+            disabled={confirming}
+            className="ml-auto text-sm text-green-700 underline hover:text-green-900 disabled:opacity-50"
+          >
+            Re-confirm
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (pending) {
+    return (
+      <div
+        className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-5 py-4"
+        data-testid="record-confirmation-blocked"
+      >
+        <div className="flex items-start gap-3">
+          <ShieldCheck className="mt-0.5 h-5 w-5 text-amber-600" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-amber-900">
+              {pending} (not yet confirmed)
+            </p>
+            <p className="mt-1 text-sm text-amber-800">
+              Check each value marked Provisional and enter your own answer in its field:
+              retype a number or text, or pick an option (to keep the option shown, pick
+              another and then it again). If a value is wrong and you do not know the right one,
+              clear it to reject it. Confirm Record is available once none are marked.
+            </p>
+          </div>
+        </div>
       </div>
     );
   }
@@ -329,6 +380,7 @@ export default function PatientDetail({
   const params = useParams<{ personId: string }>();
   const personId = personIdOverride ?? params.personId;
   const navigate = useNavigate();
+  const writableFields = useWritableFields(personId);
 
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -345,13 +397,20 @@ export default function PatientDetail({
   const [patientName, setPatientName] = useState("");
   const [editedName, setEditedName] = useState("");
   const [chosenTab, setChosenTab] = useState(0);
+  const [sourceCodesOpened, setSourceCodesOpened] = useState(false);
+  // The group a 30-day wearable value pointed at, and the record it was for.
+  const [omopFocus, setOmopFocus] = useState<(OmopFocus & { personId: string }) | null>(null);
   // Coming back from Field Concept Mapping after Add field (#721): the tab
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
-  const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state));
+  // Coming back from Garmin's consent page (#2802) lands on the Wearables
+  // tab, where the outcome is shown.
+  const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state)
+    ?? (new URLSearchParams(location.search).has("garmin") ? "wearable" : null));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
-  const { categoryForDisease } = useAllDiseaseMappings();
+  const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();
+  const { categories: categoryObjects } = useCategoryObjects();
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
 
@@ -363,6 +422,9 @@ export default function PatientDetail({
   const saveSeqRef = useRef(0);
   const saveRevisionRef = useRef(0);
   const dirtyFieldsRef = useRef(new Set<string>());
+  // The added fields edited and not yet saved. custom_fields is one object,
+  // so "dirty" alone cannot say which of its keys the user changed.
+  const dirtyAddedFieldsRef = useRef(new Set<string>());
   const confirmedWritesRef = useRef<Record<string, unknown>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
@@ -404,9 +466,15 @@ export default function PatientDetail({
     } else {
       // A confirmed write is approved data, whatever an older read says: its
       // proposal mark must not come back with the stale record.
-      fresh = withoutMarks(fresh, Object.keys(confirmedWritesRef.current));
+      fresh = withoutMarks(fresh, [
+        ...Object.keys(confirmedWritesRef.current),
+        ...addedMarks(addedFieldNames(confirmedWritesRef.current[ADDED_FIELDS])),
+      ]);
       for (const [field, value] of Object.entries(confirmedWritesRef.current)) {
-        if (fresh[field] === value) delete confirmedWritesRef.current[field];
+        // For added fields the confirmed write is the keys this editor saved;
+        // every other key is the server's.
+        if (field === ADDED_FIELDS) fresh[field] = mergeAddedFields(fresh[field], value);
+        else if (fresh[field] === value) delete confirmedWritesRef.current[field];
         else fresh[field] = value;
       }
     }
@@ -414,16 +482,23 @@ export default function PatientDetail({
     const unsaved: Record<string, unknown> = {};
     if (pending) {
       for (const field of dirtyFieldsRef.current) {
+        if (field === ADDED_FIELDS && dirtyAddedFieldsRef.current.size) {
+          // Keep only the keys still being edited on top of the fresh object.
+          unsaved[field] = mergeAddedFields(
+            fresh[field], pickAddedFields(pending.info[field], dirtyAddedFieldsRef.current));
         // A touched proposal is kept even when the user ended on the proposed
         // value: that is confirming it, and the refresh must not undo it.
-        if (!LIFECYCLE.has(field) && (pending.info[field] !== fresh[field] || field in marksOf(fresh))) {
+        } else if (!LIFECYCLE.has(field) && (pending.info[field] !== fresh[field] || field in marksOf(fresh))) {
           unsaved[field] = pending.info[field];
         } else {
           dirtyFieldsRef.current.delete(field);
         }
       }
     }
-    const edited = withoutMarks({ ...fresh, ...unsaved }, Object.keys(unsaved));
+    const edited = withoutMarks({ ...fresh, ...unsaved }, [
+      ...Object.keys(unsaved),
+      ...(ADDED_FIELDS in unsaved ? addedMarks(dirtyAddedFieldsRef.current) : []),
+    ]);
 
     patientInfoRef.current = { ...fresh };
     setPatientInfo(fresh);
@@ -437,7 +512,7 @@ export default function PatientDetail({
     (async () => {
       try {
         setLoading(true);
-        const res = await api.get(`/patient-info/${personId}/`);
+        const res = await api.get(`/v1/patient-records/${personId}/`);
         const d = res.data.patient_info;
         adoptServerRecord(d, readRevision);
 
@@ -461,8 +536,10 @@ export default function PatientDetail({
   }, [personId, adoptServerRecord]);
 
    
-  const performSave = useCallback(async () => {
-    if (!pendingDataRef.current || !personId) return;
+  // performSave runs before reloadPatientInfo is defined; it calls it through this ref.
+  const reloadRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const performSave = useCallback(async (): Promise<boolean> => {
+    if (!pendingDataRef.current || !personId) return true;
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
@@ -505,7 +582,15 @@ export default function PatientDetail({
       // A proposal the user touched is sent even when they land on the same
       // value: that is confirming it, and it becomes approved data (#2659).
       const proposed = marksOf(baseline);
+      // What this save sends of the added fields: the keys edited, as they
+      // are now. Kept apart so a later edit to one of them stays dirty.
+      const addedSent = pickAddedFields(info[ADDED_FIELDS], [...dirtyAddedFieldsRef.current]);
+
       for (const [f, v] of Object.entries(info)) {
+        if (f === ADDED_FIELDS) {
+          if (Object.keys(addedSent).length) patchFields[f] = addedSent;
+          continue;
+        }
         const confirmed = f in proposed && dirtyFieldsRef.current.has(f);
         if (LIFECYCLE.has(f) || (v === baseline[f] && !confirmed)) continue;
         const desc = descriptors[f];
@@ -517,21 +602,44 @@ export default function PatientDetail({
         }
       }
 
-      // All fields ride the single PatientRecord PATCH.
+      // All fields ride the single PatientRecord PATCH. A cleared proposal is named in
+      // rejected_proposals: that, not a bare blank, is how the user rejects it (#2671).
+      const rejected = rejectedProposals(patchFields, proposed);
+      const body = rejected.length ? { ...patchFields, rejected_proposals: rejected } : patchFields;
       if (renamed || Object.keys(patchFields).length > 0) {
         await api.patch(
           `/patient-info/${personId}/`,
-          renamed ? { ...patchFields, patient_name: data.name } : patchFields,
+          renamed ? { ...body, patient_name: data.name } : body,
         );
         saveRevisionRef.current += 1;
         if (patientInfoRef.current) {
-          patientInfoRef.current = withoutMarks(patientInfoRef.current, Object.keys(patchFields));
+          patientInfoRef.current = withoutMarks(
+            patientInfoRef.current, [...Object.keys(patchFields), ...addedMarks(Object.keys(addedSent))]);
         }
         for (const f of Object.keys(patchFields)) {
+          if (f === ADDED_FIELDS) {
+            const now = pickAddedFields(pendingDataRef.current?.info[f], Object.keys(addedSent));
+            for (const [name, value] of Object.entries(addedSent)) {
+              if (now[name] === value) dirtyAddedFieldsRef.current.delete(name);
+            }
+            if (patientInfoRef.current) {
+              patientInfoRef.current[f] = mergeAddedFields(patientInfoRef.current[f], addedSent);
+            }
+            confirmedWritesRef.current[f] = mergeAddedFields(confirmedWritesRef.current[f], addedSent);
+            if (!dirtyAddedFieldsRef.current.size) dirtyFieldsRef.current.delete(f);
+            continue;
+          }
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
+        // Saving a proposed value as the patient's own can clear other marks the
+        // server holds (the disease group, a calculated field): read the record
+        // again so the page and the confirmation banner follow it (#2761). The
+        // save waits for the read, so a confirmation that follows it cannot be
+        // overwritten by a read that began before it.
+        if (Object.keys(patchFields).some((f) => f in proposed)
+            || addedMarks(Object.keys(addedSent)).some((mark) => mark in proposed)) await reloadRef.current();
       }
       // Derived/read-only fields may change in the editor as a side effect of
       // an actual edit (for example tnbc_status). They were not sent, so they
@@ -550,6 +658,7 @@ export default function PatientDetail({
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
       }
+      return true;
     } catch (err) {
       if (seq === saveSeqRef.current) {
         setSaveStatus("error");
@@ -571,7 +680,12 @@ export default function PatientDetail({
             }
             else if (typeof data.error === "string") detail = data.error;
             else {
-              const fieldErrors = Object.entries(data)
+              // An added field's refusal is nested under custom_fields, by
+              // its own name: {custom_fields: {frailty_index: ["Enter a number."]}}.
+              const { [ADDED_FIELDS]: added, ...columns } = data;
+              const nested = added && typeof added === "object" && !Array.isArray(added)
+                ? added as Record<string, unknown> : {};
+              const fieldErrors = [...Object.entries(columns), ...Object.entries(nested)]
                 .filter(([, v]) => Array.isArray(v))
                 .map(([k, v]) => `${k}: ${(v as string[]).join(", ")}`)
                 .join("; ");
@@ -588,10 +702,11 @@ export default function PatientDetail({
         }
         setSaveErrorMsg(detail);
       }
+      return false;
     }
   }, [personId]);
 
-  const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const doSave = useCallback(() => {
     // An edit made while a prior PATCH is still in flight must not reach the
     // server first: the older response could otherwise overwrite it. This also
@@ -633,20 +748,90 @@ export default function PatientDetail({
   // form does not own -- wearable imports, and language skills, whose eight
   // flattened columns are derived from PersonLanguageSkill rows rather than
   // patched directly.
-  const reloadPatientInfo = useCallback(() => {
-    if (!personId) return;
+  const reloadPatientInfo = useCallback((): Promise<void> => {
+    if (!personId) return Promise.resolve();
     const readRevision = saveRevisionRef.current;
-    api.get(`/patient-info/${personId}/`)
+    return api.get(`/v1/patient-records/${personId}/`)
       .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
       .catch(() => {});
   }, [personId, adoptServerRecord]);
 
-  const handleFieldChange = useCallback((field: string, value: unknown) => {
+  reloadRef.current = reloadPatientInfo;
+
+  // A professional confirming the proposals the record shows (#2870). The server lists what it
+  // will confirm on the record read (`provisional_confirm`) and saves each field's own current
+  // proposal; the page sends what it showed so a stale page confirms nothing it did not see, then
+  // reads the record again, which is how the marks the server cleared (a disease group, a
+  // calculated field) go.
+  const confirmLabels = useRef<Record<string, string>>({});
+  const registerLabel = useCallback((name: string, label: string) => { confirmLabels.current[name] = label; }, []);
+  const [confirmBusy, setConfirmBusy] = useState<string | null>(null);
+  const [confirmErrors, setConfirmErrors] = useState<Record<string, string>>({});
+  const [confirmNote, setConfirmNote] = useState<{ text: string; failed: boolean } | null>(null);
+  const runConfirm = useCallback(async (field: string | null) => {
+    if (!personId) return;
+    const info = editedInfoRef.current;
+    const names = field ? [field] : confirmableFields(info);
+    if (names.length === 0) return;
+    // What the page shows for each field and for every one confirmed together with it, so a
+    // stale page confirms nothing it did not see (the server decides each group whole).
+    const expected = shownValues(info, names);
+    setConfirmBusy(field ?? '*');
+    setConfirmErrors({});
+    setConfirmNote(null);
+    const refused = (items: { field: string; reason: string; detail?: string }[]) => {
+      const errors: Record<string, string> = {};
+      for (const item of items) if (ACTIONABLE_SKIPS.has(item.reason)) errors[item.field] = skipText(item);
+      setConfirmErrors(errors);
+      return errors;
+    };
+    try {
+      const result: ConfirmResult = await confirmProvisional(personId, field ? { fields: [field] } : { all: true }, expected);
+      const errors = refused(result.skipped);
+      if (field) {
+        if (!result.confirmed.includes(field) && !errors[field]) {
+          setConfirmErrors({ [field]: result.skipped.find((item) => item.field === field)
+            ? skipText(result.skipped.find((item) => item.field === field)!) : 'The value was not confirmed.' });
+        }
+      } else {
+        const count = result.confirmed.length;
+        const missed = Object.keys(errors).length;
+        setConfirmNote({
+          text: `${count} provisional ${count === 1 ? 'value' : 'values'} confirmed as approved data`
+            + (missed ? `; ${missed} could not be confirmed (see the marked ${missed === 1 ? 'field' : 'fields'}).` : '.'),
+          failed: count === 0 && missed > 0,
+        });
+      }
+      saveRevisionRef.current += 1;     // a read that began before this write is stale, whenever it lands
+      await reloadPatientInfo();
+    } catch (err) {
+      const res = (err as { response?: { status?: number; data?: { detail?: string; skipped?: { field: string; reason: string; detail?: string }[] } } })?.response;
+      if (res?.status === 409 && res.data?.skipped) {
+        // Nothing was confirmed: what the page showed is not what the server holds now.
+        const errors = refused(res.data.skipped);
+        if (!field) setConfirmNote({ text: 'The proposals changed since this page was loaded, so nothing was confirmed. Review them and try again.', failed: true });
+        else if (!errors[field]) setConfirmErrors({ [field]: skipText({ field, reason: 'changed' }) });
+        await reloadPatientInfo();
+      } else {
+        const text = res?.status === 403
+          ? (res.data?.detail ?? 'You do not have permission to confirm values for this patient.')
+          : (res?.data?.detail ?? 'The values could not be confirmed. Please try again.');
+        if (field) setConfirmErrors({ [field]: text });
+        else setConfirmNote({ text, failed: true });
+      }
+    } finally {
+      setConfirmBusy(null);
+    }
+  }, [personId, reloadPatientInfo]);
+
+  const handleFieldChange = useCallback((field: string, value: unknown, alsoApproved: string[] = []) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     // Touching a proposed field makes it the user's answer, so its indicator goes
     // and it is sent as an edit even if they end up on the proposed value.
+    // `alsoApproved` names marks the edit settles beyond the field itself: an added
+    // field's value is a key of custom_fields, marked `custom_fields.<name>`.
     const proposed = field in marksOf(patientInfoRef.current);
-    const updated = withoutMarks({ ...base, [field]: value }, [field]);
+    const updated = withoutMarks({ ...base, [field]: value }, [field, ...alsoApproved]);
     if (value === patientInfoRef.current?.[field] && !proposed) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
@@ -663,6 +848,16 @@ export default function PatientDetail({
     scheduleAutoSave(updated, editedNameRef.current);
   }, [scheduleAutoSave]);
 
+
+  // An added field has no column: its value is a key of custom_fields. The
+  // editor holds that object whole and the save sends only the keys edited
+  // here (#2669).
+  const handleAddedFieldChange = useCallback((fieldName: string, value: unknown) => {
+    const base = pendingDataRef.current?.info ?? editedInfoRef.current;
+    dirtyAddedFieldsRef.current.add(fieldName);
+    handleFieldChange(ADDED_FIELDS, mergeAddedFields(base[ADDED_FIELDS], { [fieldName]: value }),
+      [addedMark(fieldName)]);
+  }, [handleFieldChange]);
 
   const handleNameChange = useCallback((name: string) => {
     setEditedName(name);
@@ -738,25 +933,78 @@ export default function PatientDetail({
     }
   }, [handleFieldChange, scheduleAutoSave]);
 
-  const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "mcl" | "other" => {
-    const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
-    if (d.includes("breast")) return "breast";
-    if (d.includes("mantle")) return "mcl";
-    if (d.includes("lymphoma")) return "lymphoma";
-    if (d.includes("myeloma")) return "myeloma";
-    if (d.includes("cll") || d.includes("chronic lymphocytic")) return "cll";
-    return "other";
-  };
+  // The record's Disease Category picks the disease tab (#2332), by the rule the
+  // attestation uses to know which section is on screen
+  // (`disease_profiles.record_category` on the server): what Disease Category
+  // management maps the disease to, and only a name it does not hold falls back to
+  // the editor's old keyword match.
+  const recordCategory = recordDiseaseCategory(
+    typeof editedInfo?.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
+    diseaseTypeOf(editedInfo?.disease),
+  );
+  const getDiseaseType = () => diseaseTypeOfCategory(recordCategory);
+  const categoryLabel = categoryObjects.find((c) => c.value === recordCategory)?.label ?? recordCategory;
+  // A record with more than one cancer has the extension of each (#2182), primary first.
+  const recordCategories = recordDiseaseCategories(
+    recordCategory,
+    Array.isArray(editedInfo?.disease_categories) ? (editedInfo.disease_categories as string[]) : [],
+  );
+  // The disease tab of a record with one cancer is that cancer's; this is the primary's
+  // unless the primary has no extension and another cancer does.
+  const tabCategory = recordCategories[0] ?? "";
+  const labelOfCategory = (code: string) => categoryObjects.find((c) => c.value === code)?.label ?? code;
+  const categoryViews = recordCategories.map((code) => ({
+    code, label: labelOfCategory(code), diseaseType: diseaseTypeOfCategory(code),
+  }));
+  const diseaseLabels = Object.fromEntries(recordCategories.map((code) => [code, labelOfCategory(code)]));
 
+  const DISEASE_LABELS: Record<string, string> = { breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" };
+  // The primary cancer's name, for what describes the record's main disease.
+  const primaryDiseaseLabel = DISEASE_LABELS[getDiseaseType()] ?? categoryLabel;
   const getDiseaseTabLabel = () =>
-    ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[getDiseaseType()];
+    recordCategories.length > 1
+      ? "Diseases"
+      : ({ breast: "Breast Cancer", lymphoma: "Follicular Lymphoma", myeloma: "Multiple Myeloma", cll: "CLL", mcl: "Mantle Cell Lymphoma" } as Record<string, string>)[diseaseTypeOfCategory(tabCategory)]
+        ?? labelOfCategory(tabCategory);
 
-  const provisionalValue = useMemo(
-    () => ({ marks: marksOf(editedInfo), patientMode }),
-    [editedInfo, patientMode],
+  // The fields a professional may confirm, as the server listed them on the record read. Not the
+  // patient's own page (a patient confirms by entering a value) and nothing the page decides.
+  const confirmable = useMemo(
+    () => (patientMode ? [] : confirmableFields(editedInfo)),
+    [patientMode, editedInfo],
+  );
+  const provisionalValue = useMemo<ProvisionalValue>(
+    () => ({
+      marks: marksOf(editedInfo),
+      patientMode,
+      ...(confirmable.length > 0 ? {
+        confirm: {
+          confirmable: new Set(confirmable),
+          busy: confirmBusy,
+          errors: confirmErrors,
+          onConfirm: (name: string) => { void runConfirm(name); },
+          registerLabel,
+        },
+      } : {}),
+    }),
+    [editedInfo, patientMode, confirmable, confirmBusy, confirmErrors, runConfirm, registerLabel],
+  );
+  // The proposals still on the page that stop the patient confirming (#2761).
+  const attestationBlockerCount = useMemo(
+    // With no write descriptor (still loading, or the fetch failed) the page cannot tell
+    // which marks the patient can clear: a calculated field would be counted that the
+    // server does not count, and the banner would flash a number that then falls. So it
+    // counts none, offers the button, and the server's 409 decides.
+    () => (patientMode && !writableFields.error && !writableFields.loading
+      ? attestationBlockers(editedInfo, writableFields.descriptors, recordCategory, addedFields).length
+      : 0),
+    [patientMode, editedInfo, writableFields.loading, writableFields.error, writableFields.descriptors,
+      recordCategory, addedFields],
   );
 
-  if (loading) return <PatientDetailSkeleton />;
+  // Until the mappings are in, the record's category is a guess, and a tab that
+  // appears and then goes would move every tab after it.
+  if (loading || mappingsLoading) return <PatientDetailSkeleton />;
 
   if (fetchError && !patientInfo) {
     return (
@@ -782,8 +1030,20 @@ export default function PatientDetail({
   // Immunizations are shown inside the Treatment tab, not as a separate tab.
   // The disease-specific tab only appears when a recognised disease is selected.
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
+  // The signed-in person's own record: patient mode, or the provider console
+  // on the record the account's patient link names (#2816). What acts on the
+  // caller's own record (device uploads and syncs) is offered only here.
+  const ownRecord = patientMode || isOwnRecord(user, personId);
   const diseaseType = getDiseaseType();
-  const showDiseaseTab = diseaseType !== "other";
+  // A tab for the record's category when it has a hand-authored section or a field
+  // placed on its extension: a category a curator adds gets its tab without a deploy.
+  // Someone who can add fields gets it for any category, even an empty one, because
+  // the tab's Add Field link is how its first field is made.
+  const showDiseaseTab = recordCategories.length > 0 && recordCategories.some((code) => (
+    diseaseTypeOfCategory(code) !== "other"
+    || canViewOmop
+    || addedFields.some((f) => f.tab === "disease" && fieldDiseases(f).includes(code))
+  ));
   const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
@@ -821,23 +1081,41 @@ export default function PatientDetail({
     : Object.keys(fieldTabs).map(Number).find((i) => fieldTabs[i] === returnTab) ?? -1;
   const activeTab = returnIdx >= 0 ? returnIdx : chosenTab;
   const setActiveTab = (index: number) => {
+    // Once opened, the Source Codes tab stays mounted; see where it renders.
+    if (index === sourceCodesIdx || activeTab === sourceCodesIdx) setSourceCodesOpened(true);
     setReturnTab(null);
     setChosenTab(index);
+    // Reached from the tab bar, the OMOP tab opens as it always does: the
+    // focus belongs to the click that set it.
+    setOmopFocus(null);
+  };
+  // A 30-day wearable value's link to its rows opens the OMOP tab at that group (#2887).
+  const openOmopRows = (focus: OmopFocus) => {
+    setActiveTab(omopIdx);
+    if (personId) setOmopFocus({ ...focus, personId });
   };
   const fieldTab = fieldTabs[activeTab];
   // The record's Disease Category, which scopes a field added from the
   // disease tab and decides which disease-specific added fields it shows.
-  const diseaseCode = recordDiseaseCategory(
-    typeof editedInfo.disease === "string" ? categoryForDisease(editedInfo.disease) : null,
-    diseaseType,
-  );
-  // Offered to whoever sees the fields' globes; nobody else gets its markup.
+  const diseaseCode = tabCategory;
+  // Offered to whoever sees the fields' globes; nobody else gets its markup. On the
+  // disease tab of a record with several cancers, one link per cancer: a field is
+  // added to one disease's extension.
   const addFieldLink = canViewOmop && fieldTab && personId ? (
-    <AddFieldLink
-      tab={fieldTab}
-      disease={fieldTab === "disease" ? diseaseCode : undefined}
-      returnPath={`/patient/${personId}`}
-    />
+    fieldTab === "disease" && recordCategories.length > 1 ? (
+      <div className="flex flex-wrap justify-end gap-2">
+        {recordCategories.map((code) => (
+          <AddFieldLink key={code} tab={fieldTab} disease={code}
+            label={`Add Field to ${labelOfCategory(code)}`} returnPath={`/patient/${personId}`} />
+        ))}
+      </div>
+    ) : (
+      <AddFieldLink
+        tab={fieldTab}
+        disease={fieldTab === "disease" ? diseaseCode : undefined}
+        returnPath={`/patient/${personId}`}
+      />
+    )
   ) : null;
 
   const tabDescriptions: Record<number, string> = {
@@ -864,7 +1142,7 @@ export default function PatientDetail({
       record={editedInfo}
       name={patientName}
       diseaseType={diseaseType}
-      diseaseLabel={getDiseaseTabLabel()}
+      diseaseLabel={primaryDiseaseLabel}
     />
   ) : null;
 
@@ -985,26 +1263,56 @@ export default function PatientDetail({
                 {addFieldLink}
               </div>
 
+              {!patientMode && (
+                <ConfirmProvisionalBanner
+                  count={confirmable.length}
+                  labels={confirmable.map((name) => confirmLabels.current[name] ?? humanize(name))}
+                  busy={confirmBusy !== null}
+                  note={confirmNote}
+                  onConfirmAll={() => { void runConfirm(null); }}
+                />
+              )}
               <ProvisionalContext.Provider value={provisionalValue}>
-              <div key={activeTab} className="animate-tab-in px-8 pb-10">
+              <div key={activeTab} hidden={activeTab === sourceCodesIdx} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
                   <>
                     {patientMode && (
                       <RecordConfirmation
                         validated={!!editedInfo.validated}
                         validationDate={editedInfo.validation_date as string | null}
+                        provisionalCount={attestationBlockerCount}
                         onConfirm={async () => {
+                          // An edit the autosave has not sent yet is still marked on the
+                          // server: send it first, so the click does not meet a 409.
+                          if (autoSaveTimerRef.current) {
+                            clearTimeout(autoSaveTimerRef.current);
+                            autoSaveTimerRef.current = null;
+                          }
+                          // A failed save has shown its own error: do not confirm over it.
+                          if ((await doSave()) === false) return;
                           const readRevision = saveRevisionRef.current;
                           try {
                             const result = await confirmRecord();
-                            adoptServerRecord({
-                              ...patientInfoRef.current,
+                            const confirmed = {
                               validated: result.validated,
                               validated_by: result.validated_by,
                               validation_date: result.validation_date,
-                            }, readRevision);
-                          } catch {
-                            setSaveErrorMsg('Failed to confirm record. Please try again.');
+                            };
+                            adoptServerRecord({ ...patientInfoRef.current, ...confirmed }, readRevision);
+                            // A read that began before the confirmation is stale, whenever it
+                            // lands: count the confirmation as a write the way an edit is.
+                            saveRevisionRef.current += 1;
+                            Object.assign(confirmedWritesRef.current, confirmed);
+                          } catch (err) {
+                            // 409: the server still holds values marked Provisional
+                            // (an edit not saved yet, or a proposal that arrived), and says so.
+                            const res = (err as { response?: { status?: number; data?: { detail?: string } } })?.response;
+                            if (res?.status === 409) reloadPatientInfo();   // the banner follows the server's marks
+                            setSaveErrorMsg(
+                              res?.status === 409 && res.data?.detail
+                                ? res.data.detail
+                                : 'Failed to confirm record. Please try again.',
+                            );
                           }
                         }}
                       />
@@ -1023,7 +1331,10 @@ export default function PatientDetail({
                   <DiseaseTab
                     formData={editedInfo}
                     onChange={handleFieldChange}
-                    diseaseType={diseaseType}
+                    diseaseType={diseaseTypeOfCategory(tabCategory)}
+                    category={tabCategory}
+                    categoryLabel={labelOfCategory(tabCategory)}
+                    categories={categoryViews}
                   />
                 )}
                 {activeTab === treatmentIdx && (
@@ -1054,23 +1365,34 @@ export default function PatientDetail({
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
-                {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
-                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
+                {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} focus={omopFocus?.personId === personId ? omopFocus : null} />}
                 {/* Fields added through Field Concept Mapping render last on
                     their tab, then the tab's second Add Field (#721). */}
                 {fieldTab && (
                   <CustomPatientFields
                     fields={addedFields}
                     tabs={addedFieldTabs(fieldTab)}
-                    diseases={diseaseCode ? [diseaseCode] : []}
+                    diseases={recordCategories}
+                    diseaseLabels={diseaseLabels}
                     formData={editedInfo}
+                    descriptors={writableFields.descriptors}
+                    onChange={handleAddedFieldChange}
                   />
                 )}
                 {addFieldLink && <div className="mt-6 flex justify-end">{addFieldLink}</div>}
               </div>
+              {/* Outside the panel above, which is keyed by tab and so remounts
+                  on every switch: once opened, the Source Codes tab stays
+                  mounted (hidden) so the Generate OMOP run it watches can
+                  still re-read this page's record (#2822). */}
+              {sourceCodesIdx >= 0 && (sourceCodesOpened || activeTab === sourceCodesIdx) && personId && (
+                <div hidden={activeTab !== sourceCodesIdx} className="animate-tab-in px-8 pb-10">
+                  <PatientSourceCodesTab personId={personId} onRecordRefreshed={reloadPatientInfo} />
+                </div>
+              )}
               </ProvisionalContext.Provider>
             </div>
           </>

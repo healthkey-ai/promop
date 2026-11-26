@@ -195,14 +195,15 @@ export const useAllDiseaseMappings = (): {
   const reverseLookup = useMemo(() => {
     const map = new Map<string, string>();
     for (const m of mappings) {
-      map.set(m.disease_name.toLowerCase(), m.category);
+      map.set(m.disease_name.trim().toLowerCase(), m.category);
     }
     return map;
   }, [mappings]);
 
   const categoryForDisease = useCallback(
+    // Trimmed, as the server reads the name (`disease_profiles.record_category`).
     (disease: string): string | null =>
-      reverseLookup.get(disease.toLowerCase()) ?? null,
+      reverseLookup.get(disease.trim().toLowerCase()) ?? null,
     [reverseLookup],
   );
 

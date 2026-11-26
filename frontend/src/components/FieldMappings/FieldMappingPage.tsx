@@ -5,9 +5,11 @@ import { ArrowLeft, ChevronDown, ChevronRight, Download, Search, BookOpen, Check
 import api from "@/api/axios";
 import { fetchDiseaseCategories } from "@/api/mappingHub";
 import { useAuth } from "@/hooks/useAuth";
+import { invalidateAllWritableFields } from "@/hooks/useWritableFields";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
+import { answerFigures, type AnswerCoverageFigures } from "./answerConcept";
 import { FormulaEditDialog } from "./FormulaEditDialog";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
 import { addFieldReturn, type AddFieldReturn } from "@/components/PatientInfo/fieldMappingLinks";
@@ -74,6 +76,9 @@ interface FieldDescriptor extends FieldScoped {
   } | null;
   explanation: string | null;
   derivation_error: string | null;
+  /** How many of the field's answers have a concept decision (#1224); null
+   *  when the field has no curated answers. */
+  answer_coverage?: AnswerCoverageFigures | null;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -434,6 +439,9 @@ export default function FieldMappingPage() {
   const closeNewField = (created: boolean) => {
     const returnTo = newField?.returnTo;
     setNewField(null);
+    // A new field is writable on every record it is part of; the patient
+    // page this returns to must ask again rather than render it read-only.
+    if (created) invalidateAllWritableFields();
     if (returnTo) {
       // Replacing this entry: Back from the patient page must not reopen
       // the dialog on a field already added or abandoned.
@@ -506,6 +514,8 @@ export default function FieldMappingPage() {
   const handleMappingSaved = () => {
     setDialogOpen(false);
     setSelectedField(null);
+    // A mapping decides what a patient page may write.
+    invalidateAllWritableFields();
     fetchDescriptors();
   };
 
@@ -604,6 +614,24 @@ export default function FieldMappingPage() {
     return <span className="text-xs text-gray-400">&mdash;</span>;
   };
 
+  /** The answers' concept decisions: "3 of 5 decided", amber until each has one. */
+  const renderAnswersCell = (f: FieldDescriptor) => {
+    const figures = answerFigures(f.answer_coverage);
+    if (!figures) return <span className="text-xs text-gray-400">&mdash;</span>;
+    const text = (
+      <span className={`text-xs ${figures.complete ? "text-green-700" : "text-amber-700"}`} title={figures.detail}>
+        {figures.summary}
+      </span>
+    );
+    if (!canWrite) return text;
+    return (
+      <button type="button" onClick={() => setChoiceEditorField(f)}
+        aria-label={`Open the answers of ${f.field_name}`} className="cursor-pointer hover:underline">
+        {text}
+      </button>
+    );
+  };
+
   /** Render table (omop_table) cell. */
   const renderTableCell = (f: FieldDescriptor) => {
     if (f.locked_table) {
@@ -673,6 +701,7 @@ export default function FieldMappingPage() {
             </th>
             <th className="px-3 py-2">Coding</th>
             <th className="px-3 py-2">Table</th>
+            <th className="px-3 py-2">Answers</th>
             <th className="px-3 py-2">Synonyms</th>
           </tr>
         </thead>
@@ -749,6 +778,7 @@ export default function FieldMappingPage() {
                   renderTableCell(f)
                 )}
               </td>
+              <td className="px-3 py-2">{renderAnswersCell(f)}</td>
               <td className="px-3 py-2">{renderSynonyms(f)}</td>
             </tr>
             );
@@ -1138,6 +1168,8 @@ export default function FieldMappingPage() {
             diseases: fieldDiseases(selectedField),
             options: diseaseOptions,
             optionsIncomplete: categoriesState === "failed",
+            // Scope takes effect at once and has no proposal stage: approvers only.
+            readOnly: !canApprove,
           } : undefined}
           commonUnits={selectedField.unit_options}
           choices={selectedField.choices}
@@ -1189,6 +1221,11 @@ export default function FieldMappingPage() {
       {choiceEditorField && canWrite && (
         <FieldChoiceEditor
           fieldName={choiceEditorField.field_name}
+          canApprove={canApprove}
+          // Until the categories have loaded the list is only what fields already
+          // use, so the scope is shown but not offered for editing.
+          diseaseOptions={categoriesState === "loading" ? undefined : diseaseOptions}
+          diseaseOptionsIncomplete={categoriesState === "failed"}
           onClose={() => {
             setChoiceEditorField(null);
             fetchDescriptors();

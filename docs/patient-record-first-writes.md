@@ -70,6 +70,77 @@ Patient name uses the same PATCH and updates Person's name columns; its response
 field is not a stored PatientRecord column. Clinician validation fields retain
 their staff access checks.
 
+### Confirming a proposal
+
+A value the record shows as Provisional (from a mapping not yet approved) is not on
+`PatientRecord`. A patient approves one by entering it, which is this PATCH. A professional
+who may write the patient approves it with
+`POST /api/v1/patient-records/{person_id}/confirm-provisional/`
+(`omop_core/services/provisional_confirm.py`), which is the same write with the value taken from
+the server's current proposal instead of the client: it locks the record, reads the overlay, and
+calls `apply_patient_record_patch` once with every confirmed field, so the value lands on
+`PatientRecord` first, is tracked in `user_edited_fields` until OMOP holds it, projects through the
+field's descriptor, and drops its mark, exactly as an equivalent PATCH does (a revision row names the
+caller). The projected fact is dated when the reading was taken (`as_of`), not today as a typed edit's is.
+Only fields an OMOP projection (or a Person/Location column) acknowledges are confirmable: any other would stay
+pinned in `user_edited_fields`. It writes no clinical row of its own beyond that projection, approves no
+mapping, and never sets `validated`. See the provisional data plan, "Staff confirm provisional values".
+
+### Created fields
+
+A field added through Field Concept Mapping (`CustomPatientField`) has no
+column: its value is a key of `PatientRecord.custom_fields`. Its edits follow
+the same path (#2669, `omop_core/services/custom_field_values.py`):
+
+- **The PATCH carries `custom_fields: {<name>: <value>}`**, partial by key:
+  a key not named is untouched, and one whose value is what the record holds
+  is not an edit. The editors send only the keys the user changed
+  (`frontend/src/utils/addedFieldEdits.ts`), never the object they read,
+  which also holds computed results and other people's values as they were.
+  A key that is not an approved, non-computed created field is ignored, as a
+  read-only column is. Values are coerced by the field's type (text, number,
+  ISO date, boolean); `null` or `""` clears; a value of the wrong type is a
+  400 that names the field and saves nothing.
+- **PatientRecord first.** The value is written to `custom_fields` and marked
+  pending in `user_edited_fields` as `custom_fields.<name>`; no column name
+  has a dot, so the two never collide. A `RecordRevision` is written under the
+  same name.
+- **Forward into OMOP** with `project_single_value`, from the field's own
+  mapping and under its source key (`custom:<name>`), typed by the author as
+  any other edit. A Measurement or Observation projection acknowledges the
+  edit. An occurrence table records a boolean yes and nothing else, since an
+  occurrence cannot hold a number, a date, text or a no; a table with no
+  writer, a source key longer than the table's source column and a failed
+  write all leave the value pending on the record.
+- **Derivation keeps it.** `refresh_patient_record` rebuilds `custom_fields`
+  from OMOP and puts a pending value back until derivation produces the same
+  answer. An entered row is read back as entered (a boolean's 0 or 1, a
+  date's own value); an imported row answers a boolean by existing and a date
+  by its own date. The latest fact answers the field, so a newer import
+  replaces an entered value and on one day the entered value wins. A value
+  cleared in the editor stays cleared against imported facts of that day or
+  before (`cleared_days`); a later import, or a value entered after the
+  clear by anyone, becomes current.
+- **The descriptor lists them.** `GET /api/v1/patient-records/writable-fields/`
+  adds an entry per created field (`custom: true`, `container:
+  "custom_fields"`), writable when approved and not computed, read-only for a
+  caller without write access, and scoped by `?disease=` like a column. The
+  entries are added at the endpoint, not in `build_writable_field_descriptor`,
+  which the save path calls on every PATCH.
+
+- **Provisional values (#2857).** With provisional data on, a proposal-based row also
+  answers a created field the record leaves empty, marked
+  `provisional_fields["custom_fields.<name>"]`; the PATCH of that key is an approval
+  and drops the mark (`mirror_user_edit`). See [the plan](provisional_data_plan.md#created-fields-as-built-2857).
+
+`recompute_formula_field`, which runs when a formula changes, writes only
+the computed keys of `custom_fields`, under the record's lock, so it cannot
+put an entered value back to what it was.
+
+Not covered: whether the field belongs to the record's disease is not
+enforced (#2333), and a pending created-field edit is not re-projected when
+its mapping is changed and re-approved.
+
 ## Write Descriptor Changes
 
 The `build_writable_field_descriptor()` function now returns `KIND_DIRECT` with
@@ -214,6 +285,7 @@ import/ingestion path, not an interactive save.
 |------|------|
 | `omop_core/services/write_descriptor.py` | Builds field descriptors with projection metadata |
 | `omop_core/services/omop_projection.py` | `project_single_value()` (PATCH-time) and `project_field_to_omop()` (mapping approval) |
+| `omop_core/services/custom_field_values.py` | Created fields: coercion, pending tracking, projection and read-back |
 | `patient_portal/api/views.py` | `partial_update()` calls `_project_mapped_fields()` after save |
 | `omop_core/services/patient_record_service.py` | Derivation snapshots/restores `user_edited_fields` |
 | `omop_core/signals.py` | `post_save` on `FieldConceptMapping` triggers projection |
