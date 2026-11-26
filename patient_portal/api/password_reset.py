@@ -3,7 +3,7 @@ Administrator-initiated password reset via an emailed single-use link
 (PHR-S FM TI.1.1#08). No password is ever emailed — the link carries Django's
 signed reset token (tied to the account's password hash + last_login, so it is
 invalidated once the password changes or after PASSWORD_RESET_TIMEOUT). The
-email is sent through the project's configured backend (Mailgun/anymail in prod).
+email is sent through the project's configured backend (anymail in prod: SendGrid or Mailgun).
 """
 from __future__ import annotations
 

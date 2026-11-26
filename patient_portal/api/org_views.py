@@ -39,6 +39,13 @@ class InvitationEmailError(Exception):
     """Raised when an invitation email cannot be handed to the email backend."""
 
 
+def _sender_domain() -> str:
+    """Mailgun's sending domain for the failure logs, when Mailgun is the backend."""
+    if settings.EMAIL_BACKEND == 'anymail.backends.mailgun.EmailBackend':
+        return settings.ANYMAIL.get('MAILGUN_SENDER_DOMAIN', '')
+    return ''
+
+
 def _send_invitation_email(invitation) -> None:
     # Bare /accept-invite path — matches the SPA route (App.tsx) and the emailed-link
     # convention used by /reset-password and /accept-patient-invite. An org-scoped
@@ -72,7 +79,7 @@ def _send_invitation_email(invitation) -> None:
             "Failed to send invitation email to %s via %s domain=%s from=%s: %s",
             invitation.email,
             settings.EMAIL_BACKEND,
-            settings.ANYMAIL.get('MAILGUN_SENDER_DOMAIN', ''),
+            _sender_domain(),
             settings.DEFAULT_FROM_EMAIL,
             exc,
         )
@@ -83,7 +90,7 @@ def _send_invitation_email(invitation) -> None:
             sent_count,
             invitation.email,
             settings.EMAIL_BACKEND,
-            settings.ANYMAIL.get('MAILGUN_SENDER_DOMAIN', ''),
+            _sender_domain(),
             settings.DEFAULT_FROM_EMAIL,
         )
         raise InvitationEmailError
