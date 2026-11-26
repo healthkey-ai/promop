@@ -390,24 +390,33 @@ def _email_settings(env) -> tuple[str, dict]:
     regional API, e.g. https://api.eu.sendgrid.com/v3/ for an EU-resident
     account); otherwise Mailgun when MAILGUN_API_KEY and MAILGUN_SENDER_DOMAIN
     are; otherwise the console backend, for local development. EMAIL_BACKEND
-    overrides the choice. SendGrid's open and click tracking are off: click
+    overrides the choice. SendGrid's open, click and subscription tracking are off: click
     tracking rewrites every link, so a password-reset or invitation token would
-    pass through SendGrid's redirect.
+    pass through SendGrid's redirect. Values are stripped: a key pasted into a
+    secret with its newline would otherwise be refused in the Authorization
+    header, and every send would fail.
     """
+    value = {key: env.get(key, '').strip() for key in (
+        'SENDGRID_API_KEY', 'SENDGRID_API_URL', 'MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN')}
     anymail = {}
-    if env.get('SENDGRID_API_KEY'):
+    if value['SENDGRID_API_KEY']:
         backend = 'anymail.backends.sendgrid.EmailBackend'
-        anymail['SENDGRID_API_KEY'] = env['SENDGRID_API_KEY']
-        if env.get('SENDGRID_API_URL'):
-            anymail['SENDGRID_API_URL'] = env['SENDGRID_API_URL']
-        anymail['SENDGRID_SEND_DEFAULTS'] = {'track_clicks': False, 'track_opens': False}
-    elif env.get('MAILGUN_API_KEY') and env.get('MAILGUN_SENDER_DOMAIN'):
+        anymail['SENDGRID_API_KEY'] = value['SENDGRID_API_KEY']
+        if value['SENDGRID_API_URL']:
+            anymail['SENDGRID_API_URL'] = value['SENDGRID_API_URL']
+        anymail['SENDGRID_SEND_DEFAULTS'] = {
+            'track_clicks': False, 'track_opens': False,
+            # Nor SendGrid's own unsubscribe footer, whatever the account says:
+            # the apps that need one write their own List-Unsubscribe.
+            'esp_extra': {'tracking_settings': {'subscription_tracking': {'enable': False}}},
+        }
+    elif value['MAILGUN_API_KEY'] and value['MAILGUN_SENDER_DOMAIN']:
         backend = 'anymail.backends.mailgun.EmailBackend'
     else:
         backend = 'django.core.mail.backends.console.EmailBackend'
     for key in ('MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN'):
-        if env.get(key):
-            anymail[key] = env[key]
+        if value[key]:
+            anymail[key] = value[key]
     return env.get('EMAIL_BACKEND', backend), anymail
 
 

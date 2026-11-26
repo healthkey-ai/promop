@@ -26,10 +26,16 @@ def test_mailgun_needs_its_key_and_domain():
 def test_sendgrid_with_its_key_and_tracking_off():
     backend, anymail = _email_settings({'SENDGRID_API_KEY': 'SG.k'})
     assert backend == SENDGRID
-    assert anymail == {
-        'SENDGRID_API_KEY': 'SG.k',
-        'SENDGRID_SEND_DEFAULTS': {'track_clicks': False, 'track_opens': False},
-    }
+    assert anymail['SENDGRID_API_KEY'] == 'SG.k'
+    assert anymail['SENDGRID_SEND_DEFAULTS']['track_clicks'] is False
+    assert anymail['SENDGRID_SEND_DEFAULTS']['track_opens'] is False
+
+
+def test_a_pasted_newline_is_stripped():
+    backend, anymail = _email_settings({'SENDGRID_API_KEY': 'SG.k\n', 'SENDGRID_API_URL': ' https://api.eu.sendgrid.com/v3/\n'})
+    assert backend == SENDGRID
+    assert (anymail['SENDGRID_API_KEY'], anymail['SENDGRID_API_URL']) == ('SG.k', 'https://api.eu.sendgrid.com/v3/')
+    assert _email_settings({'SENDGRID_API_KEY': '\n'})[0] == CONSOLE
 
 
 def test_sendgrid_takes_a_regional_api():
@@ -58,4 +64,5 @@ def test_a_sendgrid_message_goes_to_the_regional_api_untracked(settings):
     assert (call['method'], call['url']) == ('POST', 'https://api.eu.sendgrid.com/v3/mail/send')
     assert call['headers']['Authorization'] == 'Bearer SG.k'
     tracking = json.loads(call['data'])['tracking_settings']
-    assert tracking == {'click_tracking': {'enable': False}, 'open_tracking': {'enable': False}}
+    assert tracking == {'click_tracking': {'enable': False}, 'open_tracking': {'enable': False},
+                        'subscription_tracking': {'enable': False}}
