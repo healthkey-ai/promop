@@ -20,10 +20,11 @@ from dataclasses import dataclass
 
 from django.db.models import Q
 
-from omop_core.models import Concept, ConceptRelationship, resolve_concept_replacement
+from omop_core.models import Concept, ConceptRelationship
 from omop_core.services import lot_regimens
 from omop_core.services.patient_record_service import (
     _COMPONENT_RELATIONSHIP_IDS,
+    _expand_component_ids,
     _is_asserted_regimen,
     _usable_concept_name,
 )
@@ -63,12 +64,13 @@ def declared_regimen_targets() -> dict:
     return dict(targets)
 
 
-def _with_component_edges(concept_ids):
-    return set(
-        ConceptRelationship.objects
-        .filter(_LIVE, concept_1_id__in=concept_ids, relationship_id__in=_COMPONENT_RELATIONSHIP_IDS)
-        .values_list('concept_1_id', flat=True)
-    )
+def _with_components(concept_ids):
+    """The ids the derivation's own expansion gives at least one component.
+
+    Calls ``_expand_component_ids`` rather than restating its edge filter, so the
+    audit follows whatever that filter is on the branch it runs on.
+    """
+    return {cid for cid in concept_ids if _expand_component_ids([cid], ())}
 
 
 def _problem_with(concept, has_components):
@@ -91,21 +93,16 @@ def _problem_with(concept, has_components):
 
 
 def _replacements(concept_id):
-    """Live successors that would themselves pass: 'Concept replaced by', then 'Maps to'."""
-    candidates = []
-    resolved, chain = resolve_concept_replacement(concept_id)
-    if len(chain) > 1:
-        candidates.append(resolved.concept_id)
-    candidates += (
+    """Successors one live 'Concept replaced by' or 'Maps to' edge away that would pass."""
+    candidates = list(dict.fromkeys(
         ConceptRelationship.objects
-        .filter(_LIVE, concept_1_id=concept_id, relationship_id='Maps to')
+        .filter(_LIVE, concept_1_id=concept_id, relationship_id__in=('Concept replaced by', 'Maps to'))
         .exclude(concept_2_id=concept_id)
         .order_by('concept_2_id')
         .values_list('concept_2_id', flat=True)
-    )
-    candidates = list(dict.fromkeys(candidates))
+    ))
     concepts = Concept.objects.in_bulk(candidates)
-    with_components = _with_component_edges(candidates)
+    with_components = _with_components(candidates)
     return tuple(
         (cid, concepts[cid].concept_name) for cid in candidates
         if _problem_with(concepts.get(cid), cid in with_components) is None
@@ -120,7 +117,7 @@ def regimen_target_problems() -> list:
     ]
     targets = declared_regimen_targets()
     concepts = Concept.objects.in_bulk(list(targets))
-    with_components = _with_component_edges(list(targets))
+    with_components = _with_components(list(targets))
     for concept_id in sorted(targets):
         concept = concepts.get(concept_id)
         reason = _problem_with(concept, concept_id in with_components)

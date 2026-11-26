@@ -131,6 +131,16 @@ def test_the_derivations_own_regimen_test_is_applied(installed, monkeypatch):
     assert (problem.concept_id, problem.reason) == (BR, 'is not accepted as a HemOnc regimen by the derivation')
 
 
+def test_components_are_judged_by_the_derivations_own_expansion(installed, monkeypatch):
+    real = regimen_vocabulary_audit._expand_component_ids
+    monkeypatch.setattr(regimen_vocabulary_audit, '_expand_component_ids',
+                        lambda regimens, drugs: set() if list(regimens) == [BR] else real(regimens, drugs))
+
+    [problem] = regimen_target_problems()
+    assert problem.concept_id == BR
+    assert problem.reason.startswith('has no component edge the derivation reads')
+
+
 def test_a_retired_id_lists_only_successors_that_would_pass(installed, monkeypatch):
     monkeypatch.setitem(lot_regimens.REGIMEN_CONCEPT_IDS, frozenset({'drug x', 'drug y'}), RETIRED)
     monkeypatch.setitem(lot_regimens._GENERATOR_ALIASES, 'xy', RETIRED)
@@ -139,9 +149,12 @@ def test_a_retired_id_lists_only_successors_that_would_pass(installed, monkeypat
     _regimen(RETIRED + 2, concept_name='Maps to')
     _regimen(RETIRED + 3, invalid_reason='D')
     _concept(RETIRED + 4, concept_class='Brand Name')
+    _regimen(RETIRED + 5, concept_name='Obsolete edge')
     _edge(RETIRED, RETIRED + 1, 'Concept replaced by')
     for target in (RETIRED + 2, RETIRED + 3, RETIRED + 4):
         _edge(RETIRED, target, 'Maps to')
+    _edge(RETIRED, RETIRED + 5, 'Concept replaced by')
+    ConceptRelationship.objects.filter(concept_1_id=RETIRED, concept_2_id=RETIRED + 5).update(invalid_reason='D')
 
     [problem] = regimen_target_problems()
     assert problem.replacements == ((RETIRED + 1, 'Replaced by'), (RETIRED + 2, 'Maps to'))
