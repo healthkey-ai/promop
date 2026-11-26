@@ -8,6 +8,14 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Email through Twilio SendGrid** — set `SENDGRID_API_KEY` (a key with Mail
+  Send permission) and promop sends through SendGrid instead of Mailgun;
+  `SENDGRID_API_URL` points it at a regional API, such as
+  `https://api.eu.sendgrid.com/v3/` for an EU-resident account. Open and click
+  tracking are off on every message, so links (password resets, invitations)
+  go to the app, not through SendGrid's redirect. Mailgun is unchanged and is
+  used when only its variables are set; `EMAIL_BACKEND` still overrides both.
+
 - **PHR therapy: whether a line's response had been assessed** —
   `GET /api/v1/phr/therapy/` returns `response_assessed` beside each line's
   other detail: false when the patient said their response had not been

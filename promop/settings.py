@@ -382,25 +382,38 @@ ACCOUNT_CLOSED_BLOCK_SECONDS = int(os.environ.get('ACCOUNT_CLOSED_BLOCK_SECONDS'
 # when empty, mirroring the AUDIT_HMAC_KEY pattern.
 EXPORT_SIGNING_KEY = os.environ.get('EXPORT_SIGNING_KEY', '')
 
-_mailgun_configured = bool(
-    os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
-)
 
-# Email — uses Mailgun HTTP API via django-anymail when configured,
-# falls back to console backend for local development.
-EMAIL_BACKEND = os.environ.get(
-    'EMAIL_BACKEND',
-    (
-        'anymail.backends.mailgun.EmailBackend'
-        if _mailgun_configured
-        else 'django.core.mail.backends.console.EmailBackend'
-    ),
-)
-ANYMAIL = {}
-if os.environ.get('MAILGUN_API_KEY'):
-    ANYMAIL['MAILGUN_API_KEY'] = os.environ['MAILGUN_API_KEY']
-if os.environ.get('MAILGUN_SENDER_DOMAIN'):
-    ANYMAIL['MAILGUN_SENDER_DOMAIN'] = os.environ['MAILGUN_SENDER_DOMAIN']
+def _email_settings(env) -> tuple[str, dict]:
+    """The mail backend and ANYMAIL settings that ``env`` asks for.
+
+    SendGrid when SENDGRID_API_KEY is set (SENDGRID_API_URL points it at a
+    regional API, e.g. https://api.eu.sendgrid.com/v3/ for an EU-resident
+    account); otherwise Mailgun when MAILGUN_API_KEY and MAILGUN_SENDER_DOMAIN
+    are; otherwise the console backend, for local development. EMAIL_BACKEND
+    overrides the choice. SendGrid's open and click tracking are off: click
+    tracking rewrites every link, so a password-reset or invitation token would
+    pass through SendGrid's redirect.
+    """
+    anymail = {}
+    if env.get('SENDGRID_API_KEY'):
+        backend = 'anymail.backends.sendgrid.EmailBackend'
+        anymail['SENDGRID_API_KEY'] = env['SENDGRID_API_KEY']
+        if env.get('SENDGRID_API_URL'):
+            anymail['SENDGRID_API_URL'] = env['SENDGRID_API_URL']
+        anymail['SENDGRID_SEND_DEFAULTS'] = {'track_clicks': False, 'track_opens': False}
+    elif env.get('MAILGUN_API_KEY') and env.get('MAILGUN_SENDER_DOMAIN'):
+        backend = 'anymail.backends.mailgun.EmailBackend'
+    else:
+        backend = 'django.core.mail.backends.console.EmailBackend'
+    for key in ('MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN'):
+        if env.get(key):
+            anymail[key] = env[key]
+    return env.get('EMAIL_BACKEND', backend), anymail
+
+
+# Email — through django-anymail (SendGrid or Mailgun) when configured; see
+# _email_settings.
+EMAIL_BACKEND, ANYMAIL = _email_settings(os.environ)
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.

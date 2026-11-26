@@ -3523,7 +3523,7 @@ that reason, the read of the page included. A token is checked against
   `publicApi` only and render everything as text.
 - **Deployment.** The links are built from `APP_BASE_URL`, which must be the
   public origin that serves the SPA. Email needs a real backend
-  (`MAILGUN_API_KEY` and `MAILGUN_SENDER_DOMAIN`, or an `EMAIL_BACKEND`):
+  (`SENDGRID_API_KEY`, or `MAILGUN_API_KEY` and `MAILGUN_SENDER_DOMAIN`, or an `EMAIL_BACKEND`):
   with the console backend no voter ever receives a link, and the Share
   dialog says so. With a broker, the **worker** sends the mail, so it needs
   the mail variables, `APP_BASE_URL` and `DEFAULT_FROM_EMAIL` as well as the

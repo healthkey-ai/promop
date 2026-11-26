@@ -45,7 +45,7 @@ class TestInit:
             sentry.init_sentry(debug=False)
         denylist = init.call_args.kwargs['event_scrubber'].denylist
         for key in ('database_url', 'audit_hmac_key', 'service_auth_token',
-                    'celery_result_backend', 'cache_url'):
+                    'celery_result_backend', 'cache_url', 'sendgrid_api_key'):
             assert key in denylist
 
 
