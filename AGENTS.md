@@ -154,6 +154,7 @@ redeploy does not. See `docs/render-staging-celery.md`.
 | SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
 | SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
 | Retired mapping destinations audit | `omop_core/management/commands/audit_retired_mapping_destinations.py` — read-only, exits 1 when any are found |
+| Regimen vocabulary audit | `omop_core/management/commands/audit_regimen_vocabulary.py` — LOT resolver ids the vocabulary cannot serve; read-only, exits 1 when any are found |
 | Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
 | React tests | `frontend/src/App.test.tsx`, `frontend/src/components/**/*.test.tsx` |
 
