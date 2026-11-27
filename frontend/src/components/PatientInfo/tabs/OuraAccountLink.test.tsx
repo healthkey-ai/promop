@@ -127,6 +127,25 @@ describe('OuraAccountLink', () => {
     expect(onBusyChange.mock.calls.map(call => call[0])).toEqual([true, false]);
   });
 
+  it('says what Oura sent when a sync stored nothing', async () => {
+    mockGet.mockResolvedValue(connected());
+    mockPost.mockResolvedValueOnce(synced({
+      samples_created: 0, replaced: 0, samples_read: 0,
+      documents_returned: { activity: 0, sleep: 0, spo2: 0, vo2: 0 },
+    }));
+    render(<OuraAccountLink />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Sync now' }));
+    expect(await screen.findByText(/Oura sent no days for this range/)).toBeInTheDocument();
+
+    mockPost.mockResolvedValueOnce(synced({
+      samples_created: 0, replaced: 0, samples_read: 0,
+      documents_returned: { activity: 3, sleep: 2, spo2: 0, vo2: 0 },
+    }));
+    await userEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+    expect(await screen.findByText(/Oura sent 5 records, but none held values this site reads/))
+      .toBeInTheDocument();
+  });
+
   it('says so when a sync changed nothing, and when the server skipped it', async () => {
     mockGet.mockResolvedValue(connected());
     mockPost.mockResolvedValueOnce(synced({ samples_created: 0, replaced: 0 }));

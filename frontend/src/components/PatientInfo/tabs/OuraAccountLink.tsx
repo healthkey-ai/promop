@@ -23,6 +23,10 @@ interface SyncResult extends PendingSamples {
   unavailable?: string[];
   /** The read ran out of time: part of the range was not read. */
   incomplete?: boolean;
+  /** How many documents Oura sent, by kind (counts only). */
+  documents_returned?: Record<string, number>;
+  /** How many daily values this site could read from them. */
+  samples_read?: number;
 }
 
 /** What the callback put in the address when it sent the patient back. */
@@ -81,6 +85,20 @@ function count(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? '' : 's'}`;
 }
 
+/** Why a sync that stored nothing did: what Oura sent, in counts. */
+function nothingRead(result: SyncResult): string {
+  const returned = result.documents_returned;
+  if (!returned || result.samples_created > 0 || (result.replaced ?? 0) > 0) return '';
+  const total = Object.values(returned).reduce((sum, n) => sum + n, 0);
+  if (total === 0) {
+    return ' Oura sent no days for this range. Open the Oura app and make sure your ring has synced.';
+  }
+  if ((result.samples_read ?? 0) === 0) {
+    return ` Oura sent ${count(total, 'record')}, but none held values this site reads.`;
+  }
+  return '';
+}
+
 function describe(result: SyncResult): string {
   if (result.skipped === 'recent') return 'Your Oura data is already up to date.';
   const parts = [count(result.samples_created, 'new value')];
@@ -88,7 +106,7 @@ function describe(result: SyncResult): string {
   const range = result.start_date && result.end_date ? ` ${result.start_date} to ${result.end_date}` : '';
   const pending = pendingClause(result);
   const missing = (result.unavailable ?? []).map(kind => KIND_LABELS[kind] ?? kind);
-  return `Synced${range}: ${parts.join(', ')}.${pending ? ` ${pending}` : ''}`
+  return `Synced${range}: ${parts.join(', ')}.${pending ? ` ${pending}` : ''}${nothingRead(result)}`
     + (missing.length > 0
       ? ` Oura did not share ${missing.join(', ')}. Disconnect and connect again, leaving every box ticked, to include it.`
       : '')

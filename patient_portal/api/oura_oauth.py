@@ -348,7 +348,15 @@ def sync(request):
         'end_date': end.isoformat(),
         'unavailable': fetched.unavailable,
         'incomplete': fetched.incomplete,
+        # What Oura sent, by kind, and how many daily values this site could
+        # read from it: counts only, so an empty sync can be told apart from
+        # one whose documents were not in a shape the reader knows.
+        'documents_returned': {kind: len(items) for kind, items in fetched.documents.items()},
+        'samples_read': len(samples),
     })
+    logger.info('oura_sync_read person_id=%s documents=%s samples=%s unavailable=%s incomplete=%s',
+                person.pk, result['documents_returned'], len(samples), fetched.unavailable,
+                fetched.incomplete)
     result.setdefault('unmapped_samples', 0)
     result.setdefault('unmapped_metrics', [])
     return Response(result)

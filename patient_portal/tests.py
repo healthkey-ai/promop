@@ -37922,6 +37922,29 @@ class OuraOAuthEndpointTest(TestCase):
         return sorted(float(v) for v in Observation.objects.filter(
             person=self.person, observation_source_value='oura_steps').values_list('value_as_number', flat=True))
 
+    def test_sync_reports_how_many_documents_oura_sent_and_how_many_values_were_read(self):
+        self._connect()
+        response, _ = self._sync()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['documents_returned'], {'activity': 1, 'sleep': 1, 'spo2': 0, 'vo2': 0})
+        self.assertGreater(response.data['samples_read'], 0)
+
+    def test_an_empty_answer_from_oura_is_told_apart_from_documents_that_held_nothing_readable(self):
+        self._connect()
+        empty = {'activity': [], 'sleep': [], 'spo2': [], 'vo2': []}
+        response, _ = self._sync(documents=empty)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['documents_returned'], {'activity': 0, 'sleep': 0, 'spo2': 0, 'vo2': 0})
+        self.assertEqual((response.data['samples_read'], response.data['samples_created']), (0, 0))
+
+        # Documents arrived, but none has a field the reader knows.
+        odd = dict(empty, activity=[{'day': self.day.isoformat(), 'unknown_field': 1}])
+        from omop_core.models import OuraConnection
+        OuraConnection.objects.filter(person=self.person).update(last_sync_at=None)
+        response, _ = self._sync(documents=odd)
+        self.assertEqual(response.data['documents_returned']['activity'], 1)
+        self.assertEqual((response.data['samples_read'], response.data['samples_created']), (0, 0))
+
     # ── Status and start ────────────────────────────────────────────────────
 
     def test_status_says_whether_it_is_set_up_and_whether_the_patient_is_connected(self):
