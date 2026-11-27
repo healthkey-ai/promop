@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0380_retire_hkl_duplicates'),
+        ('omop_core', '0376_hematologic_spread_concept_and_scope'),
         ('patient_portal', '0033_staff_requested_on_and_closing'),
     ]
 
