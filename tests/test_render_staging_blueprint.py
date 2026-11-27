@@ -232,3 +232,34 @@ def test_start_sh_prepares_on_boot_unless_told_it_was_done(tmp_path, skip, prepa
     assert result.returncode == 0, result.stderr
     assert (tmp_path / 'served').exists()
     assert (tmp_path / 'prepared').exists() is prepared
+
+
+@pytest.mark.parametrize('name', ['promop', 'promop-worker'])
+def test_production_builds_cpu_torch_only_when_the_revision_has_the_script(tmp_path, name):
+    """This shared Blueprint can be synced before main has the script (#1625 hit
+    the same trap with scripts/prepare-deployment.sh), so the production build
+    falls back to the plain pip install when it is absent."""
+    command = _service(name)['buildCommand']
+    assert 'if [ -f scripts/install-python-deps.sh ]' in command
+    log = tmp_path / 'log'
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    for tool in ('python', 'pip', 'npm'):
+        (bin_dir / tool).write_text(f'#!/bin/sh\necho {tool} "$@" >> {log}\n')
+        (bin_dir / tool).chmod(0o755)
+    (tmp_path / 'frontend').mkdir()
+    # The part of the command up to the frontend build is the Python install.
+    install = command.split(' && cd frontend')[0]
+    env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}'}
+
+    without = subprocess.run(['/bin/sh', '-c', install], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert without.returncode == 0, without.stderr
+    assert 'pip install -r requirements.txt' in log.read_text()
+
+    log.write_text('')
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts' / 'install-python-deps.sh').write_text(f'echo script >> {log}\n')
+    with_script = subprocess.run(['/bin/sh', '-c', install], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert with_script.returncode == 0, with_script.stderr
+    assert log.read_text().strip().endswith('script')
+    assert 'pip install' not in log.read_text()

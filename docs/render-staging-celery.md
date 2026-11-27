@@ -38,11 +38,15 @@ loads (#2937). Staging therefore builds through
 installs CPU-only torch before `requirements.txt` (and falls back to the default
 wheel if the CPU index is unreachable). The staging web service also sets
 `SKIP_PREPARE_ON_BOOT=true`, because `preDeployCommand` has just run
-`scripts/prepare-deployment.sh`; `start.sh` skips the second run. Production sets
-neither: it has no pre-deploy command, so `start.sh` keeps preparing on boot.
+`scripts/prepare-deployment.sh`; `start.sh` skips the second run. Production
+(`promop`, `promop-worker`) gets the CPU-only torch install too, guarded with
+`if [ -f scripts/install-python-deps.sh ]` so a Blueprint sync that reaches it
+before `main` has the script falls back to the plain `pip install`. Production
+does not set `SKIP_PREPARE_ON_BOOT`: it has no pre-deploy command, so `start.sh`
+keeps preparing on boot.
 
-Both are `render.yaml` settings (build command, environment variable), so they
-take effect with the next Blueprint sync, not with a code-only deploy.
+All of these are `render.yaml` settings (build command, environment variable), so
+they take effect with the next Blueprint sync, not with a code-only deploy.
 
 ## Apply
 
