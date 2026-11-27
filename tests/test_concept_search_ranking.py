@@ -23,7 +23,10 @@ from omop_core.models import (
     FieldConceptMapping,
     SourceCodeConceptMapping,
     SuggestSynonymTerm,
+    VocabularyRelease,
 )
+from django.utils import timezone
+
 from patient_portal.models import Identity
 from tests.factories import ConceptClassFactory, DomainFactory, VocabularyFactory
 
@@ -180,10 +183,15 @@ def test_an_exact_code_or_omop_id_still_ranks_first(api, vocabulary):
     assert search(api, '19197-3')[0] == '19197-3'
 
 
-def test_naming_a_specimen_turns_the_specimen_preference_off():
-    plain = ranked_concept_ordering('testosterone free', None)
-    typed = ranked_concept_ordering('testosterone free urine', None)
-    assert len(typed) == len(plain) - 1
+def test_naming_a_specimen_turns_the_specimen_preference_off(api, vocabulary):
+    make_concept((9500001, 'U-1', 'Testosterone Free [Mass/volume] in Urine and Serum or Plasma'))
+    make_concept((9500002, 'U-2', 'Testosterone Free [Mass/volume] in Urine'))
+    # No specimen typed: the usual one leads, though its name is longer.
+    plain = search(api, 'testosterone free')
+    assert plain.index('U-1') < plain.index('U-2')
+    # A specimen typed: the shorter name wins, as the preference no longer applies.
+    typed = search(api, 'testosterone free urine')
+    assert typed.index('U-2') < typed.index('U-1')
 
 
 def test_synonyms_are_read_in_one_statement(api, vocabulary):
@@ -236,8 +244,6 @@ def test_the_synonym_read_follows_the_callers_vocabulary_and_standing(api, vocab
 
 
 def test_the_etag_follows_what_the_ranking_reads(api, vocabulary):
-    from omop_core.models import VocabularyRelease
-    from django.utils import timezone
     VocabularyRelease.objects.create(
         build_timestamp=timezone.now(), status='published', published_at=timezone.now(),
         scope=['LOINC'], vocab_versions={'LOINC': '2.78'}, row_counts={'concept': 1},
@@ -251,6 +257,16 @@ def test_the_etag_follows_what_the_ranking_reads(api, vocabulary):
     assert after.status_code == 200
     assert after['ETag'] != first['ETag']
     assert after.json()['results'][0]['concept_code'] == '14914-6'
+    # An approved code mapping counts, and so does deleting it.
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='Epic', source_code='TF2', source_code_description='x',
+        target_concept_id=TESTO_SERUM[0], status='approved', origin='import',
+        domain_id='Measurement', omop_table='measurement',
+    )
+    approved = api.get(URL, {'q': 'testosterone free'})
+    assert approved['ETag'] != after['ETag']
+    mapping.delete()
+    assert api.get(URL, {'q': 'testosterone free'})['ETag'] != approved['ETag']
 
 
 # ---- plain-language searches (the demo's cases) ----------------------------------------

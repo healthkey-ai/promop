@@ -11006,8 +11006,8 @@ def _etag_matches(if_none_match, etag):
 def _set_release_etag(request, response, extra=''):
     """Set ETag and Cache-Control on a concept response based on the latest
     published VocabularyRelease. Returns a 304 if If-None-Match matches.
-    ``extra`` folds data the response also depends on into the tag (the curator
-    search's ranking reads approved mappings)."""
+    ``extra`` (a string, or a callable returning one) folds data the response
+    also depends on into the tag (the curator search's ranking reads approved mappings)."""
     from django.http import HttpResponseNotModified
     from omop_core.services.vocab_release import get_latest_release, get_release_etag
 
@@ -11015,6 +11015,8 @@ def _set_release_etag(request, response, extra=''):
     etag = get_release_etag(release)
     if etag is None:
         return response
+    if callable(extra):
+        extra = extra()  # only now that there is a release to tag
     if extra:
         etag = f'{etag[:-1]}-{hashlib.sha256(extra.encode()).hexdigest()[:12]}"'
 
@@ -11452,7 +11454,7 @@ def concept_search(request):
     # available OMOP/LOINC data lets us classify it safely.
     response = _paginated_concept_response(
         queryset, request, ordering=None, paginator=_ConceptSearchPagination(),
-        etag_extra=_concept_ranking_stamp(),
+        etag_extra=_concept_ranking_stamp,
     )
     if response.status_code == status.HTTP_304_NOT_MODIFIED:
         # A revalidation hit carries no body to annotate (#1457).

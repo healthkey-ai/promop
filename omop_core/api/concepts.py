@@ -8,7 +8,7 @@ implementation here is what stops the two surfaces from drifting.
 """
 import re
 
-from django.db.models import Case, IntegerField, Q, Value, When
+from django.db.models import Case, Count, IntegerField, Max, Q, Value, When
 from django.db.models.functions import Length
 from rest_framework.pagination import PageNumberPagination
 
@@ -249,14 +249,16 @@ def concept_usage_rank():
         | Q(concept_id__in=ConceptMappingPriority.objects.values('concept_id'))
     )
     mapped = Q(concept_id__in=SourceCodeConceptMapping.objects.filter(
-        status='approved', target_concept__isnull=False).values('target_concept_id'))
+        status='approved', target_concept__isnull=False,
+    ).values('target_concept_id').distinct())
     return Case(When(curated, then=0), When(mapped, then=1), default=2,
                 output_field=IntegerField())
 
 
 def ranked_concept_ordering(query, concept_id, hits=None):
     """``concept_match_ordering`` plus synonym tiers, usage, specimen and code length."""
-    hits = hits or {'exact': (), 'prefix': ()}
+    if hits is None:
+        hits = {'exact': (), 'prefix': ()}
     best = Q(concept_code__iexact=query)
     if concept_id is not None:
         best |= Q(concept_id=concept_id)
@@ -289,14 +291,17 @@ def ranking_stamp():
     The release ETag alone would let a browser revalidate to a 304 over an order that
     an approval, a ranked concept or a deploy has since changed.
     """
-    from django.db.models import Count, Max
     from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping
 
     parts = [str(RANKING_VERSION)]
     for model in (FieldConceptMapping, ConceptMappingPriority):
         agg = model.objects.aggregate(n=Count('pk'), t=Max('updated_at'))
         parts += [str(agg['n']), str(agg['t'])]
-    parts.append(str(SourceCodeConceptMapping.objects.aggregate(t=Max('updated_at'))['t']))
+    # Approved rows only (the ranking reads no others), counted so a delete shows too.
+    approved = SourceCodeConceptMapping.objects.filter(
+        status='approved', target_concept__isnull=False,
+    ).aggregate(n=Count('pk'), t=Max('updated_at'))
+    parts += [str(approved['n']), str(approved['t'])]
     return '|'.join(parts)
 
 
