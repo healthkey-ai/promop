@@ -47,8 +47,13 @@ def _days(n: int) -> str:
     return '1 day' if n == 1 else f'{n} days'
 
 
-def _send_patient_invitation_email(invitation) -> None:
-    accept_url = f"{settings.APP_BASE_URL}/accept-patient-invite?token={invitation.token}"
+def _patient_invitation_message(invitation, accept_url: str) -> tuple[str, str]:
+    """The invitation email's subject and body: PROMOP's own, or the
+    deployment's when PATIENT_INVITATION_EMAIL names a function
+    ``(invitation, accept_url) -> (subject, body)``."""
+    if settings.PATIENT_INVITATION_EMAIL:
+        from django.utils.module_loading import import_string
+        return import_string(settings.PATIENT_INVITATION_EMAIL)(invitation, accept_url)
     subject = "You've been invited to access your health record on PROMOP"
     body = (
         f"Hi,\n\n"
@@ -59,6 +64,18 @@ def _send_patient_invitation_email(invitation) -> None:
         f"If you weren't expecting this invitation, you can ignore this email.\n\n"
         f"— The HealthKey team"
     )
+    return subject, body
+
+
+def _send_patient_invitation_email(invitation) -> None:
+    accept_url = f"{settings.APP_BASE_URL}/accept-patient-invite?token={invitation.token}"
+    try:
+        subject, body = _patient_invitation_message(invitation, accept_url)
+    except Exception as exc:
+        # A deployment's function that fails is an email that could not be
+        # sent, as a backend failure is: the invitation stands, the caller warns.
+        logger.exception("Could not write the email for patient invitation %s", invitation.pk)
+        raise PatientInvitationEmailError from exc
     if settings.DEBUG:
         logger.info(
             "Patient invitation email preview\nTo: %s\nFrom: %s\nSubject: %s\n\n%s",

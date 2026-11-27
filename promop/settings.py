@@ -358,6 +358,12 @@ def _invite_ttl_days(raw: str) -> int:
 
 INVITE_TTL_DAYS = _invite_ttl_days(os.environ.get('INVITE_TTL_DAYS', '7'))
 
+# A deployment's own patient invitation email: the dotted path of a function
+# ``(invitation, accept_url) -> (subject, body)``, for a deployment whose
+# members are not PROMOP's patients (its name, its wording). Empty: PROMOP's
+# email. Set in a deployment's settings module, not the environment.
+PATIENT_INVITATION_EMAIL = ''
+
 # Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
 # All env-configurable per organizational policy.
 AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
