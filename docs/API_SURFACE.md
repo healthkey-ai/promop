@@ -836,8 +836,8 @@ Results are ordered by match quality, best first (#1466, #2923). The order is a 
 this precedence, and is stable, so paging is safe:
 
 1. **Match tier**: exact code or OMOP id; exact name or an exactly equal synonym; name or
-   synonym starting with `q`; a close match of `q` without its optional word (below); any
-   other match.
+   synonym starting with `q`; with an optional word, a name containing the typed phrase; a
+   close match of `q` without its optional word (below); any other match.
 2. Standard concepts before non-standard.
 3. **`prefer_domain_id`**, when sent: concepts of that domain first.
 4. **Use**: a concept an approved field mapping uses or a curator ranked on the Concept to
@@ -854,14 +854,14 @@ this precedence, and is stable, so paging is safe:
 Serum or Plasma` is the total testosterone, and only the exceptions say "Free". When `q` has
 the word `total` (`OPTIONAL_WORDS`) and something else of three or more characters, the text
 without it is searched too, and the concepts whose name equals or starts with that text rank
-behind an exact or prefix match of the full text and ahead of a looser one.
+behind a name that has the typed phrase and ahead of a looser match (the two words apart).
 
 **Answers to their question.** `Gleason grade group` is in no name of LOINC 94734-1, only in
 those of its answers (`ISUP Grade (Grade Group) 3 (Gleason score 4+3=7)`), which the vocabulary
-links with `Answer of`. One more statement finds the questions of up to 50 LOINC answers whose
-name matches `q` and adds them to the list; they rank as any other match of the text, so
-`prefer_domain_id=Measurement` lifts them. Skipped when `vocabulary_id`, `domain_id` or
-`standard_concept` exclude LOINC measurements.
+links with `Answer of`. One more statement finds up to 50 questions (lowest id first) of the LOINC
+answers whose name matches `q` and adds them to the list; they rank as any other match of the text, so
+`prefer_domain_id=Measurement` lifts them. Skipped for text with no token of three characters, and when `vocabulary_id`, `domain_id`
+(other than Measurement or Observation) or `standard_concept` exclude LOINC tests.
 
 **Synonyms.** LOINC names say "Ag" and "Ab" where a curator types "antigen" and "antibody",
 so a name match alone never reached them. The search also matches the synonyms in
