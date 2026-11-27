@@ -58,6 +58,10 @@ export interface CodeMappingRow {
   umls_cui: string;
   created_by: string;
   reviewer?: string;
+  /** Email of the account that approved the mapping; '' when none. */
+  reviewer_email?: string;
+  /** Email of the curator who proposed the destination; '' for a machine proposal. */
+  proposer_email?: string;
   reviewed_at?: string | null;
   /** Who proposed the destination, while the two-person rule is on (#2726); null otherwise. */
   proposed_by_id?: number | null;
@@ -411,8 +415,9 @@ export function retirementDetail(row: CodeMappingRow | null): string {
  */
 export function approvalNote(row: CodeMappingRow): string {
   if (row.status !== "approved") return "";
-  if (!row.reviewer && !row.reviewed_at) return "";
-  const who = row.reviewer ? ` by ${row.reviewer}` : "";
+  if (!row.reviewer && !row.reviewer_email && !row.reviewed_at) return "";
+  const approver = row.reviewer_email || row.reviewer;
+  const who = approver ? ` by ${approver}` : "";
   const when = row.reviewed_at
     ? ` on ${new Date(row.reviewed_at).toLocaleDateString()}`
     : "";

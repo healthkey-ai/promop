@@ -14196,6 +14196,11 @@ def _proposer_id(mapping):
     return mapping.proposed_by_id
 
 
+def _user_email(user):
+    """The account's email address, '' for None (shown in the provenance line)."""
+    return (getattr(user, 'email', '') or '') if user is not None else ''
+
+
 def _user_display(user):
     """Human-readable label for a user, '' for None."""
     if user is None:
@@ -14342,6 +14347,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             # created_by/updated_by, which say only who last touched the row.
             'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
             'reviewed_at': mapping.reviewed_at if mapping else None,
+            'reviewer_email': _user_email(getattr(mapping, 'reviewer', None) if mapping else None),
+            'proposer_email': _user_email(getattr(mapping, 'proposed_by', None) if mapping else None),
             # Who proposed the destination, only while the two-person rule is on:
             # the page disables Approve for that curator (#2726).
             'proposed_by_id': _proposer_id(mapping),
@@ -14435,6 +14442,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         # created_by/updated_by, which say only who last touched the row.
         'reviewer': _user_display(getattr(mapping, 'reviewer', None) if mapping else None),
         'reviewed_at': mapping.reviewed_at if mapping else None,
+        'reviewer_email': _user_email(getattr(mapping, 'reviewer', None) if mapping else None),
+        'proposer_email': _user_email(getattr(mapping, 'proposed_by', None) if mapping else None),
         'proposed_by_id': _proposer_id(mapping),
         'occurrence_count': mapping.occurrence_count if mapping else 0,
         'destination_count': destination_count if destination_count is not None else 0,
@@ -15441,7 +15450,7 @@ def code_mapping_group(request):
         return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
-        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'proposed_by', 'locked_by', 'organization',
     ).prefetch_related('axis_variants__target_concept'))
     # Same tab, search and provenance narrowing browse applied before it
     # counted the entry. Without this, an entry reading "3 codes" under a
@@ -15895,7 +15904,7 @@ def code_mapping_list(request):
     if request.method == 'GET':
         from omop_core.services.mapping_source_units import SourceUnits
         mappings = SourceCodeConceptMapping.objects.select_related(
-            'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+            'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'proposed_by', 'locked_by', 'organization',
         ).prefetch_related(
             'axis_variants__target_concept',
         ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
@@ -16007,7 +16016,7 @@ def code_mapping_detail(request, mapping_id):
         return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
-        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
+        'target_concept', 'destination_unit_concept', 'created_by', 'reviewer', 'proposed_by', 'locked_by', 'organization')
     if request.method != 'GET':
         mappings = mappings.select_for_update(of=('self',))
     mapping = mappings.first()
