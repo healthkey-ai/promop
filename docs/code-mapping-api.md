@@ -387,7 +387,7 @@ app. Rejected mappings and a hospital's own override of a code are left out.
 The Word document is refused with a 400 above 5,000 mappings; the CSV is not
 limited. Send `Accept: */*` (or none): DRF negotiates content before the view
 runs, and `Accept: text/csv` alone is answered 406. On the
-Code Mapping page it is "Download all wearable mappings" on the Wearables tab.
+Code Mapping page it is "Download all wearable mappings" on the Wearables domain of the Concept to Code tab.
 It needs a session with a role that reads the mapping pages (staff, org admin,
 doctor or analyst); anyone else gets 403.
 

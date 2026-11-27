@@ -66,13 +66,11 @@ beforeEach(() => {
 });
 
 describe("Share on the Wearables tab", () => {
-  it("is offered beside the download to a mapping administrator", async () => {
+  it("is offered on the tab's All line to a mapping administrator, with no download there", async () => {
     renderOn("OpenWearables");
     await waitFor(() => expect(share()).toBeInTheDocument());
-    expect(download()).toBeInTheDocument();
-    // On the tab's "All" line, after the download.
-    expect(share()!.parentElement).toContainElement(download());
-    expect(download()!.compareDocumentPosition(share()!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(download()).not.toBeInTheDocument();
+    expect(share()!.parentElement).toContainElement(screen.getByTestId("all-mappings-count"));
   });
 
   it("is offered to staff", async () => {
@@ -83,10 +81,10 @@ describe("Share on the Wearables tab", () => {
 
   // A share sends mail and gathers voters' addresses: writing mappings is
   // not enough, and reading them certainly is not.
-  it.each(["analyst", "doctor"])("is hidden from a %s, who still gets the download", async (name) => {
+  it.each(["analyst", "doctor"])("is hidden from a %s", async (name) => {
     mockUseAuth.mockReturnValue(role(name));
     renderOn("OpenWearables");
-    await waitFor(() => expect(download()).toBeInTheDocument());
+    await screen.findAllByText("VOTED");
     expect(share()).not.toBeInTheDocument();
   });
 
@@ -122,7 +120,7 @@ describe("the votes indicator on a mapping row", () => {
     const voted = (await screen.findAllByText("VOTED"))[0].closest("tr")!;
     const quiet = screen.getAllByText("QUIET")[0].closest("tr")!;
     expect(voted.children).toHaveLength(quiet.children.length);
-    expect(voted.closest("table")!.querySelectorAll("thead th")).toHaveLength(10);
+    expect(voted.closest("table")!.querySelectorAll("thead th")).toHaveLength(11);
   });
 
   it("leaves the other tabs at their eight columns", async () => {

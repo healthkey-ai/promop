@@ -6,6 +6,18 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Code Mapping, Wearables tab: a Source System column and dropdown** — the
+  first column is Source System (HealthKit, Garmin, ...), sortable. Sorted by
+  it, each section is one collapsed entry per system, opened to load that
+  system's codes. A Source Systems dropdown beside "All" limits the tab to the
+  systems ticked (`source_systems` on `GET /api/v1/code-mappings/`; a section
+  ordered by `source_system` returns `system_groups`; the group endpoint takes
+  `group_system`). The "Download all wearable mappings" buttons, the Download
+  menu on the "All" line and the "auto-approved (Suggest)" checkbox are gone
+  from that tab; the Concept to Code tab keeps the download.
+
 ### Added
 
 - **A deployment's own patient invitation email** — `PATIENT_INVITATION_EMAIL`,
