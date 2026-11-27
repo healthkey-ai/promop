@@ -348,7 +348,7 @@ python manage.py seed_wearable_device_mappings   # or wait for the next vocabula
 
 ### Downloading the tab
 
-The Wearables tab has "Download all wearable mappings", as a CSV or as a Word document with one
+The Wearables domain of the Concept to Code tab has "Download all wearable mappings", as a CSV or as a Word document with one
 table per category: every mapping on the tab, proposed and approved, without rejected rows,
 ordered so that the codes of one metric sit together. Anyone who can read the Code Mapping page
 can download it. The endpoint, the columns and what the file leaves out are in
@@ -462,7 +462,8 @@ starts sending HealthKit, Health Connect or HL7 PHR codes finds a curated mappin
 
 ## Oura Ring export
 
-Oura's cloud API is OAuth-gated and not built here. What is built is the
+Oura's cloud API is OAuth-gated; the linked account that reads it is
+[below](#oura-account-by-oauth). The export is the other way in: the
 export a member requests from Oura's Membership Hub (Export data; Oura says it
 can take up to ten days): a zip of CSV files that follows the Oura API V2 data
 models, durations in seconds (#2889). It is a file upload, so it sits with the
@@ -512,6 +513,30 @@ shared writer: the device's own code (the metric key behind `oura_`, so a bare
   as a Garmin sync does). A day with no steps, activity or calories is not
   stored; a day repeated in a file is the later row; a plain `sleep` file is
   read only when there is no `sleepmodel`.
+
+## Oura account by OAuth
+
+Oura's API V2 is OAuth2 only, and can be read on demand with history, so a
+patient links their account once and this server pulls their days (#2900). The
+rules are in `AGENTS.md` ("Wearables — Oura Account by OAuth"); this is the shape.
+
+| Step | Where | What |
+|---|---|---|
+| Register the app | `https://cloud.ouraring.com/oauth/applications` | redirect URL `<APP_BASE_URL>/api/v1/oura/oauth/callback/`; scopes `daily`, `spo2`, `heart_health`; an unapproved app is capped at ten users |
+| Consent | `POST /api/v1/oura/oauth/start/` | Oura's `https://cloud.ouraring.com/oauth/authorize` with a PKCE challenge, the scopes and a signed state |
+| Connect | `GET /api/v1/oura/oauth/callback/` | code exchanged at `https://api.ouraring.com/oauth/token`, tokens stored encrypted, back to `/?oura=connected` |
+| Sync | `POST /api/v1/oura/sync/` | `GET https://api.ouraring.com/v2/usercollection/{daily_activity,sleep,daily_spo2,vO2_max}` with `start_date`, `end_date`, `next_token` |
+| Disconnect | `DELETE /api/v1/oura/connection/` | `GET https://api.ouraring.com/oauth/revoke?access_token=...`, row removed |
+
+Every request carries a `User-Agent` (Oura may answer 403 without one). The API
+documents are read through the export parser's day rules, so the metric table
+under [Oura Ring export](#oura-ring-export) holds for both, with the API's
+field names: `daily_activity` (`steps`, `high_activity_time`,
+`medium_activity_time`, `active_calories`), `sleep` (`total_sleep_duration`,
+`average_hrv`, `lowest_heart_rate`, `average_breath`, `type`), `daily_spo2`
+(`spo2_percentage.average`), `vO2_max` (`vo2_max`). Both ways write device
+`oura` with `replace_daily=True`, so a later day from either replaces the same
+day from the other.
 
 ## Garmin Connect sync
 

@@ -39,6 +39,9 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.ConsentEvent', 'patient_portal.DocumentAcceptance',
     'patient_portal.ConsentLedgerEntry',
     'patient_portal.PatientMessage', 'patient_portal.PatientUser',
+    # A login an importer named for a Person here: like PatientUser, it ties an
+    # account to this deployment's Person.
+    'patient_portal.PersonExternalKey',
     # Access a patient granted to their record, and who opened it. A link is
     # derived from this deployment's own key, so it would open nothing elsewhere.
     'patient_portal.RecordShare', 'patient_portal.ShareScan',
@@ -60,6 +63,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.GarminConnection',
     # A patient's saved Garmin Connect Personal API key, encrypted (#2834).
     'omop_core.GarminPersonalKey',
+    # A patient's link to this deployment's Oura app registration (#2900).
+    'omop_core.OuraConnection',
     # A patient's phones signed in to this deployment's Open Wearables SDK
     # routes, and the running day totals of what they sent (#2810).
     'omop_core.OpenWearablesConnection', 'omop_core.OpenWearablesDevice',

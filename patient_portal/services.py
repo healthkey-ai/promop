@@ -126,12 +126,16 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
     """Resolve an existing Person for *identity*, or auto-provision one.
 
     Lookup order:
-      1. Existing PatientUser link
-      2. Person whose HealthKey email extension matches
-      3. Brand-new Person + PatientUser (+ PatientRecord if email known)
+      1. Existing PatientUser link -- moved to the Person keyed to this login
+         when it is a different, unclaimed one and the linked Person is empty
+      2. Person an importer keyed to this login's (issuer, sub)
+      3. Person whose HealthKey email extension matches
+      4. Brand-new Person + PatientUser (+ PatientRecord if email known)
 
-    When allow_create=False, steps 1 and 2 still run (an existing patient is
-    always returned) but step 3 is skipped — returns None instead of creating.
+    When allow_create=False (a clinician's login), steps 1 and 3 still run (an
+    existing patient is always returned) but steps 2 and 4 are skipped, as is the
+    move in step 1 -- returns None instead of creating. A staff login skips the
+    keyed steps too.
 
     Returns the linked Person, or None if not found and allow_create=False.
 
@@ -139,9 +143,26 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
     signed in. It needs a verified address, and an ambiguous one forks, so an
     import keyed on email loses the unverified and the duplicated.
     """
-    pu = PatientUser.objects.filter(identity=identity).first()
-    if pu:
-        return pu.person
+    from patient_portal.person_adoption import AdoptionOutcome, adopt_keyed_person
+
+    pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
+    # Steps 1 and 2. A login keyed to an imported Person gets it even when it
+    # signed in before the key existed and was given an empty Person then.
+    # Not for a clinician's or staff login: those never get a patient link here.
+    outcome = AdoptionOutcome(person_id=pu.person_id if pu else None)
+    if allow_create and not getattr(identity, 'is_staff', False):
+        try:
+            with transaction.atomic():
+                outcome = adopt_keyed_person(identity, pu)
+        except Exception:  # noqa: BLE001
+            # This runs on every request: a failed move must not lock the member out.
+            logger.exception("keyed person adoption failed for identity %s", identity.pk)
+    if outcome.person_id is not None:
+        if pu is not None and outcome.person_id == pu.person_id:
+            return pu.person
+        person = Person.objects.filter(person_id=outcome.person_id).first()
+        if person is not None:
+            return person
 
     if email_verified is None:
         # Was `is_local`, which treated every email/password account as verified --
@@ -174,7 +195,16 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
         if person:
             holder = PatientUser.objects.filter(person=person).first()
             if holder is None:
-                PatientUser.objects.create(identity=identity, person=person)
+                try:
+                    with transaction.atomic():
+                        PatientUser.objects.create(identity=identity, person=person)
+                except IntegrityError:
+                    # Parallel first requests of one login: the other one
+                    # linked it first (the page loads several at once).
+                    pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
+                    if pu:
+                        return pu.person
+                    raise
                 return person
             if holder.identity_id == identity.pk:
                 return person

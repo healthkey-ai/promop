@@ -101,6 +101,13 @@ the same path (#2669, `omop_core/services/custom_field_values.py`):
   read-only column is. Values are coerced by the field's type (text, number,
   ISO date, boolean); `null` or `""` clears; a value of the wrong type is a
   400 that names the field and saves nothing.
+- **A dropdown holds one of its answers.** A field of type `choice` takes the
+  stored value of one of its live answers (`FieldChoice` rows under its name), as
+  text or a number sent for a numeric value; anything else, a retired answer
+  included, is a 400 that lists the answers and saves nothing. A value the record
+  already holds is not an edit, so a retired answer already stored is never refused
+  when a client echoes it. See
+  [created dropdowns](field_concept_mapping_architecture.md#created-dropdown-fields).
 - **PatientRecord first.** The value is written to `custom_fields` and marked
   pending in `user_edited_fields` as `custom_fields.<name>`; no column name
   has a dot, so the two never collide. A `RecordRevision` is written under the
@@ -116,7 +123,8 @@ the same path (#2669, `omop_core/services/custom_field_values.py`):
   from OMOP and puts a pending value back until derivation produces the same
   answer. An entered row is read back as entered (a boolean's 0 or 1, a
   date's own value); an imported row answers a boolean by existing and a date
-  by its own date. The latest fact answers the field, so a newer import
+  by its own date, and a dropdown by the answer its text or its
+  `value_as_concept_id` stands for (none when it stands for none). The latest fact answers the field, so a newer import
   replaces an entered value and on one day the entered value wins. A value
   cleared in the editor stays cleared against imported facts of that day or
   before (`cleared_days`); a later import, or a value entered after the

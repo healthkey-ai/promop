@@ -40,6 +40,11 @@ const DESCRIPTORS = [
   field("ecog", { answer_coverage: { choices: 5, mapped: 2, no_equivalent: 1, proposed: 1, unmapped: 1 } }),
   field("smoking_status", { answer_coverage: { choices: 3, mapped: 3, no_equivalent: 0, proposed: 0, unmapped: 0 } }),
   field("weight"),
+  // A dropdown created through Add Field: its answers are the same rows, edited in the same place.
+  field("gleason_grade_group", {
+    field_type: "choice",
+    answer_coverage: { choices: 3, mapped: 2, no_equivalent: 0, proposed: 0, unmapped: 1 },
+  }),
 ];
 
 const READER = { currentUser: {
@@ -70,6 +75,14 @@ describe("Answers column", () => {
     expect(within(row("ecog")).getByText("3 of 5 decided")).toHaveAttribute(
       "title", "2 with a concept, 1 with no equivalent, 1 waiting for approval, 1 with no proposal");
     expect(within(row("smoking_status")).getByText("3 of 3 decided")).toHaveClass("text-green-700");
+  });
+
+  it("opens a created dropdown's answers in the same editor", async () => {
+    renderPage();
+    await screen.findByText("gleason_grade_group");
+    expect(within(row("gleason_grade_group")).getByText("2 of 3 decided")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open the answers of gleason_grade_group" }));
+    expect(await screen.findByText("Editor for gleason_grade_group")).toBeInTheDocument();
   });
 
   it("shows a dash for a field with no curated answers", async () => {

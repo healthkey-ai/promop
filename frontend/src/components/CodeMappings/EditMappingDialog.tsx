@@ -575,13 +575,28 @@ export default function EditMappingDialog({
     }
   }, [examples, exampleVocabulary, exampleCode, exampleTable]);
 
-  // ── Acquire edit lock on open ───────────────────────────────────
+  // ── Edit lock: held only while this dialog is open on this mapping ──
+  // The lock is released on every way out (Close, Escape, a save, another row
+  // opening, the page unmounting, the tab closing), not just the Close button,
+  // so a closed dialog never leaves the mapping locked to this account. The
+  // server still expires a lock after MAPPING_LOCK_TIMEOUT_MINUTES as a
+  // backstop for a browser that dies without a word.
   useEffect(() => {
     if (!open || mode !== "edit" || !selectedRow?.mapping_id) return;
+    const lockPath = `/v1/code-mappings/${selectedRow.mapping_id}/lock/`;
     let cancelled = false;
+    let held = false;
+    const release = () => {
+      if (!held) return;
+      held = false;
+      Promise.resolve(api.delete(lockPath)).catch(() => {});
+    };
     (async () => {
       try {
-        await api.post(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`);
+        await api.post(lockPath);
+        held = true;
+        // The dialog went away while the request was in flight.
+        if (cancelled) release();
       } catch (err) {
         if (cancelled) return;
         const resp = err && typeof err === "object" && "response" in err
@@ -593,7 +608,25 @@ export default function EditMappingDialog({
         // Non-lock errors -- still allow editing, the save may work.
       }
     })();
-    return () => { cancelled = true; };
+    // A closing tab cancels ordinary requests; keepalive lets this one finish.
+    const releaseOnPageHide = () => {
+      if (!held) return;
+      held = false;
+      const csrf = document.cookie.split("; ").find((row) => row.startsWith("csrftoken="))?.split("=")[1];
+      const base = String(api.defaults.baseURL || "/api").replace(/\/$/, "");
+      void fetch(`${base}${lockPath}`, {
+        method: "DELETE",
+        credentials: "include",
+        keepalive: true,
+        headers: csrf ? { "X-CSRFToken": csrf } : {},
+      }).catch(() => {});
+    };
+    window.addEventListener("pagehide", releaseOnPageHide);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("pagehide", releaseOnPageHide);
+      release();
+    };
   }, [open, mode, selectedRow?.mapping_id]);
 
   // ── Load destination options & source evidence for edit mode ─────
@@ -653,13 +686,10 @@ export default function EditMappingDialog({
     setExistingMapping(null);
     setSearchingConcepts(false);
     setMintOpen(false);
-    // Release edit lock.
-    if (selectedRow?.mapping_id) {
-      api.delete(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`).catch(() => {});
-    }
+    // The edit lock is released by the effect above when the dialog closes.
     setSaving(false);
     onClose();
-  }, [selectedRow?.mapping_id, onClose]);
+  }, [onClose]);
 
   const setField = useCallback((field: keyof MappingForm, value: string) => {
     if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");

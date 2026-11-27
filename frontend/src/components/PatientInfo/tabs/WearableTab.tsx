@@ -8,6 +8,7 @@ import Section from '../Section';
 import GarminAccountLink from './GarminAccountLink';
 import GarminConnectSync from './GarminConnectSync';
 import OpenWearablesLink from './OpenWearablesLink';
+import OuraAccountLink from './OuraAccountLink';
 import OuraUpload from './OuraUpload';
 import UploadsList, { type UploadRecord } from './UploadsList';
 import { pendingClause } from './wearableResult';
@@ -34,6 +35,12 @@ interface Props {
    * value has its chart and no link to rows (#2887).
    */
   onOpenOmopRows?: (focus: OmopFocus) => void;
+  /**
+   * True for a reader who may open the mapping pages (staff, org admins and
+   * professional grants, outside patient mode): each 30-day value then links to
+   * the Code Mapping page's rows for the metric's source codes.
+   */
+  canOpenMappings?: boolean;
   /**
    * True when the page is the signed-in person's own record. A file upload,
    * the upload history and its deletes all act on the caller's own record,
@@ -117,7 +124,7 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false, onOpenOmopRows }: Props) {
+export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false, onOpenOmopRows, canOpenMappings = false }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -127,7 +134,13 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   const [uploading, setUploading] = useState(false);
   // A Garmin Connect sync in flight: uploads and deletes wait for it, as it
   // waits for them.
-  const [syncing, setSyncing] = useState(false);
+  // A count, not a flag: the Garmin sync and the Oura account's sync can run
+  // together, and the first to finish must not unlock what the other holds.
+  const [syncCount, setSyncCount] = useState(0);
+  const syncing = syncCount > 0;
+  const setSyncing = useCallback((busy: boolean) => {
+    setSyncCount(count => Math.max(0, count + (busy ? 1 : -1)));
+  }, []);
   const [uploadResult, setUploadResult] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   // Which section's upload the result and error above belong to, so each is
@@ -400,7 +413,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   };
 
   return (
-    <WearableMetricProvider value={{ personId, onOpenOmopRows }}>
+    <WearableMetricProvider value={{ personId, onOpenOmopRows, canOpenMappings }}>
     <div
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
@@ -499,7 +512,8 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
         </section>
       )}
 
-      {/* An Oura Ring export (#2889): the file Oura's Membership Hub sends. */}
+      {/* Oura Ring: the account linked once (#2900), whose days this site reads,
+          and under it the export file Oura's Membership Hub sends (#2889). */}
       {ownRecord && (
         <OuraUpload
           disabled={uploading || syncing || deletingId !== null}
@@ -507,6 +521,17 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
           result={messageAt === 'oura' ? uploadResult : null}
           error={messageAt === 'oura' ? uploadError : null}
           onFiles={(files) => void uploadFiles(files, 'oura', 'oura')}
+          account={canSyncOwnDevice ? (
+            <OuraAccountLink
+              personId={personId}
+              disabled={uploading || deletingId !== null}
+              onBusyChange={setSyncing}
+              onSynced={(changed) => {
+                fetchUploads();
+                if (changed && onRefresh) onRefresh();
+              }}
+            />
+          ) : null}
         >
           {!uploadsLoading && <UploadsList {...uploadsProps} uploads={ouraUploads} name="oura" />}
         </OuraUpload>

@@ -23,7 +23,7 @@ import threading
 from contextlib import contextmanager
 
 from django.conf import settings
-from django.db.models.signals import post_save, post_delete, pre_save
+from django.db.models.signals import post_init, post_save, post_delete, pre_save
 from django.dispatch import receiver
 
 from .models import (
@@ -207,6 +207,23 @@ def field_concept_mapping_saved(sender, instance, **kwargs):
         txn.on_commit(lambda pk=mapping_pk: _dispatch_projection(pk))
     else:
         _project_field_sync(mapping_pk)
+
+
+@receiver(post_init, sender=FieldConceptMapping)
+def field_concept_mapping_loaded(sender, instance, **kwargs):
+    """Remember what a created field's mapping said when it was loaded (#2941)."""
+    from omop_core.services.custom_field_rederive import mapping_post_init
+    mapping_post_init(sender, instance, **kwargs)
+
+
+@receiver(post_save, sender=FieldConceptMapping)
+def field_concept_mapping_rederive(sender, instance, **kwargs):
+    """A created field whose mapping now points at a concept: derive the records with facts there (#2941).
+
+    Off the request and only with a broker; see ``services/custom_field_rederive.py``.
+    """
+    from omop_core.services.custom_field_rederive import mapping_saved
+    mapping_saved(sender, instance, **kwargs)
 
 
 def _dispatch_projection(mapping_pk):

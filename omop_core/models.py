@@ -3600,6 +3600,48 @@ class GarminConnection(models.Model):
         return f'Garmin connection for person {self.person_id}'
 
 
+class OuraConnection(models.Model):
+    """A patient's Oura account, linked by OAuth (#2900).
+
+    The patient approved this deployment's Oura app on Oura's consent page. The
+    server then reads their days from Oura's API when they open the Wearables
+    tab or press Sync (``omop_core/services/oura_oauth.py``): Oura pushes
+    nothing, so there is no account id to route by and no uniqueness to hold
+    beyond one connection per record.
+
+    The tokens are stored encrypted under the wearable token key
+    (``garmin_oauth.encrypt``, ``GARMIN_TOKEN_KEY``, in no database) and never
+    leave the server. Oura's refresh tokens are single use, so a refresh saves
+    both under this row's lock.
+
+    System data: it belongs to this deployment's app registration, so it is
+    never copied between instances, and it goes with the person.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='oura_connection',
+    )
+    access_token = models.TextField(blank=True, default='')
+    refresh_token = models.TextField(blank=True, default='')
+    access_expires_at = models.DateTimeField(null=True, blank=True)
+    tokens_updated_at = models.DateTimeField(null=True, blank=True)
+    connected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='oura_connections',
+    )
+    # Set again when the patient connects again: it is this account's link.
+    connected_at = models.DateTimeField(default=timezone.now)
+    # When a sync last finished, and the last day it read to. The next one
+    # starts a few days before it (Oura revises recent days).
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    synced_through = models.DateField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'oura_connection'
+
+    def __str__(self):
+        return f'Oura connection for person {self.person_id}'
+
+
 class GarminPersonalKey(models.Model):
     """A patient's Garmin Connect Personal API key, saved for later syncs (#2834).
 
@@ -5166,6 +5208,16 @@ class ConceptMappingNote(models.Model):
         return f'note: concept {self.concept_id}'
 
 
+class CustomPatientFieldQuerySet(models.QuerySet):
+    """``active()`` is what every reader of created fields uses; retired ones are kept apart."""
+
+    def active(self):
+        return self.filter(retired_at__isnull=True)
+
+    def retired(self):
+        return self.filter(retired_at__isnull=False)
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 
@@ -5178,6 +5230,9 @@ class CustomPatientField(models.Model):
         ('number', 'Number'),
         ('date', 'Date'),
         ('boolean', 'Boolean'),
+        # One of the field's curated answers (``FieldChoice`` rows under the
+        # field's name), stored as the answer's stored value.
+        ('choice', 'Dropdown'),
     ]
     MODE_CHOICES = [
         ('editable', 'Editable'),
@@ -5196,8 +5251,17 @@ class CustomPatientField(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
     )
+    # A removed field is retired, not deleted: it leaves every list, tab and pass but
+    # its definition, mapping, answers, scope and the values records hold stay, so it
+    # can be restored. See ``omop_core.services.custom_field_removal``.
+    retired_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text='When an administrator removed the field. Values already stored are kept.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CustomPatientFieldQuerySet.as_manager()
 
     class Meta:
         db_table = 'custom_patient_field'
@@ -5213,7 +5277,8 @@ class CustomPatientField(models.Model):
         }
         if self.field_name in concrete_names:
             raise ValidationError({'field_name': 'This name is already a PatientRecord field.'})
-        if self.mapping_id and self.mapping.status != 'approved':
+        # A retired field's mapping is rejected while it is retired (restoring approves it).
+        if self.mapping_id and self.retired_at is None and self.mapping.status != 'approved':
             raise ValidationError({'mapping': 'A custom PatientRecord field requires an approved mapping.'})
 
     def __str__(self):

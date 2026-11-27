@@ -505,6 +505,190 @@ fills a created field the record leaves empty, marked with its confidence in
 `provisional_fields["custom_fields.<name>"]`. A computed field is not proposed. The
 [plan](provisional_data_plan.md#created-fields-as-built-2857) has the rules.
 
+### Created dropdown fields
+
+A created field can be a **dropdown**: `CustomPatientField.field_type = 'choice'`
+(`FIELD_TYPE_CHOICES`, migration `0378`; the dialog calls it "Dropdown"). It reuses
+the answer machinery of the built-in coded fields and adds no second answer system.
+
+- **The answers are `FieldChoice` rows under the field's name** (`field_name` is a
+  string, not a column), so the identity, code, stored value, aliases, retirement and
+  `value_as_concept` decisions of [#1224](#scoped-choices-fieldchoice-identity-1224)
+  apply unchanged. `POST /api/v1/custom-patient-fields/` takes `answers`
+  (`[{label, value?, concept?}]`, in order) and creates, in the field's transaction, the
+  field, its approved mapping (`value_kind='concept'`), its scope and the answers. An
+  answer's concept becomes an **approved** `value_as_concept` decision
+  (`field_value_mappings.propose` then `approve`, so the same target checks apply: a
+  current standard concept outside the non-answer domains). The creator is an approver
+  (`_can_approve_mappings`: staff and org admins; an analyst or a doctor gets 403).
+  `FieldChoiceSerializer` accepts a created dropdown's name, so the Field Mappings answer
+  editor adds, renames, retires, scopes and maps answers afterwards; a created field of
+  another type takes none.
+- **What a dropdown needs.** At least one answer; distinct labels and distinct stored
+  values (a value left blank stores the label, and a rename freezes that, so a renamed
+  answer keeps saving its old stored value, #2901); one answer per concept (two answers
+  sharing a concept could not be read back); `mode='editable'` (a person chooses it);
+  and `omop_table` Measurement or Observation, the tables that carry a coded answer. A
+  refused answer is a per-index 400 (`answers: [{label?, value?, concept?}]`) and nothing
+  is created. At most 200 answers, and a name that still has `FieldChoice` rows (left by a
+  field since removed, since answers are keyed by name, not by the field) is refused rather
+  than inheriting them.
+- **Reads.** The definition list (`GET custom-patient-fields/`) and the writable-fields
+  descriptor carry `options: [{value, code, label?}]` as a built-in select's do: `value`
+  is what a save stores, `code` the code of the answer's concept (its approved decision,
+  else its primary code) or null, `label` only where it differs from the value. Retired
+  answers are not offered. The record read carries only the stored value under
+  `custom_fields`; the descriptor entry adds `multiple: false` and the projection's
+  `value_concept_map`.
+- **Writes.** The PATCH value must be the stored value of a live answer, else a 400 that
+  names the field and lists the answers (`custom_field_values.changed_values`); `null` or
+  `""` clears; a number is accepted for a numeric stored value (`2` is `"2"`). A value the
+  record already holds is not an edit and is not checked again, so a client echoing a
+  retired answer already stored is not refused. It lands on `custom_fields`, is pending as
+  `custom_fields.<name>`, and projects as for any created field.
+- **Projection.** The recipe is the `concept` value kind of `project_single_value` with
+  `value_concept_map` from `answer_concept_ids`: the row carries `value_as_string` = the
+  stored value always, and `value_as_concept_id` as well where the answer has a usable
+  approved concept (none, and plain text, for an answer with no concept, a
+  no-equivalent decision, or a target a reload retired). A retired decision is not
+  written; the value is still saved. The row is under the field's one concept and its
+  source key `custom:<name>`, in Observation or Measurement.
+- **Derive-back** (`custom_field_values.AnswerIndex`, used by
+  `patient_record_service.custom_field_answers`). A fact at the field's concept, entered
+  or imported, reads as the stored value of the answer its `value_as_string` stands for
+  (label, stored value or alias, case and spacing aside), else the answer its
+  `value_as_concept_id` stands for (`answer_values_by_concept`, the inverse of the
+  projection from the same decisions). A text or concept that two live answers share, or
+  that stands for no answer, reads as nothing and is **not written**: such a fact is
+  skipped before the latest fact is chosen, so it cannot hide an older fact that does
+  match. A retired answer still reads (stored data keeps its meaning); a live answer
+  speaks over a retired one. A value the editor wrote (under `custom:<name>`) whose answer
+  was **deleted** since still reads as the text it stored, so deleting an answer does not
+  blank the record; an imported fact of a deleted answer is not read. A *proposal* whose
+  answer is retired is not shown, since a proposal is approved by saving its value and only
+  a live answer can be saved.
+- **Provisional data.** A proposal-based row fills a dropdown through the same reader, so
+  only with one of its answers; the mark, the rejection by clearing and the approval by
+  PATCH are the scalar rules of [created fields](patient-record-first-writes.md#created-fields).
+- **Limits.** The field has **one concept**, as every created field does, and facts are
+  matched on it: an import that carries the answer as a *different* observation concept
+  (one concept per answer, the common FHIR pattern) is not read into the dropdown, which
+  needs a mapping to the field's one question concept with the answer as value. An answer
+  concept is read back only from `value_as_concept_id` of a fact at that question concept.
+  An existing dropdown's mapping (`PATCH field-mappings/<id>/`) cannot be moved to a table
+  that holds no answer or given another value kind (400), and the edit dialog lists only
+  Measurement and Observation for it. Changing an answer's stored value through the editor
+  keeps the old value as an alias, so facts saved under it still name the answer, and a
+  stored value another answer of the field answers to is refused; a saved value is also
+  matched exactly before any folded spelling. Each refresh builds the answer index (about
+  nine queries) once for the approved pass and again for the provisional pass when there
+  are provisional rows; it is not yet shared between them.
+  Dropdowns are single-choice (no multi-select) and text-valued: no integer, decimal or
+  boolean answer typing, and a dropdown cannot be changed to or from another type, nor
+  computed. Answer scope by disease (`FieldChoiceDisease`) is stored but, as for built-in
+  fields, does not yet narrow what the patient tab offers. A condition, drug or procedure
+  table cannot hold a coded answer, so a dropdown cannot be stored there.
+
+### Filling a created field from existing facts (#2941)
+
+A created field reads imported OMOP facts at its mapping's concept whenever a record is
+derived, but creating it, restoring it or moving its approved mapping derives nothing.
+`omop_core/services/custom_field_rederive.py` queues that: when a created field's mapping
+becomes (or, while approved, changes) approved with a concept, table or source key
+(`FieldConceptMapping` pre/post-save, so every writer that saves is covered), and on
+restore (`update()` fires no signal), a Celery chain derives the people with a non-erroneous
+fact at the concept in the mapping's table, `CHUNK` (25) per task, each chunk queueing the
+next with its person-id cursor and stopping at a 10-minute budget. One pending chain per
+mapping is coalesced through the cache. Built-in field mappings queue nothing.
+
+With no `CELERY_BROKER_URL` nothing is queued (a derivation costs seconds per person and
+a lab concept can hold thousands): run `manage.py refresh_custom_field_records <name>`
+(`--dry-run`, `--limit`), Generate OMOP on a patient, or `backfill_patient_records`.
+A text field over a numeric result reads the number (`custom_field_values.read_value`),
+not the concept's name.
+
+### Removing a created field: retire, restore, delete
+
+A created field is **global**: one `CustomPatientField`, one approved mapping, its
+answers and scope, shared by every organization on the instance. Removing it removes
+it for all of them, so it is an approval like creating one: `DELETE
+/api/v1/custom-patient-fields/<field_name>/` and `POST .../restore/` are for staff and
+org admins (`_can_approve_mappings`); an analyst, doctor or patient gets 403 on both,
+before the field is looked up. v1 only. Rules in `omop_core/services/custom_field_removal.py`.
+
+| Call | What it does |
+|---|---|
+| `GET .../<name>/` | the field with `records_with_value`, `records_with_entered_value`, `has_facts`, `answers`, `can_delete`, `retired`: what a confirmation dialog shows. Only an entered value (a pending edit) and facts under the field's own key block a delete: a value that merely mirrors facts at the field's concept is derived data, and leaves the records with the field (#2941) |
+| `DELETE .../<name>/` | **retire** (the default, reversible) |
+| `DELETE .../<name>/?permanent=true` | **delete for good**, only when `can_delete`; else 409 `has_data` with the counts |
+| `POST .../<name>/restore/` | restore a retired field; 409 `not_retired`, or `mapping_conflict` when another approved mapping took its table and source value |
+| `GET /custom-patient-fields/?state=retired` | the removed fields (approvers only), with their scope |
+| `DELETE field-mappings/<id>/` of a created field's mapping | 409 `created_field` naming the action above (it was a 500: `CustomPatientField.mapping` is `PROTECT`); so is a `PATCH` that un-approves or rejects it (the field would vanish with no way back) |
+| `PUT field-mappings/<name>/diseases/` of a retired field | 409 `retired_field`: its scope is kept for the restore |
+| any of the above on a field another request just deleted | 404 `gone` |
+
+- **Retire** sets `CustomPatientField.retired_at` (migration `0379`) and flips the
+  field's mapping to `rejected`, with `update()` so that neither an approval's OMOP
+  re-projection nor any record changes. Every reader of created fields asks for
+  `CustomPatientField.objects.active()` or for approved mappings, so the field leaves
+  the patient tabs (`GET custom-patient-fields/`), the writable-fields descriptor, the
+  Field Mappings lists and CSV (`created_field: true` marks a created field's
+  descriptor), the patient-visible and attestation rules, the derive and provisional
+  passes, the formulas, and the scope readers (`disease_profiles.memberships()`,
+  `extension_fields()` and `field_names()` skip a retired field; `include_retired`
+  reads them). An edit of it is ignored as a key with no definition always was, and
+  the answer editor refuses its answers. Idempotent.
+- **Nothing a record holds is touched.** `custom_fields.<name>` and the OMOP facts under
+  the field's source key stay. `refresh_patient_record` rebuilds `custom_fields` from the
+  active fields' facts, so it carries a retired field's stored value over unchanged
+  (`retired_values`); a key no field defines, retired or not, is still dropped. The
+  definition, mapping, answers (`FieldChoice` rows, aliases, codes and concept decisions),
+  formula and scope rows are all kept, so a restore returns the same field.
+  `user_edited_fields` pins (`custom_fields.<name>`) stay too, through derivations
+  (`retired_pins`): only a permanent delete clears them.
+- **The name stays taken.** Creating a field under a retired name is a 400 that points to
+  Restore, so stored values are never adopted by a different definition.
+- **Restore** approves the mapping again (with `update()`, so no re-projection) and clears
+  `retired_at`; the field, its scope, answers and every stored value are back at once.
+- **Delete for good** only when nothing depends on the field: no record holds a value
+  under the key (one `has_key` query; a JSON null is no value) and no OMOP fact is
+  written under the field's own source key and still holding an answer (one existence query; a
+  row whose value was cleared holds none and is deleted with the field). Rows that only sit at
+  the field's concept are the patients' own data and do not block (#2930): deleting the
+  field never touches them, and a field created again over that concept reads them again.
+  Otherwise it is refused and retire is the way. It then deletes, in one transaction, the definition,
+  mapping, formula, scope, synonyms, answers (with aliases, codes, disease scope and
+  concept decisions), and what records keep *about* the field with no value in it:
+  `user_edited_fields` pins (`custom_fields.<name>`, a pending clear), proposal rejections
+  and the key in the provisional picture. A retired field can be deleted later by the same
+  rule, from the Removed fields list. A permanent delete **retires first** and re-checks
+  after that commits: a retired field takes no new value from the record editor, so a write
+  that resolved the field while it was active cannot land between the check and the delete.
+  A refusal at that point leaves the field retired. Records are matched by the key as data
+  (`KeyTransform`), never by building a lookup from the name, since `psa__level` or
+  `x__isnull` are valid names. The scans are unindexed JSON lookups over `patient_record`
+  and the two provisional tables, run when the dialog opens and once more per removal.
+- **Copying between instances.** The curation payload (`dump_field_curation`,
+  `copy_reference_data`) carries `retired` on each created field, with the rejected
+  mapping; a payload without the key leaves the target's state alone.
+- **The page.** On a created field's row, staff and org admins get a Remove field action
+  (`RemoveFieldDialog.tsx`): it reads the usage, states how many records hold a value and
+  says that removing keeps them and is restorable, offers Delete permanently only when
+  `can_delete`, and reports what the server answered. The global Remove-mapping X is not
+  shown for a created field. **Removed fields** (`RemovedFieldsPanel.tsx`, approvers only)
+  lists them with Restore and Delete.
+- **Not done.**
+  - A retired field's `custom_fields` value is still in the raw JSON of the record read on
+    `/api/v1/patient-records/` and the legacy path, to every reader of the record (nothing renders
+    it; a client that echoes the object back sends a no-op). Retiring hides a field, it does not
+    withdraw its data from the API; a sensitive field's values would need a data fix. The dialog says so.
+  - Restore does not re-derive records. While a field was retired its value was frozen, so facts
+    the ETL wrote meanwhile, and the provisional marks dropped at retire, come back at each
+    record's next derivation (`manage.py backfill_patient_records --all` does every record).
+  - Permission is the same as creation: an admin of *any* organization may remove a global field,
+    and `GET .../<name>/` counts records instance-wide. A narrower rule (staff only, or the
+    creating organization) is a product decision not made here.
+
 ### Whose record a field is part of: `FieldDiseaseMembership`
 
 A patient's record is a **profile**: the base record every patient has, plus

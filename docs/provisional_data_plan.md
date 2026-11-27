@@ -745,6 +745,12 @@ mapping (`custom_field_values`, `patient_record_service.custom_field_answers`). 
 part in provisional data as a **scalar, key by key**: a proposal-based row (confidence
 not null) answers it, marked with the row's confidence.
 
+- **A dropdown created field** (`field_type='choice'`) is proposed only with one of its answers:
+  its reader maps a row's text (its label, stored value or an alias) or `value_as_concept_id` to
+  the answer's stored value and reads a row that matches no answer as no row at all, so an older
+  matching proposal is not hidden by a newer unmatched one. The mark, the rejection and the
+  approval by PATCH are the scalar rules below, the value being the stored value
+  ([created dropdowns](field_concept_mapping_architecture.md#created-dropdown-fields)).
 - **Storage.** `patient_record_confidence.custom_fields` is a nullable JSON object,
   `{field_name: percent}`, holding the proposals only (`PROVISIONAL_OBJECT_FIELDS` names
   the one object field; the parity test and `confidence_field_names()` cover it).

@@ -7,7 +7,7 @@ from .loinc_axes import (
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .version import version_view
-from . import garmin_oauth, open_wearables
+from . import garmin_oauth, open_wearables, oura_oauth
 from . import mapping_votes
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
@@ -72,6 +72,8 @@ from .views import (
     code_mapping_accuracy_analytics,
     code_mapping_unit_search,
     custom_patient_field_list,
+    custom_patient_field_detail,
+    custom_patient_field_restore,
     field_synonyms, field_synonym_detail, field_synonyms_batch,
     field_choice_list, field_choice_detail, field_choice_codes,
     field_choice_value_mappings, field_choice_value_mapping_decide,
@@ -254,6 +256,12 @@ urlpatterns = [
     # the other spelling with the app's page.
     re_path(r'^garmin/oauth/callback/?$', garmin_oauth.oauth_callback, name='v1-garmin-oauth-callback'),
     re_path(r'^garmin/webhooks/(?P<secret>[^/]+)/?$', garmin_oauth.webhook, name='v1-garmin-webhook'),
+    # An Oura account linked by OAuth, read on demand (#2900). The callback
+    # answers with or without the final slash, as Oura is registered with one.
+    path('oura/connection/', oura_oauth.connection, name='v1-oura-connection'),
+    path('oura/oauth/start/', oura_oauth.oauth_start, name='v1-oura-oauth-start'),
+    re_path(r'^oura/oauth/callback/?$', oura_oauth.oauth_callback, name='v1-oura-oauth-callback'),
+    path('oura/sync/', oura_oauth.sync, name='v1-oura-sync'),
     # A phone app built on the Open Wearables SDK (#2810). The first two are
     # the signed-in patient's. The rest are the paths the SDK itself calls
     # under {host}/api/v1/, with no final slash, so both spellings answer: a
@@ -290,6 +298,8 @@ urlpatterns = [
     path('code-mappings/<int:mapping_id>/snomed-attributes/', code_mapping_snomed_attributes, name='v1-code-mapping-snomed-attributes'),
     path('loinc/axis-values/', loinc_axis_values, name='v1-loinc-axis-values'),
     path('custom-patient-fields/', custom_patient_field_list, name='v1-custom-patient-field-list'),
+    path('custom-patient-fields/<str:field_name>/', custom_patient_field_detail, name='v1-custom-patient-field-detail'),
+    path('custom-patient-fields/<str:field_name>/restore/', custom_patient_field_restore, name='v1-custom-patient-field-restore'),
     path('field-mappings/propose-all/', propose_all_mappings, name='v1-field-mapping-propose-all'),
     path('field-mappings/export/', field_mapping_export, name='v1-field-mapping-export'),
     path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),

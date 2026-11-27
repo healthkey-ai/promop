@@ -358,6 +358,12 @@ def _invite_ttl_days(raw: str) -> int:
 
 INVITE_TTL_DAYS = _invite_ttl_days(os.environ.get('INVITE_TTL_DAYS', '7'))
 
+# A deployment's own patient invitation email: the dotted path of a function
+# ``(invitation, accept_url) -> (subject, body)``, for a deployment whose
+# members are not PROMOP's patients (its name, its wording). Empty: PROMOP's
+# email. Set in a deployment's settings module, not the environment.
+PATIENT_INVITATION_EMAIL = ''
+
 # Authentication-policy controls for local (email/password) accounts — PHR-S FM TI.1.1.
 # All env-configurable per organizational policy.
 AUTH_LOCKOUT_THRESHOLD = int(os.environ.get('AUTH_LOCKOUT_THRESHOLD', '5'))   # #03 consecutive failures before lockout
@@ -382,25 +388,50 @@ ACCOUNT_CLOSED_BLOCK_SECONDS = int(os.environ.get('ACCOUNT_CLOSED_BLOCK_SECONDS'
 # when empty, mirroring the AUDIT_HMAC_KEY pattern.
 EXPORT_SIGNING_KEY = os.environ.get('EXPORT_SIGNING_KEY', '')
 
-_mailgun_configured = bool(
-    os.environ.get('MAILGUN_API_KEY') and os.environ.get('MAILGUN_SENDER_DOMAIN')
-)
 
-# Email — uses Mailgun HTTP API via django-anymail when configured,
-# falls back to console backend for local development.
-EMAIL_BACKEND = os.environ.get(
-    'EMAIL_BACKEND',
-    (
-        'anymail.backends.mailgun.EmailBackend'
-        if _mailgun_configured
-        else 'django.core.mail.backends.console.EmailBackend'
-    ),
-)
-ANYMAIL = {}
-if os.environ.get('MAILGUN_API_KEY'):
-    ANYMAIL['MAILGUN_API_KEY'] = os.environ['MAILGUN_API_KEY']
-if os.environ.get('MAILGUN_SENDER_DOMAIN'):
-    ANYMAIL['MAILGUN_SENDER_DOMAIN'] = os.environ['MAILGUN_SENDER_DOMAIN']
+def _email_settings(env) -> dict:
+    """The email settings that ``env`` asks for.
+
+    Twilio SendGrid when SENDGRID_API_KEY is set: its SMTP relay, at
+    SENDGRID_SMTP_HOST (smtp.eu.sendgrid.net for an EU-resident account), with
+    tracking off (promop.mail). Otherwise Mailgun's HTTP API, through anymail,
+    when MAILGUN_API_KEY and MAILGUN_SENDER_DOMAIN are set; otherwise the
+    console backend, for local development. EMAIL_BACKEND overrides the choice.
+    Values are stripped: a key pasted into a secret with its newline would
+    otherwise fail every sign-in to the relay.
+    """
+    value = {key: env.get(key, '').strip() for key in (
+        'SENDGRID_API_KEY', 'SENDGRID_SMTP_HOST', 'MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN')}
+    email = {'ANYMAIL': {k: value[k] for k in ('MAILGUN_API_KEY', 'MAILGUN_SENDER_DOMAIN') if value[k]}}
+    if value['SENDGRID_API_KEY']:
+        email.update(
+            EMAIL_BACKEND='promop.mail.SendGridSMTPBackend',
+            EMAIL_HOST=value['SENDGRID_SMTP_HOST'] or 'smtp.sendgrid.net',
+            EMAIL_PORT=587,
+            EMAIL_USE_TLS=True,
+            EMAIL_HOST_USER='apikey',  # SendGrid's fixed user name for an API key
+            EMAIL_HOST_PASSWORD=value['SENDGRID_API_KEY'],
+            EMAIL_TIMEOUT=30,  # a request that sends mail never hangs on the relay
+        )
+    elif value['MAILGUN_API_KEY'] and value['MAILGUN_SENDER_DOMAIN']:
+        email['EMAIL_BACKEND'] = 'anymail.backends.mailgun.EmailBackend'
+    else:
+        email['EMAIL_BACKEND'] = 'django.core.mail.backends.console.EmailBackend'
+    if env.get('EMAIL_BACKEND'):
+        email['EMAIL_BACKEND'] = env['EMAIL_BACKEND']
+    return email
+
+
+# Email — SendGrid's SMTP relay or Mailgun when configured; see _email_settings.
+_EMAIL = _email_settings(os.environ)
+EMAIL_BACKEND = _EMAIL['EMAIL_BACKEND']
+ANYMAIL = _EMAIL['ANYMAIL']
+EMAIL_HOST = _EMAIL.get('EMAIL_HOST', 'localhost')
+EMAIL_PORT = _EMAIL.get('EMAIL_PORT', 25)
+EMAIL_USE_TLS = _EMAIL.get('EMAIL_USE_TLS', False)
+EMAIL_HOST_USER = _EMAIL.get('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = _EMAIL.get('EMAIL_HOST_PASSWORD', '')
+EMAIL_TIMEOUT = _EMAIL.get('EMAIL_TIMEOUT')
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PROMOP <noreply@healthkey.ai>')
 
 # Base URL used to build invitation accept links in emails.
@@ -618,6 +649,12 @@ FAMILY_AUTH_APP_URLS = _env_list("FAMILY_AUTH_APP_URLS")
 FAMILY_AUTH_RESET_APPS = _env_list("FAMILY_AUTH_RESET_APPS")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
+# The login issuer an importer may name in a person's external key
+# (POST /api/v1/persons/external-keys/): this deployment's Firebase project,
+# since a key only helps a login that presents it.
+PERSON_EXTERNAL_KEY_ISSUERS = (
+    [f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}"] if FIREBASE_PROJECT_ID else []
+)
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
     "FIREBASE_SKIP_REVOCATION_CHECK", "false"
 ).lower() in ("1", "true")
@@ -666,6 +703,19 @@ GARMIN_WEBHOOK_SECRET = os.environ.get('GARMIN_WEBHOOK_SECRET', '')
 GARMIN_REDIRECT_URI = os.environ.get('GARMIN_REDIRECT_URI', '')
 GARMIN_TOKEN_KEY = os.environ.get('GARMIN_TOKEN_KEY', '')
 GARMIN_TOKEN_KEY_FALLBACKS = _env_list('GARMIN_TOKEN_KEY_FALLBACKS')
+
+# Oura API app (#2900): a patient links their Oura account by OAuth and this
+# server reads their days. Register the app at
+# https://cloud.ouraring.com/oauth/applications (Oura caps an unapproved app at
+# ten users).
+#   OURA_CLIENT_ID / OURA_CLIENT_SECRET: the app's client id and secret.
+# Tokens are stored under GARMIN_TOKEN_KEY (the wearable token key, named for
+# Garmin, which came first), so it must be set as well. The redirect URL
+# registered with Oura is <APP_BASE_URL>/api/v1/oura/oauth/callback/ unless
+# OURA_REDIRECT_URI says otherwise; it must match the registration exactly.
+OURA_CLIENT_ID = os.environ.get('OURA_CLIENT_ID', '')
+OURA_CLIENT_SECRET = os.environ.get('OURA_CLIENT_SECRET', '')
+OURA_REDIRECT_URI = os.environ.get('OURA_REDIRECT_URI', '')
 
 # Open Wearables SDK routes (#2810): a phone app built on the Open Wearables
 # SDK syncs HealthKit and Health Connect straight to this deployment. Needs no

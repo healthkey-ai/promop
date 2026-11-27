@@ -154,7 +154,7 @@ from .permissions import (
     EtlDeletePermission, EtlPatientCrudPermission, EtlWritePermission,
     PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
+    VocabReadPermission, LabSyncPermission, EtlProvisionPermission, EtlImporterPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
     is_interactive_session, InteractiveSessionPermission,
 )
@@ -5310,10 +5310,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # rather than leaving it to whoever remembers to run a load.
         #
         # The vocabulary check is not redundant. lab_results.sync._ensure_concept
-        # mints concept_id 32865 into HK-Labs as a fallback when Athena is absent
-        # — a locally-authored row occupying a genuine Athena id. Accepting it
-        # here would type every wearable row with a shadow concept, which is the
-        # defect class #415 exists to eliminate, and would do so silently.
+        # used to mint concept_id 32865 into HK-Labs as a fallback when Athena is
+        # absent (removed, #2922) — a locally-authored row occupying a genuine
+        # Athena id. Accepting one here would type every wearable row with a shadow
+        # concept, which is the defect class #415 exists to eliminate.
         type_concept = Concept.objects.filter(
             concept_id=WEARABLE_TYPE_CONCEPT_ID).first()
         if type_concept is None or type_concept.vocabulary_id != 'Type Concept':
@@ -7822,6 +7822,131 @@ class PersonViewSet(viewsets.GenericViewSet):
             },
             status=status.HTTP_201_CREATED,
         )
+
+    _EXTERNAL_KEYS_MAX = 1000
+
+    @action(detail=False, methods=['post'], url_path='external-keys',
+            permission_classes=[EtlImporterPermission])
+    def external_keys(self, request):
+        """
+        POST /api/v1/persons/external-keys/
+        Body: {"keys": [{"person_id": 1234, "issuer": "<login issuer>",
+                         "subject": "<login subject>"}, ...]}   (1 to 1000)
+        Response 200: {"created": N, "existing": M, "results": [
+            {"index": 0, "person_id": 1234, "status": "created"}, ...]}
+
+        Records which login an imported Person belongs to, for a Person
+        ``provision`` minted with no actor claims. A login whose verified
+        (issuer, sub) matches is linked to it on its next request, including an
+        account that already signed in and was given an empty Person
+        (``resolve_or_create_person``).
+
+        Idempotent. Per key, ``status`` is one of:
+          * ``created`` / ``existing``: the key names this Person.
+          * ``conflict``: the login is already keyed to ``held_by``, another
+            Person. A key is never moved.
+          * ``claimed``: another login's account holds this Person, so the key
+            could never link and is not stored.
+          * ``person_keyed``: this Person is already keyed to another login of
+            the same issuer. One Person is never given to two logins.
+          * ``not_found``: no such Person.
+        A malformed batch, or an issuer outside PERSON_EXTERNAL_KEY_ISSUERS,
+        is a 400 that writes nothing.
+        """
+        from patient_portal.models import PatientUser, PersonExternalKey
+
+        if not (request.resolver_match and (request.resolver_match.url_name or '').startswith('v1-')):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        keys = request.data.get('keys') if isinstance(request.data, dict) else None
+        if not isinstance(keys, list) or not keys:
+            return Response({'detail': 'keys must be a non-empty list.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(keys) > self._EXTERNAL_KEYS_MAX:
+            return Response({'detail': f'Maximum {self._EXTERNAL_KEYS_MAX} keys per request.'},
+                            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        allowed = set(settings.PERSON_EXTERNAL_KEY_ISSUERS)
+        items, seen = [], {}
+        for i, key in enumerate(keys):
+            if not isinstance(key, dict):
+                return Response({'detail': f'Entry {i}: must be an object.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            pid, issuer, subject = key.get('person_id'), key.get('issuer'), key.get('subject')
+            if not isinstance(pid, int) or isinstance(pid, bool) or not 0 < pid < 2 ** 31:
+                return Response({'detail': f'Entry {i}: person_id must be a positive integer.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not isinstance(issuer, str) or issuer not in allowed:
+                return Response({'detail': f'Entry {i}: issuer is not accepted here.',
+                                 'accepted_issuers': sorted(allowed)},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if (not isinstance(subject, str) or not subject or len(subject) > 255
+                    or subject != subject.strip() or _contains_nul(subject)):
+                return Response({'detail': f'Entry {i}: subject must be non-empty text of at most '
+                                           f'255 characters, without surrounding whitespace.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if seen.setdefault((issuer, subject), pid) != pid:
+                return Response({'detail': f'Entry {i}: this login is given two persons in one batch.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            items.append((i, pid, issuer, subject))
+
+        pids = {pid for _, pid, _, _ in items}
+        subjects = {subject for _, _, _, subject in items}
+        with transaction.atomic():
+            persons = set(Person.objects.filter(person_id__in=pids).values_list('person_id', flat=True))
+            held = {
+                (iss, sub): person_id for iss, sub, person_id in
+                PersonExternalKey.objects.filter(subject__in=subjects).values_list('issuer', 'subject', 'person_id')
+            }
+            # A login the ETL keyed before #1547 sits on Person itself.
+            for iss, sub, person_id in Person.objects.filter(
+                    actor_sub__in=subjects, actor_iss__in=allowed,
+            ).values_list('actor_iss', 'actor_sub', 'person_id'):
+                held.setdefault((iss, sub), person_id)
+            # The login each Person is already keyed to, per issuer, so one
+            # Person is never given to two logins.
+            person_keys = {
+                (person_id, iss): sub for person_id, iss, sub in
+                PersonExternalKey.objects.filter(person_id__in=pids).values_list('person_id', 'issuer', 'subject')
+            }
+            for person_id, iss, sub in Person.objects.filter(
+                    person_id__in=pids, actor_iss__in=allowed, actor_sub__isnull=False,
+            ).values_list('person_id', 'actor_iss', 'actor_sub'):
+                person_keys.setdefault((person_id, iss), sub)
+            holders = {
+                person_id: (iss, sub) for person_id, iss, sub in
+                PatientUser.objects.filter(person_id__in=pids)
+                .values_list('person_id', 'identity__issuer', 'identity__sub')
+            }
+            results, new = [], []
+            for i, pid, issuer, subject in items:
+                result = {'index': i, 'person_id': pid}
+                owner = held.get((issuer, subject))
+                if pid not in persons:
+                    result['status'] = 'not_found'
+                elif owner == pid:
+                    result['status'] = 'existing'
+                elif owner is not None:
+                    result.update(status='conflict', held_by=owner)
+                elif pid in holders and holders[pid] != (issuer, subject):
+                    result['status'] = 'claimed'
+                elif person_keys.get((pid, issuer), subject) != subject:
+                    result['status'] = 'person_keyed'
+                else:
+                    result['status'] = 'created'
+                    new.append(PersonExternalKey(person_id=pid, issuer=issuer, subject=subject))
+                    held[(issuer, subject)] = pid
+                    person_keys[(pid, issuer)] = subject
+                results.append(result)
+            try:
+                with transaction.atomic():
+                    PersonExternalKey.objects.bulk_create(new)
+            except IntegrityError:
+                return Response({'detail': 'A key in this batch was written concurrently; retry the batch.'},
+                                status=status.HTTP_409_CONFLICT)
+        counts = {s: sum(1 for r in results if r['status'] == s) for s in ('created', 'existing')}
+        logger.info('person external keys: %d created, %d existing, %d other',
+                    counts['created'], counts['existing'], len(results) - sum(counts.values()))
+        return Response({**counts, 'results': results}, status=status.HTTP_200_OK)
 
     def partial_update(self, request, person_id=None):
         """
@@ -11003,9 +11128,11 @@ def _etag_matches(if_none_match, etag):
     return False
 
 
-def _set_release_etag(request, response):
+def _set_release_etag(request, response, extra=''):
     """Set ETag and Cache-Control on a concept response based on the latest
-    published VocabularyRelease. Returns a 304 if If-None-Match matches."""
+    published VocabularyRelease. Returns a 304 if If-None-Match matches.
+    ``extra`` (a string, or a callable returning one) folds data the response
+    also depends on into the tag (the curator search's ranking reads approved mappings)."""
     from django.http import HttpResponseNotModified
     from omop_core.services.vocab_release import get_latest_release, get_release_etag
 
@@ -11013,6 +11140,10 @@ def _set_release_etag(request, response):
     etag = get_release_etag(release)
     if etag is None:
         return response
+    if callable(extra):
+        extra = extra()  # only now that there is a release to tag
+    if extra:
+        etag = f'{etag[:-1]}-{hashlib.sha256(extra.encode()).hexdigest()[:12]}"'
 
     if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
     if _etag_matches(if_none_match, etag):
@@ -11315,9 +11446,12 @@ from omop_core.api.concepts import (  # noqa: E402
     CONCEPT_FILTER_PARAMS as _CONCEPT_FILTER_PARAMS,
     ConceptPagination as _PackagedConceptPagination,
     apply_concept_filters as _apply_concept_filters,
+    ConceptSearchPagination as _ConceptSearchPagination,
+    ranking_stamp as _concept_ranking_stamp,
     concept_match_ordering as _concept_match_ordering,
     concept_name_search_filter as _concept_name_search_filter,
     concept_text_search as _concept_text_search,
+    curator_search_queryset as _curator_search_queryset,
     destination_concepts as _destination_concepts,
     serialize_concept_base as _serialize_concept_base,
 )
@@ -11379,16 +11513,19 @@ def _truthy_param(query_params, name):
     return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
 
 
-def _paginated_concept_response(queryset, request, ordering=('concept_id',)):
+def _paginated_concept_response(queryset, request, ordering=('concept_id',), paginator=None,
+                                etag_extra=''):
     # Default to the pk: concept_name has only a GIN trigram index (usable for
     # icontains, not ORDER BY), so sorting a *listing* by name would force a full
     # sort of a vocabulary on every page request. A search passes its own
     # ordering, over a matched set small enough to sort.
-    paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by(*ordering), request)
+    paginator = paginator or ConceptPagination()
+    if ordering is not None:  # None: the queryset arrives already ranked
+        queryset = queryset.order_by(*ordering)
+    page = paginator.paginate_queryset(queryset, request)
     versions = _vocab_version_map()
     response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
-    return _set_release_etag(request, response)
+    return _set_release_etag(request, response, etag_extra)
 
 
 @functools.lru_cache(maxsize=1)
@@ -11417,7 +11554,8 @@ def concept_search(request):
         standard_concept  optional exact-match filter (S or C)
         include_retired       'true' to also return concepts with an invalid_reason
         include_non_standard  'true' to also return non-standard concepts
-        page / page_size  pagination (page_size capped at 100)
+        page / page_size  pagination (page_size capped at 100); ``limit`` is accepted
+                          as an alias of page_size, which wins when both are sent
 
     By default only concepts usable as a destination are returned: active, and
     either standard or authored on this instance (#1465).
@@ -11434,16 +11572,14 @@ def concept_search(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Name, exact code or OMOP id, each branch indexable (#1466).
-    search_filter, concept_id = _concept_text_search(query)
-    queryset = _apply_concept_filters(
-        _destination_concepts(Concept.objects.filter(search_filter), request.query_params),
-        request.query_params,
-    )
+    # Name, exact code or OMOP id, each branch indexable (#1466), plus synonym recall
+    # and a ranking that prefers the concept in use (#2923).
+    queryset, _ = _curator_search_queryset(query, request.query_params)
     # Show a curator what kind of input a Measurement mapping expects when the
     # available OMOP/LOINC data lets us classify it safely.
     response = _paginated_concept_response(
-        queryset, request, ordering=_concept_match_ordering(query, concept_id),
+        queryset, request, ordering=None, paginator=_ConceptSearchPagination(),
+        etag_extra=_concept_ranking_stamp,
     )
     if response.status_code == status.HTTP_304_NOT_MODIFIED:
         # A revalidation hit carries no body to annotate (#1457).
@@ -15304,7 +15440,9 @@ def code_mapping_group(request):
     from omop_core.services.source_retirement import mapping_source_retirement
 
     label = request.query_params.get('label')
-    if not label:
+    # Or one source code system's rows, for a section sorted by source system.
+    group_system = request.query_params.get('group_system')
+    if not label and not group_system:
         return Response({'detail': 'label is required.'}, status=status.HTTP_400_BAD_REQUEST)
     filters = section_filters(request.query_params)
     section = request.query_params.get('section', 'Unmapped')
@@ -15318,8 +15456,18 @@ def code_mapping_group(request):
     # counted the entry. Without this, an entry reading "3 codes" under a
     # provenance filter expands into all 2,557 -- including the rows the filter
     # existed to hide -- and a cross-tab search expands into one tab only.
+    members = visible_rows(mappings, request.query_params, section=section)
+    if group_system:
+        from omop_core.services import wearable_mapping_export as wearable_export
+        try:
+            (system,) = wearable_export.clean_sources(group_system)
+        except (wearable_export.FormatError, ValueError):
+            return Response({'detail': 'Unknown source code system.'}, status=status.HTTP_400_BAD_REQUEST)
+        members = members.filter(source_vocabulary_id=system)
+    else:
+        members = group_members(members, label)
     rows = list(with_destination_counts(
-        filters[section](group_members(visible_rows(mappings, request.query_params, section=section), label))
+        filters[section](members)
     ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
     truncated = len(rows) > MAX_GROUP_MEMBERS
     rows = rows[:MAX_GROUP_MEMBERS]
@@ -15327,7 +15475,7 @@ def code_mapping_group(request):
     attach_source_samples(rows)
     metadata = mapping_source_retirement(rows)
     return Response({
-        'label': label,
+        'label': label or group_system,
         'section': section,
         'results': [_serialize_code_mapping_row(
             row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
@@ -15355,7 +15503,8 @@ def _group_job_rows(data):
     # A search deliberately reaches across tabs for browsing. A group decision
     # never does: Epic and Cerner albumin are two decisions.
     filters = {key: data.get(key) for key in (
-        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'auto_approved', 'queue_sections')}
+        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'auto_approved', 'queue_sections',
+        'source_systems')}
     filters['search'] = ''
     mappings = without_icd10_athena_duplicates(
         SourceCodeConceptMapping.objects.select_related('organization')
@@ -17429,11 +17578,24 @@ def custom_patient_field_list(request):
 
     if request.method == 'GET':
         from omop_core.services import disease_profiles
-        fields = CustomPatientField.objects.select_related('mapping__concept').filter(
-            mapping__status='approved',
-        )
+        retired = request.query_params.get('state') == 'retired'
+        if retired and not _can_approve_mappings(request.user):
+            # The removed fields are an administrator's to see and restore.
+            return Response({'detail': 'Organization admin access required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        fields = CustomPatientField.objects.select_related('mapping__concept')
+        # Removed fields leave every list a patient page or a mapper reads; their
+        # mapping is rejected while they are, so only the retired view skips that filter.
+        fields = (fields.retired() if retired
+                  else fields.active().filter(mapping__status='approved'))
+        from omop_core.services import custom_field_values
+        fields = list(fields)
+        choices = [f.field_name for f in fields if f.field_type == 'choice']
         return Response(CustomPatientFieldSerializer(
-            fields, many=True, context={'field_diseases': disease_profiles.memberships()},
+            fields, many=True, context={
+                'field_diseases': disease_profiles.memberships(include_retired=retired),
+                'field_options': custom_field_values.options_for(choices) if choices else {},
+            },
         ).data)
 
     if not _can_approve_mappings(request.user):
@@ -17445,6 +17607,75 @@ def custom_patient_field_list(request):
     serializer.is_valid(raise_exception=True)
     custom_field = serializer.save()
     return Response(CustomPatientFieldSerializer(custom_field).data, status=status.HTTP_201_CREATED)
+
+
+def _removal_error_response(error):
+    """A refused removal as a 409 with the reason and the counts, never a 500."""
+    body = {'detail': error.message, 'code': error.code, **error.extra}
+    # A field another request deleted meanwhile is simply not there any more.
+    return Response(body, status=status.HTTP_404_NOT_FOUND if error.code == 'gone'
+                    else status.HTTP_409_CONFLICT)
+
+
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def custom_patient_field_detail(request, field_name):
+    """GET: what depends on a created field. DELETE: remove it (retire it, or ``?permanent=true``).
+
+    Fields are global across organizations, so removing one removes it for every
+    organization on the instance. Removing is an approval, as creating one is:
+    staff and org admins only (``_can_approve_mappings``); anyone else is refused
+    before the field is looked up. See ``omop_core.services.custom_field_removal``.
+
+    DELETE retires: the field leaves every tab, list and pass, and the values
+    records hold are kept, so ``POST .../restore/`` brings it back. ``permanent=true``
+    deletes it for good, and only when no record holds a value and no OMOP fact is
+    written under it (409 with the counts otherwise).
+    """
+    from omop_core.services import custom_field_removal as removal
+    from .serializers import CustomPatientFieldSerializer
+
+    if not _can_approve_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    field = CustomPatientField.objects.select_related('mapping__concept').filter(
+        field_name=field_name).first()
+    if field is None:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        data = CustomPatientFieldSerializer(field).data
+        return Response({**data, **removal.usage(field)})
+
+    permanent = str(request.query_params.get('permanent', '')).lower() in ('1', 'true', 'yes')
+    try:
+        if permanent:
+            found = removal.delete(field)
+            return Response({**found, 'state': 'deleted'})
+        removal.retire(field, request.user)
+    except removal.RemovalError as error:
+        return _removal_error_response(error)
+    return Response({**removal.usage(field), 'state': 'retired'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def custom_patient_field_restore(request, field_name):
+    """Restore a retired created field with its mapping, answers, scope and values (approvers only)."""
+    from omop_core.services import custom_field_removal as removal
+    from .serializers import CustomPatientFieldSerializer
+
+    if not _can_approve_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    field = CustomPatientField.objects.select_related('mapping__concept').filter(
+        field_name=field_name).first()
+    if field is None:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        removal.restore(field)
+    except removal.RemovalError as error:
+        return _removal_error_response(error)
+    field.refresh_from_db()
+    return Response(CustomPatientFieldSerializer(field).data)
 
 
 @api_view(['GET', 'POST'])
@@ -17581,6 +17812,11 @@ def field_scope(request, field_name):
     # A name with rows but no field (the field was removed) is still
     # reachable, so its rows can be read and cleared.
     held = FieldDiseaseMembership.objects.filter(field_name=field_name)
+    if request.method == 'PUT' and CustomPatientField.objects.retired().filter(field_name=field_name).exists():
+        # A removed field keeps its scope so a restore returns it to the same diseases.
+        return Response({'detail': 'This created field is removed. Restore it before changing its scope.',
+                         'code': 'retired_field', 'field_name': field_name},
+                        status=status.HTTP_409_CONFLICT)
     if field_name not in disease_profiles.field_names() and not held.exists():
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PUT':
@@ -17614,17 +17850,40 @@ def field_mapping_detail(request, pk):
         from .serializers import FieldConceptMappingSerializer
         return Response(FieldConceptMappingSerializer(mapping).data)
 
+    # A created field's mapping is the field's own: it cannot be removed (or changed
+    # into something else) apart from the field, which is what the removal actions do.
+    created = CustomPatientField.objects.filter(mapping_id=mapping.pk).first()
     if request.method == 'DELETE':
         if mapping.status == 'approved' and not _can_approve_mappings(request.user):
             return Response(
                 {'detail': 'Only org admins and staff can delete approved mappings.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if created is not None:
+            return Response({
+                'detail': (f"This is the mapping of the created field '{created.field_name}', so it "
+                           'cannot be deleted by itself. Remove the field instead: '
+                           f'DELETE /api/v1/custom-patient-fields/{created.field_name}/.'),
+                'code': 'created_field', 'field_name': created.field_name,
+            }, status=status.HTTP_409_CONFLICT)
         mapping.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     # PATCH — enforce approval restrictions
+    if created is not None and created.retired_at is not None:
+        return Response({
+            'detail': (f"The created field '{created.field_name}' is removed, so its mapping cannot be "
+                       'changed. Restore the field first.'),
+            'code': 'retired_field', 'field_name': created.field_name,
+        }, status=status.HTTP_409_CONFLICT)
     new_status = request.data.get('status')
+    if created is not None and new_status and new_status != 'approved':
+        # Un-approving or rejecting it would hide the field with no way to restore it.
+        return Response({
+            'detail': (f"This is the mapping of the created field '{created.field_name}'. To take the "
+                       f'field out of use, remove it: DELETE /api/v1/custom-patient-fields/{created.field_name}/.'),
+            'code': 'created_field', 'field_name': created.field_name,
+        }, status=status.HTTP_409_CONFLICT)
     if new_status and not _can_approve_mappings(request.user):
         if new_status == 'approved':
             return Response(

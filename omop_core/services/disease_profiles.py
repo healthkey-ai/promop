@@ -104,14 +104,26 @@ def extension_codes() -> tuple[str, ...]:
     return tuple(sorted(category_codes() - {OTHER}))
 
 
-def memberships() -> dict[str, list[str]]:
-    """``{field_name: [disease, ...]}`` for every disease-specific field, one query."""
+def _retired_names():
+    """The created fields an administrator removed. Their rows are kept for a restore."""
+    from omop_core.models import CustomPatientField
+
+    return CustomPatientField.objects.retired().values('field_name')
+
+
+def memberships(include_retired: bool = False) -> dict[str, list[str]]:
+    """``{field_name: [disease, ...]}`` for every disease-specific field.
+
+    A retired created field has no scope while it is retired (its rows are kept so a
+    restore brings it back to the same diseases); ``include_retired`` reads them.
+    """
     from omop_core.models import FieldDiseaseMembership
 
+    rows = FieldDiseaseMembership.objects.order_by('field_name', 'disease')
+    if not include_retired:
+        rows = rows.exclude(field_name__in=_retired_names())
     found: dict[str, list[str]] = defaultdict(list)
-    for field_name, disease in (FieldDiseaseMembership.objects
-                                .order_by('field_name', 'disease')
-                                .values_list('field_name', 'disease')):
+    for field_name, disease in rows.values_list('field_name', 'disease'):
         found[field_name].append(disease)
     return dict(found)
 
@@ -121,6 +133,7 @@ def extension_fields(code: str) -> set[str]:
     from omop_core.models import FieldDiseaseMembership
 
     return set(FieldDiseaseMembership.objects.filter(disease=code)
+               .exclude(field_name__in=_retired_names())
                .values_list('field_name', flat=True))
 
 
@@ -139,7 +152,7 @@ def in_profile(field_diseases: Iterable[str], profile: Iterable[str]) -> bool:
     return not field_diseases or bool(field_diseases & set(profile))
 
 
-def field_names(using: str = 'default') -> set[str]:
+def field_names(using: str = 'default', include_retired: bool = False) -> set[str]:
     """Every field that can have a scope: what the field descriptors list.
 
     A clinical column, a genomics component or a created field. Not an
@@ -156,7 +169,9 @@ def field_names(using: str = 'default') -> set[str]:
         and _classify_field(field.name) not in ('internal', 'unit')
     }
     names |= {'genetic_mutations.' + attribute['key'] for attribute in components()}
-    return names | set(CustomPatientField.objects.using(using).values_list('field_name', flat=True))
+    created = CustomPatientField.objects.using(using)
+    created = created if include_retired else created.active()
+    return names | set(created.values_list('field_name', flat=True))
 
 
 def resolver() -> Callable[[object], str | None]:

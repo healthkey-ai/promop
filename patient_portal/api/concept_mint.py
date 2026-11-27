@@ -11,6 +11,9 @@ from rest_framework.response import Response
 
 from omop_core.models import Concept, ConceptAncestor, ConceptClass, Domain, Vocabulary
 from omop_core.mapping.suggestions import lexical_candidates, umls_candidates
+from omop_core.services.hkl_duplicates import (
+    HK_LABS_VOCABULARY, find_standard_duplicate, retired_standard_concept,
+)
 from omop_core.services.pk import next_pk
 
 # How many existing concepts the curator is shown before they may mint a new
@@ -102,6 +105,22 @@ def mint_destination(request):
         return Response({'detail': 'Review candidate destinations again before minting.'}, status=400)
     if reviewed != evidence or request.data.get('none_match') is not True:
         return Response({'detail': 'Confirm that none of the reviewed candidates match.'}, status=400)
+    if data['vocabulary_id'] == HK_LABS_VOCABULARY:
+        # A local lab concept beside a standard one is what put hkl:psa ahead of
+        # LOINC 2857-1 in concept search: refuse it, and say which to use.
+        duplicate = (
+            retired_standard_concept(data['concept_code'])
+            or find_standard_duplicate(
+                name=data['concept_name'], code=data['concept_code'], domain_id=data['domain_id'])
+        )
+        if duplicate is not None:
+            return Response({
+                'detail': (f'A standard concept already exists for this: {duplicate.vocabulary_id} '
+                           f'{duplicate.concept_code} "{duplicate.concept_name}". '
+                           'Choose it instead of minting a local HK-Labs concept.'),
+                'code': 'standard_concept_exists',
+                'concept': _serialize_concept(duplicate),
+            }, status=409)
     try:
         with transaction.atomic():
             vocabulary = Vocabulary.objects.select_for_update().get(pk=data['vocabulary_id'])

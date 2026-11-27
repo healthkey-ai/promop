@@ -1,6 +1,6 @@
 """Bounded curation pages with 100 codes per section."""
 from django.contrib.postgres.aggregates import ArrayAgg
-from django.db.models import Case, CharField, Count, F, Q, Value, When
+from django.db.models import Case, CharField, Count, F, Q, Sum, Value, When
 from django.db.models.functions import Upper, Trim
 from rest_framework.exceptions import ValidationError
 
@@ -38,6 +38,10 @@ ORDER_FIELDS = {
     'destination_concept_id': 'target_concept_id',
     'destination_count': 'destination_count', 'status': 'status',
     'category': 'category', 'metric_key': 'metric_key',
+    # The Wearables tab's first column. A section sorted by it is not paged
+    # rows but one collapsed entry per system (`system_group_entries`), so the
+    # name only has to be a valid column.
+    'source_system': 'source_vocabulary_id',
 }
 
 
@@ -118,7 +122,13 @@ SEARCH_FIELDS = {
     'concept_id': (),
     'organization': ('organization__name', 'organization__slug'),
     'org': ('organization__name', 'organization__slug'),
+    'metric': ('metric_key',),
+    'metric_key': ('metric_key',),
 }
+
+# Fields a ``field:value`` search matches whole, not as a substring: a metric
+# key is a short identifier, and ``hr`` is not ``resting_hr`` and ``walking_hr_avg``.
+EXACT_SEARCH_FIELDS = frozenset({'metric', 'metric_key'})
 
 ALL_SEARCH_FIELDS = (
     'source_code', 'source_vocabulary_id', 'source_code_description',
@@ -144,7 +154,9 @@ def parse_search(search):
 def search_filter(search):
     """The Q a stripped, non-empty search means, shared by every list path.
 
-    * ``field:value`` searches that field alone; ``concept_id:`` is exact.
+    * ``field:value`` searches that field alone; ``concept_id:`` and
+      ``metric:`` (a wearable metric key, as the Wearables tab links to it)
+      are exact.
     * An all-digit search is a source code and matches only ``source_code``:
       Epic vocabularies are OIDs, so the digits would otherwise match every
       row of a code system (#2376), and a concept id is ``concept_id:N``.
@@ -160,9 +172,10 @@ def search_filter(search):
         lookups = ('source_code',)
     else:
         lookups = ALL_SEARCH_FIELDS
+    match = 'iexact' if field in EXACT_SEARCH_FIELDS else 'icontains'
     query = Q()
     for lookup in lookups:
-        query |= Q(**{f'{lookup}__icontains': value})
+        query |= Q(**{f'{lookup}__{match}': value})
     return query
 
 
@@ -233,6 +246,42 @@ def apply_auto_approved(queryset, params):
     return queryset.filter(AUTO_APPROVED_BY_SUGGEST) if _auto_approved(params) else queryset
 
 
+def source_systems_from(params):
+    """The source code systems the Wearables tab is limited to; empty is all.
+
+    Same ids and wording as the Wearables file download's ``sources``."""
+    from omop_core.services import wearable_mapping_export as wearable_export
+    try:
+        return wearable_export.clean_sources(params.get('source_systems') or '')
+    except wearable_export.FormatError as error:
+        raise ValidationError({'source_systems': str(error)})
+
+
+def apply_source_systems(queryset, params):
+    systems = source_systems_from(params)
+    return queryset.filter(source_vocabulary_id__in=systems) if systems else queryset
+
+
+def system_group_entries(queryset, descending=False):
+    """One collapsed entry per source code system in a section, by display name.
+
+    Systems are few (the Wearables tab has six), so there is no paging: the
+    rows behind an entry are fetched when it is opened (``group_system`` on the
+    group endpoint)."""
+    from omop_core.services.wearable_mapping_export import SOURCE_LABELS
+    entries = [{
+        'source_vocabulary_id': row['source_vocabulary_id'],
+        'label': SOURCE_LABELS.get(row['source_vocabulary_id'], row['source_vocabulary_id']),
+        'members': row['members'],
+        'seen': row['seen'] or 0,
+        'proposed': row['proposed'],
+    } for row in queryset.order_by().values('source_vocabulary_id').annotate(
+        members=Count('pk'), seen=Sum('occurrence_count'),
+        proposed=Count('pk', filter=Q(status='proposed')))]
+    return sorted(entries, key=lambda entry: (entry['label'].lower(), entry['source_vocabulary_id']),
+                  reverse=descending)
+
+
 def apply_seen(queryset, params):
     """The page opts into Seen > 0; other API clients retain their full catalog."""
     return queryset.filter(occurrence_count__gt=0) if _seen_only(params) else queryset
@@ -264,6 +313,7 @@ def visible_rows(mappings, params, section=None):
     rows = apply_organization(rows, (params.get('organization') or '').strip())
     rows = apply_notes(rows, params)
     rows = apply_auto_approved(rows, params)
+    rows = apply_source_systems(rows, params)
     if section is not None:
         return _apply_seen_for_section(rows, params, section)
     return apply_seen(rows, params)
@@ -424,7 +474,9 @@ def browse_mappings(mappings, params, serialize):
     filtered = apply_notes(filtered, params)
     auto_approved = _auto_approved(params)
     filtered = apply_auto_approved(filtered, params)
-    if search or provenance or organization or with_notes or auto_approved:
+    source_systems = source_systems_from(params)
+    filtered = apply_source_systems(filtered, params)
+    if search or provenance or organization or with_notes or auto_approved or source_systems:
         _unmapped_filter = ~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])
         if seen_only:
             _unmapped_filter = _unmapped_filter & Q(occurrence_count__gt=0)
@@ -451,7 +503,7 @@ def browse_mappings(mappings, params, serialize):
     # not been taught about groups keeps the behaviour it has, and so the two
     # shapes can be compared on the same data.
     rollup = params.get('rollup') == '1'
-    pages, selected_ids, groups = {}, [], {}
+    pages, selected_ids, groups, system_groups = {}, [], {}, {}
     section_totals = [totals['unmapped'], totals['mapped'], rejected,
                       totals['athena'] + totals['athena_rejected']]
     if queue_sections:
@@ -488,6 +540,13 @@ def browse_mappings(mappings, params, serialize):
             if section in included_sections:
                 groups[section] = group_entries(query, page, PAGE_SIZE, order=order)
             pages[section] = dict(page=page, page_size=PAGE_SIZE, total=group_total)
+            continue
+        if order.lstrip('-') == 'source_system':
+            # Sorted by source system, a section is its systems, collapsed:
+            # the entries replace the rows, which are fetched when one opens.
+            pages[section] = dict(page=1, page_size=PAGE_SIZE, total=total)
+            if section in included_sections:
+                system_groups[section] = system_group_entries(query, descending=order.startswith('-'))
             continue
         page = min(requested_page, max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE))
         pages[section] = dict(page=page, page_size=PAGE_SIZE, total=total)
@@ -528,7 +587,7 @@ def browse_mappings(mappings, params, serialize):
                 tabs=tabs, selected_source=source, pages=pages, rejected_count=rejected,
                 provenances=provenances, selected_provenance=provenance,
                 organizations=organizations, selected_organization=organization,
-                groups=groups, rollup=rollup)
+                groups=groups, rollup=rollup, system_groups=system_groups)
     if not include_duplicates:
         response['duplicates_included'] = False
     return response

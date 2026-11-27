@@ -387,7 +387,7 @@ app. Rejected mappings and a hospital's own override of a code are left out.
 The Word document is refused with a 400 above 5,000 mappings; the CSV is not
 limited. Send `Accept: */*` (or none): DRF negotiates content before the view
 runs, and `Accept: text/csv` alone is answered 406. On the
-Code Mapping page it is "Download all wearable mappings" on the Wearables tab.
+Code Mapping page it is "Download all wearable mappings" on the Wearables domain of the Concept to Code tab.
 It needs a session with a role that reads the mapping pages (staff, org admin,
 doctor or analyst); anyone else gets 403.
 
@@ -611,7 +611,8 @@ address as typed.
 
 - **Mail.** Voting needs working outbound email: the links are built from
   `APP_BASE_URL` and sent through the deployment's mail backend
-  (`MAILGUN_API_KEY`, `MAILGUN_SENDER_DOMAIN`, `DEFAULT_FROM_EMAIL`). When
+  (`SENDGRID_API_KEY`, with `SENDGRID_SMTP_HOST` for a regional relay, or
+  `MAILGUN_API_KEY` and `MAILGUN_SENDER_DOMAIN`; and `DEFAULT_FROM_EMAIL`). When
   `CELERY_BROKER_URL` is set the worker sends the email, so the worker needs
   those variables and `APP_BASE_URL` too; without a broker it is sent in the
   request. `MAPPING_VOTE_EMAIL_TIMEOUT` (10 seconds) bounds the mail
@@ -704,9 +705,13 @@ The lookup lifecycle is:
    multi-strategy UMLS/vector/lexical work. Its highest-ranked candidate becomes
    the target of a `proposed` SCCM row only.
 6. If there is no suitable suggestion, mint an HK quarantine concept for the
-   requested table (`HK-Labs`, `HK-Observation`, `HK-Condition`, `HK-Drug`, or
+   requested table (`HK-Observation`, `HK-Condition`, `HK-Drug`, or
    `HK-Procedure`) and create a proposed row pointing to it. The result is
-   still unresolved until a curator approves it.
+   still unresolved until a curator approves it. **A lab (measurement) is the
+   exception (#2922):** no `HK-Labs` concept is created. The code is queued as a
+   proposed row with no destination (the response has no concept), and its rows
+   wait at concept 0 until a curator picks a standard concept or mints one
+   through `code-mappings/mint-destination/`.
 
 The `Seen` value is therefore “times this unresolved proposal was encountered
 by the resolver.” It is stored on the SCCM row, not on the source concept or

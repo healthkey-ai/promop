@@ -326,6 +326,8 @@ def test_every_table_a_withdrawal_reaches_is_a_decision():
         'omop_core.ConditionEra', 'omop_core.ConditionOccurrence', 'omop_core.Death', 'omop_core.DoseEra',
         'omop_core.DrugEra', 'omop_core.DrugExposure', 'omop_core.FhirConnection', 'omop_core.FhirOauthState',
         'omop_core.GarminConnection',
+        # A linked Oura account could refill the erased record at the next sync (#2900).
+        'omop_core.OuraConnection',
         # A saved Garmin key could refill the erased record at the next sync (#2834).
         'omop_core.GarminPersonalKey',
         # A phone left signed in would go on syncing into the erased record (#2810).
@@ -339,6 +341,8 @@ def test_every_table_a_withdrawal_reaches_is_a_decision():
         'omop_core.WearableUpload', 'omop_oncology.CancerModifier', 'omop_oncology.Episode',
         'omop_oncology.Histology', 'omop_oncology.StemTable', 'patient_portal.AiExplanation',
         'patient_portal.PatientMessage', 'patient_portal.PatientStatement', 'patient_portal.RecordShare',
+        # Which login an importer said the record belongs to: nothing to keep once it is erased.
+        'patient_portal.PersonExternalKey',
         'prolog_surveys.MintedParticipant', 'prolog_surveys.ParticipantMergeCandidate',
         'prolog_surveys.SurveyInvitation',
     }

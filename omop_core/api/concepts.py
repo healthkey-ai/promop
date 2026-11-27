@@ -6,7 +6,9 @@ usable, filters that can stand alone against the index, destination narrowing by
 default, and rank-by-match ordering instead of primary key. Keeping one
 implementation here is what stops the two surfaces from drifting.
 """
-from django.db.models import Case, IntegerField, Q, When
+import re
+
+from django.db.models import Case, Count, IntegerField, Max, Q, Value, When
 from django.db.models.functions import Length
 from rest_framework.pagination import PageNumberPagination
 
@@ -18,6 +20,29 @@ class ConceptPagination(PageNumberPagination):
     page_size = 25
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+class ConceptSearchPagination(ConceptPagination):
+    """The curator search's pages: ``limit`` is accepted as ``page_size``.
+
+    The dialogs ask for ``limit`` (8, 25 or 50) and used to get the default 25,
+    since only ``page_size`` was read. ``page_size`` wins when both are sent, an
+    unusable value falls back to the default, and the cap stays 100. The envelope
+    is unchanged. Only the curator search uses this class: the other concept
+    endpoints, and the embedder's search, keep ``page_size`` alone.
+    """
+    limit_query_param = 'limit'
+
+    def get_page_size(self, request):
+        # ``page_size`` decides when it is sent, valid or not; ``limit`` only stands in
+        # for a request that sends no ``page_size``.
+        name = (self.page_size_query_param
+                if self.page_size_query_param in request.query_params
+                else self.limit_query_param)
+        raw = str(request.query_params.get(name) or '').strip()
+        if raw.isascii() and raw.isdecimal() and int(raw) > 0:
+            return min(int(raw), self.max_page_size)
+        return self.page_size
 
 
 def _truthy_param(query_params, name):
@@ -106,6 +131,269 @@ def concept_match_ordering(query, concept_id):
         Length('concept_name'),
         'concept_id',
     )
+
+
+# --- The curator search's ranking (#2923) ---------------------------------------------
+#
+# ``concept_match_ordering`` alone ranked a LOINC "Prostate specific Ag [Mass/volume] in
+# DBS" ahead of the serum test everybody means, because "DBS" is a shorter name; and a
+# search for "prostate specific antigen" never reached LOINC at all, whose names say
+# "Ag". ``curator_search_queryset`` adds, behind the same match tiers:
+#
+# * synonym recall: LOINC and SNOMED synonyms ("Prostate specific antigen, Blood"),
+#   read from ``suggest_synonym_term``, whose partial trigram indexes are per domain;
+# * usage: a concept a curator already chose (an approved field mapping, or a
+#   ranked concept) before one an approved code mapping reaches, before the rest;
+# * the usual specimen, Serum or Plasma, when the text names no specimen;
+# * a shorter code last, which in LOINC and SNOMED is the older, more general concept.
+#
+# The embedder's drug and regimen search, and the value-concept search, keep using
+# ``search_queryset`` and ``concept_match_ordering`` as they were.
+
+# Domains whose synonyms are searched when the caller names none: where abbreviations
+# ("Ag", "Ab") and test aliases hide the concept from its own name. A caller that
+# filters on one of Suggest's domains gets that domain's synonyms instead.
+SYNONYM_DOMAINS = ('Measurement', 'Observation')
+# Synonym rows read in all, best first. Broad searches match far more than a page can
+# show; the name match covers their tail.
+SYNONYM_ROWS = 400
+MIN_SYNONYM_TOKEN = 3
+
+# Words that name a specimen. Typing one means the curator chose it, so the usual
+# specimen is not preferred over it.
+SPECIMEN_WORDS = frozenset({
+    'serum', 'plasma', 'blood', 'urine', 'csf', 'fluid', 'semen', 'stool', 'saliva',
+    'sputum', 'tissue', 'marrow', 'dbs', 'specimen', 'swab', 'cord', 'amniotic',
+    'pleural', 'synovial', 'ascites', 'peritoneal', 'capillary', 'venous', 'arterial',
+})
+USUAL_SPECIMEN = 'Serum or Plasma'
+
+
+def _tokens(query):
+    return re.findall(r'[^\W_]+', query, flags=re.UNICODE)
+
+
+def synonym_hits(query, query_params):
+    """Concepts whose synonyms match the typed text, by how closely.
+
+    Returns ``{'exact': set, 'prefix': set, 'any': set}`` of concept ids: a synonym
+    equal to the text, one that begins with it, and every one found. One indexed
+    statement over the domains, capped at ``SYNONYM_ROWS`` rows, best match then
+    shortest synonym first. Matching is by every token of the text, as the name
+    match is. An empty or unbuilt synonym table gives no hits.
+    """
+    from omop_core.models import SUGGEST_DESTINATION_DOMAINS, SuggestSynonymTerm
+
+    domain = (query_params.get('domain_id') or '').strip()
+    standard = (query_params.get('standard_concept') or '').strip()
+    if standard and standard != 'S':
+        domains = ()  # the synonym table holds standard concepts only
+    elif domain:
+        domains = (domain,) if domain in SUGGEST_DESTINATION_DOMAINS else ()
+    else:
+        domains = SYNONYM_DOMAINS
+    upper = query.upper()
+    # A trigram index serves a LIKE pattern of three characters or more. Shorter tokens
+    # still narrow the match, but only beside one the index can drive: with none, the read
+    # would scan a whole domain partition. Text with no such token (``t(4;14)``, ``b 12``)
+    # gets name matches only.
+    tokens = _tokens(upper)
+    if not any(len(t) >= MIN_SYNONYM_TOKEN for t in tokens):
+        domains = ()
+    hits = {'exact': set(), 'prefix': set(), 'any': set()}
+    if not domains:
+        return hits
+    # ``term`` is stored uppercased and the partial indexes are on the bare column:
+    # LIKE against it, never UPPER(term) or ILIKE, or no index is used. Every domain
+    # is its own OR branch, an equality the planner can match to that domain's index
+    # (``domain_id IN (...)`` it cannot), so the whole read is one statement and a
+    # BitmapOr of the partial indexes.
+    match = Q()
+    for domain_id in domains:
+        branch = Q(domain_id=domain_id)
+        for token in tokens:
+            branch &= Q(term__contains=token)
+        match |= branch
+    rows = SuggestSynonymTerm.objects.filter(match)
+    # The cap is taken after the caller's own filters, so another vocabulary's synonyms
+    # cannot crowd out the one asked for. The join runs on the rows the index returns.
+    for param in ('vocabulary_id', 'concept_class_id'):
+        if query_params.get(param):
+            rows = rows.filter(**{f'concept__{param}': query_params[param]})
+    rows = rows.annotate(tier=Case(
+        When(term=upper, then=Value(1)),
+        When(term__startswith=upper, then=Value(2)),
+        default=Value(3), output_field=IntegerField(),
+    )).order_by('tier', Length('term'), 'concept_id', 'term').values_list('concept_id', 'tier')
+    for concept_id, tier in rows[:SYNONYM_ROWS]:
+        hits['any'].add(concept_id)
+        if tier == 1:
+            hits['exact'].add(concept_id)
+        elif tier == 2:
+            hits['prefix'].add(concept_id)
+    return hits
+
+
+def concept_usage_rank():
+    """0 curated, 1 reached by an approved code mapping, 2 neither.
+
+    Curated is a concept an approved field mapping uses or a curator ranked on the
+    Concept to Code tab. Both lists are small and ``IN (subquery)`` inside a CASE is
+    hashed once per statement, not probed per matched row.
+    """
+    from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping
+
+    curated = (
+        Q(concept_id__in=FieldConceptMapping.objects.filter(
+            status='approved', concept__isnull=False).values('concept_id'))
+        | Q(concept_id__in=ConceptMappingPriority.objects.values('concept_id'))
+    )
+    mapped = Q(concept_id__in=SourceCodeConceptMapping.objects.filter(
+        status='approved', target_concept__isnull=False,
+    ).values('target_concept_id').distinct())
+    return Case(When(curated, then=0), When(mapped, then=1), default=2,
+                output_field=IntegerField())
+
+
+# Words LOINC leaves out of a name when it means the usual case: "Testosterone [Mass/volume]
+# in Serum or Plasma" is the total testosterone, and only the exceptions say "Free" or
+# "bioavailable". When the text has one, the text without it is also searched, and the
+# concepts that match it closely rank behind an exact or prefix match of the full text and
+# ahead of a looser one.
+OPTIONAL_WORDS = frozenset({'total'})
+# The answers of a LOINC test are concepts of their own (class Answer); a match on one
+# also finds the question it is an answer of. At most this many questions are added.
+ANSWER_QUESTIONS = 50
+ANSWER_VOCABULARY = 'LOINC'
+QUESTION_DOMAINS = ('Measurement', 'Observation')
+
+
+def optional_word_text(query):
+    """The text without its optional words, or '' when it has none or nothing else of use."""
+    tokens = _tokens(query)
+    kept = [t for t in tokens if t.lower() not in OPTIONAL_WORDS]
+    if len(kept) == len(tokens) or not any(len(t) >= MIN_SYNONYM_TOKEN for t in kept):
+        return ''
+    return ' '.join(kept)
+
+
+def answer_questions(query, query_params):
+    """Ids of the LOINC questions whose answers' names match the typed text.
+
+    "Gleason grade group" is in no name of LOINC 94734-1, only in the names of its answers
+    (``ISUP Grade (Grade Group) 3 (Gleason score 4+3=7)``), which the concept table links
+    with ``Answer of``. One statement, bounded to ``ANSWER_QUESTIONS`` rows: the name filter
+    drives the trigram index, the class and vocabulary narrow it. Skipped when the caller's
+    filters exclude LOINC measurements.
+    """
+    from omop_core.models import Concept, ConceptRelationship
+
+    # Text with no token of three characters has no trigram to drive the name match.
+    if not any(len(t) >= MIN_SYNONYM_TOKEN for t in _tokens(query)):
+        return set()
+    vocabulary = (query_params.get('vocabulary_id') or '').strip()
+    domain = (query_params.get('domain_id') or '').strip()
+    standard = (query_params.get('standard_concept') or '').strip()
+    if ((vocabulary and vocabulary != ANSWER_VOCABULARY) or (domain and domain not in QUESTION_DOMAINS)
+            or (standard and standard != 'S')):
+        return set()
+    answers = Concept.objects.filter(
+        concept_name_search_filter(query), vocabulary_id=ANSWER_VOCABULARY,
+        concept_class_id='Answer', invalid_reason__isnull=True,
+    )
+    questions = ConceptRelationship.objects.filter(
+        concept_1__in=answers, relationship_id='Answer of', invalid_reason__isnull=True,
+    ).values_list('concept_2_id', flat=True).order_by('concept_2_id').distinct()[:ANSWER_QUESTIONS]
+    return set(questions)
+
+
+def ranked_concept_ordering(query, concept_id, hits=None, prefer_domain=''):
+    """``concept_match_ordering`` plus synonym, optional-word and answer tiers, a preferred
+    domain, usage, specimen and code length."""
+    if hits is None:
+        hits = {'exact': (), 'prefix': (), 'questions': ()}
+    best = Q(concept_code__iexact=query)
+    if concept_id is not None:
+        best |= Q(concept_id=concept_id)
+    exact = Q(concept_name__iexact=query)
+    prefix = Q(concept_name__istartswith=query)
+    if hits['exact']:
+        exact |= Q(concept_id__in=list(hits['exact']))
+    if hits['prefix']:
+        prefix |= Q(concept_id__in=list(hits['prefix']))
+    near = Q()
+    bare = optional_word_text(query)
+    if bare:
+        near |= Q(concept_name__iexact=bare) | Q(concept_name__istartswith=bare)
+    tiers = [When(best, then=0), When(exact, then=1), When(prefix, then=2)]
+    if bare:
+        # A name that has the typed phrase, "total" included, anywhere in it comes before one
+        # that only has the text without it.
+        tiers.append(When(concept_name__icontains=query, then=3))
+    if near:
+        tiers.append(When(near, then=len(tiers)))
+    ordering = [
+        Case(*tiers, default=len(tiers) + 1, output_field=IntegerField()),
+        Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
+    ]
+    if prefer_domain:
+        ordering.append(Case(When(domain_id=prefer_domain, then=0), default=1,
+                             output_field=IntegerField()))
+    ordering.append(concept_usage_rank())
+    if not SPECIMEN_WORDS.intersection(t.lower() for t in _tokens(query)):
+        ordering.append(Case(When(concept_name__icontains=USUAL_SPECIMEN, then=0), default=1,
+                             output_field=IntegerField()))
+    ordering += [Length('concept_name'), Length('concept_code'), 'concept_id']
+    return tuple(ordering)
+
+
+# Bump when the ranking changes: a cached response must not outlive the order it holds.
+RANKING_VERSION = 3
+
+
+def ranking_stamp():
+    """What the ranking reads besides the vocabulary, as one short string for the ETag.
+
+    The release ETag alone would let a browser revalidate to a 304 over an order that
+    an approval, a ranked concept or a deploy has since changed.
+    """
+    from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping
+
+    parts = [str(RANKING_VERSION)]
+    for model in (FieldConceptMapping, ConceptMappingPriority):
+        agg = model.objects.aggregate(n=Count('pk'), t=Max('updated_at'))
+        parts += [str(agg['n']), str(agg['t'])]
+    # Approved rows only (the ranking reads no others), counted so a delete shows too.
+    approved = SourceCodeConceptMapping.objects.filter(
+        status='approved', target_concept__isnull=False,
+    ).aggregate(n=Count('pk'), t=Max('updated_at'))
+    parts += [str(approved['n']), str(approved['t'])]
+    return '|'.join(parts)
+
+
+def curator_search_queryset(query, query_params):
+    """The matched, filtered and ranked queryset behind ``GET /api/v1/concepts/search/``.
+
+    Returns ``(queryset, concept_id)`` like ``search_queryset``, with synonym recall
+    and the ranking above. The synonym ids join the match filter as one indexable
+    ``concept_id IN (...)`` branch, so the other branches keep their indexes.
+    """
+    from omop_core.models import Concept
+
+    search_filter, concept_id = concept_text_search(query)
+    hits = synonym_hits(query, query_params)
+    hits['questions'] = answer_questions(query, query_params)
+    if hits['any'] | hits['questions']:
+        search_filter |= Q(concept_id__in=list(hits['any'] | hits['questions']))
+    bare = optional_word_text(query)
+    if bare:
+        search_filter |= concept_name_search_filter(bare)
+    queryset = apply_concept_filters(
+        destination_concepts(Concept.objects.filter(search_filter), query_params),
+        query_params,
+    )
+    return queryset.order_by(*ranked_concept_ordering(
+        query, concept_id, hits, (query_params.get('prefer_domain_id') or '').strip())), concept_id
 
 
 def serialize_concept_base(concept, versions=None):

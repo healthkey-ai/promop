@@ -43,7 +43,7 @@ import { addedFieldTabs, fieldDiseases, recordDiseaseCategories, recordDiseaseCa
 import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, addedFieldNames, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
-import { isOwnRecord } from "@/utils/roles";
+import { canViewMappings, isOwnRecord } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -403,10 +403,10 @@ export default function PatientDetail({
   // Coming back from Field Concept Mapping after Add field (#721): the tab
   // the admin left, by its field-tab key, until another tab is chosen.
   const location = useLocation();
-  // Coming back from Garmin's consent page (#2802) lands on the Wearables
-  // tab, where the outcome is shown.
+  // Coming back from Garmin's or Oura's consent page (#2802, #2900) lands on
+  // the Wearables tab, where the outcome is shown.
   const [returnTab, setReturnTab] = useState<string | null>(() => returnedTab(location.state)
-    ?? (new URLSearchParams(location.search).has("garmin") ? "wearable" : null));
+    ?? (["garmin", "oura"].some((name) => new URLSearchParams(location.search).has(name)) ? "wearable" : null));
   // Fields added through Field Concept Mapping, read once for every tab.
   const addedFields = useCustomPatientFields();
   const { categoryForDisease, loading: mappingsLoading } = useAllDiseaseMappings();
@@ -1365,7 +1365,7 @@ export default function PatientDetail({
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} canOpenMappings={!patientMode && canViewMappings(user)} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} focus={omopFocus?.personId === personId ? omopFocus : null} />}

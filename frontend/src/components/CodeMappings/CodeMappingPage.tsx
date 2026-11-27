@@ -10,14 +10,14 @@ import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { linkedMappingId } from "./mappingLinks";
+import { linkedMappingId, linkedMetricKey } from "./mappingLinks";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
 import { CuratorNoteMark } from "./CuratorNoteMark";
 import { saveBlob } from "@/utils/download";
 import { AxisVariantFlag, AxisVariantList } from "./LoincAxisChips";
-import WearableMappingsDownload from "./WearableMappingsDownload";
+import WearableSourceSystemSelect from "./WearableSourceSystemSelect";
 import WearableVoteShare from "./WearableVoteShare";
 import VoteTally from "./VoteTally";
 import {
@@ -238,19 +238,20 @@ function mappingRowId(row: MappingIdentity): string {
 type MappingSection = "Unmapped" | "Proposed" | "Approved";
 type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source_code_description"
   | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status"
-  | "category" | "metric_key";
+  | "category" | "metric_key" | "source_system";
 /** The columns a grouped queue can sort by as well as a flat one. */
 const GROUP_SORT_COLUMNS: SortColumn[] = ["occurrence_count", "source_code_description", "category", "metric_key"];
 /** The columns only the Wearables tab has. */
-const WEARABLE_SORT_COLUMNS: SortColumn[] = ["category", "metric_key"];
+const WEARABLE_SORT_COLUMNS: SortColumn[] = ["category", "metric_key", "source_system"];
 type SectionSort = { column: SortColumn; descending: boolean };
 
 
 function sortMappingRows(rows: CodeMappingRow[], sort?: SectionSort): CodeMappingRow[] {
   if (!sort) return rows;
   return [...rows].sort((a, b) => {
-    const left = a[sort.column];
-    const right = b[sort.column];
+    const key = sort.column === "source_system" ? "source_vocabulary_id" : sort.column;
+    const left = a[key];
+    const right = b[key];
     // Unknown values stay last in either direction.
     if (left == null && right != null) return 1;
     if (right == null && left != null) return -1;
@@ -287,8 +288,21 @@ type BrowseResponse = {
   organizations: { organization_id: number | null; slug: string; name: string; count: number }[];
   selected_organization: string;
   groups: Partial<Record<MappingSection, GroupEntry[]>>;
+  /** A section sorted by source system comes back as one entry per system. */
+  system_groups?: Partial<Record<MappingSection, SystemGroupEntry[]>>;
   rollup: boolean;
 };
+
+/** One source code system's rows in a section, collapsed until opened. */
+type SystemGroupEntry = {
+  source_vocabulary_id: string;
+  label: string;
+  members: number;
+  seen: number;
+  proposed: number;
+};
+const systemExpansionKey = (entry: SystemGroupEntry, section: MappingSection) =>
+  `${section}|system:${entry.source_vocabulary_id}`;
 
 /** One review row standing for every vendor code sharing a label. */
 type GroupEntry = {
@@ -439,13 +453,17 @@ export default function CodeMappingPage() {
   // Evidence (#2702): open that mapping's Edit Mapping dialog. Held in state
   // and cleared once handled, like the linked concept.
   const [linkedMapping, setLinkedMapping] = useState<number | undefined>(() => linkedMappingId(searchParams));
+  // ?metric=<key>, from a 30-day value on a patient's Wearables tab: open the
+  // Wearables tab on that metric's source codes, every device's. Only the
+  // starting point: the search box is the curator's from then on.
+  const [linkedMetric] = useState(() => linkedMetricKey(searchParams));
   const [direction, setDirection] = useState<'forward' | 'reverse'>(
-    searchParams.get('direction') === 'forward' || linkedMapping !== undefined ? 'forward' : 'reverse');
+    searchParams.get('direction') === 'forward' || linkedMapping !== undefined || linkedMetric ? 'forward' : 'reverse');
   const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
   const loadSequence = useRef(0);
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState(linkedMetric ? `metric:${linkedMetric}` : "");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const referenceCache = useRef<Reference | null>(null);
@@ -461,10 +479,10 @@ export default function CodeMappingPage() {
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [error, setError] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(linkedMetric ? `metric:${linkedMetric}` : "");
   // `null` means no choice has been made, so use the work-prioritized default.
   // The empty string is a real vocabulary ID: it represents the Uncoded tab.
-  const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
+  const [activeVocabulary, setActiveVocabulary] = useState<string | null>(linkedMetric ? WEARABLES_TAB : null);
   const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
   const [approvedCollapsed, setApprovedCollapsed] = useState(true);
   const [proposedCollapsed, setProposedCollapsed] = useState(false);
@@ -495,6 +513,11 @@ export default function CodeMappingPage() {
   const [withNotes, setWithNotes] = useState(false);
   // Only the codes a Suggest run approved by itself (#1532).
   const [autoApprovedOnly, setAutoApprovedOnly] = useState(false);
+  // The Wearables tab has no such filter: a tick made on another tab does not
+  // narrow it, where nothing would show that it is on.
+  const autoApprovedFilter = autoApprovedOnly && !onWearablesTab;
+  // The source code systems the Wearables tab is limited to; none is every one.
+  const [sourceSystems, setSourceSystems] = useState<string[]>([]);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
   const [groupRunning, setGroupRunning] = useState<string | null>(null);
@@ -590,7 +613,8 @@ export default function CodeMappingPage() {
     if (organizationFilter) params.organization = organizationFilter;
     if (rollup) params.rollup = 1;
     if (withNotes) params.with_notes = "1";
-    if (autoApprovedOnly) params.auto_approved = "1";
+    if (autoApprovedFilter) params.auto_approved = "1";
+    if (onWearablesTab && sourceSystems.length) params.source_systems = sourceSystems.join(",");
     // Grouping can start without a click, when the tab the server opens on
     // changes, and a grouped queue refuses any other sort with a 400.
     const sorts = rollup ? sortsAcrossGrouping(effectiveSorts) : effectiveSorts;
@@ -627,7 +651,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, effectiveSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, autoApprovedOnly, direction,
+  }, [activeVocabulary, debouncedSearch, pages, effectiveSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, autoApprovedFilter, onWearablesTab, sourceSystems, direction,
     unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
@@ -836,6 +860,9 @@ export default function CodeMappingPage() {
     () => new Map(vocabularyTabs.map((tab) => [tab.vocabulary_id, tab.label])),
     [vocabularyTabs],
   );
+  // The Wearables tab's Source System column: the name the dropdown lists.
+  const wearableSystemLabel = (vocabulary: string) =>
+    reference.wearable_source_systems?.find((system) => system.id === vocabulary)?.label || vocabulary || "—";
   const systemLabel = (row: CodeMappingRow) =>
     tabLabels.get(tabForRow(row)) ?? (row.source_vocabulary_id || "Uncoded");
   const foreignHits = useMemo(
@@ -851,8 +878,9 @@ export default function CodeMappingPage() {
   const organizationOptions = browse?.organizations ?? [];
   const provenanceValue = (origin: string) => origin || BLANK_PROVENANCE;
 
-  const loadGroup = useCallback(async (entry: GroupEntry, section: MappingSection) => {
-    const cacheKey = expansionKey(entry, section);
+  // `scope` is one label's codes, or one source code system's (a section
+  // sorted by source system).
+  const loadMembers = useCallback(async (cacheKey: string, section: MappingSection, scope: { label: string } | { group_system: string }) => {
     setExpandedGroups((current) => ({ ...current, [cacheKey]: null }));
     // A tab switch clears the cache; without this, a fetch already in flight
     // resolves afterwards and re-inserts the previous tab's rows.
@@ -860,10 +888,11 @@ export default function CodeMappingPage() {
     try {
       const { data } = await api.get<{ results: CodeMappingRow[] }>("/v1/code-mappings/group/", {
         params: {
-          label: groupKey(entry), section, queue_sections: "1",
+          ...scope, section, queue_sections: "1",
           seen_only: seenOnly ? "1" : "0",
           ...(withNotes ? { with_notes: "1" } : {}),
-          ...(autoApprovedOnly ? { auto_approved: "1" } : {}),
+          ...(autoApprovedFilter ? { auto_approved: "1" } : {}),
+          ...(onWearablesTab && sourceSystems.length ? { source_systems: sourceSystems.join(",") } : {}),
           // The server picks the default tab until one is clicked, so sending
           // activeVocabulary would fetch across every vocabulary on first load.
           ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
@@ -881,16 +910,19 @@ export default function CodeMappingPage() {
       setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
       setError("Could not load the codes in that group.");
     }
-  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly, withNotes, autoApprovedOnly]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly, withNotes, autoApprovedFilter, onWearablesTab, sourceSystems]);
 
-  const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
-    const cacheKey = expansionKey(entry, section);
+  const toggleMembers = useCallback((cacheKey: string, section: MappingSection, scope: { label: string } | { group_system: string }) => {
     if (cacheKey in expandedGroups) {
       setExpandedGroups(({ [cacheKey]: _removed, ...rest }) => rest);
       return;
     }
-    void loadGroup(entry, section);
-  }, [expandedGroups, loadGroup]);
+    void loadMembers(cacheKey, section, scope);
+  }, [expandedGroups, loadMembers]);
+  const toggleGroup = (entry: GroupEntry, section: MappingSection) =>
+    toggleMembers(expansionKey(entry, section), section, { label: groupKey(entry) });
+  const toggleSystem = (entry: SystemGroupEntry, section: MappingSection) =>
+    toggleMembers(systemExpansionKey(entry, section), section, { group_system: entry.source_vocabulary_id });
 
   const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve" | "reject", section: MappingSection) => {
     const key = expansionKey(entry, section);
@@ -906,7 +938,8 @@ export default function CodeMappingPage() {
         section, queue_sections: "1",
         seen_only: seenOnly ? "1" : "0",
         ...(withNotes ? { with_notes: "1" } : {}),
-        ...(autoApprovedOnly ? { auto_approved: "1" } : {}),
+        ...(autoApprovedFilter ? { auto_approved: "1" } : {}),
+        ...(onWearablesTab && sourceSystems.length ? { source_systems: sourceSystems.join(",") } : {}),
         ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
         ...(organizationFilter ? { organization: organizationFilter } : {}),
         ...(action === "suggest" ? {
@@ -1276,11 +1309,14 @@ export default function CodeMappingPage() {
     // Category (with the measure class under it) and Metric lead the
     // Wearables tab only; every other tab keeps its eight columns.
     const showMetricColumns = selectedVocabulary === WEARABLES_TAB;
-    const colCount = showMetricColumns ? 10 : 8;
+    const colCount = showMetricColumns ? 11 : 8;
     const sort = effectiveSorts[section];
     // Present only when the server grouped this response; otherwise the flat
     // queue renders exactly as before.
     const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
+    // Sorted by source system, the section is its systems, collapsed until opened.
+    const systemEntries = !browse?.rollup && sort?.column === "source_system" && showMetricColumns
+      ? browse?.system_groups?.[section] ?? [] : null;
     const pagination = browse?.pages[section];
     const header = (label: string, column: SortColumn) => {
       const sortable = groupEntries === null || GROUP_SORT_COLUMNS.includes(column);
@@ -1301,7 +1337,7 @@ export default function CodeMappingPage() {
             onChange={(event) => { setPages({}); setExpandedGroups({}); setWithNotes(event.target.checked); }} />
           with notes
         </label>}
-        {column === "source_code" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
+        {column === "source_code" && !showMetricColumns && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
           <input type="checkbox" checked={autoApprovedOnly}
             aria-label={`${section}: only codes Suggest approved by itself`}
             title="Filter all source tabs and sections to codes a Suggest run approved by itself (auto-approved)"
@@ -1344,6 +1380,7 @@ export default function CodeMappingPage() {
             }`}
           >
             {showMetricColumns && <>
+              <td className="px-4 py-3 text-xs text-slate-700" data-testid="source-system">{wearableSystemLabel(row.source_vocabulary_id)}</td>
               <CategoryCell category={row.category} measureClass={row.measure_class} />
               <MetricKeyCell metricKey={row.metric_key} />
             </>}
@@ -1424,6 +1461,7 @@ export default function CodeMappingPage() {
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
+            {showMetricColumns && header("Source System", "source_system")}
             {showMetricColumns && header("Category", "category")}
             {showMetricColumns && header("Metric", "metric_key")}
             {header("Source", "source_code")}
@@ -1437,7 +1475,36 @@ export default function CodeMappingPage() {
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {groupEntries
+          {systemEntries
+            ? systemEntries.map((entry) => {
+              const cacheKey = systemExpansionKey(entry, section);
+              const open = cacheKey in expandedGroups;
+              const members = expandedGroups[cacheKey];
+              return (
+                <Fragment key={cacheKey}>
+                  <tr className="bg-slate-50/60">
+                    <td colSpan={colCount} className="px-4 py-3">
+                      <button type="button"
+                        aria-expanded={open}
+                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.label}`}
+                        onClick={() => toggleSystem(entry, section)}
+                        className="inline-flex items-center gap-2 text-left font-medium text-slate-900 hover:underline">
+                        <span aria-hidden="true" className="inline-block w-3">{open ? "▾" : "▸"}</span>
+                        <span className="text-xs font-semibold uppercase tracking-wide">{entry.label}</span>
+                        <span className="font-mono text-xs font-normal text-slate-600">
+                          {entry.members === 1 ? "1 code" : `${entry.members.toLocaleString()} codes`}
+                        </span>
+                      </button>
+                    </td>
+                  </tr>
+                  {open && members === null && (
+                    <tr><td colSpan={colCount} className="px-4 py-3 text-center text-xs text-slate-500" role="status">Loading codes…</td></tr>
+                  )}
+                  {open && members && members.map(renderRow)}
+                </Fragment>
+              );
+            })
+            : groupEntries
             ? groupEntries.map((entry) => {
               const cacheKey = expansionKey(entry, section);
               const open = cacheKey in expandedGroups;
@@ -1446,6 +1513,7 @@ export default function CodeMappingPage() {
                 <Fragment key={cacheKey}>
                   <tr className="bg-slate-50/60">
                     {showMetricColumns && <>
+                      <td className="px-4 py-3" />
                       <CategoryCell category={entry.category} measureClass={entry.measure_class} />
                       <MetricKeyCell metricKey={entry.metric_key} />
                     </>}
@@ -1515,7 +1583,7 @@ export default function CodeMappingPage() {
               );
             })
             : (browse ? sectionRows : sortMappingRows(sectionRows, sort)).map(renderRow)}
-          {(groupEntries ? groupEntries.length === 0 : sectionRows.length === 0) && (
+          {(systemEntries ? systemEntries.length === 0 : groupEntries ? groupEntries.length === 0 : sectionRows.length === 0) && (
             <tr>
               <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{loading ? "Loading rows…" : emptyText}</td>
             </tr>
@@ -1992,10 +2060,17 @@ export default function CodeMappingPage() {
         <div className="mb-4 flex items-center">
           <span className="text-sm font-semibold uppercase tracking-wide text-slate-700">All</span>
           <span className="ml-1 text-sm font-normal text-slate-500" data-testid="all-mappings-count">({allCount})</span>
-          <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
-          {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
-          {/* The whole tab, built by the server, where the menus write loaded rows. */}
-          {selectedVocabulary === WEARABLES_TAB && <WearableMappingsDownload systems={reference.wearable_source_systems} />}
+          {selectedVocabulary === WEARABLES_TAB ? (
+            // The Wearables tab limits what it lists to the systems ticked; the
+            // whole-tab download and the loaded-rows menu are not offered here.
+            <span className="ml-3">
+              <WearableSourceSystemSelect systems={reference.wearable_source_systems ?? []} value={sourceSystems}
+                onChange={(next) => { setPages({}); setExpandedGroups({}); setSourceSystems(next); }} />
+            </span>
+          ) : <>
+            <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
+            {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
+          </>}
           {/* Sharing the proposals for a public vote sends mail from this
               deployment and gathers voters' addresses: for those who approve
               mappings, staff and org admins (#2678). */}
@@ -2016,7 +2091,7 @@ export default function CodeMappingPage() {
             <DownloadMenu rows={sectionRows} section={section} />
             {!collapsed && renderTable(sectionRows, withNotes
               ? `No ${section.toLowerCase()} mappings with a curator note here. Uncheck "with notes" to see every code.`
-              : autoApprovedOnly
+              : autoApprovedFilter
                 ? `No ${section.toLowerCase()} mappings were auto-approved by Suggest here. Uncheck "auto-approved (Suggest)" to see every code.`
                 : `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
           </section>;

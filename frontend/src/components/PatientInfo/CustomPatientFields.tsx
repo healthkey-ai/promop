@@ -66,14 +66,20 @@ export function CustomPatientFields({ fields, tabs, diseases, diseaseLabels, for
           const reason = writable
             ? undefined
             : descriptor?.reason ?? (computed ? "Computed from its formula; not editable here." : undefined);
+          const dropdown = field.field_type === "choice";
+          const current = values[field.field_name];
+          // The answers offered. A value the record holds that is no longer one of them (an
+          // answer retired since) still shows as it is: the select lists it as its own option.
+          const options = dropdown ? field.options ?? descriptor?.options ?? [] : undefined;
           return (
             <div key={field.id}>
               <Field
                 label={field.unit ? `${field.display_name} (${field.unit})` : field.display_name}
                 name={field.field_name}
                 markName={addedMark(field.field_name)}
-                type={field.field_type}
-                value={values[field.field_name] ?? (field.field_type === "boolean" ? null : "")}
+                type={field.field_type === "choice" ? "select" : field.field_type}
+                options={options}
+                value={current ?? (field.field_type === "boolean" ? null : "")}
                 onChange={(name, value) => onChange?.(name, entered(field, value))}
                 disabled={!writable}
                 readOnly={computed}

@@ -170,8 +170,8 @@ class IdentityAdmin(UserAdmin):
     @admin.action(description='Email password reset link', permissions=['support'])
     def reset_password(self, request, queryset):
         """Administrative password reset (PHR-S FM TI.1.1#08): email each selected
-        account a single-use reset link (via the configured Mailgun/anymail backend).
-        No password is set or emailed — the user chooses their own via the link."""
+        account a single-use reset link (via the configured anymail backend:
+        SendGrid or Mailgun). No password is set or emailed — the user chooses their own via the link."""
         from django.contrib import messages
         from patient_portal.api.password_reset import send_password_reset_email, PasswordResetEmailError
         sent, failed = 0, []

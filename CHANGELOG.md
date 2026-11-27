@@ -6,8 +6,53 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Code Mapping, Wearables tab: a Source System column and dropdown** — the
+  first column is Source System (HealthKit, Garmin, ...), sortable. Sorted by
+  it, each section is one collapsed entry per system, opened to load that
+  system's codes. A Source Systems dropdown beside "All" limits the tab to the
+  systems ticked (`source_systems` on `GET /api/v1/code-mappings/`; a section
+  ordered by `source_system` returns `system_groups`; the group endpoint takes
+  `group_system`). The "Download all wearable mappings" buttons, the Download
+  menu on the "All" line and the "auto-approved (Suggest)" checkbox are gone
+  from that tab; the Concept to Code tab keeps the download.
+
 ### Added
 
+- **A deployment's own patient invitation email** — `PATIENT_INVITATION_EMAIL`,
+  set in a deployment's settings module, names a function
+  `(invitation, accept_url) -> (subject, body)` that writes the invitation
+  email, for both the first send and "Send the invitation again". A deployment
+  whose members are not PROMOP's patients can then use its own name and
+  wording instead of "your health record on PROMOP". Empty (the default):
+  PROMOP's email, unchanged.
+- **Email through Twilio SendGrid** — set `SENDGRID_API_KEY` (a key with Mail
+  Send permission) and promop sends through SendGrid's SMTP relay instead of
+  Mailgun; `SENDGRID_SMTP_HOST` names the relay, `smtp.eu.sendgrid.net` for an
+  EU-resident account (default `smtp.sendgrid.net`). SMTP, not SendGrid's HTTP
+  API, because the API refuses a part whose type has parameters, such as a
+  calendar invite's `text/calendar; method=REQUEST`. Open, click and
+  subscription tracking are off on every message (`promop.mail`, SendGrid's
+  `X-SMTPAPI` header), so links (password resets, invitations) go to the app,
+  not through SendGrid's redirect, and SendGrid adds no unsubscribe footer of
+  its own. Values are stripped of surrounding whitespace (a key pasted into a
+  secret with its newline). Mailgun is unchanged and is used when only its
+  variables are set; `EMAIL_BACKEND` still overrides both.
+- **Wearables: link an Oura account** — the Oura Ring section of the Wearables
+  tab gains Connect Oura, Sync now and Disconnect. A patient approves this
+  site's Oura app once on Oura's own page (OAuth2, PKCE) and the site reads
+  their steps, active minutes and energy, sleep, HRV, resting heart rate,
+  breathing rate, blood oxygen and VO2 max from Oura's API: the last 90 days
+  at first, then from a few days before the last sync, right after connecting
+  and when the tab opens with a sync older than 12 hours. The days go through
+  the same rules and `Oura` source codes as the export upload, and a later day
+  from either replaces the same day from the other. Needs `OURA_CLIENT_ID`,
+  `OURA_CLIENT_SECRET` and `GARMIN_TOKEN_KEY` on the web service and an Oura app
+  registered with the redirect URL `<APP_BASE_URL>/api/v1/oura/oauth/callback/`;
+  Oura caps an unapproved app at ten users. Nothing syncs while the tab is
+  closed (#2900). See
+  [wearable-omop-mapping.md](docs/wearable-omop-mapping.md#oura-account-by-oauth).
 - **Wearables: upload an Oura Ring export** — an "Oura Ring" section on the
   Wearables tab, directly below Garmin, takes the data export Oura's Membership
   Hub sends (the zip, or any of its CSV files). Steps, active minutes and
