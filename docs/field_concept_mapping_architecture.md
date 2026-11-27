@@ -530,7 +530,9 @@ the answer machinery of the built-in coded fields and adds no second answer syst
   sharing a concept could not be read back); `mode='editable'` (a person chooses it);
   and `omop_table` Measurement or Observation, the tables that carry a coded answer. A
   refused answer is a per-index 400 (`answers: [{label?, value?, concept?}]`) and nothing
-  is created.
+  is created. At most 200 answers, and a name that still has `FieldChoice` rows (left by a
+  field since removed, since answers are keyed by name, not by the field) is refused rather
+  than inheriting them.
 - **Reads.** The definition list (`GET custom-patient-fields/`) and the writable-fields
   descriptor carry `options: [{value, code, label?}]` as a built-in select's do: `value`
   is what a save stores, `code` the code of the answer's concept (its approved decision,
@@ -560,7 +562,11 @@ the answer machinery of the built-in coded fields and adds no second answer syst
   that stands for no answer, reads as nothing and is **not written**: such a fact is
   skipped before the latest fact is chosen, so it cannot hide an older fact that does
   match. A retired answer still reads (stored data keeps its meaning); a live answer
-  speaks over a retired one.
+  speaks over a retired one. A value the editor wrote (under `custom:<name>`) whose answer
+  was **deleted** since still reads as the text it stored, so deleting an answer does not
+  blank the record; an imported fact of a deleted answer is not read. A *proposal* whose
+  answer is retired is not shown, since a proposal is approved by saving its value and only
+  a live answer can be saved.
 - **Provisional data.** A proposal-based row fills a dropdown through the same reader, so
   only with one of its answers; the mark, the rejection by clearing and the approval by
   PATCH are the scalar rules of [created fields](patient-record-first-writes.md#created-fields).

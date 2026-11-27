@@ -677,6 +677,17 @@ describe("create mode, dropdown", () => {
     expect(screen.getByLabelText("Answer 3 label")).toHaveValue("Old");
   });
 
+  it("sends a row that has a value but no label, so the server can say it needs one", async () => {
+    const dialog = props();
+    render(<ConceptAssignDialog {...dialog} />);
+    await fillBasics();
+    fireEvent.change(screen.getByLabelText("Answer 1 stored value"), { target: { value: "5" } });
+    await waitFor(() => expect(addButton()).toBeEnabled());
+    fireEvent.click(addButton());
+    await waitFor(() => expect(mockPost).toHaveBeenCalled());
+    expect(posted().answers).toEqual([{ label: "", value: "5", concept: null }]);
+  });
+
   it("removes an answer, but keeps the last row", () => {
     render(<ConceptAssignDialog {...props()} />);
     fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "choice" } });

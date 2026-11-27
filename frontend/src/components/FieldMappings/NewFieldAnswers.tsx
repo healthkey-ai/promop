@@ -4,7 +4,7 @@ import api from "@/api/axios";
 import { HelpTip, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 
 import {
-  blankAnswer, type AnswerConcept, type AnswerDraft, type AnswerErrors,
+  blankAnswer, isEntered, type AnswerConcept, type AnswerDraft, type AnswerErrors,
 } from "./answerDrafts";
 
 const TIP =
@@ -126,8 +126,8 @@ export function NewFieldAnswers({ answers, errors, disabled, onChange }: {
   const update = (key: number, change: Partial<AnswerDraft>) => (
     onChange(answers.map((answer) => (answer.key === key ? { ...answer, ...change } : answer)))
   );
-  // The server counts the rows it was sent, which leave out the ones without a label.
-  const sent = answers.filter((answer) => answer.label.trim() !== "");
+  // The server counts the rows it was sent, which leave out the rows with nothing entered.
+  const sent = answers.filter(isEntered);
   return (
     <fieldset className="mb-4 rounded-md border border-slate-200 p-4" aria-labelledby={heading}>
       <legend id={heading} className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">

@@ -30,10 +30,16 @@ export function blankAnswer(): AnswerDraft {
   return { key: nextKey++, label: "", value: "", concept: null };
 }
 
-/** The answers as the create request sends them: rows with a label, nothing else. */
+/** A row with nothing entered is not an answer; one with a value or a concept but no label is, and
+ *  the server says it needs a label. */
+export const isEntered = (answer: AnswerDraft) => (
+  answer.label.trim() !== "" || answer.value.trim() !== "" || answer.concept !== null
+);
+
+/** The answers as the create request sends them: the rows that have something entered. */
 export function answersPayload(answers: AnswerDraft[]) {
   return answers
-    .filter((answer) => answer.label.trim() !== "")
+    .filter(isEntered)
     .map((answer) => ({
       label: answer.label.trim(),
       value: answer.value.trim(),

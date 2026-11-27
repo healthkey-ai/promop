@@ -114,16 +114,17 @@ def definitions(names=None) -> dict:
     return {field.field_name: field for field in fields}
 
 
-def _curated_choices(names):
+def _curated_choices(names, *, with_aliases=False):
     """The answers (``FieldChoice`` rows) of the given created fields, live and retired.
 
     A row holding decisions about a lookup's entries is not an answer.
     """
     from omop_core.models import FieldChoice
 
-    return (FieldChoice.objects.filter(field_name__in=list(names))
+    rows = (FieldChoice.objects.filter(field_name__in=list(names))
             .exclude(context_key__startswith='lookup:')
-            .prefetch_related('aliases').order_by('field_name', 'sort_order', 'display', 'pk'))
+            .order_by('field_name', 'sort_order', 'display', 'pk'))
+    return rows.prefetch_related('aliases') if with_aliases else rows
 
 
 def answer_values(names) -> dict[str, dict[str, str]]:
@@ -181,9 +182,10 @@ class AnswerIndex:
     The derive-back of a dropdown: ``value(name, text, concept_id)`` is the
     stored value of the one answer a fact's text (its label, value or an alias,
     case and spacing aside) or, failing that, its ``value_as_concept_id``
-    stands for, or ``None``. A spelling or a concept that two answers of the
-    field share is not guessed, and a live answer speaks over a retired one:
-    stored data still reads under an answer that has since been retired.
+    stands for, or ``None``. A spelling or a concept that two answers of the field
+    share is not guessed, and a live answer speaks over a retired one: stored data
+    still reads under an answer that has since been retired (``live_only`` leaves
+    those out, for a proposal, which is approved by saving its value).
     """
 
     def __init__(self, names):
@@ -193,8 +195,11 @@ class AnswerIndex:
         self._fold = field_choices.fold
         live: dict[str, dict[str, set]] = {}
         retired: dict[str, dict[str, set]] = {}
-        for choice in _curated_choices(names):
+        self._live_values: dict[str, set] = {name: set() for name in names}
+        for choice in _curated_choices(names, with_aliases=True):
             tier = retired if choice.retired_at else live
+            if not choice.retired_at:
+                self._live_values[choice.field_name].add(choice.stored_value)
             spellings = {choice.display, choice.stored_value,
                          *(alias.alias for alias in choice.aliases.all())}
             for text in spellings:
@@ -207,14 +212,16 @@ class AnswerIndex:
                                 if len(values) == 1}
         self._concept = answer_values_by_concept(list(names))
 
-    def value(self, name, text=None, concept_id=None):
+    def value(self, name, text=None, concept_id=None, *, live_only=False):
+        found = None
         if text:
             found = self._text.get(name, {}).get(self._fold(text))
-            if found is not None:
-                return found
-        if concept_id:
-            return self._concept.get(name, {}).get(concept_id)
-        return None
+        if found is None and concept_id:
+            found = self._concept.get(name, {}).get(concept_id)
+        if found is not None and live_only and found not in self._live_values.get(name, ()):
+            # A proposal is approved by saving its value, and only a live answer can be saved.
+            return None
+        return found
 
 
 def coerce(field_type: str, raw):
@@ -467,10 +474,17 @@ def read_value(field_type: str, row, *, entered: bool, answers=None, name=None):
     number = getattr(row, 'value_as_number', None)
     text = getattr(row, 'value_as_string', None)
     if field_type == 'choice':
-        # Only an answer the field has: the row's text, else its answer concept.
+        # Only an answer the field has: the row's text, else its answer concept. A row the
+        # editor wrote carried a live answer when it was saved; if the answer was deleted
+        # since, the text it stored is still what was entered, and shows as it is.
         if answers is None:
             return None
-        return answers.value(name, text, getattr(row, 'value_as_concept_id', None))
+        found = answers.value(
+            name, text, getattr(row, 'value_as_concept_id', None),
+            live_only=getattr(row, 'confidence', None) is not None)
+        if found is None and entered and text:
+            return text
+        return found
     if field_type == 'number':
         if number is None:
             return None

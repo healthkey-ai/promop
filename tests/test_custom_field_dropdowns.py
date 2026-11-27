@@ -518,3 +518,46 @@ def test_saving_grade_groups_writes_the_measurement_with_and_without_a_concept(
     row.refresh_from_db()
     assert (row.value_as_concept_id, row.value_as_string) == (None, '5')
     assert derived(record) == {'gleason_grade_group': '5'}
+
+
+# ------------------------------------------------------------ review follow-ups
+
+
+def test_a_value_entered_under_an_answer_that_was_deleted_still_shows(staff, record, grade):
+    patch(staff, record, {'gleason_grade_group': '2'})
+    FieldChoice.objects.get(field_name='gleason_grade_group', display='Grade group 2').delete()
+    assert derived(record) == {'gleason_grade_group': '2'}
+    # An imported fact of an answer that no longer exists is not read.
+    other = PatientRecordFactory()
+    imported(other, grade, value_as_string='Grade group 2')
+    assert derived(other) == {}
+
+
+def test_a_proposal_of_a_retired_answer_is_not_shown_since_it_could_not_be_confirmed(
+        record, grade, settings):
+    settings.PROVISIONAL_DATA_ENABLED = True
+    settings.PROVISIONAL_CONFIDENCE_FLOOR = 70
+    from omop_core.models import PatientRecordProvisional
+    field_choices.set_retired(
+        FieldChoice.objects.get(field_name='gleason_grade_group', display='Grade group 1'), True)
+    imported(record, grade, value_as_string='1', confidence=82)
+    refresh_patient_record(record.person)
+    shown = PatientRecordProvisional.objects.filter(person=record.person).first()
+    assert not (shown.custom_fields if shown else None)
+    # The same fact, approved, still reads: stored data keeps its meaning.
+    other = PatientRecordFactory()
+    imported(other, grade, value_as_string='1')
+    assert derived(other) == {'gleason_grade_group': '1'}
+
+
+def test_a_name_with_answers_left_by_a_removed_field_is_refused(staff, concepts):
+    FieldChoice.objects.create(field_name='gleason_grade_group', display='Old answer')
+    response = create(staff, concepts, expect=400)
+    assert 'field_name' in response.data
+    assert not CustomPatientField.objects.exists()
+
+
+def test_the_number_of_answers_is_capped(staff, concepts):
+    response = create(staff, concepts, expect=400,
+                      answers=[{'label': f'Answer {n}'} for n in range(201)])
+    assert 'answers' in response.data

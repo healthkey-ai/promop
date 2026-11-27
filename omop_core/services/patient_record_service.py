@@ -969,12 +969,12 @@ def custom_field_answers(snapshot: OmopSnapshot, person: Person = None) -> dict[
             imported = [row for row in snapshot.procedures if row.procedure_concept_id == concept_id]
         if field.field_type == 'choice':
             # A fact that matches no answer is not read, and does not hide an
-            # older one that does.
-            def reads(row, name=field.field_name):
+            # older one that does. A value the editor wrote reads as entered.
+            def reads(row, was_entered, name=field.field_name):
                 return custom_field_values.read_value(
-                    'choice', row, entered=False, answers=answers, name=name) is not None
-            entered = [row for row in entered if reads(row)]
-            imported = [row for row in imported if reads(row)]
+                    'choice', row, entered=was_entered, answers=answers, name=name) is not None
+            entered = [row for row in entered if reads(row, True)]
+            imported = [row for row in imported if reads(row, False)]
         row, was_entered = custom_field_values.latest_row(
             entered, imported, cleared.get((target, source)))
         if row is None:

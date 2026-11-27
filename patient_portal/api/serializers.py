@@ -1945,7 +1945,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=30), required=False, default=list,
     )
     # A dropdown's answers, in order; required for one and refused for any other type.
-    answers = CustomFieldAnswerSerializer(many=True, required=False, default=list)
+    answers = CustomFieldAnswerSerializer(many=True, required=False, default=list, max_length=200)
 
     def validate_diseases(self, value):
         return _clean_field_diseases(value)
@@ -1999,6 +1999,12 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         if not answers:
             raise serializers.ValidationError(
                 {'answers': 'A dropdown needs at least one answer.'})
+        if FieldChoice.objects.filter(field_name=attrs['field_name']).exists():
+            # Answers are keyed by the field's name, not by the field: those of a field
+            # since removed would be inherited, with their scope and concept decisions.
+            raise serializers.ValidationError({
+                'field_name': 'Answers already exist under this name (from a field since removed); '
+                              'choose another name.'})
         errors: list[dict] = []
         labels: dict[str, int] = {}
         stored: dict[str, int] = {}
