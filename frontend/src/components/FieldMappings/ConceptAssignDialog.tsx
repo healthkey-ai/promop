@@ -169,6 +169,15 @@ const TIP = {
     "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed.",
 } as const;
 
+// The OMOP domain a table's concepts belong to; tables with no single domain are left out.
+const TABLE_DOMAIN: Record<string, string> = {
+  Measurement: "Measurement",
+  Observation: "Observation",
+  ConditionOccurrence: "Condition",
+  DrugExposure: "Drug",
+  ProcedureOccurrence: "Procedure",
+};
+
 export function ConceptAssignDialog({
   fieldName, fieldType, suggestQuery, onShowSourceCodes, onClose, onSaved,
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
@@ -223,6 +232,8 @@ export function ConceptAssignDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Only the latest search may set results: a table or vocabulary change re-searches.
+  const searchSeq = useRef(0);
   const overlayRef = useRef<HTMLDivElement>(null);
 
   const unitChoices = commonUnits || [];
@@ -246,27 +257,34 @@ export function ConceptAssignDialog({
     (table) => table.toLowerCase() === omopTable.trim().replace(/_/g, "").toLowerCase(),
   );
 
+  // The search ranks concepts of the table's own domain first (a tie-break, never a filter), so
+  // a Measurement field is offered the LOINC test before a SNOMED finding of the same words.
+  const preferDomain = selectedTableOption ? TABLE_DOMAIN[selectedTableOption] : undefined;
+
   const doSearch = useCallback(async (q: string) => {
+    const seq = ++searchSeq.current;
     if (q.length < 3) {
       setResults([]);
+      setSearching(false);
       return;
     }
     setSearching(true);
     try {
       const params: Record<string, string> = { q, limit: "50" };
       if (vocabFilter) params.vocabulary_id = vocabFilter;
+      if (preferDomain) params.prefer_domain_id = preferDomain;
       const resp = await api.get("/v1/concepts/search/", { params });
-      setResults(resp.data.results || resp.data || []);
+      if (seq === searchSeq.current) setResults(resp.data.results || resp.data || []);
     } catch (err: unknown) {
       if (err && typeof err === "object" && "response" in err) {
         const status = (err as { response: { status: number } }).response?.status;
         if (status === 401 || status === 403) throw err;
       }
-      setResults([]);
+      if (seq === searchSeq.current) setResults([]);
     } finally {
-      setSearching(false);
+      if (seq === searchSeq.current) setSearching(false);
     }
-  }, [vocabFilter]);
+  }, [vocabFilter, preferDomain]);
 
   const handleSuggest = () => {
     setSearchQuery(
