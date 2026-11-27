@@ -15,7 +15,9 @@ Resolution order — ``resolve_source_code``:
    fallback, but never bypass SCCM.
 3. With no approved mapping or direct concept, resolve as before (direct lookup on the source
    vocabulary), and if that fails **mint** a concept under an ``HK-*``
-   quarantine vocabulary and record a **proposed** mapping beside it.
+   quarantine vocabulary and record a **proposed** mapping beside it. Never for
+   a lab (``HK-Labs``): that code is queued with no destination, for a curator
+   to map or mint (#2922).
 4. A **proposed** mapping never overrides anything.  It is a review item, and
    an admin/curator/SME approves, edits, or rejects it in the Code Mapping UI.
 
@@ -101,6 +103,7 @@ _CREATE_FIELDS = {
 
 # Which HK-* vocabulary a minted destination lands in, per OMOP table, and the
 # domain/class it carries there.
+HK_LABS_VOCABULARY = 'HK-Labs'
 _QUARANTINE_TARGETS = {
     'measurement': ('HK-Labs', 'Measurement', 'Lab Test', 'hkl'),
     'observation': ('HK-Observation', 'Observation', 'Clinical Observation', 'hko'),
@@ -851,7 +854,10 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
         return None, mapping
 
     # Rule 5 — mint only after direct resolution and suggestion both fail.
-    if not mint:
+    # Never for a lab: a local HK-Labs concept is minted by a curator through
+    # code-mappings/mint-destination/ (#2922). The code is queued with no
+    # destination, and its rows wait at concept 0 until one is chosen.
+    if not mint or _QUARANTINE_TARGETS.get(table, ('',))[0] == HK_LABS_VOCABULARY:
         return None, _record_proposal(
             source_vocabulary_id=source_vocabulary_id,
             source_code=source_code,

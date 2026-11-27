@@ -52,39 +52,12 @@ from patient_portal.api.permissions import (
     ScopedTokenPermission, get_request_org, is_service_token, is_machine_request,
     reject_machine_actor_claims,
 )
-# Reuse the proven HK-Labs concept-fallback machinery.
-from patient_portal.api.lab_results.sync import HK_LABS_VOCAB_ID, _ensure_hk_deps
+from patient_portal.api.lab_results.sync import _ensure_concept
 
 logger = logging.getLogger(__name__)
 
 EHR_TYPE_CONCEPT_ID = 32817        # "EHR"
 NO_MATCHING_CONCEPT_ID = 0         # OMOP "No matching concept"
-
-_FALLBACK_CONCEPTS = {
-    NO_MATCHING_CONCEPT_ID: ('No matching concept', 'Metadata', 'Undefined'),
-    EHR_TYPE_CONCEPT_ID: ('EHR', 'Type Concept', 'Type Concept'),
-}
-
-
-def _ensure_concept(concept_id):
-    """Return a Concept by id, creating an HK-Labs fallback if vocabularies aren't loaded."""
-    concept = Concept.objects.filter(concept_id=concept_id).first()
-    if concept:
-        return concept
-    name, domain_id, concept_class_id = _FALLBACK_CONCEPTS[concept_id]
-    _ensure_hk_deps(domain_id, concept_class_id)
-    return Concept.objects.create(
-        concept_id=concept_id,
-        concept_name=name,
-        domain_id=domain_id,
-        vocabulary_id=HK_LABS_VOCAB_ID,
-        concept_class_id=concept_class_id,
-        standard_concept=None,
-        source='HealthKey',
-        concept_code=f'hkl:fallback-{concept_id}',
-        valid_start_date=date(1970, 1, 1),
-        valid_end_date=date(2099, 12, 31),
-    )
 
 
 def _parse_date(value):
@@ -380,6 +353,12 @@ class FhirSyncView(APIView):
 
         ehr_type = _ensure_concept(EHR_TYPE_CONCEPT_ID)
         no_match = _ensure_concept(NO_MATCHING_CONCEPT_ID)
+        if ehr_type is None or no_match is None:
+            # No stand-in concept is created (#2922).
+            return Response(
+                {'detail': 'Required OMOP concepts not available. Run load_athena_vocabularies.'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         # Group bundle resources.
         patient_res = None

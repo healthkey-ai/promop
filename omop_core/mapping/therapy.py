@@ -222,6 +222,11 @@ def _ensure_hk_vocab(vocabulary_id):
 def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
+    if vocabulary_id == HK_LABS_VOCAB_ID:
+        # No importer creates a local lab concept: a curator mints one through
+        # code-mappings/mint-destination/ (#2922).
+        raise ValueError('HK-Labs concepts are minted only through the curator mint endpoint.')
+
     concept = Concept.objects.filter(
         vocabulary_id=vocabulary_id, concept_code=concept_code,
     ).first()

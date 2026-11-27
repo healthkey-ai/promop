@@ -13,7 +13,7 @@ from rest_framework.test import APIClient
 from omop_core.models import (
     CareSite, Concept, ConceptClass, Domain, LoincClass, LoincCodeClass,
     Measurement, MeasurementOwnership, Person, PatientRecord, ProvenanceRecord,
-    Vocabulary, VisitOccurrence,
+    SourceCodeConceptMapping, Vocabulary, VisitOccurrence,
 )
 
 
@@ -143,7 +143,7 @@ class SyncViewTest(TestCase):
         care_site = CareSite.objects.get(care_site_name='Quest Diagnostics')
         self.assertEqual(visit.care_site_id, care_site.care_site_id)
 
-    def test_sync_loinc_unmatched_creates_hk_concept(self):
+    def test_sync_loinc_unmatched_mints_nothing_and_queues_the_name(self):
         resp = self.client.post('/api/lab-results/sync/', {
             'person_id': 1001,
             'measurements': [
@@ -160,11 +160,13 @@ class SyncViewTest(TestCase):
 
         m = Measurement.objects.get(measurement_id=resp.data['measurement_ids'][0])
         self.assertEqual(m.measurement_concept_id, 0)
-        self.assertIsNotNone(m.measurement_source_concept_id)
-
-        hk_concept = Concept.objects.get(concept_id=m.measurement_source_concept_id)
-        self.assertEqual(hk_concept.vocabulary_id, 'HK-Labs')
-        self.assertEqual(hk_concept.concept_code, 'hkl:obscure-regional-panel')
+        # No local concept is created (#2922): the row has no source concept and the
+        # name waits in the code-mapping queue for a curator.
+        self.assertIsNone(m.measurement_source_concept_id)
+        self.assertFalse(Concept.objects.filter(vocabulary_id='HK-Labs').exists())
+        queued = SourceCodeConceptMapping.objects.get(source_code='Obscure Regional Panel')
+        self.assertEqual((queued.status, queued.omop_table, queued.target_concept_id),
+                         ('proposed', 'measurement', None))
 
     def test_sync_invalid_person_404(self):
         resp = self.client.post('/api/lab-results/sync/', {

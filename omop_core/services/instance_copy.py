@@ -9,6 +9,7 @@ from django.core.management.base import CommandError
 from django.db import connections
 
 from omop_core.models import Concept
+from omop_core.services import hkl_duplicates
 
 SOURCE_ALIAS: str = 'copy_source'
 CHUNK: int = 2000
@@ -79,15 +80,28 @@ def local_concept_ids(refs: Iterable[ConceptRef]) -> dict[ConceptRef, int]:
 
     Matched by code, never by id: Athena ids agree across instances, but
     HealthKey-minted ids are numbered per instance.
+
+    A removed HK-Labs concept that duplicated a standard test (``hkl:psa``, see
+    hkl_duplicates) and is no longer here resolves to the standard concept it
+    duplicated, so a mapping or row copied from an instance that still has it
+    lands on LOINC instead of losing its concept. Any other removed ``hkl:``
+    concept is simply not found here. One that is still here resolves to itself.
     """
     wanted = set(refs)
     if not wanted:
         return {}
-    return {
+    aliases = {ref: alias for ref in wanted if (alias := hkl_duplicates.alias_for(*ref))}
+    lookup = wanted | set(aliases.values())
+    found = {
         (vocabulary_id, code): concept_id
         for concept_id, vocabulary_id, code in Concept.objects.filter(
-            vocabulary_id__in={v for v, _ in wanted},
-            concept_code__in={c for _, c in wanted},
+            vocabulary_id__in={v for v, _ in lookup},
+            concept_code__in={c for _, c in lookup},
         ).values_list('concept_id', 'vocabulary_id', 'concept_code')
-        if (vocabulary_id, code) in wanted
+        if (vocabulary_id, code) in lookup
     }
+    result = {ref: found[ref] for ref in wanted if ref in found}
+    for ref, alias in aliases.items():
+        if ref not in result and alias in found:
+            result[ref] = found[alias]
+    return result

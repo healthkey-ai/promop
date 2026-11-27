@@ -5310,10 +5310,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # rather than leaving it to whoever remembers to run a load.
         #
         # The vocabulary check is not redundant. lab_results.sync._ensure_concept
-        # mints concept_id 32865 into HK-Labs as a fallback when Athena is absent
-        # — a locally-authored row occupying a genuine Athena id. Accepting it
-        # here would type every wearable row with a shadow concept, which is the
-        # defect class #415 exists to eliminate, and would do so silently.
+        # used to mint concept_id 32865 into HK-Labs as a fallback when Athena is
+        # absent (removed, #2922) — a locally-authored row occupying a genuine
+        # Athena id. Accepting one here would type every wearable row with a shadow
+        # concept, which is the defect class #415 exists to eliminate.
         type_concept = Concept.objects.filter(
             concept_id=WEARABLE_TYPE_CONCEPT_ID).first()
         if type_concept is None or type_concept.vocabulary_id != 'Type Concept':

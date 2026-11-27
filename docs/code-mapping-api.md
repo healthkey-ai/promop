@@ -705,9 +705,13 @@ The lookup lifecycle is:
    multi-strategy UMLS/vector/lexical work. Its highest-ranked candidate becomes
    the target of a `proposed` SCCM row only.
 6. If there is no suitable suggestion, mint an HK quarantine concept for the
-   requested table (`HK-Labs`, `HK-Observation`, `HK-Condition`, `HK-Drug`, or
+   requested table (`HK-Observation`, `HK-Condition`, `HK-Drug`, or
    `HK-Procedure`) and create a proposed row pointing to it. The result is
-   still unresolved until a curator approves it.
+   still unresolved until a curator approves it. **A lab (measurement) is the
+   exception (#2922):** no `HK-Labs` concept is created. The code is queued as a
+   proposed row with no destination (the response has no concept), and its rows
+   wait at concept 0 until a curator picks a standard concept or mints one
+   through `code-mappings/mint-destination/`.
 
 The `Seen` value is therefore “times this unresolved proposal was encountered
 by the resolver.” It is stored on the SCCM row, not on the source concept or
