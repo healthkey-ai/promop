@@ -351,10 +351,34 @@ def test_a_matching_answer_finds_the_question_it_answers(api, answers_of_the_que
     assert len(codes) == len(set(codes))
 
 
-def test_the_question_is_not_added_when_the_filters_exclude_it(api, answers_of_the_question):
-    assert '94734-1' not in search(api, 'Gleason grade group', vocabulary_id='SNOMED')
-    assert '94734-1' not in search(api, 'Gleason grade group', domain_id='Observation')
-    assert '94734-1' not in search(api, 'Gleason grade group', standard_concept='C')
+def relationship_statements(queries):
+    return [q['sql'] for q in queries.captured_queries if 'concept_relationship' in q['sql']]
+
+
+@pytest.mark.parametrize('params', [
+    {'vocabulary_id': 'SNOMED'}, {'domain_id': 'Condition'}, {'standard_concept': 'C'},
+])
+def test_the_answer_lookup_is_skipped_when_the_filters_exclude_loinc_tests(
+        api, answers_of_the_question, params):
+    with CaptureQueriesContext(connection) as queries:
+        search(api, 'Gleason grade group', **params)
+    assert not relationship_statements(queries)
+
+
+@pytest.mark.parametrize('params', [
+    {}, {'vocabulary_id': 'LOINC'}, {'domain_id': 'Measurement'}, {'domain_id': 'Observation'},
+])
+def test_the_answer_lookup_runs_when_loinc_tests_may_match(api, answers_of_the_question, params):
+    with CaptureQueriesContext(connection) as queries:
+        search(api, 'Gleason grade group', **params)
+    assert len(relationship_statements(queries)) == 1
+
+
+def test_text_with_no_token_of_three_characters_reads_no_answers(api, answers_of_the_question):
+    for text in ('t 4', 'b 12', 't(4;14)'):
+        with CaptureQueriesContext(connection) as queries:
+            search(api, text)
+        assert not relationship_statements(queries), text
 
 
 def test_a_retired_link_does_not_add_the_question(api, answers_of_the_question):
@@ -380,6 +404,14 @@ def test_a_concept_that_really_says_total_stays_ahead_of_the_fallback(api, plain
     codes = search(api, 'total testosterone')
     assert codes[:2] == ['TT-1', 'TT-2'] and codes.index('2986-8') == 2
     assert exact.concept_code in codes and prefix.concept_code in codes
+
+
+def test_a_name_with_the_typed_total_in_the_middle_beats_the_text_without_it(api, plain_language):
+    middle = make_concept((9600003, 'TT-3', 'Serum total testosterone measurement'),
+                          vocabulary_id='SNOMED')
+    sibling = make_concept((9600004, 'TT-4', 'Testosterone.free'), vocabulary_id='SNOMED')
+    codes = search(api, 'total testosterone')
+    assert codes.index(middle.concept_code) < codes.index(sibling.concept_code)
 
 
 def test_only_text_with_something_besides_the_optional_word_is_widened():

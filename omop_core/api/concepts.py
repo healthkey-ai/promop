@@ -265,7 +265,7 @@ OPTIONAL_WORDS = frozenset({'total'})
 # also finds the question it is an answer of. At most this many questions are added.
 ANSWER_QUESTIONS = 50
 ANSWER_VOCABULARY = 'LOINC'
-QUESTION_DOMAIN = 'Measurement'
+QUESTION_DOMAINS = ('Measurement', 'Observation')
 
 
 def optional_word_text(query):
@@ -288,10 +288,13 @@ def answer_questions(query, query_params):
     """
     from omop_core.models import Concept, ConceptRelationship
 
+    # Text with no token of three characters has no trigram to drive the name match.
+    if not any(len(t) >= MIN_SYNONYM_TOKEN for t in _tokens(query)):
+        return set()
     vocabulary = (query_params.get('vocabulary_id') or '').strip()
     domain = (query_params.get('domain_id') or '').strip()
     standard = (query_params.get('standard_concept') or '').strip()
-    if ((vocabulary and vocabulary != ANSWER_VOCABULARY) or (domain and domain != QUESTION_DOMAIN)
+    if ((vocabulary and vocabulary != ANSWER_VOCABULARY) or (domain and domain not in QUESTION_DOMAINS)
             or (standard and standard != 'S')):
         return set()
     answers = Concept.objects.filter(
@@ -300,7 +303,7 @@ def answer_questions(query, query_params):
     )
     questions = ConceptRelationship.objects.filter(
         concept_1__in=answers, relationship_id='Answer of', invalid_reason__isnull=True,
-    ).values_list('concept_2_id', flat=True).distinct()[:ANSWER_QUESTIONS]
+    ).values_list('concept_2_id', flat=True).order_by('concept_2_id').distinct()[:ANSWER_QUESTIONS]
     return set(questions)
 
 
@@ -323,10 +326,14 @@ def ranked_concept_ordering(query, concept_id, hits=None, prefer_domain=''):
     if bare:
         near |= Q(concept_name__iexact=bare) | Q(concept_name__istartswith=bare)
     tiers = [When(best, then=0), When(exact, then=1), When(prefix, then=2)]
+    if bare:
+        # A name that has the typed phrase, "total" included, anywhere in it comes before one
+        # that only has the text without it.
+        tiers.append(When(concept_name__icontains=query, then=3))
     if near:
-        tiers.append(When(near, then=3))
+        tiers.append(When(near, then=len(tiers)))
     ordering = [
-        Case(*tiers, default=4, output_field=IntegerField()),
+        Case(*tiers, default=len(tiers) + 1, output_field=IntegerField()),
         Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
     ]
     if prefer_domain:
@@ -341,7 +348,7 @@ def ranked_concept_ordering(query, concept_id, hits=None, prefer_domain=''):
 
 
 # Bump when the ranking changes: a cached response must not outlive the order it holds.
-RANKING_VERSION = 2
+RANKING_VERSION = 3
 
 
 def ranking_stamp():
