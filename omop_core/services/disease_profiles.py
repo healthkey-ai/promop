@@ -152,7 +152,7 @@ def in_profile(field_diseases: Iterable[str], profile: Iterable[str]) -> bool:
     return not field_diseases or bool(field_diseases & set(profile))
 
 
-def field_names(using: str = 'default') -> set[str]:
+def field_names(using: str = 'default', include_retired: bool = False) -> set[str]:
     """Every field that can have a scope: what the field descriptors list.
 
     A clinical column, a genomics component or a created field. Not an
@@ -169,7 +169,9 @@ def field_names(using: str = 'default') -> set[str]:
         and _classify_field(field.name) not in ('internal', 'unit')
     }
     names |= {'genetic_mutations.' + attribute['key'] for attribute in components()}
-    return names | set(CustomPatientField.objects.using(using).active().values_list('field_name', flat=True))
+    created = CustomPatientField.objects.using(using)
+    created = created if include_retired else created.active()
+    return names | set(created.values_list('field_name', flat=True))
 
 
 def resolver() -> Callable[[object], str | None]:

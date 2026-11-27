@@ -582,7 +582,8 @@ def _apply_memberships(payload: dict, stats: TransferStats) -> None:
     from omop_core.services.disease_profiles import extension_codes, field_names
 
     known = set(extension_codes())
-    fields = field_names()
+    # A removed field keeps its scope here too, so a restore on this instance is right.
+    fields = field_names(include_retired=True)
     source = payload.get('membership_source') or {}
     source_fields = set(source.get('fields', ()))
     source_categories = set(source.get('categories', ()))

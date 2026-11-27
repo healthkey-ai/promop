@@ -23,6 +23,9 @@ interface Props {
   onDone: (outcome: RemovalOutcome, fieldName: string) => void;
 }
 
+const statusOf = (error: unknown): number | undefined =>
+  axios.isAxiosError(error) ? error.response?.status : undefined;
+
 const errorText = (error: unknown, fallback: string): string => {
   if (axios.isAxiosError(error)) {
     const detail = (error.response?.data as { detail?: unknown } | undefined)?.detail;
@@ -46,6 +49,11 @@ export function RemoveFieldDialog({ fieldName, displayName, onClose, onDone }: P
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const busyRef = useRef(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
   const path = `/v1/custom-patient-fields/${encodeURIComponent(fieldName)}/`;
 
   const load = async () => {
@@ -65,6 +73,16 @@ export function RemoveFieldDialog({ fieldName, displayName, onClose, onDone }: P
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fieldName]);
 
+  // A modal takes focus when it opens and closes on Escape.
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busyRef.current) closeRef.current();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
   const remove = async (permanent: boolean) => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -75,6 +93,11 @@ export function RemoveFieldDialog({ fieldName, displayName, onClose, onDone }: P
       const state = (response.data as { state?: string } | undefined)?.state;
       onDone(state === "deleted" ? "deleted" : "retired", fieldName);
     } catch (failure) {
+      if (statusOf(failure) === 404) {
+        // Another administrator deleted it meanwhile: nothing left to remove; refresh the page.
+        onDone("deleted", fieldName);
+        return;
+      }
       setError(errorText(failure, "Could not remove the field."));
       // The counts may have changed since the dialog opened; show the current ones.
       await load();
@@ -129,8 +152,9 @@ export function RemoveFieldDialog({ fieldName, displayName, onClose, onDone }: P
 
               {!usage.retired && (
                 <p>
-                  <strong>Remove</strong> hides the field from patient tabs, mappings and records. Every value
-                  already stored is kept, and you can restore the field later.
+                  <strong>Remove</strong> hides the field from patient tabs and mappings. Every value already
+                  stored is kept (it stays in the record data, no longer shown), and you can restore the field
+                  later.
                 </p>
               )}
               {usage.can_delete ? (
@@ -152,6 +176,7 @@ export function RemoveFieldDialog({ fieldName, displayName, onClose, onDone }: P
 
         <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 px-5 py-3">
           <button
+            ref={cancelRef}
             type="button"
             onClick={onClose}
             className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"

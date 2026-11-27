@@ -118,3 +118,34 @@ describe("RemovedFieldsPanel", () => {
     expect(await screen.findByText("No removed fields.")).toBeInTheDocument();
   });
 });
+
+describe("RemoveFieldDialog keyboard and races", () => {
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockDelete.mockReset();
+  });
+
+  it("focuses Cancel on open and closes on Escape", async () => {
+    mockGet.mockResolvedValue({ data: usage() });
+    const onClose = vi.fn();
+    render(<RemoveFieldDialog fieldName="gleason_grade_group" onClose={onClose} onDone={vi.fn()} />);
+    await screen.findByTestId("usage-summary");
+
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a 404 on removal as done, so the page refreshes", async () => {
+    mockGet.mockResolvedValue({ data: usage() });
+    mockDelete.mockRejectedValue(Object.assign(new Error("gone"), {
+      isAxiosError: true, response: { status: 404, data: { detail: "Not found." } },
+    }));
+    const onDone = vi.fn();
+    render(<RemoveFieldDialog fieldName="gleason_grade_group" onClose={vi.fn()} onDone={onDone} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Remove field" }));
+
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith("deleted", "gleason_grade_group"));
+  });
+});

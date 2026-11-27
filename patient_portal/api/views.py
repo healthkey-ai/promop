@@ -17454,7 +17454,9 @@ def custom_patient_field_list(request):
 def _removal_error_response(error):
     """A refused removal as a 409 with the reason and the counts, never a 500."""
     body = {'detail': error.message, 'code': error.code, **error.extra}
-    return Response(body, status=status.HTTP_409_CONFLICT)
+    # A field another request deleted meanwhile is simply not there any more.
+    return Response(body, status=status.HTTP_404_NOT_FOUND if error.code == 'gone'
+                    else status.HTTP_409_CONFLICT)
 
 
 @api_view(['GET', 'DELETE'])
@@ -17484,7 +17486,7 @@ def custom_patient_field_detail(request, field_name):
 
     if request.method == 'GET':
         data = CustomPatientFieldSerializer(field).data
-        return Response({**data, 'retired': field.retired_at is not None, **removal.usage(field)})
+        return Response({**data, **removal.usage(field)})
 
     permanent = str(request.query_params.get('permanent', '')).lower() in ('1', 'true', 'yes')
     try:
@@ -17652,6 +17654,11 @@ def field_scope(request, field_name):
     # A name with rows but no field (the field was removed) is still
     # reachable, so its rows can be read and cleared.
     held = FieldDiseaseMembership.objects.filter(field_name=field_name)
+    if request.method == 'PUT' and CustomPatientField.objects.retired().filter(field_name=field_name).exists():
+        # A removed field keeps its scope so a restore returns it to the same diseases.
+        return Response({'detail': 'This created field is removed. Restore it before changing its scope.',
+                         'code': 'retired_field', 'field_name': field_name},
+                        status=status.HTTP_409_CONFLICT)
     if field_name not in disease_profiles.field_names() and not held.exists():
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PUT':
@@ -17712,6 +17719,13 @@ def field_mapping_detail(request, pk):
             'code': 'retired_field', 'field_name': created.field_name,
         }, status=status.HTTP_409_CONFLICT)
     new_status = request.data.get('status')
+    if created is not None and new_status and new_status != 'approved':
+        # Un-approving or rejecting it would hide the field with no way to restore it.
+        return Response({
+            'detail': (f"This is the mapping of the created field '{created.field_name}'. To take the "
+                       f'field out of use, remove it: DELETE /api/v1/custom-patient-fields/{created.field_name}/.'),
+            'code': 'created_field', 'field_name': created.field_name,
+        }, status=status.HTTP_409_CONFLICT)
     if new_status and not _can_approve_mappings(request.user):
         if new_status == 'approved':
             return Response(

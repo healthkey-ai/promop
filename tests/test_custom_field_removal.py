@@ -468,3 +468,75 @@ def test_a_retired_fields_pending_pin_survives_a_derivation_and_a_restore(staff,
     kept = PatientRecord.objects.get(pk=record.pk)
     assert f'custom_fields.{NAME}' in kept.user_edited_fields
     assert kept.custom_fields == {NAME: '1'}
+
+
+# ------------------------------------------------------------ review follow-ups
+
+
+@pytest.mark.parametrize('name', ['psa__level', 'psa__isnull', 'contains', 'x__icontains', 'in'])
+def test_a_name_that_looks_like_a_lookup_is_counted_as_the_key_it_is(staff, concepts, name):
+    make(staff, concepts, field_name=name, field_type='text', answers=[], diseases=[])
+    record = PatientRecordFactory()
+    PatientRecord.objects.filter(pk=record.pk).update(custom_fields={name: 'x'})
+
+    data = staff.get(url(name)).data
+
+    assert data['records_with_value'] == 1 and data['can_delete'] is False
+    assert staff.delete(url(name) + '?permanent=true').status_code == 409
+    assert staff.delete(url(name)).status_code == 200
+
+
+def test_a_field_another_request_deleted_is_a_404_not_a_500(grade):
+    stale = CustomPatientField.objects.get(pk=grade.pk)
+    custom_field_removal.delete(grade)
+    with pytest.raises(custom_field_removal.RemovalError) as error:
+        custom_field_removal.retire(stale)
+    assert error.value.code == 'gone'
+
+
+def test_permanent_delete_retires_first_and_a_refusal_leaves_it_retired(staff, grade, record, monkeypatch):
+    # A value lands after the first check (a write that resolved the field while active).
+    original = custom_field_removal.usage
+    calls = []
+
+    def racing(field):
+        calls.append(field.retired_at is not None)
+        result = original(field)
+        if len(calls) == 1:
+            # After the first check has passed, before the field is retired.
+            PatientRecord.objects.filter(pk=record.pk).update(custom_fields={NAME: '1'})
+        return result
+
+    monkeypatch.setattr(custom_field_removal, 'usage', racing)
+    response = staff.delete(url() + '?permanent=true')
+
+    assert response.status_code == 409 and response.data['code'] == 'has_data'
+    grade.refresh_from_db()
+    assert grade.retired_at is not None
+    assert stored(record) == {NAME: '1'}
+
+
+def test_a_removed_fields_scope_cannot_be_changed(staff, grade):
+    staff.delete(url())
+    response = staff.put(f'{FIELD_MAPPINGS}{NAME}/diseases/', {'diseases': []}, format='json')
+    assert response.status_code == 409 and response.data['code'] == 'retired_field'
+    assert FieldDiseaseMembership.objects.filter(field_name=NAME).count() == 1
+
+
+@pytest.mark.parametrize('new_status', ['proposed', 'rejected'])
+def test_an_active_created_fields_mapping_cannot_be_unapproved_by_hand(staff, grade, new_status):
+    response = staff.patch(f'{FIELD_MAPPINGS}{grade.mapping_id}/', {'status': new_status}, format='json')
+    assert response.status_code == 409 and response.data['code'] == 'created_field'
+    assert FieldConceptMapping.objects.get(pk=grade.mapping_id).status == 'approved'
+
+
+def test_a_removed_fields_scope_survives_copying_to_another_instance(staff, grade):
+    from omop_core.services.field_curation_transfer import apply_payload, read_payload
+
+    staff.delete(url())
+    payload = read_payload('default')
+    FieldDiseaseMembership.objects.all().delete()
+    CustomPatientField.objects.all().delete()
+    FieldConceptMapping.objects.all().delete()
+    apply_payload(payload)
+    assert list(FieldDiseaseMembership.objects.filter(field_name=NAME).values_list('disease', flat=True)) == ['MM']

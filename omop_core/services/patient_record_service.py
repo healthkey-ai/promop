@@ -5217,12 +5217,16 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
             setattr(patient_info, field, overrides[field])
     values = _formula_values(patient_info)
     custom_fields = dict(patient_info.custom_fields or {})
-    custom_field_names = set(CustomPatientField.objects.active().filter(
-        mode='computed', mapping__status='approved',
-    ).values_list('field_name', flat=True))
-    changed_fields = set()
     # A retired created field's formula does not run: its stored result is kept as it was.
-    retired_names = set(CustomPatientField.objects.retired().values_list('field_name', flat=True))
+    custom_field_names, retired_names = set(), set()
+    for name, mode, retired_at, approved in CustomPatientField.objects.filter(
+            Q(retired_at__isnull=False) | Q(mode='computed', mapping__status='approved'),
+    ).values_list('field_name', 'mode', 'retired_at', 'mapping__status'):
+        if retired_at is not None:
+            retired_names.add(name)
+        elif mode == 'computed' and approved == 'approved':
+            custom_field_names.add(name)
+    changed_fields = set()
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
         if field_formula.field_name in overrides or field_formula.field_name in retired_names:
             continue

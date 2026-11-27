@@ -605,7 +605,9 @@ before the field is looked up. v1 only. Rules in `omop_core/services/custom_fiel
 | `DELETE .../<name>/?permanent=true` | **delete for good**, only when `can_delete`; else 409 `has_data` with the counts |
 | `POST .../<name>/restore/` | restore a retired field; 409 `not_retired`, or `mapping_conflict` when another approved mapping took its table and source value |
 | `GET /custom-patient-fields/?state=retired` | the removed fields (approvers only), with their scope |
-| `DELETE field-mappings/<id>/` of a created field's mapping | 409 `created_field` naming the action above (it was a 500: `CustomPatientField.mapping` is `PROTECT`) |
+| `DELETE field-mappings/<id>/` of a created field's mapping | 409 `created_field` naming the action above (it was a 500: `CustomPatientField.mapping` is `PROTECT`); so is a `PATCH` that un-approves or rejects it (the field would vanish with no way back) |
+| `PUT field-mappings/<name>/diseases/` of a retired field | 409 `retired_field`: its scope is kept for the restore |
+| any of the above on a field another request just deleted | 404 `gone` |
 
 - **Retire** sets `CustomPatientField.retired_at` (migration `0379`) and flips the
   field's mapping to `rejected`, with `update()` so that neither an approval's OMOP
@@ -639,7 +641,13 @@ before the field is looked up. v1 only. Rules in `omop_core/services/custom_fiel
   concept decisions), and what records keep *about* the field with no value in it:
   `user_edited_fields` pins (`custom_fields.<name>`, a pending clear), proposal rejections
   and the key in the provisional picture. A retired field can be deleted later by the same
-  rule, from the Removed fields list.
+  rule, from the Removed fields list. A permanent delete **retires first** and re-checks
+  after that commits: a retired field takes no new value from the record editor, so a write
+  that resolved the field while it was active cannot land between the check and the delete.
+  A refusal at that point leaves the field retired. Records are matched by the key as data
+  (`KeyTransform`), never by building a lookup from the name, since `psa__level` or
+  `x__isnull` are valid names. The scans are unindexed JSON lookups over `patient_record`
+  and the two provisional tables, run when the dialog opens and once more per removal.
 - **Copying between instances.** The curation payload (`dump_field_curation`,
   `copy_reference_data`) carries `retired` on each created field, with the rejected
   mapping; a payload without the key leaves the target's state alone.
@@ -649,10 +657,17 @@ before the field is looked up. v1 only. Rules in `omop_core/services/custom_fiel
   `can_delete`, and reports what the server answered. The global Remove-mapping X is not
   shown for a created field. **Removed fields** (`RemovedFieldsPanel.tsx`, approvers only)
   lists them with Restore and Delete.
-- **Not done.** A retired field's `custom_fields` value is still in the raw JSON of the
-  record read (nothing renders it; a client that echoes the whole object sends it back, which
-  is a no-op); hiding it from the API would need the record serializer to filter by field
-  state. Removing a field does not re-derive records: nothing changes in them.
+- **Not done.**
+  - A retired field's `custom_fields` value is still in the raw JSON of the record read on
+    `/api/v1/patient-records/` and the legacy path, to every reader of the record (nothing renders
+    it; a client that echoes the object back sends a no-op). Retiring hides a field, it does not
+    withdraw its data from the API; a sensitive field's values would need a data fix. The dialog says so.
+  - Restore does not re-derive records. While a field was retired its value was frozen, so facts
+    the ETL wrote meanwhile, and the provisional marks dropped at retire, come back at each
+    record's next derivation (`manage.py backfill_patient_records --all` does every record).
+  - Permission is the same as creation: an admin of *any* organization may remove a global field,
+    and `GET .../<name>/` counts records instance-wide. A narrower rule (staff only, or the
+    creating organization) is a product decision not made here.
 
 ### Whose record a field is part of: `FieldDiseaseMembership`
 

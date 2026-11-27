@@ -776,7 +776,11 @@ export default function FieldMappingPage() {
                           ? "Only org admins and staff can approve mappings. Analysts may propose mappings for review."
                           : f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"
                       }
-                      disabled={(!f.mapping && !f.suggestion) || (!canApprove && f.mapping?.status !== "approved")}
+                      disabled={
+                        (!f.mapping && !f.suggestion) || (!canApprove && f.mapping?.status !== "approved")
+                        // A created field is taken out of use with Remove field, not by un-approving it.
+                        || (!!f.created_field && f.mapping?.status === "approved")
+                      }
                     >
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>

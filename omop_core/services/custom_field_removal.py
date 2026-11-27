@@ -26,6 +26,7 @@ codes and concept decisions), and the record-level traces that carry the name bu
 value: ``user_edited_fields`` pins (a pending clear), proposal rejections and
 provisional entries. The record's values are not touched because there are none.
 """
+import json
 import logging
 
 from django.db import transaction
@@ -58,10 +59,16 @@ class RemovalError(Exception):
 
 def _holders(name: str):
     """The records whose ``custom_fields`` hold a value under ``name`` (a JSON null is none)."""
+    from django.db.models import JSONField, Value
+    from django.db.models.fields.json import KeyTransform
+
     from omop_core.models import PatientRecord
 
+    # The name is data, never part of a lookup path: ``psa__level`` is one key, not a
+    # nested one, and ``x__isnull`` is not a lookup.
     return (PatientRecord.objects.filter(custom_fields__has_key=name)
-            .exclude(**{f'custom_fields__{name}': None}))
+            .annotate(_held=KeyTransform(name, 'custom_fields'))
+            .exclude(_held=Value(None, output_field=JSONField())))
 
 
 def _has_facts(field) -> bool:
@@ -102,12 +109,25 @@ def usage(field) -> dict:
     }
 
 
+def _lock(field, related: bool = False):
+    """The field row, locked. A field another request deleted meanwhile is a ``gone`` refusal."""
+    from omop_core.models import CustomPatientField
+
+    rows = CustomPatientField.objects.select_for_update()
+    if related:
+        rows = rows.select_related('mapping')
+    try:
+        return rows.get(pk=field.pk)
+    except CustomPatientField.DoesNotExist:
+        raise RemovalError('gone', 'This field no longer exists.') from None
+
+
 def retire(field, user=None) -> bool:
     """Hide the field everywhere and keep everything it holds. False if it already was retired."""
     from omop_core.models import CustomPatientField, FieldConceptMapping
 
     with transaction.atomic():
-        locked = CustomPatientField.objects.select_for_update().get(pk=field.pk)
+        locked = _lock(field)
         if locked.retired_at is not None:
             return False
         now = timezone.now()
@@ -129,8 +149,7 @@ def restore(field) -> None:
     from omop_core.models import CustomPatientField, FieldConceptMapping
 
     with transaction.atomic():
-        locked = (CustomPatientField.objects.select_for_update()
-                  .select_related('mapping').get(pk=field.pk))
+        locked = _lock(field, related=True)
         if locked.retired_at is None:
             raise RemovalError('not_retired', 'This field is not removed.')
         mapping = locked.mapping
@@ -152,24 +171,29 @@ def restore(field) -> None:
 
 
 def delete(field) -> dict:
-    """Delete the field for good. Raises ``RemovalError('has_data')`` when anything depends on it."""
+    """Delete the field for good. Raises ``RemovalError('has_data')`` when anything depends on it.
+
+    The field is retired (and that committed) before the final check and the delete:
+    a retired field takes no new value from the record editor, so a write that
+    resolved the field while it was active cannot land between the check and the
+    delete. A refusal after that point leaves the field retired.
+    """
     from omop_core.models import (
         CustomPatientField, FieldChoice, FieldConceptMapping, FieldDiseaseMembership,
         FieldFormula, FieldSynonym,
     )
 
     name = field.field_name
+    found = usage(field)
+    if not found['can_delete']:
+        raise _has_data(found)
+    retire(field)
     with transaction.atomic():
-        # Lock the definition first, so a restore or a second delete waits and then finds it gone.
-        locked = (CustomPatientField.objects.select_for_update()
-                  .select_related('mapping').get(pk=field.pk))
+        # Lock the definition, so a restore or a second delete waits and then finds it gone.
+        locked = _lock(field, related=True)
         found = usage(locked)
-        if not found['can_delete']:
-            raise RemovalError(
-                'has_data',
-                'Records still hold values for this field, or OMOP facts are written under it. '
-                'Retire it instead: its values are kept and it can be restored.',
-                **found)
+        if locked.retired_at is None or not found['can_delete']:
+            raise _has_data(found)
         mapping_id = locked.mapping_id
         locked.delete()
         FieldConceptMapping.objects.filter(pk=mapping_id).delete()
@@ -183,19 +207,26 @@ def delete(field) -> dict:
     return found
 
 
+def _has_data(found: dict) -> RemovalError:
+    return RemovalError(
+        'has_data',
+        'Records still hold values for this field, or OMOP facts are written under it. '
+        'Retire it instead: its values are kept and it can be restored.',
+        **found)
+
+
 def _drop_record_traces(name: str) -> None:
     """Remove what records keep *about* a deleted field: pending-edit pins and rejections.
 
     Only reached when no record holds a value, so no stored value is lost. A pin is
     ``custom_fields.<name>`` in ``user_edited_fields`` (a pending clear); a retired
-    field keeps its pins, which are ignored while it is retired.
+    field keeps its pins, which a derivation carries over until it is restored.
+    One statement, so a concurrent edit's other pins are not overwritten.
     """
     from omop_core.models import PatientRecord, ProposalRejection
 
     pin = custom_field_values.pending_key(name)
-    for record in PatientRecord.objects.filter(user_edited_fields__contains=[pin]):
-        remaining = [key for key in record.user_edited_fields if key != pin]
-        PatientRecord.objects.filter(pk=record.pk).update(user_edited_fields=remaining)
+    _jsonb_remove(PatientRecord, 'user_edited_fields', pin, array=True)
     ProposalRejection.objects.filter(field_name=pin).delete()
 
 
@@ -208,9 +239,20 @@ def _drop_derived_entries(name: str) -> None:
     from omop_core.models import PatientRecordConfidence, PatientRecordProvisional
 
     for model in (PatientRecordProvisional, PatientRecordConfidence):
-        for row in model.objects.filter(custom_fields__has_key=name):
-            kept = {key: value for key, value in (row.custom_fields or {}).items() if key != name}
-            model.objects.filter(pk=row.pk).update(custom_fields=kept)
+        _jsonb_remove(model, 'custom_fields', name, array=False)
+
+
+def _jsonb_remove(model, column: str, key: str, *, array: bool) -> None:
+    """Remove ``key`` from a jsonb object column (or string element from an array), in one statement."""
+    from django.db import connection
+
+    table = connection.ops.quote_name(model._meta.db_table)
+    col = connection.ops.quote_name(column)
+    # ``jsonb_exists`` / ``@>`` select the rows that carry it, so unrelated rows are not rewritten.
+    where = f'{col} @> %s::jsonb' if array else f'jsonb_exists({col}, %s)'
+    probe = json.dumps([key]) if array else key
+    with connection.cursor() as cursor:
+        cursor.execute(f'UPDATE {table} SET {col} = {col} - %s WHERE {where}', [key, probe])
 
 
 def retired_values(stored: dict | None) -> dict:
