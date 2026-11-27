@@ -34,13 +34,14 @@ class ConceptSearchPagination(ConceptPagination):
     limit_query_param = 'limit'
 
     def get_page_size(self, request):
-        for name in (self.page_size_query_param, self.limit_query_param):
-            try:
-                value = int(str(request.query_params[name]).strip())
-            except (KeyError, ValueError):
-                continue
-            if value > 0:
-                return min(value, self.max_page_size)
+        # ``page_size`` decides when it is sent, valid or not; ``limit`` only stands in
+        # for a request that sends no ``page_size``.
+        name = (self.page_size_query_param
+                if self.page_size_query_param in request.query_params
+                else self.limit_query_param)
+        raw = str(request.query_params.get(name) or '').strip()
+        if raw.isascii() and raw.isdecimal() and int(raw) > 0:
+            return min(int(raw), self.max_page_size)
         return self.page_size
 
 
@@ -156,6 +157,7 @@ SYNONYM_DOMAINS = ('Measurement', 'Observation')
 # Synonym rows read in all, best first. Broad searches match far more than a page can
 # show; the name match covers their tail.
 SYNONYM_ROWS = 400
+MIN_SYNONYM_TOKEN = 3
 
 # Words that name a specimen. Typing one means the curator chose it, so the usual
 # specimen is not preferred over it.
@@ -183,12 +185,21 @@ def synonym_hits(query, query_params):
     from omop_core.models import SUGGEST_DESTINATION_DOMAINS, SuggestSynonymTerm
 
     domain = (query_params.get('domain_id') or '').strip()
-    if domain:
+    standard = (query_params.get('standard_concept') or '').strip()
+    if standard and standard != 'S':
+        domains = ()  # the synonym table holds standard concepts only
+    elif domain:
         domains = (domain,) if domain in SUGGEST_DESTINATION_DOMAINS else ()
     else:
         domains = SYNONYM_DOMAINS
     upper = query.upper()
+    # A trigram index serves a LIKE pattern of three characters or more. Shorter tokens
+    # still narrow the match, but only beside one the index can drive: with none, the read
+    # would scan a whole domain partition. Text with no such token (``t(4;14)``, ``b 12``)
+    # gets name matches only.
     tokens = _tokens(upper)
+    if not any(len(t) >= MIN_SYNONYM_TOKEN for t in tokens):
+        domains = ()
     hits = {'exact': set(), 'prefix': set(), 'any': set()}
     if not domains:
         return hits
@@ -200,14 +211,20 @@ def synonym_hits(query, query_params):
     match = Q()
     for domain_id in domains:
         branch = Q(domain_id=domain_id)
-        for token in (tokens if len(tokens) > 1 else [upper]):
+        for token in tokens:
             branch &= Q(term__contains=token)
         match |= branch
-    rows = SuggestSynonymTerm.objects.filter(match).annotate(tier=Case(
+    rows = SuggestSynonymTerm.objects.filter(match)
+    # The cap is taken after the caller's own filters, so another vocabulary's synonyms
+    # cannot crowd out the one asked for. The join runs on the rows the index returns.
+    for param in ('vocabulary_id', 'concept_class_id'):
+        if query_params.get(param):
+            rows = rows.filter(**{f'concept__{param}': query_params[param]})
+    rows = rows.annotate(tier=Case(
         When(term=upper, then=Value(1)),
         When(term__startswith=upper, then=Value(2)),
         default=Value(3), output_field=IntegerField(),
-    )).order_by('tier', Length('term')).values_list('concept_id', 'tier')
+    )).order_by('tier', Length('term'), 'concept_id', 'term').values_list('concept_id', 'tier')
     for concept_id, tier in rows[:SYNONYM_ROWS]:
         hits['any'].add(concept_id)
         if tier == 1:
@@ -260,6 +277,27 @@ def ranked_concept_ordering(query, concept_id, hits=None):
                              output_field=IntegerField()))
     ordering += [Length('concept_name'), Length('concept_code'), 'concept_id']
     return tuple(ordering)
+
+
+# Bump when the ranking changes: a cached response must not outlive the order it holds.
+RANKING_VERSION = 1
+
+
+def ranking_stamp():
+    """What the ranking reads besides the vocabulary, as one short string for the ETag.
+
+    The release ETag alone would let a browser revalidate to a 304 over an order that
+    an approval, a ranked concept or a deploy has since changed.
+    """
+    from django.db.models import Count, Max
+    from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping
+
+    parts = [str(RANKING_VERSION)]
+    for model in (FieldConceptMapping, ConceptMappingPriority):
+        agg = model.objects.aggregate(n=Count('pk'), t=Max('updated_at'))
+        parts += [str(agg['n']), str(agg['t'])]
+    parts.append(str(SourceCodeConceptMapping.objects.aggregate(t=Max('updated_at'))['t']))
+    return '|'.join(parts)
 
 
 def curator_search_queryset(query, query_params):

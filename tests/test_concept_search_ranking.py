@@ -207,6 +207,104 @@ def test_a_domain_filter_narrows_the_synonyms_read(api, vocabulary):
     assert not [q for q in queries.captured_queries if 'suggest_synonym_term' in q['sql']]
 
 
+def synonym_statements(queries):
+    return [q['sql'] for q in queries.captured_queries if 'suggest_synonym_term' in q['sql']]
+
+
+def test_text_with_no_token_of_three_characters_reads_no_synonyms(api, vocabulary):
+    """A trigram index cannot serve a shorter LIKE pattern; the read would scan a partition."""
+    for text in ('t 4', 'b 12', 't(4;14)', 'il 6'):
+        with CaptureQueriesContext(connection) as queries:
+            search(api, text)
+        assert not synonym_statements(queries), text
+    with CaptureQueriesContext(connection) as queries:
+        search(api, 'psa b 12')
+    assert len(synonym_statements(queries)) == 1
+
+
+def test_the_synonym_read_follows_the_callers_vocabulary_and_standing(api, vocabulary):
+    with CaptureQueriesContext(connection) as queries:
+        search(api, 'prostate specific antigen', vocabulary_id='LOINC')
+    assert 'vocabulary_id' in synonym_statements(queries)[0]
+    # Synonyms belong to standard concepts, so a non-standard filter reads none.
+    with CaptureQueriesContext(connection) as queries:
+        search(api, 'prostate specific antigen', standard_concept='C')
+    assert not synonym_statements(queries)
+    # The other vocabulary's synonyms cannot crowd the asked-for one out of the cap.
+    assert '2857-1' in search(api, 'prostate specific antigen', vocabulary_id='LOINC')
+    assert search(api, 'prostate specific antigen', vocabulary_id='SNOMED') == ['63476009']
+
+
+def test_the_etag_follows_what_the_ranking_reads(api, vocabulary):
+    from omop_core.models import VocabularyRelease
+    from django.utils import timezone
+    VocabularyRelease.objects.create(
+        build_timestamp=timezone.now(), status='published', published_at=timezone.now(),
+        scope=['LOINC'], vocab_versions={'LOINC': '2.78'}, row_counts={'concept': 1},
+        checksums={'concept': {'count': 1}})
+    first = api.get(URL, {'q': 'testosterone free'})
+    assert first.status_code == 200 and first['ETag']
+    again = api.get(URL, {'q': 'testosterone free'}, HTTP_IF_NONE_MATCH=first['ETag'])
+    assert again.status_code == 304
+    ConceptMappingPriority.objects.create(concept_id=TESTO_SERUM_MOLES[0], position=1)
+    after = api.get(URL, {'q': 'testosterone free'}, HTTP_IF_NONE_MATCH=first['ETag'])
+    assert after.status_code == 200
+    assert after['ETag'] != first['ETag']
+    assert after.json()['results'][0]['concept_code'] == '14914-6'
+
+
+# ---- plain-language searches (the demo's cases) ----------------------------------------
+
+TESTO_TOTAL = (3008893, '2986-8', 'Testosterone [Mass/volume] in Serum or Plasma')
+GRADE_GROUP_QUESTION = (36660206, '94734-1',
+                        'Prostate cancer grade group [Score] in Prostate tumor Qualitative')
+GRADE_ANSWERS = {
+    1: (36662377, 'LA30794-4', 'ISUP Grade (Grade Group) 1 (Gleason score <=6)'),
+    2: (36662565, 'LA30795-1', 'ISUP Grade (Grade Group) 2 (Gleason score 3+4=7)'),
+    3: (36662476, 'LA30796-9', 'ISUP Grade (Grade Group) 3 (Gleason score 4+3=7)'),
+    4: (36662300, 'LA30797-7', 'ISUP Grade (Grade Group) 4 (Gleason score 8)'),
+}
+GLEASON_SNOMED = {n: (3655243 + n, f'86074{n + 1}00{n}', f'Gleason grade group {n}')
+                  for n in range(1, 5)}
+
+
+@pytest.fixture()
+def plain_language(vocabulary):
+    """What else a curator's plain words match on staging: a HealthKey lab, an ingredient."""
+    reference_rows('HK-Labs', 'Measurement', 'Lab Test')
+    Concept.objects.create(
+        concept_id=9400001, concept_code='hkl:psa', concept_name='PSA', vocabulary_id='HK-Labs',
+        domain_id='Measurement', concept_class_id='Lab Test', standard_concept=None,
+        source='HealthKey', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+    synonym(PSA_SERUM, 'PSA SERPL-MCNC')
+    make_concept(TESTO_TOTAL)
+    synonym(TESTO_TOTAL, 'Testosterone, Blood')
+    reference_rows('RxNorm', 'Drug', 'Ingredient')
+    make_concept((9400002, '10379', 'testosterone'), vocabulary_id='RxNorm', domain_id='Drug')
+    for spec in GRADE_ANSWERS.values():
+        make_concept(spec, domain_id='Meas Value')
+    for spec in GLEASON_SNOMED.values():
+        make_concept(spec, vocabulary_id='SNOMED', domain_id='Observation')
+
+
+@pytest.mark.parametrize('query, code, rank', [
+    ('PSA', '2857-1', 3),
+    ('prostate specific antigen', '2857-1', 1),
+    ('prostate specific Ag', '2857-1', 1),
+    ('testosterone', '2986-8', 3),
+    ('free testosterone', '2991-8', 1),
+    ('ISUP grade group 3', 'LA30796-9', 1),
+    ('grade group 3', 'LA30796-9', 3),
+    ('grade group 1', 'LA30794-4', 3),
+    ('grade group 2', 'LA30795-1', 3),
+    ('grade group 4', 'LA30797-7', 3),
+])
+def test_plain_language_finds_the_intended_concept_in_the_first_results(
+        api, plain_language, query, code, rank):
+    codes = search(api, query)
+    assert code in codes[:rank], codes[:10]
+
+
 # ---- the result limit ---------------------------------------------------------------
 
 @pytest.fixture()
@@ -240,9 +338,14 @@ def test_limit_is_capped_and_page_size_wins(api, many):
     assert len(results(api, limit=50, page_size=500)['results']) == 100
 
 
-@pytest.mark.parametrize('bad', ['0', '-3', 'abc', '', '2.5'])
+@pytest.mark.parametrize('bad', ['0', '-3', 'abc', '', '2.5', '1_0', '\u0663'])
 def test_an_unusable_limit_gets_the_default_page(api, many, bad):
     assert len(results(api, limit=bad)['results']) == 25
+
+
+def test_an_unusable_page_size_is_not_replaced_by_limit(api, many):
+    assert len(results(api, page_size=0, limit=8)['results']) == 25
+    assert len(results(api, page_size='abc', limit=8)['results']) == 25
 
 
 def test_the_envelope_is_unchanged_and_pages_follow_the_limit(api, many):

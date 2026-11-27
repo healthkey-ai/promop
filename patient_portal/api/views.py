@@ -11003,9 +11003,11 @@ def _etag_matches(if_none_match, etag):
     return False
 
 
-def _set_release_etag(request, response):
+def _set_release_etag(request, response, extra=''):
     """Set ETag and Cache-Control on a concept response based on the latest
-    published VocabularyRelease. Returns a 304 if If-None-Match matches."""
+    published VocabularyRelease. Returns a 304 if If-None-Match matches.
+    ``extra`` folds data the response also depends on into the tag (the curator
+    search's ranking reads approved mappings)."""
     from django.http import HttpResponseNotModified
     from omop_core.services.vocab_release import get_latest_release, get_release_etag
 
@@ -11013,6 +11015,8 @@ def _set_release_etag(request, response):
     etag = get_release_etag(release)
     if etag is None:
         return response
+    if extra:
+        etag = f'{etag[:-1]}-{hashlib.sha256(extra.encode()).hexdigest()[:12]}"'
 
     if_none_match = request.META.get('HTTP_IF_NONE_MATCH', '')
     if _etag_matches(if_none_match, etag):
@@ -11316,6 +11320,7 @@ from omop_core.api.concepts import (  # noqa: E402
     ConceptPagination as _PackagedConceptPagination,
     apply_concept_filters as _apply_concept_filters,
     ConceptSearchPagination as _ConceptSearchPagination,
+    ranking_stamp as _concept_ranking_stamp,
     concept_match_ordering as _concept_match_ordering,
     concept_name_search_filter as _concept_name_search_filter,
     concept_text_search as _concept_text_search,
@@ -11381,7 +11386,8 @@ def _truthy_param(query_params, name):
     return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
 
 
-def _paginated_concept_response(queryset, request, ordering=('concept_id',), paginator=None):
+def _paginated_concept_response(queryset, request, ordering=('concept_id',), paginator=None,
+                                etag_extra=''):
     # Default to the pk: concept_name has only a GIN trigram index (usable for
     # icontains, not ORDER BY), so sorting a *listing* by name would force a full
     # sort of a vocabulary on every page request. A search passes its own
@@ -11392,7 +11398,7 @@ def _paginated_concept_response(queryset, request, ordering=('concept_id',), pag
     page = paginator.paginate_queryset(queryset, request)
     versions = _vocab_version_map()
     response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
-    return _set_release_etag(request, response)
+    return _set_release_etag(request, response, etag_extra)
 
 
 @functools.lru_cache(maxsize=1)
@@ -11446,6 +11452,7 @@ def concept_search(request):
     # available OMOP/LOINC data lets us classify it safely.
     response = _paginated_concept_response(
         queryset, request, ordering=None, paginator=_ConceptSearchPagination(),
+        etag_extra=_concept_ranking_stamp(),
     )
     if response.status_code == status.HTTP_304_NOT_MODIFIED:
         # A revalidation hit carries no body to annotate (#1457).

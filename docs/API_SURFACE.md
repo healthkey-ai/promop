@@ -852,11 +852,17 @@ so a name match alone never reached them. The search also matches the synonyms i
 `suggest_synonym_term`, whose per-domain partial trigram indexes keep it fast (#1467), for the
 `Measurement` and `Observation` domains, or for the one domain the request filters on when it
 is a domain Suggest keeps synonyms for. One extra statement, at most 400 synonym rows, best
-synonym match first; a synonym match joins the name matches in the same list, once per
+synonym match first, taken after the request's `vocabulary_id` and `concept_class_id`; it is
+skipped for text with no token of three characters (a trigram index cannot serve it) and when
+`standard_concept` is not `S`; a synonym match joins the name matches in the same list, once per
 concept. Only standard, active concepts have synonyms there, so `include_retired` and
 `include_non_standard` add nothing to the synonym side. The embedder's drug and regimen
 search (`omop_core.api.concepts.search_queryset`) and the value-concept search keep the
 name-only match and the original ordering.
+
+The `ETag` combines the vocabulary release with a stamp of what the ranking reads (approved
+field and code mappings, ranked concepts, `RANKING_VERSION`), so a curator's approval or a
+deploy that changes the order is not answered with a `304` over the old one.
 
 A client that pages the whole vocabulary should use `GET /api/v1/concepts/`, which stays
 ordered by `concept_id`.
