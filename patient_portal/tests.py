@@ -25478,8 +25478,9 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(concept.concept_id, target.concept_id)
         self.assertEqual(mapping.status, 'approved')
 
-    def test_unresolvable_code_mints_and_proposes(self):
-        """Minting is the final fallback, after the suggestion service declines."""
+    def test_unresolvable_lab_code_is_queued_with_no_destination_and_nothing_is_minted(self):
+        """No HK-Labs concept is created (#2922): the code waits in the queue for a
+        curator to pick a standard concept or mint one through the mint endpoint."""
         from unittest.mock import patch
 
         with patch(
@@ -25491,17 +25492,15 @@ class CodeMappingResolutionTest(TestCase):
                 omop_table='measurement', source_system='hk-labs',
             )
         self.assertIsNone(concept)
-        self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Labs')
-        self.assertEqual(mapping.target_concept.source, 'HealthKey')
-        self.assertIsNone(mapping.target_concept.standard_concept)
-        self.assertGreaterEqual(mapping.target_concept.concept_id, 2_000_000_000)
+        self.assertIsNone(mapping.target_concept_id)
+        self.assertFalse(Concept.objects.filter(vocabulary_id='HK-Labs').exists())
 
         self.assertEqual(mapping.status, 'proposed')
         self.assertEqual(mapping.origin, 'import')
         self.assertEqual(mapping.origin_system, 'hk-labs')
         self.assertEqual(mapping.occurrence_count, 1)
 
-    def test_repeat_sighting_mints_once_and_counts(self):
+    def test_repeat_sighting_mints_nothing_and_counts(self):
         from unittest.mock import patch
 
         with patch(
@@ -25517,7 +25516,7 @@ class CodeMappingResolutionTest(TestCase):
         self.assertEqual(
             SourceCodeConceptMapping.objects.get(source_code='MPS').occurrence_count, 3,
         )
-        self.assertEqual(Concept.objects.filter(vocabulary_id='HK-Labs').count(), 1)
+        self.assertFalse(Concept.objects.filter(vocabulary_id='HK-Labs').exists())
 
     def test_approved_mapping_overrides_a_direct_concept_hit(self):
         """Rule 2: overriding a wrong automatic resolution is what an approved
