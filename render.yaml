@@ -200,7 +200,13 @@ services:
     # WhiteNoise serves build/ at the root, so phr loads /remote/remoteEntry.js.
     # Moved, not copied: with no WHITENOISE_ROOT, a frontend/dist/remote left
     # behind would become the served root (promop/frontend_paths.py).
-    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && npm run build:remote
+    #
+    # Python dependencies go through scripts/install-python-deps.sh, which puts
+    # CPU-only torch in first: the default wheel ships ~3 GB of CUDA libraries
+    # that a GPU-less Render instance only ever carries around (#2937). The
+    # remote is built with `vite build` directly because `npm run build` has
+    # just type-checked the same sources; `build:remote` would run `tsc -b` again.
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && bash scripts/install-python-deps.sh && cd frontend && npm install && npm run build && npx vite build --config vite.remote.config.ts
       && mv dist/remote build/remote && cd .. && python manage.py collectstatic --noinput
     # Prepare once per deploy, not once per instance boot. A failure here
     # stops the deploy and leaves the running version serving, where the
@@ -212,6 +218,10 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      # preDeployCommand has just prepared the deployment, so start.sh does not
+      # run the same sequence again on boot (about 25 s of every deploy).
+      - key: SKIP_PREPARE_ON_BOOT
+        value: "true"
       - key: LOINC_USER
         sync: false
       - key: LOINC_PASSWORD
@@ -298,7 +308,8 @@ services:
     region: oregon
     autoDeploy: true
     plan: 1c-2g
-    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt
+    # CPU-only torch: see the staging web service's build command (#2937).
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && bash scripts/install-python-deps.sh
     startCommand: bash start-worker.sh
     envVars:
       - key: SECRET_KEY

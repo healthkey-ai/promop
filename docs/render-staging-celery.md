@@ -28,6 +28,22 @@ API key and other external-service credentials stay dashboard-managed. Render
 ignores newly added `sync: false` entries during an existing Blueprint update;
 if a required external credential is absent, it must be set in Render first.
 
+## Deploy time
+
+A staging deploy used to take 9+ minutes (web) and 5+ minutes (worker), most of
+it carrying about 3 GB of NVIDIA CUDA libraries that `sentence-transformers`
+brings in through the default torch wheel and a GPU-less Render instance never
+loads (#2937). Staging therefore builds through
+[`scripts/install-python-deps.sh`](../scripts/install-python-deps.sh), which
+installs CPU-only torch before `requirements.txt` (and falls back to the default
+wheel if the CPU index is unreachable). The staging web service also sets
+`SKIP_PREPARE_ON_BOOT=true`, because `preDeployCommand` has just run
+`scripts/prepare-deployment.sh`; `start.sh` skips the second run. Production sets
+neither: it has no pre-deploy command, so `start.sh` keeps preparing on boot.
+
+Both are `render.yaml` settings (build command, environment variable), so they
+take effect with the next Blueprint sync, not with a code-only deploy.
+
 ## Apply
 
 Sync `render.yaml` from `dev` in the Blueprint managing these services. An

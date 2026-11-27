@@ -13,7 +13,15 @@ set -e
 # web service booting. render.yaml chmods start.sh and only start.sh -- that
 # chmod exists because the mode is not trusted to survive, and a second file
 # would get none of that protection.
-bash scripts/prepare-deployment.sh
+#
+# A service whose deploy already runs it as a Render preDeployCommand (staging)
+# sets SKIP_PREPARE_ON_BOOT=true, so the sequence is not repeated on every boot
+# (#2937). Unset, which is production's case, it runs here exactly as before.
+if [ "${SKIP_PREPARE_ON_BOOT:-}" = "true" ]; then
+  echo "SKIP_PREPARE_ON_BOOT is set: the deployment was prepared by the pre-deploy command."
+else
+  bash scripts/prepare-deployment.sh
+fi
 
 # No --bind: gunicorn defaults to 0.0.0.0:$PORT when PORT is set, which Render
 # sets, and --workers likewise follows WEB_CONCURRENCY. Passing them here would
