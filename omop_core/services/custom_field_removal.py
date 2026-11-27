@@ -27,7 +27,7 @@ with the field. It removes
 the definition, its mapping, formula, scope, synonyms, answers (with their aliases,
 codes and concept decisions), and the record-level traces that carry the name but no
 value: ``user_edited_fields`` pins (a pending clear), proposal rejections and
-provisional entries. The record's values are not touched because there are none.
+provisional entries, and the derived value under the name.
 """
 import json
 import logging
