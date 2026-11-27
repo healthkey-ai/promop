@@ -339,6 +339,8 @@ def test_every_table_a_withdrawal_reaches_is_a_decision():
         'omop_core.WearableUpload', 'omop_oncology.CancerModifier', 'omop_oncology.Episode',
         'omop_oncology.Histology', 'omop_oncology.StemTable', 'patient_portal.AiExplanation',
         'patient_portal.PatientMessage', 'patient_portal.PatientStatement', 'patient_portal.RecordShare',
+        # Which login an importer said the record belongs to: nothing to keep once it is erased.
+        'patient_portal.PersonExternalKey',
         'prolog_surveys.MintedParticipant', 'prolog_surveys.ParticipantMergeCandidate',
         'prolog_surveys.SurveyInvitation',
     }

@@ -145,6 +145,25 @@ deleted while an importer still addresses it.
 Out of scope, by the ETL's own request: merge and dedup APIs. Existing
 duplicates are resolved by re-import on their side.
 
+## Exception: login keys (#2927)
+
+The rule above, that an importer's assertion never links a login, is relaxed for
+one case. The HealthTree ETL reads a patient's Firebase uid from HealthTree's own
+user table, not from a vendor export. Without this case, a patient whose
+imported Person has no address keeps getting an empty record forever.
+
+- `POST /api/v1/persons/external-keys/` lets the ETL credential (not staff) record
+  `(issuer, subject) -> person` in `person_external_key`. It accepts only issuers
+  in `PERSON_EXTERNAL_KEY_ISSUERS` (this deployment's Firebase
+  project).
+- `resolve_or_create_person` links a login whose verified `(issuer, sub)` matches
+  a key exactly, or matches a Person's `actor_iss/actor_sub` stamped before
+  #1547. The key wins over an email match.
+- A key is never moved to another Person. A Person another login holds is never
+  taken. A login already given an empty Person moves to the keyed one on its next
+  request, and the empty Person is dropped. One that holds data stays where it is,
+  and a `PersonMergeCandidate` is filed instead.
+
 ## Correction owed
 
 `docs/identity-architecture.md` describes unsigned cross-service actor

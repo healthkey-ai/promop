@@ -154,7 +154,7 @@ from .permissions import (
     EtlDeletePermission, EtlPatientCrudPermission, EtlWritePermission,
     PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
-    VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
+    VocabReadPermission, LabSyncPermission, EtlProvisionPermission, EtlImporterPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
     is_interactive_session, InteractiveSessionPermission,
 )
@@ -7822,6 +7822,131 @@ class PersonViewSet(viewsets.GenericViewSet):
             },
             status=status.HTTP_201_CREATED,
         )
+
+    _EXTERNAL_KEYS_MAX = 1000
+
+    @action(detail=False, methods=['post'], url_path='external-keys',
+            permission_classes=[EtlImporterPermission])
+    def external_keys(self, request):
+        """
+        POST /api/v1/persons/external-keys/
+        Body: {"keys": [{"person_id": 1234, "issuer": "<login issuer>",
+                         "subject": "<login subject>"}, ...]}   (1 to 1000)
+        Response 200: {"created": N, "existing": M, "results": [
+            {"index": 0, "person_id": 1234, "status": "created"}, ...]}
+
+        Records which login an imported Person belongs to, for a Person
+        ``provision`` minted with no actor claims. A login whose verified
+        (issuer, sub) matches is linked to it on its next request, including an
+        account that already signed in and was given an empty Person
+        (``resolve_or_create_person``).
+
+        Idempotent. Per key, ``status`` is one of:
+          * ``created`` / ``existing``: the key names this Person.
+          * ``conflict``: the login is already keyed to ``held_by``, another
+            Person. A key is never moved.
+          * ``claimed``: another login's account holds this Person, so the key
+            could never link and is not stored.
+          * ``person_keyed``: this Person is already keyed to another login of
+            the same issuer. One Person is never given to two logins.
+          * ``not_found``: no such Person.
+        A malformed batch, or an issuer outside PERSON_EXTERNAL_KEY_ISSUERS,
+        is a 400 that writes nothing.
+        """
+        from patient_portal.models import PatientUser, PersonExternalKey
+
+        if not (request.resolver_match and (request.resolver_match.url_name or '').startswith('v1-')):
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        keys = request.data.get('keys') if isinstance(request.data, dict) else None
+        if not isinstance(keys, list) or not keys:
+            return Response({'detail': 'keys must be a non-empty list.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if len(keys) > self._EXTERNAL_KEYS_MAX:
+            return Response({'detail': f'Maximum {self._EXTERNAL_KEYS_MAX} keys per request.'},
+                            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        allowed = set(settings.PERSON_EXTERNAL_KEY_ISSUERS)
+        items, seen = [], {}
+        for i, key in enumerate(keys):
+            if not isinstance(key, dict):
+                return Response({'detail': f'Entry {i}: must be an object.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            pid, issuer, subject = key.get('person_id'), key.get('issuer'), key.get('subject')
+            if not isinstance(pid, int) or isinstance(pid, bool) or not 0 < pid < 2 ** 31:
+                return Response({'detail': f'Entry {i}: person_id must be a positive integer.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if not isinstance(issuer, str) or issuer not in allowed:
+                return Response({'detail': f'Entry {i}: issuer is not accepted here.',
+                                 'accepted_issuers': sorted(allowed)},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if (not isinstance(subject, str) or not subject or len(subject) > 255
+                    or subject != subject.strip() or _contains_nul(subject)):
+                return Response({'detail': f'Entry {i}: subject must be non-empty text of at most '
+                                           f'255 characters, without surrounding whitespace.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if seen.setdefault((issuer, subject), pid) != pid:
+                return Response({'detail': f'Entry {i}: this login is given two persons in one batch.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            items.append((i, pid, issuer, subject))
+
+        pids = {pid for _, pid, _, _ in items}
+        subjects = {subject for _, _, _, subject in items}
+        with transaction.atomic():
+            persons = set(Person.objects.filter(person_id__in=pids).values_list('person_id', flat=True))
+            held = {
+                (iss, sub): person_id for iss, sub, person_id in
+                PersonExternalKey.objects.filter(subject__in=subjects).values_list('issuer', 'subject', 'person_id')
+            }
+            # A login the ETL keyed before #1547 sits on Person itself.
+            for iss, sub, person_id in Person.objects.filter(
+                    actor_sub__in=subjects, actor_iss__in=allowed,
+            ).values_list('actor_iss', 'actor_sub', 'person_id'):
+                held.setdefault((iss, sub), person_id)
+            # The login each Person is already keyed to, per issuer, so one
+            # Person is never given to two logins.
+            person_keys = {
+                (person_id, iss): sub for person_id, iss, sub in
+                PersonExternalKey.objects.filter(person_id__in=pids).values_list('person_id', 'issuer', 'subject')
+            }
+            for person_id, iss, sub in Person.objects.filter(
+                    person_id__in=pids, actor_iss__in=allowed, actor_sub__isnull=False,
+            ).values_list('person_id', 'actor_iss', 'actor_sub'):
+                person_keys.setdefault((person_id, iss), sub)
+            holders = {
+                person_id: (iss, sub) for person_id, iss, sub in
+                PatientUser.objects.filter(person_id__in=pids)
+                .values_list('person_id', 'identity__issuer', 'identity__sub')
+            }
+            results, new = [], []
+            for i, pid, issuer, subject in items:
+                result = {'index': i, 'person_id': pid}
+                owner = held.get((issuer, subject))
+                if pid not in persons:
+                    result['status'] = 'not_found'
+                elif owner == pid:
+                    result['status'] = 'existing'
+                elif owner is not None:
+                    result.update(status='conflict', held_by=owner)
+                elif pid in holders and holders[pid] != (issuer, subject):
+                    result['status'] = 'claimed'
+                elif person_keys.get((pid, issuer), subject) != subject:
+                    result['status'] = 'person_keyed'
+                else:
+                    result['status'] = 'created'
+                    new.append(PersonExternalKey(person_id=pid, issuer=issuer, subject=subject))
+                    held[(issuer, subject)] = pid
+                    person_keys[(pid, issuer)] = subject
+                results.append(result)
+            try:
+                with transaction.atomic():
+                    PersonExternalKey.objects.bulk_create(new)
+            except IntegrityError:
+                return Response({'detail': 'A key in this batch was written concurrently; retry the batch.'},
+                                status=status.HTTP_409_CONFLICT)
+        counts = {s: sum(1 for r in results if r['status'] == s) for s in ('created', 'existing')}
+        logger.info('person external keys: %d created, %d existing, %d other',
+                    counts['created'], counts['existing'], len(results) - sum(counts.values()))
+        return Response({**counts, 'results': results}, status=status.HTTP_200_OK)
 
     def partial_update(self, request, person_id=None):
         """

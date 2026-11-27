@@ -618,6 +618,12 @@ FAMILY_AUTH_APP_URLS = _env_list("FAMILY_AUTH_APP_URLS")
 FAMILY_AUTH_RESET_APPS = _env_list("FAMILY_AUTH_RESET_APPS")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
+# The login issuer an importer may name in a person's external key
+# (POST /api/v1/persons/external-keys/): this deployment's Firebase project,
+# since a key only helps a login that presents it.
+PERSON_EXTERNAL_KEY_ISSUERS = (
+    [f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}"] if FIREBASE_PROJECT_ID else []
+)
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
     "FIREBASE_SKIP_REVOCATION_CHECK", "false"
 ).lower() in ("1", "true")
