@@ -203,10 +203,8 @@ services:
     #
     # Python dependencies go through scripts/install-python-deps.sh, which puts
     # CPU-only torch in first: the default wheel ships ~3 GB of CUDA libraries
-    # that a GPU-less Render instance only ever carries around (#2937). The
-    # remote is built with `vite build` directly because `npm run build` has
-    # just type-checked the same sources; `build:remote` would run `tsc -b` again.
-    buildCommand: python scripts/verify_source_catalog_snapshots.py && bash scripts/install-python-deps.sh && cd frontend && npm install && npm run build && npx vite build --config vite.remote.config.ts
+    # that a GPU-less Render instance only ever carries around (#2937).
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && bash scripts/install-python-deps.sh && cd frontend && npm install && npm run build && npm run build:remote
       && mv dist/remote build/remote && cd .. && python manage.py collectstatic --noinput
     # Prepare once per deploy, not once per instance boot. A failure here
     # stops the deploy and leaves the running version serving, where the
