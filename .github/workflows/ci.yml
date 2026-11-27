@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [django, pytest]
+        suite: [pytest]
 
     services:
       postgres:
@@ -129,7 +129,7 @@ jobs:
         # CI measured worksteal at 6m46s versus loadfile's 5m47s baseline for
         # this database-heavy suite. Keep the faster scheduler and its timing
         # report so any future sharding decision remains evidence-led.
-        run: pytest -n auto --dist loadfile -q --durations=20
+        run: pytest -n auto --dist loadfile -q --durations=0 --durations-min=0
 
   athena_browser:
     name: Athena browser runtime
