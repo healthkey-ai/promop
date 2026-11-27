@@ -34,20 +34,34 @@ jobs:
         run: python3 .github/scripts/async_e2e_changes.py
 
   backend_suites:
-    name: Backend suite (${{ matrix.suite }})
+    name: Backend suite (${{ matrix.suite }} ${{ matrix.shard }}/${{ matrix.shards }})
     needs: changes
     # A skipped job satisfies its required check. Detection errors run full CI.
     if: >-
       !cancelled() &&
       (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
     runs-on: ubuntu-latest
-    # A backend leg normally completes within 16 minutes. Bound genuine hangs
-    # without making ordinary runner variance look like a failure.
+    # A sharded backend leg normally completes within 6 minutes. Bound genuine
+    # hangs without making ordinary runner variance look like a failure.
     timeout-minutes: 25
     strategy:
       fail-fast: false
+      # Each suite already uses every core of a runner (xdist, --parallel), so
+      # the only way to go faster is to run part of it on another runner (#2939).
+      # A shard is a stable subset of whole test files (pytest) or test classes
+      # (Django runner): see promop/test_sharding.py. The pytest split is
+      # weighted by tests/shard_weights.json (scripts/update_test_shard_weights.py
+      # regenerates it from a CI log). The Django runner pays ~3 minutes of
+      # migrations per job whatever its share, hence fewer shards.
       matrix:
-        suite: [pytest]
+        include:
+          - {suite: django, shard: 1, shards: 3}
+          - {suite: django, shard: 2, shards: 3}
+          - {suite: django, shard: 3, shards: 3}
+          - {suite: pytest, shard: 1, shards: 4}
+          - {suite: pytest, shard: 2, shards: 4}
+          - {suite: pytest, shard: 3, shards: 4}
+          - {suite: pytest, shard: 4, shards: 4}
 
     services:
       postgres:
@@ -68,6 +82,8 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/promop_test
       SECRET_KEY: ci-secret-key
       DEBUG: 'True'
+      TEST_SHARD_COUNT: ${{ matrix.shards }}
+      TEST_SHARD_INDEX: ${{ matrix.shard }}
 
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +136,7 @@ jobs:
         # large publisher catalogs into a database the tests never use.
         run: >-
           python manage.py test omop_core patient_portal
+          --testrunner promop.test_runner.ShardedDiscoverRunner
           --parallel auto --timing --verbosity=2 --noinput
 
       # These suites discover different tests. Separate runners give each its
@@ -127,9 +144,9 @@ jobs:
       - name: Run tests (pytest)
         if: matrix.suite == 'pytest'
         # CI measured worksteal at 6m46s versus loadfile's 5m47s baseline for
-        # this database-heavy suite. Keep the faster scheduler and its timing
-        # report so any future sharding decision remains evidence-led.
-        run: pytest -n auto --dist loadfile -q --durations=0 --durations-min=0
+        # this database-heavy suite. Keep the faster scheduler inside a shard;
+        # the timing report shows whether the shard weights need refreshing.
+        run: pytest -n auto --dist loadfile -q --durations=20
 
   athena_browser:
     name: Athena browser runtime
@@ -175,7 +192,7 @@ jobs:
       (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
     runs-on: ubuntu-latest
     steps:
-      - name: Require both backend suites to pass
+      - name: Require every backend suite shard to pass
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           BACKEND_RESULT: ${{ needs.backend_suites.result }}
