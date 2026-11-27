@@ -8,6 +8,8 @@ export interface FieldUsage {
   field_name: string;
   retired: boolean;
   records_with_value: number;
+  /** Records holding an entry of their own (a pending edit); values read from patients' results do not count. */
+  records_with_entered_value?: number;
   has_facts: boolean;
   answers: number;
   can_delete: boolean;
@@ -161,10 +163,12 @@ export function RemoveFieldDialog({ fieldName, displayName, onClose, onDone }: P
                 <p>
                   Nothing depends on it, so it can also be <strong>deleted permanently</strong>: its mapping and
                   answers are deleted with it, and this cannot be undone.
+                  {usage.records_with_value > 0 &&
+                    " The values it shows are read from patients' own results; they stop showing on the records, and the results themselves are kept."}
                 </p>
               ) : (
                 <p>
-                  It cannot be deleted permanently while a record holds a value or OMOP data is written under it.
+                  It cannot be deleted permanently while a record holds an entry of its own for it or OMOP data is written under it.
                   {usage.retired && " Restore it to use it again."}
                 </p>
               )}
