@@ -478,3 +478,16 @@ def test_an_upload_that_reopens_a_rejected_row_proposes_it(alice, bob, lab_conce
     assert upload(alice, reopen).status_code == 201
     row.refresh_from_db()
     assert (row.status, row.proposed_by) == ('proposed', alice)
+
+
+@pytest.mark.django_db
+def test_detail_shows_proposer_and_approver_emails(alice, bob, lab_concept):
+    mapping = propose(alice, lab_concept)
+    body = client_for(bob).get(detail(mapping)).data
+    assert body['proposer_email'] == 'alice@example.com'
+    assert body['reviewer_email'] == ''
+
+    assert approve(bob, mapping).status_code == 200
+    body = client_for(bob).get(detail(mapping)).data
+    assert body['proposer_email'] == 'alice@example.com'
+    assert body['reviewer_email'] == 'bob@example.com'

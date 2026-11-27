@@ -1907,6 +1907,11 @@ export default function EditMappingDialog({
               <span className="break-words text-slate-600">
                 {selectedRow?.origin_system || "\u2014"}
               </span>
+              {selectedRow?.proposer_email && (
+                <span className="break-words text-slate-600" data-testid="mapping-proposer">
+                  {" \u00b7 proposed by "}{selectedRow.proposer_email}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2">
