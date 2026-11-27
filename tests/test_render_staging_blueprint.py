@@ -149,6 +149,10 @@ def test_staging_build_publishes_the_federation_remote(tmp_path):
     config = yaml.safe_load((ROOT / 'render.yaml').read_text())
     command = next(s for s in config['services'] if s['name'] == 'promop-staging')['buildCommand']
     (tmp_path / 'frontend').mkdir()
+    # The Python install is its own script (scripts/install-python-deps.sh,
+    # tested below); here it only has to exist and succeed.
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts' / 'install-python-deps.sh').write_text('#!/bin/sh\n')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
     # npm stands in for both Vite builds: each writes its output where the
@@ -177,3 +181,85 @@ esac
     assert served == tmp_path / 'frontend' / 'build'
     assert (served / 'index.html').read_text() == 'spa\n'
     assert (served / 'remote' / 'remoteEntry.js').read_text() == 'remote\n'
+
+
+def _service(name):
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    return next(s for s in config['services'] if s['name'] == name)
+
+
+def test_staging_installs_cpu_only_torch_through_the_script():
+    """The default torch wheel brings ~3 GB of CUDA libraries a GPU-less Render
+    instance never loads; every staging build goes through the script that
+    installs the CPU wheel first (#2937)."""
+    script = ROOT / 'scripts' / 'install-python-deps.sh'
+    assert script.exists()
+    body = script.read_text()
+    assert 'download.pytorch.org/whl/cpu' in body
+    assert 'pip install -r requirements.txt' in body
+    for name in ('promop-staging', 'promop-staging-worker'):
+        command = _service(name)['buildCommand']
+        assert 'bash scripts/install-python-deps.sh' in command
+        assert 'pip install -r requirements.txt' not in command
+
+
+def test_only_staging_web_skips_the_second_prepare_on_boot():
+    """Staging runs prepare-deployment.sh as its preDeployCommand, so start.sh
+    need not repeat it. Production has no pre-deploy command: start.sh must keep
+    preparing there (#2937)."""
+    def env(service):
+        return {e['key']: e.get('value') for e in service['envVars']}
+
+    staging = _service('promop-staging')
+    assert staging['preDeployCommand'] == 'bash scripts/prepare-deployment.sh'
+    assert env(staging)['SKIP_PREPARE_ON_BOOT'] == 'true'
+    production = _service('promop')
+    assert 'preDeployCommand' not in production
+    assert 'SKIP_PREPARE_ON_BOOT' not in env(production)
+
+
+@pytest.mark.parametrize('skip, prepared', [('true', False), ('', True), ('false', True)])
+def test_start_sh_prepares_on_boot_unless_told_it_was_done(tmp_path, skip, prepared):
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts' / 'prepare-deployment.sh').write_text('touch prepared\n')
+    (tmp_path / 'start.sh').write_text((ROOT / 'start.sh').read_text())
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    (bin_dir / 'gunicorn').write_text('#!/bin/sh\ntouch served\n')
+    (bin_dir / 'gunicorn').chmod(0o755)
+    env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'SKIP_PREPARE_ON_BOOT': skip}
+    result = subprocess.run(['bash', 'start.sh'], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / 'served').exists()
+    assert (tmp_path / 'prepared').exists() is prepared
+
+
+@pytest.mark.parametrize('name', ['promop', 'promop-worker'])
+def test_production_builds_cpu_torch_only_when_the_revision_has_the_script(tmp_path, name):
+    """This shared Blueprint can be synced before main has the script (#1625 hit
+    the same trap with scripts/prepare-deployment.sh), so the production build
+    falls back to the plain pip install when it is absent."""
+    command = _service(name)['buildCommand']
+    assert 'if [ -f scripts/install-python-deps.sh ]' in command
+    log = tmp_path / 'log'
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    for tool in ('python', 'pip', 'npm'):
+        (bin_dir / tool).write_text(f'#!/bin/sh\necho {tool} "$@" >> {log}\n')
+        (bin_dir / tool).chmod(0o755)
+    (tmp_path / 'frontend').mkdir()
+    # The part of the command up to the frontend build is the Python install.
+    install = command.split(' && cd frontend')[0]
+    env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}'}
+
+    without = subprocess.run(['/bin/sh', '-c', install], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert without.returncode == 0, without.stderr
+    assert 'pip install -r requirements.txt' in log.read_text()
+
+    log.write_text('')
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts' / 'install-python-deps.sh').write_text(f'echo script >> {log}\n')
+    with_script = subprocess.run(['/bin/sh', '-c', install], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert with_script.returncode == 0, with_script.stderr
+    assert log.read_text().strip().endswith('script')
+    assert 'pip install' not in log.read_text()

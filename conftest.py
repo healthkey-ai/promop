@@ -232,3 +232,28 @@ def _reseed_if_flushed(request, django_db_blocker):
     if not Concept.objects.filter(concept_id=0).exists():
         _seed_reference_data()
     yield
+
+
+# ── CI sharding (#2939) ──────────────────────────────────────────────────────
+# With TEST_SHARD_COUNT / TEST_SHARD_INDEX set, this run keeps only its share of
+# the test files, so one suite can be spread over several CI jobs. Every xdist
+# worker collects too and must see the same items, which holds because the split
+# is a pure function of the file names and tests/shard_weights.json. Unset, the
+# hook does nothing. See promop/test_sharding.py.
+def pytest_collection_modifyitems(config, items):
+    from pathlib import Path
+
+    from promop.test_sharding import load_weights, shard_of, shard_settings
+
+    settings = shard_settings()
+    if settings is None:
+        return
+    index, count = settings
+    weights = load_weights(Path(__file__).parent / 'tests' / 'shard_weights.json')
+    files = {item.nodeid.split('::', 1)[0] for item in items}
+    mine = shard_of(files, weights, index, count)
+    kept = [item for item in items if item.nodeid.split('::', 1)[0] in mine]
+    dropped = [item for item in items if item.nodeid.split('::', 1)[0] not in mine]
+    if dropped:
+        config.hook.pytest_deselected(items=dropped)
+    items[:] = kept
