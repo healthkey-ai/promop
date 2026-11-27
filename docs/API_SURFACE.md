@@ -819,6 +819,7 @@ Query params:
 | `include_non_standard` | no | `true` to also return non-standard concepts |
 | `page` | no | 1-based page number |
 | `page_size` | no | Defaults to 25; capped at 100 |
+| `limit` | no | An alias of `page_size` on this endpoint only (the dialogs send it); `page_size` wins when both are sent; an unusable value is ignored (#2923) |
 
 **Default scope (changed in #1465).** Only concepts usable as a mapping destination are
 returned: active (`invalid_reason` empty), and either standard (`standard_concept = 'S'`) or
@@ -830,10 +831,34 @@ endpoint `GET /api/v1/concepts/` is unscoped, as before.
 `q` also matches an exact `concept_code` (case-insensitive) and, when numeric, an OMOP
 `concept_id`.
 
-Results are ordered by match quality, best first: exact code or id, exact name, name starting
-with `q`, any other match; within each, standard concepts first, then shorter names, then
-`concept_id`. (Before #1466 the order was `concept_id`.) The order is stable, so paging is
-safe. A client that pages the whole vocabulary should use `GET /api/v1/concepts/`, which stays
+Results are ordered by match quality, best first (#1466, #2923). The order is a sort key, in
+this precedence, and is stable, so paging is safe:
+
+1. **Match tier**: exact code or OMOP id; exact name or an exactly equal synonym; name or
+   synonym starting with `q`; any other match.
+2. Standard concepts before non-standard.
+3. **Use**: a concept an approved field mapping uses or a curator ranked on the Concept to
+   Code tab, then one an approved code mapping reaches, then the rest. This reorders only
+   concepts that match equally well; it never lifts a worse name match over a better one.
+4. **The usual specimen**: a name containing `Serum or Plasma` before one that does not,
+   skipped when `q` names a specimen itself (serum, urine, blood, CSF, ... see
+   `SPECIMEN_WORDS`), since typing one is a choice.
+5. Shorter name, shorter code (in LOINC and SNOMED the older, more general concept; this
+   breaks a tie between names of equal length such as `[Measurement]` and `[Mass/volume]`),
+   then `concept_id`.
+
+**Synonyms.** LOINC names say "Ag" and "Ab" where a curator types "antigen" and "antibody",
+so a name match alone never reached them. The search also matches the synonyms in
+`suggest_synonym_term`, whose per-domain partial trigram indexes keep it fast (#1467), for the
+`Measurement` and `Observation` domains, or for the one domain the request filters on when it
+is a domain Suggest keeps synonyms for. One extra statement, at most 400 synonym rows, best
+synonym match first; a synonym match joins the name matches in the same list, once per
+concept. Only standard, active concepts have synonyms there, so `include_retired` and
+`include_non_standard` add nothing to the synonym side. The embedder's drug and regimen
+search (`omop_core.api.concepts.search_queryset`) and the value-concept search keep the
+name-only match and the original ordering.
+
+A client that pages the whole vocabulary should use `GET /api/v1/concepts/`, which stays
 ordered by `concept_id`.
 
 **Request**

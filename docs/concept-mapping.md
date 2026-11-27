@@ -56,11 +56,11 @@ The supported API for searching and browsing OMOP concepts is documented in
 
 | Endpoint | Use |
 |---|---|
-| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive search on `concept_name`, exact `concept_code` or `concept_id`, best match first. Returns active, standard (or locally minted) concepts unless `include_retired` / `include_non_standard` is passed. Optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
+| `GET /api/v1/concepts/search/?q=creatinine` | Case-insensitive search on `concept_name` and its synonyms, exact `concept_code` or `concept_id`, best match first: the concept in use and the usual specimen before near-identical names (ranking rules in [API_SURFACE.md](API_SURFACE.md#get-apiv1conceptssearch)). Returns active, standard (or locally minted) concepts unless `include_retired` / `include_non_standard` is passed. Optional exact filters for `vocabulary_id`, `domain_id`, `concept_class_id`, and `standard_concept` |
 | `GET /api/v1/concepts/?domain_id=Measurement&concept_class_id=Lab%20Test` | Filtered concept browsing without a text query |
 | `GET /api/v1/concepts/lookup/?lookup=LOINC:2160-0` | Batch translation from `(vocabulary_id, concept_code)` to OMOP `concept_id` |
 
-Search and browse responses are paginated, default to 25 results, cap `page_size` at 100, and
+Search and browse responses are paginated, default to 25 results, cap `page_size` at 100 (the search also reads `limit` as an alias), and
 return the same concept fields listed above. The search endpoint requires `q` to be at least
 three characters (a trigram); the browse endpoint requires at least one of `vocabulary_id`, `domain_id`, or
 `concept_class_id` so production deployments do not accidentally page across the full Athena

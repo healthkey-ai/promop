@@ -11315,9 +11315,11 @@ from omop_core.api.concepts import (  # noqa: E402
     CONCEPT_FILTER_PARAMS as _CONCEPT_FILTER_PARAMS,
     ConceptPagination as _PackagedConceptPagination,
     apply_concept_filters as _apply_concept_filters,
+    ConceptSearchPagination as _ConceptSearchPagination,
     concept_match_ordering as _concept_match_ordering,
     concept_name_search_filter as _concept_name_search_filter,
     concept_text_search as _concept_text_search,
+    curator_search_queryset as _curator_search_queryset,
     destination_concepts as _destination_concepts,
     serialize_concept_base as _serialize_concept_base,
 )
@@ -11379,13 +11381,15 @@ def _truthy_param(query_params, name):
     return (query_params.get(name) or '').strip().lower() in ('1', 'true', 'yes')
 
 
-def _paginated_concept_response(queryset, request, ordering=('concept_id',)):
+def _paginated_concept_response(queryset, request, ordering=('concept_id',), paginator=None):
     # Default to the pk: concept_name has only a GIN trigram index (usable for
     # icontains, not ORDER BY), so sorting a *listing* by name would force a full
     # sort of a vocabulary on every page request. A search passes its own
     # ordering, over a matched set small enough to sort.
-    paginator = ConceptPagination()
-    page = paginator.paginate_queryset(queryset.order_by(*ordering), request)
+    paginator = paginator or ConceptPagination()
+    if ordering is not None:  # None: the queryset arrives already ranked
+        queryset = queryset.order_by(*ordering)
+    page = paginator.paginate_queryset(queryset, request)
     versions = _vocab_version_map()
     response = paginator.get_paginated_response([_serialize_concept(c, versions) for c in page])
     return _set_release_etag(request, response)
@@ -11417,7 +11421,8 @@ def concept_search(request):
         standard_concept  optional exact-match filter (S or C)
         include_retired       'true' to also return concepts with an invalid_reason
         include_non_standard  'true' to also return non-standard concepts
-        page / page_size  pagination (page_size capped at 100)
+        page / page_size  pagination (page_size capped at 100); ``limit`` is accepted
+                          as an alias of page_size, which wins when both are sent
 
     By default only concepts usable as a destination are returned: active, and
     either standard or authored on this instance (#1465).
@@ -11434,16 +11439,13 @@ def concept_search(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    # Name, exact code or OMOP id, each branch indexable (#1466).
-    search_filter, concept_id = _concept_text_search(query)
-    queryset = _apply_concept_filters(
-        _destination_concepts(Concept.objects.filter(search_filter), request.query_params),
-        request.query_params,
-    )
+    # Name, exact code or OMOP id, each branch indexable (#1466), plus synonym recall
+    # and a ranking that prefers the concept in use (#2923).
+    queryset, _ = _curator_search_queryset(query, request.query_params)
     # Show a curator what kind of input a Measurement mapping expects when the
     # available OMOP/LOINC data lets us classify it safely.
     response = _paginated_concept_response(
-        queryset, request, ordering=_concept_match_ordering(query, concept_id),
+        queryset, request, ordering=None, paginator=_ConceptSearchPagination(),
     )
     if response.status_code == status.HTTP_304_NOT_MODIFIED:
         # A revalidation hit carries no body to annotate (#1457).
