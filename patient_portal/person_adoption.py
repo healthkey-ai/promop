@@ -138,7 +138,8 @@ def _carry_over(placeholder: Person, provisioned: Person) -> None:
         fields = [f.attname for f in model._meta.concrete_fields if f.attname not in ('id', 'person_id')]
         model.objects.bulk_create([
             model(person_id=provisioned.person_id, **{f: getattr(row, f) for f in fields})
-            for row in model.objects.filter(person=placeholder)
+            # Oldest first, so the copies' ids keep the order that decides the latest.
+            for row in model.objects.filter(person=placeholder).order_by('id')
         ])
 
     org_id = (

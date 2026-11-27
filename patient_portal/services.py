@@ -132,8 +132,10 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
       3. Person whose HealthKey email extension matches
       4. Brand-new Person + PatientUser (+ PatientRecord if email known)
 
-    When allow_create=False, steps 1 to 3 still run (an existing patient is
-    always returned) but step 4 is skipped — returns None instead of creating.
+    When allow_create=False (a clinician's login), steps 1 and 3 still run (an
+    existing patient is always returned) but steps 2 and 4 are skipped, as is the
+    move in step 1 -- returns None instead of creating. A staff login skips the
+    keyed steps too.
 
     Returns the linked Person, or None if not found and allow_create=False.
 

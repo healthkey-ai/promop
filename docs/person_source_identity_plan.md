@@ -154,8 +154,8 @@ imported Person has no address keeps getting an empty record forever.
 
 - `POST /api/v1/persons/external-keys/` lets the ETL credential (not staff) record
   `(issuer, subject) -> person` in `person_external_key`. It accepts only issuers
-  in `PERSON_EXTERNAL_KEY_ISSUERS`, which defaults to this deployment's Firebase
-  project.
+  in `PERSON_EXTERNAL_KEY_ISSUERS` (this deployment's Firebase
+  project).
 - `resolve_or_create_person` links a login whose verified `(issuer, sub)` matches
   a key exactly, or matches a Person's `actor_iss/actor_sub` stamped before
   #1547. The key wins over an email match.

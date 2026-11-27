@@ -257,6 +257,8 @@ class PersonExternalKey(models.Model):
         db_table = 'person_external_key'
         constraints = [
             models.UniqueConstraint(fields=['issuer', 'subject'], name='person_external_key_unique'),
+            # One login per Person per issuer, so two accounts never compete for one.
+            models.UniqueConstraint(fields=['person', 'issuer'], name='person_external_key_one_per_issuer'),
         ]
 
     def __str__(self):
