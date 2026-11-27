@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from omop_core.models import PatientRecord, Person, PersonMergeCandidate
 from patient_portal.models import PatientUser
@@ -127,8 +127,6 @@ def adopt_provisioned_person(identity) -> AdoptionOutcome:
     unless the address is verified, exactly one unclaimed Person holds it, and
     the account's own Person is empty.
     """
-    from omop_core.services.patient_transfer import PatientCopyError, delete_patient
-
     email = (identity.email or '').strip()
     if not email or not identity.has_verified_email:
         return AdoptionOutcome()
@@ -137,6 +135,59 @@ def adopt_provisioned_person(identity) -> AdoptionOutcome:
     candidate = _provisioned_candidate(email, link.person_id if link else None)
     if candidate is None:
         return AdoptionOutcome(person_id=link.person_id if link else None)
+    return _adopt(identity, link, candidate, email)
+
+
+def keyed_person(identity) -> Person | None:
+    """The Person an importer named for this login's (issuer, sub), if any.
+
+    ``Person.actor_iss/actor_sub`` is what the ETL stamped before #1547;
+    ``PersonExternalKey`` is what it asserts since. Both are exact: the login's
+    issuer and subject come from a verified token.
+    """
+    from patient_portal.models import PersonExternalKey
+
+    issuer, sub = getattr(identity, 'issuer', ''), getattr(identity, 'sub', '')
+    if not issuer or not sub:
+        return None
+    person = Person.objects.filter(actor_iss=issuer, actor_sub=sub).first()
+    if person is not None:
+        return person
+    key = (
+        PersonExternalKey.objects
+        .filter(issuer=issuer, subject=sub)
+        .select_related('person')
+        .first()
+    )
+    return key.person if key else None
+
+
+def adopt_keyed_person(identity, link=None) -> AdoptionOutcome:
+    """Link a login to the Person an importer keyed to it.
+
+    A login that arrived before its key did was given an empty Person of its
+    own; this moves it to the keyed one, as email adoption does, so the account
+    heals on its next sign-in. A keyed Person another account holds is left
+    alone.
+    """
+    unchanged = AdoptionOutcome(person_id=link.person_id if link else None)
+    candidate = keyed_person(identity)
+    if candidate is None or (link is not None and link.person_id == candidate.person_id):
+        return unchanged
+    # This runs on every authenticated request, so a case already settled
+    # returns before taking a row lock or scanning the patient tables.
+    if PatientUser.objects.filter(person=candidate).exists():
+        return unchanged
+    if link is not None and PersonMergeCandidate.objects.filter(
+        claimed_id=link.person_id, provisioned=candidate,
+    ).exists():
+        return unchanged
+    return _adopt(identity, link, candidate, (identity.email or '').strip())
+
+
+def _adopt(identity, link, candidate, email) -> AdoptionOutcome:
+    """Give *identity* the unclaimed *candidate*, dropping its own empty Person."""
+    from omop_core.services.patient_transfer import PatientCopyError, delete_patient
 
     with transaction.atomic():
         # Hold the row while re-reading the claim: two accounts verifying the
@@ -150,7 +201,13 @@ def adopt_provisioned_person(identity) -> AdoptionOutcome:
             return AdoptionOutcome(person_id=link.person_id if link else None)
 
         if link is None:
-            PatientUser.objects.create(identity=identity, person=provisioned)
+            try:
+                with transaction.atomic():
+                    PatientUser.objects.create(identity=identity, person=provisioned)
+            except IntegrityError:
+                # A parallel first request of this login linked it already.
+                link = PatientUser.objects.filter(identity=identity).first()
+                return AdoptionOutcome(person_id=link.person_id if link else None)
             return AdoptionOutcome(person_id=provisioned.person_id, adopted=True)
 
         placeholder = link.person
