@@ -575,6 +575,14 @@ the answer machinery of the built-in coded fields and adds no second answer syst
   (one concept per answer, the common FHIR pattern) is not read into the dropdown, which
   needs a mapping to the field's one question concept with the answer as value. An answer
   concept is read back only from `value_as_concept_id` of a fact at that question concept.
+  An existing dropdown's mapping (`PATCH field-mappings/<id>/`) cannot be moved to a table
+  that holds no answer or given another value kind (400), and the edit dialog lists only
+  Measurement and Observation for it. Changing an answer's stored value through the editor
+  keeps the old value as an alias, so facts saved under it still name the answer, and a
+  stored value another answer of the field answers to is refused; a saved value is also
+  matched exactly before any folded spelling. Each refresh builds the answer index (about
+  nine queries) once for the approved pass and again for the provisional pass when there
+  are provisional rows; it is not yet shared between them.
   Dropdowns are single-choice (no multi-select) and text-valued: no integer, decimal or
   boolean answer typing, and a dropdown cannot be changed to or from another type, nor
   computed. Answer scope by disease (`FieldChoiceDisease`) is stored but, as for built-in

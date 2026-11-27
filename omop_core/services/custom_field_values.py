@@ -196,8 +196,10 @@ class AnswerIndex:
         live: dict[str, dict[str, set]] = {}
         retired: dict[str, dict[str, set]] = {}
         self._live_values: dict[str, set] = {name: set() for name in names}
+        self._stored: dict[str, set] = {name: set() for name in names}
         for choice in _curated_choices(names, with_aliases=True):
             tier = retired if choice.retired_at else live
+            self._stored[choice.field_name].add(choice.stored_value)
             if not choice.retired_at:
                 self._live_values[choice.field_name].add(choice.stored_value)
             spellings = {choice.display, choice.stored_value,
@@ -214,7 +216,10 @@ class AnswerIndex:
 
     def value(self, name, text=None, concept_id=None, *, live_only=False):
         found = None
-        if text:
+        if text and text in self._stored.get(name, ()):
+            # What a save stores is exact, whatever another answer's label spells.
+            found = text
+        elif text:
             found = self._text.get(name, {}).get(self._fold(text))
         if found is None and concept_id:
             found = self._concept.get(name, {}).get(concept_id)

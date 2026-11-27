@@ -572,6 +572,16 @@ describe("create mode", () => {
 });
 
 /** A new dropdown field: the answers are entered in the dialog and sent with the field. */
+describe("editing a dropdown's mapping", () => {
+  it("offers only the tables that hold a coded answer", () => {
+    render(<ConceptAssignDialog {...editProps} fieldName="gleason_grade_group" fieldType="choice"
+      initialOmopTable="observation" />);
+    const tables = within(screen.getByLabelText("Source Table")).getAllByRole("option").map((o) => o.textContent);
+    expect(tables).toEqual(["Measurement", "Observation"]);
+    expect(screen.getByLabelText("Source Table")).toHaveValue("Observation");
+  });
+});
+
 describe("create mode, dropdown", () => {
   const QUESTION = {
     concept_id: 4112853, concept_name: "Gleason grade group", concept_code: "Q-GRADE",

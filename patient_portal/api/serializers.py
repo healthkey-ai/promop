@@ -1797,7 +1797,27 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                         f'omop_table/source_value key; already used by {other.field_name}.'
                     )
                 })
+        self._validate_dropdown_recipe(attrs)
         return attrs
+
+    def _validate_dropdown_recipe(self, attrs):
+        """A created dropdown's mapping stays one that can hold and read back a coded answer.
+
+        Re-pointed to a table with no value columns, every later edit would stay pending and
+        values already saved would stop reading back; the value kind is what writes the concept.
+        """
+        custom = getattr(self.instance, 'custom_patient_field', None) if self.instance else None
+        if custom is None or custom.field_type != 'choice':
+            return
+        from omop_core.services import custom_field_values
+        errors = {}
+        if 'omop_table' in attrs and (
+                custom_field_values.target_for(attrs['omop_table']) not in custom_field_values.CHOICE_TABLES):
+            errors['omop_table'] = 'A dropdown is stored in Measurement or Observation, the tables that hold a coded answer.'
+        if 'value_kind' in attrs and attrs['value_kind'] != 'concept':
+            errors['value_kind'] = 'A dropdown stores its answer as a concept.'
+        if errors:
+            raise serializers.ValidationError(errors)
 
     def create(self, validated_data):
         from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, user_provenance
@@ -2326,6 +2346,15 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
                     'in this context.')
         if code and same.filter(code=code).exists():
             errors['code'] = f'The code {code!r} is already used for {field_name} in this context.'
+        if 'value' in attrs and attrs['value'] and 'value' not in errors:
+            # A created dropdown reads a saved value back by what it spells, so a value another
+            # answer of the field answers to (its label, value or an alias) would be ambiguous.
+            if CustomPatientField.objects.filter(field_name=field_name, field_type='choice').exists():
+                owner = field_choices._taken_spellings(
+                    field_name, context, exclude_choice=instance).get(field_choices.fold(attrs['value']))
+                if owner is not None:
+                    errors['value'] = (f'{attrs["value"]!r} is already another spelling of an answer of '
+                                       f'{field_name}; choose a different stored value.')
         if errors:
             raise serializers.ValidationError(errors)
         if 'display' in attrs:
@@ -2377,9 +2406,21 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
                 field_choices.rename(instance, display)
         except field_choices.ChoiceError as exc:
             raise serializers.ValidationError({'display': str(exc)}) from None
+        earlier_value = instance.stored_value
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+        if instance.stored_value != earlier_value and CustomPatientField.objects.filter(
+                field_name=instance.field_name, field_type='choice').exists():
+            # Values already saved under the old stored value must still name this answer.
+            from omop_core.models import FieldChoiceAlias
+            taken = field_choices._taken_spellings(
+                instance.field_name, instance.context_key, exclude_choice=instance)
+            key = field_choices.fold(earlier_value)
+            if key not in taken and key != field_choices.fold(instance.display):
+                FieldChoiceAlias.objects.get_or_create(
+                    field_name=instance.field_name, context_key=instance.context_key, alias_key=key,
+                    defaults={'choice': instance, 'alias': earlier_value, 'source': 'label'})
         if codes_data is not None:
             instance.codes.all().delete()
             for code_data in codes_data:

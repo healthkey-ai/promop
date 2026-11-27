@@ -561,3 +561,37 @@ def test_the_number_of_answers_is_capped(staff, concepts):
     response = create(staff, concepts, expect=400,
                       answers=[{'label': f'Answer {n}'} for n in range(201)])
     assert 'answers' in response.data
+
+
+def test_a_dropdowns_mapping_cannot_be_moved_to_a_table_that_holds_no_answer(staff, grade):
+    url = f'/api/v1/field-mappings/{grade.mapping.pk}/'
+    for change in ({'omop_table': 'condition_occurrence'}, {'omop_table': 'DrugExposure'},
+                   {'value_kind': 'string'}):
+        response = staff.patch(url, change, format='json')
+        assert response.status_code == 400, change
+    assert staff.patch(url, {'omop_table': 'Measurement'}, format='json').status_code == 200
+    grade.mapping.refresh_from_db()
+    assert grade.mapping.omop_table == 'Measurement' and grade.mapping.value_kind == 'concept'
+
+
+def test_a_stored_value_is_read_exactly_even_when_another_answer_spells_it(record, grade):
+    # Answer 3's stored value is "3"; give answer 1 a label that folds to the same text.
+    FieldChoice.objects.filter(field_name='gleason_grade_group', display='Grade group 1').update(
+        display='3 ')
+    imported(record, grade, value_as_string='3')
+    assert derived(record) == {'gleason_grade_group': '3'}
+
+
+def test_the_editor_refuses_a_stored_value_another_answer_answers_to(staff, grade):
+    response = staff.post(CHOICES, {'field_name': 'gleason_grade_group', 'display': 'Zeta',
+                                    'value': 'Grade group 1'}, format='json')
+    assert response.status_code == 400 and 'value' in response.data
+
+
+def test_changing_an_answers_stored_value_keeps_the_old_one_naming_it(staff, record, grade):
+    patch(staff, record, {'gleason_grade_group': '2'})
+    choice = FieldChoice.objects.get(field_name='gleason_grade_group', display='Grade group 2')
+    response = staff.patch(f'{CHOICES}{choice.pk}/', {'value': 'two'}, format='json')
+    assert response.status_code == 200, response.data
+    # The fact saved under "2" still reads as this answer, now stored as "two".
+    assert derived(record) == {'gleason_grade_group': 'two'}

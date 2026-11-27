@@ -752,7 +752,7 @@ export function ConceptAssignDialog({
                   className={`${INPUT_CLASS} w-full`}
                 >
                   {selectedTableOption === undefined && <option value={omopTable}>{omopTable}</option>}
-                  {(dropdown ? DROPDOWN_TABLES : OMOP_TABLES).map((table) => (
+                  {(dropdown || fieldType === "choice" ? DROPDOWN_TABLES : OMOP_TABLES).map((table) => (
                     <option key={table} value={table}>{table}</option>
                   ))}
                 </select>
