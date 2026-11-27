@@ -79,7 +79,7 @@ def reverse_noop(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0378_custom_field_dropdown_type'),
+        ('omop_core', '0379_custom_field_retired_at'),
         ('omop_oncology', '0012_therapy_line_response_assessed'),
     ]
 
