@@ -634,9 +634,10 @@ before the field is looked up. v1 only. Rules in `omop_core/services/custom_fiel
   `retired_at`; the field, its scope, answers and every stored value are back at once.
 - **Delete for good** only when nothing depends on the field: no record holds a value
   under the key (one `has_key` query; a JSON null is no value) and no OMOP fact is
-  written under the field's source key or sits at its concept in the mapping's table
-  (one existence query), i.e. no approved mapping imports data into it. Otherwise it is
-  refused and retire is the way. It then deletes, in one transaction, the definition,
+  written under the field's own source key (one existence query). Rows that only sit at
+  the field's concept are the patients' own data and do not block (#2930): deleting the
+  field never touches them, and a field created again over that concept reads them again.
+  Otherwise it is refused and retire is the way. It then deletes, in one transaction, the definition,
   mapping, formula, scope, synonyms, answers (with aliases, codes, disease scope and
   concept decisions), and what records keep *about* the field with no value in it:
   `user_edited_fields` pins (`custom_fields.<name>`, a pending clear), proposal rejections
