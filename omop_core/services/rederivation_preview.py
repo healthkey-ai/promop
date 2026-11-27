@@ -338,7 +338,7 @@ def custom_field_names() -> frozenset[str]:
 
     return frozenset(
         f'custom_fields.{name}'
-        for name in CustomPatientField.objects.values_list('field_name', flat=True))
+        for name in CustomPatientField.objects.active().values_list('field_name', flat=True))
 
 
 def _reported_name(field: str, defined: frozenset[str]) -> str:

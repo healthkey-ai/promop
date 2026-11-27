@@ -825,6 +825,19 @@ the Add Field link at the top and bottom of each patient tab
 (`AddFieldLink.tsx`, shown with the fields' globes) and the Field Mappings
 page's own button, both of which open the mapping dialog in create mode.
 
+Removing one is an approval too (`DELETE /api/v1/custom-patient-fields/<name>/`,
+`POST .../restore/`, v1 only; analyst, doctor and patient get 403). A created field is
+**global**, shared by every organization on the instance, so removing it removes it for
+all of them. Remove **retires** by default: `retired_at` is set and its mapping flipped to
+`rejected`, so it leaves the tabs, descriptors, mapping lists, derive and provisional
+passes, but `custom_fields.<name>`, the OMOP facts, answers and scope are kept (a
+derivation carries the stored value over) and a restore brings it back. A name stays taken
+while retired. `?permanent=true` deletes it, its mapping, answers and scope for good, and
+only when no record holds a value and no OMOP fact exists under it (else 409 with the
+counts). Every reader of created fields uses `CustomPatientField.objects.active()`; a new
+one must too. `DELETE field-mappings/<id>/` of a created field's mapping is a 409 naming the
+action, never a 500. Details: [field_concept_mapping_architecture.md](docs/field_concept_mapping_architecture.md#removing-a-created-field-retire-restore-delete).
+
 **Staff in the admin** are a separate axis from `GroupAccess`: Django groups a
 deployment names in `STAFF_ROLES`, with `support_member_accounts` and
 `manage_staff` on `Identity`, and staff sign-in through the deployment's

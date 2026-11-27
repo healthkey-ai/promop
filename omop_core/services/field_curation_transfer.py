@@ -47,6 +47,7 @@ from itertools import groupby
 from django.db import transaction
 from django.db.models import Case, CharField, F, Value, When
 from django.db.models.functions import Lower, Trim
+from django.utils import timezone
 
 from omop_core.services.field_mapping_provenance import CURATOR_PROVENANCE, portable_provenance
 from omop_core.models import (
@@ -216,6 +217,9 @@ def read_payload(
                 'field_name': c.field_name,
                 'mapping_field_name': c.mapping.field_name,
                 **{name: getattr(c, name) for name in _CUSTOM_FIELD_FIELDS},
+                # A removed field travels as removed, with its rejected mapping (#2920);
+                # a payload written before this reads as "leave alone".
+                'retired': c.retired_at is not None,
             }
             for c in CustomPatientField.objects.using(using)
             .select_related('mapping')
@@ -541,6 +545,10 @@ def _apply_custom_fields(rows: list[dict], stats: TransferStats) -> None:
         values['mapping'] = mapping
         values['created_by'] = None
         custom = existing.get(row['field_name'])
+        if 'retired' in row:
+            was_retired = custom is not None and custom.retired_at is not None
+            values['retired_at'] = (
+                (custom.retired_at if was_retired else timezone.now()) if row['retired'] else None)
         if custom is None:
             CustomPatientField.objects.create(field_name=row['field_name'], **values)
             stats._bump(stats.created, 'custom_fields')
@@ -574,7 +582,8 @@ def _apply_memberships(payload: dict, stats: TransferStats) -> None:
     from omop_core.services.disease_profiles import extension_codes, field_names
 
     known = set(extension_codes())
-    fields = field_names()
+    # A removed field keeps its scope here too, so a restore on this instance is right.
+    fields = field_names(include_retired=True)
     source = payload.get('membership_source') or {}
     source_fields = set(source.get('fields', ()))
     source_categories = set(source.get('categories', ()))

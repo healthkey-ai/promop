@@ -1766,7 +1766,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             genomic_components = {'genetic_mutations.' + a['key'] for a in components()}
             # A custom field lives in custom_fields, not a column, and its
             # mapping is curated through this same endpoint (#2328).
-            custom_names = set(CustomPatientField.objects.values_list('field_name', flat=True))
+            custom_names = set(CustomPatientField.objects.active().values_list('field_name', flat=True))
             if field_name not in concrete_names | genomic_components | custom_names:
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."
@@ -1930,7 +1930,7 @@ class CustomPatientFieldSerializer(serializers.ModelSerializer):
             'id', 'field_name', 'display_name', 'tab', 'field_type',
             'mode', 'scope', 'diseases',
             'mapping_status', 'concept_id', 'concept_name', 'vocabulary_id',
-            'concept_code', 'omop_table', 'unit', 'options', 'created_at', 'updated_at',
+            'concept_code', 'omop_table', 'unit', 'options', 'retired_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
 
@@ -1987,7 +1987,12 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         }
         if candidate in concrete_names:
             raise serializers.ValidationError('This name is already a PatientRecord field.')
-        if CustomPatientField.objects.filter(field_name=candidate).exists():
+        existing = CustomPatientField.objects.filter(field_name=candidate).first()
+        if existing is not None and existing.retired_at is not None:
+            raise serializers.ValidationError(
+                'A removed field uses this name. Restore it from the removed fields '
+                '(its stored values are kept), or delete it permanently first.')
+        if existing is not None:
             raise serializers.ValidationError('A custom PatientRecord field already uses this name.')
         if FieldConceptMapping.objects.filter(field_name=candidate).exists():
             raise serializers.ValidationError('A field mapping already uses this name.')
@@ -2289,7 +2294,7 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
         }
         if value not in concrete_names:
             # A dropdown created through Add Field keeps its answers here too.
-            if CustomPatientField.objects.filter(field_name=value, field_type='choice').exists():
+            if CustomPatientField.objects.active().filter(field_name=value, field_type='choice').exists():
                 return value
             raise serializers.ValidationError(
                 f"'{value}' is not a concrete PatientRecord field or a created dropdown."
@@ -2455,7 +2460,7 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
 
     def validate_field_name(self, value):
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
-        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.active().filter(
             field_name=value, mode='computed',
         ).exists():
             raise serializers.ValidationError(

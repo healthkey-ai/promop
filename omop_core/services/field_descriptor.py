@@ -730,7 +730,7 @@ def get_all_field_descriptors() -> list[dict]:
     # Runtime PatientRecord fields use the JSON projection rather than Django
     # columns, so they are appended explicitly.  This keeps a newly added field
     # discoverable in the mapper immediately after its approved mapping saves.
-    for custom in CustomPatientField.objects.select_related('mapping__concept').all():
+    for custom in CustomPatientField.objects.active().select_related('mapping__concept'):
         mapping = custom.mapping
         formula = formulas_by_field.get(custom.field_name)
         formula_dict = None
@@ -775,6 +775,8 @@ def get_all_field_descriptors() -> list[dict]:
             'answer_coverage': answer_coverage.get(custom.field_name),
             'formula': formula_dict,
             'explanation': 'Administrator-defined PatientRecord field.',
+            # An administrator-created field: removed with the field, not mapping by mapping.
+            'created_field': True,
             'derivation_error': derivation_error,
         })
 

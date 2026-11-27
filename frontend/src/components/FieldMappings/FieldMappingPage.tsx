@@ -1,7 +1,8 @@
 import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ChevronRight, Download, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Download, Search, BookOpen, Check, X, Pencil, Plus, Sparkles, Trash2 } from "lucide-react";
+import axios from "axios";
 import api from "@/api/axios";
 import { fetchDiseaseCategories } from "@/api/mappingHub";
 import { useAuth } from "@/hooks/useAuth";
@@ -11,6 +12,8 @@ import { SynonymDialog } from "./SynonymDialog";
 import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { answerFigures, type AnswerCoverageFigures } from "./answerConcept";
 import { FormulaEditDialog } from "./FormulaEditDialog";
+import { RemoveFieldDialog, type RemovalOutcome } from "./RemoveFieldDialog";
+import { RemovedFieldsPanel } from "./RemovedFieldsPanel";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
 import { addFieldReturn, type AddFieldReturn } from "@/components/PatientInfo/fieldMappingLinks";
 import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
@@ -76,6 +79,8 @@ interface FieldDescriptor extends FieldScoped {
   } | null;
   explanation: string | null;
   derivation_error: string | null;
+  /** An administrator-created field: removed with the field, never by deleting its mapping alone. */
+  created_field?: boolean;
   /** How many of the field's answers have a concept decision (#1224); null
    *  when the field has no curated answers. */
   answer_coverage?: AnswerCoverageFigures | null;
@@ -228,6 +233,12 @@ export default function FieldMappingPage() {
   const [categories, setCategories] = useState<DiseaseCategoryOption[]>([]);
   const [categoriesState, setCategoriesState] = useState<"loading" | "loaded" | "failed">("loading");
   const [downloading, setDownloading] = useState<Download | null>(null);
+  // Removing a created field (staff and org admins): the field being confirmed,
+  // the Removed fields list, and what the server last answered.
+  const [removingField, setRemovingField] = useState<FieldDescriptor | null>(null);
+  const [showRemoved, setShowRemoved] = useState(false);
+  const [removedRevision, setRemovedRevision] = useState(0);
+  const [notice, setNotice] = useState("");
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
@@ -524,9 +535,27 @@ export default function FieldMappingPage() {
     try {
       await api.delete(`/v1/field-mappings/${mappingId}/`);
       fetchDescriptors();
-    } catch {
-      setError("Failed to remove mapping.");
+    } catch (failure) {
+      // The server says why (a created field's mapping is removed with the field).
+      const detail = axios.isAxiosError(failure) ? (failure.response?.data as { detail?: unknown })?.detail : null;
+      setError(typeof detail === "string" && detail ? detail : "Failed to remove mapping.");
     }
+  };
+
+  /** A created field was retired or deleted, or one was restored: show the server's answer. */
+  const handleFieldRemovalChanged = (outcome: RemovalOutcome | "restored", fieldName: string) => {
+    setRemovingField(null);
+    setNotice(
+      outcome === "retired"
+        ? `Removed ${fieldName}. Its stored values are kept; restore it from Removed fields.`
+        : outcome === "deleted"
+          ? `Deleted ${fieldName} permanently.`
+          : `Restored ${fieldName}.`,
+    );
+    // A field decides what a patient page lists and may write.
+    invalidateAllWritableFields();
+    setRemovedRevision((n) => n + 1);
+    fetchDescriptors();
   };
 
   const handleConfirm = async (field: FieldDescriptor) => {
@@ -713,7 +742,22 @@ export default function FieldMappingPage() {
               <td className="px-3 py-2 text-xs whitespace-nowrap" title={f.mapping?.provenance || undefined}>
                 {provenanceLabel(f.mapping)}
               </td>
-              <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
+              <td className="px-3 py-2 font-mono text-xs">
+                <span className="inline-flex items-center gap-1.5">
+                  {f.field_name}
+                  {f.created_field && canApprove && (
+                    <button
+                      type="button"
+                      onClick={() => setRemovingField(f)}
+                      className="rounded p-0.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
+                      title="Remove field"
+                      aria-label={`Remove field ${f.field_name}`}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </span>
+              </td>
               <td className="px-3 py-2">{renderScopeCell(f)}</td>
               <td className="px-3 py-2">
                 <div className="flex items-center gap-1.5">
@@ -732,7 +776,11 @@ export default function FieldMappingPage() {
                           ? "Only org admins and staff can approve mappings. Analysts may propose mappings for review."
                           : f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"
                       }
-                      disabled={(!f.mapping && !f.suggestion) || (!canApprove && f.mapping?.status !== "approved")}
+                      disabled={
+                        (!f.mapping && !f.suggestion) || (!canApprove && f.mapping?.status !== "approved")
+                        // A created field is taken out of use with Remove field, not by un-approving it.
+                        || (!!f.created_field && f.mapping?.status === "approved")
+                      }
                     >
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>
@@ -749,7 +797,8 @@ export default function FieldMappingPage() {
                   ) : (
                     <span className="inline-flex items-center gap-1">{renderConceptCell(f)}</span>
                   )}
-                  {canWrite && f.mapping && (
+                  {/* A created field's mapping is the field's own: it goes with the field (Remove field). */}
+                  {canWrite && f.mapping && !f.created_field && (
                     <button
                       onClick={() => handleDeleteMapping(f.mapping!.id)}
                       className="ml-1 rounded p-0.5 text-gray-400 hover:bg-red-50 hover:text-red-500"
@@ -919,14 +968,37 @@ export default function FieldMappingPage() {
         </button>
         <PageTitle className="text-xl font-semibold">Field Concept Mappings</PageTitle>
         {canApprove && (
-          <button
-            onClick={() => setNewField({ tab: shownTab, disease: selectedDisease, returnTo: null })}
-            className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-          >
-            <Plus size={15} /> Add field
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowRemoved((open) => !open)}
+              aria-expanded={showRemoved}
+              className="inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Removed fields
+            </button>
+            <button
+              onClick={() => setNewField({ tab: shownTab, disease: selectedDisease, returnTo: null })}
+              className="inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <Plus size={15} /> Add field
+            </button>
+          </div>
         )}
       </div>
+
+      {notice && (
+        <div role="status" className="mb-4 flex items-start justify-between rounded border border-green-300 bg-green-50 p-3 text-sm text-green-800">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice("")} aria-label="Dismiss" className="ml-3 text-green-700">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      {canApprove && showRemoved && (
+        <RemovedFieldsPanel revision={removedRevision} onChanged={handleFieldRemovalChanged} />
+      )}
 
       {newField && !userLoading && !canApprove && (
         <div role="alert" className="mb-4 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
@@ -1243,6 +1315,14 @@ export default function FieldMappingPage() {
             setFormulaEditorField(null);
             fetchDescriptors();
           }}
+        />
+      )}
+
+      {removingField && canApprove && (
+        <RemoveFieldDialog
+          fieldName={removingField.field_name}
+          onClose={() => setRemovingField(null)}
+          onDone={handleFieldRemovalChanged}
         />
       )}
 

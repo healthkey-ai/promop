@@ -17420,15 +17420,22 @@ def custom_patient_field_list(request):
 
     if request.method == 'GET':
         from omop_core.services import disease_profiles
-        fields = CustomPatientField.objects.select_related('mapping__concept').filter(
-            mapping__status='approved',
-        )
+        retired = request.query_params.get('state') == 'retired'
+        if retired and not _can_approve_mappings(request.user):
+            # The removed fields are an administrator's to see and restore.
+            return Response({'detail': 'Organization admin access required.'},
+                            status=status.HTTP_403_FORBIDDEN)
+        fields = CustomPatientField.objects.select_related('mapping__concept')
+        # Removed fields leave every list a patient page or a mapper reads; their
+        # mapping is rejected while they are, so only the retired view skips that filter.
+        fields = (fields.retired() if retired
+                  else fields.active().filter(mapping__status='approved'))
         from omop_core.services import custom_field_values
         fields = list(fields)
         choices = [f.field_name for f in fields if f.field_type == 'choice']
         return Response(CustomPatientFieldSerializer(
             fields, many=True, context={
-                'field_diseases': disease_profiles.memberships(),
+                'field_diseases': disease_profiles.memberships(include_retired=retired),
                 'field_options': custom_field_values.options_for(choices) if choices else {},
             },
         ).data)
@@ -17442,6 +17449,75 @@ def custom_patient_field_list(request):
     serializer.is_valid(raise_exception=True)
     custom_field = serializer.save()
     return Response(CustomPatientFieldSerializer(custom_field).data, status=status.HTTP_201_CREATED)
+
+
+def _removal_error_response(error):
+    """A refused removal as a 409 with the reason and the counts, never a 500."""
+    body = {'detail': error.message, 'code': error.code, **error.extra}
+    # A field another request deleted meanwhile is simply not there any more.
+    return Response(body, status=status.HTTP_404_NOT_FOUND if error.code == 'gone'
+                    else status.HTTP_409_CONFLICT)
+
+
+@api_view(['GET', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def custom_patient_field_detail(request, field_name):
+    """GET: what depends on a created field. DELETE: remove it (retire it, or ``?permanent=true``).
+
+    Fields are global across organizations, so removing one removes it for every
+    organization on the instance. Removing is an approval, as creating one is:
+    staff and org admins only (``_can_approve_mappings``); anyone else is refused
+    before the field is looked up. See ``omop_core.services.custom_field_removal``.
+
+    DELETE retires: the field leaves every tab, list and pass, and the values
+    records hold are kept, so ``POST .../restore/`` brings it back. ``permanent=true``
+    deletes it for good, and only when no record holds a value and no OMOP fact is
+    written under it (409 with the counts otherwise).
+    """
+    from omop_core.services import custom_field_removal as removal
+    from .serializers import CustomPatientFieldSerializer
+
+    if not _can_approve_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    field = CustomPatientField.objects.select_related('mapping__concept').filter(
+        field_name=field_name).first()
+    if field is None:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        data = CustomPatientFieldSerializer(field).data
+        return Response({**data, **removal.usage(field)})
+
+    permanent = str(request.query_params.get('permanent', '')).lower() in ('1', 'true', 'yes')
+    try:
+        if permanent:
+            found = removal.delete(field)
+            return Response({**found, 'state': 'deleted'})
+        removal.retire(field, request.user)
+    except removal.RemovalError as error:
+        return _removal_error_response(error)
+    return Response({**removal.usage(field), 'state': 'retired'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def custom_patient_field_restore(request, field_name):
+    """Restore a retired created field with its mapping, answers, scope and values (approvers only)."""
+    from omop_core.services import custom_field_removal as removal
+    from .serializers import CustomPatientFieldSerializer
+
+    if not _can_approve_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    field = CustomPatientField.objects.select_related('mapping__concept').filter(
+        field_name=field_name).first()
+    if field is None:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    try:
+        removal.restore(field)
+    except removal.RemovalError as error:
+        return _removal_error_response(error)
+    field.refresh_from_db()
+    return Response(CustomPatientFieldSerializer(field).data)
 
 
 @api_view(['GET', 'POST'])
@@ -17578,6 +17654,11 @@ def field_scope(request, field_name):
     # A name with rows but no field (the field was removed) is still
     # reachable, so its rows can be read and cleared.
     held = FieldDiseaseMembership.objects.filter(field_name=field_name)
+    if request.method == 'PUT' and CustomPatientField.objects.retired().filter(field_name=field_name).exists():
+        # A removed field keeps its scope so a restore returns it to the same diseases.
+        return Response({'detail': 'This created field is removed. Restore it before changing its scope.',
+                         'code': 'retired_field', 'field_name': field_name},
+                        status=status.HTTP_409_CONFLICT)
     if field_name not in disease_profiles.field_names() and not held.exists():
         return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'PUT':
@@ -17611,17 +17692,40 @@ def field_mapping_detail(request, pk):
         from .serializers import FieldConceptMappingSerializer
         return Response(FieldConceptMappingSerializer(mapping).data)
 
+    # A created field's mapping is the field's own: it cannot be removed (or changed
+    # into something else) apart from the field, which is what the removal actions do.
+    created = CustomPatientField.objects.filter(mapping_id=mapping.pk).first()
     if request.method == 'DELETE':
         if mapping.status == 'approved' and not _can_approve_mappings(request.user):
             return Response(
                 {'detail': 'Only org admins and staff can delete approved mappings.'},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if created is not None:
+            return Response({
+                'detail': (f"This is the mapping of the created field '{created.field_name}', so it "
+                           'cannot be deleted by itself. Remove the field instead: '
+                           f'DELETE /api/v1/custom-patient-fields/{created.field_name}/.'),
+                'code': 'created_field', 'field_name': created.field_name,
+            }, status=status.HTTP_409_CONFLICT)
         mapping.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     # PATCH — enforce approval restrictions
+    if created is not None and created.retired_at is not None:
+        return Response({
+            'detail': (f"The created field '{created.field_name}' is removed, so its mapping cannot be "
+                       'changed. Restore the field first.'),
+            'code': 'retired_field', 'field_name': created.field_name,
+        }, status=status.HTTP_409_CONFLICT)
     new_status = request.data.get('status')
+    if created is not None and new_status and new_status != 'approved':
+        # Un-approving or rejecting it would hide the field with no way to restore it.
+        return Response({
+            'detail': (f"This is the mapping of the created field '{created.field_name}'. To take the "
+                       f'field out of use, remove it: DELETE /api/v1/custom-patient-fields/{created.field_name}/.'),
+            'code': 'created_field', 'field_name': created.field_name,
+        }, status=status.HTTP_409_CONFLICT)
     if new_status and not _can_approve_mappings(request.user):
         if new_status == 'approved':
             return Response(
