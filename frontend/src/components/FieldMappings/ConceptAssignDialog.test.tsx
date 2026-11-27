@@ -570,3 +570,121 @@ describe("create mode", () => {
     ));
   });
 });
+
+/** A new dropdown field: the answers are entered in the dialog and sent with the field. */
+describe("create mode, dropdown", () => {
+  const QUESTION = {
+    concept_id: 4112853, concept_name: "Gleason grade group", concept_code: "Q-GRADE",
+    vocabulary_id: "SNOMED", domain_id: "Observation", concept_class_id: "Clinical Finding",
+    standard_concept: "S",
+  };
+  const ANSWER = {
+    concept_id: 4112854, concept_name: "Grade group 2", concept_code: "A-2",
+    vocabulary_id: "SNOMED", domain_id: "Observation", concept_class_id: "Clinical Finding",
+    standard_concept: "S",
+  };
+  const props = () => ({
+    fieldName: "", fieldType: "",
+    create: { tab: "disease", tabOptions: [{ value: "disease", label: "Disease" }] },
+    fieldScope: { diseases: [], options: [] },
+    onClose: vi.fn(), onSaved: vi.fn(),
+  });
+  const posted = () => mockPost.mock.calls.find(([url]) => url === "/v1/custom-patient-fields/")?.[1];
+  const addButton = () => screen.getByRole("button", { name: "Add Field" });
+
+  beforeEach(() => {
+    mockGet.mockImplementation(async (_url: string, config?: { params?: { q?: string } }) => ({
+      data: { results: config?.params?.q === "grade" ? [QUESTION] : config?.params?.q === "answer2" ? [ANSWER] : [] },
+    }));
+  });
+
+  const fillBasics = async () => {
+    fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Gleason grade group" } });
+    fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "choice" } });
+    fireEvent.change(screen.getByLabelText("Search concepts"), { target: { value: "grade" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Gleason grade group/ }));
+    fireEvent.click(screen.getByLabelText(/I confirm/));
+  };
+
+  it("offers answers only for a dropdown, and none are needed for any other type", () => {
+    render(<ConceptAssignDialog {...props()} />);
+    expect(screen.queryByRole("group", { name: /Answers/ })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "choice" } });
+    expect(screen.getByRole("group", { name: /Answers/ })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "number" } });
+    expect(screen.queryByRole("group", { name: /Answers/ })).not.toBeInTheDocument();
+  });
+
+  it("waits for an answer, and a dropdown is stored in an answer table and is never computed", async () => {
+    render(<ConceptAssignDialog {...props()} />);
+    await fillBasics();
+    expect(addButton()).toBeDisabled();
+    expect(addButton()).toHaveAccessibleDescription("Still needed: at least one answer.");
+    expect(screen.getByLabelText("Field mode")).toHaveValue("editable");
+    expect(screen.getByRole("option", { name: "Computed from a formula" })).toBeDisabled();
+    const tables = within(screen.getByLabelText("Source Table")).getAllByRole("option").map((o) => o.textContent);
+    expect(tables).toEqual(["Measurement", "Observation"]);
+    expect(screen.getByLabelText("Source Table")).toHaveValue("Observation");
+    expect(screen.queryByLabelText("Unit")).not.toBeInTheDocument();
+  });
+
+  it("sends the answers, with the stored value and the concept of each", async () => {
+    const dialog = props();
+    render(<ConceptAssignDialog {...dialog} />);
+    await fillBasics();
+    fireEvent.change(screen.getByLabelText("Answer 1 label"), { target: { value: "Grade group 1" } });
+    fireEvent.change(screen.getByLabelText("Answer 1 stored value"), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add answer" }));
+    fireEvent.change(screen.getByLabelText("Answer 2 label"), { target: { value: " Grade group 2 " } });
+    fireEvent.change(screen.getAllByPlaceholderText("Search a concept (optional)")[1], { target: { value: "answer2" } });
+    fireEvent.click(await screen.findByRole("button", { name: /Grade group 2.*SNOMED/ }));
+    expect(screen.getByRole("button", { name: "Remove concept Grade group 2" })).toBeInTheDocument();
+    // A row with no label is not an answer.
+    fireEvent.click(screen.getByRole("button", { name: "Add answer" }));
+
+    await waitFor(() => expect(addButton()).toBeEnabled());
+    fireEvent.click(addButton());
+    await waitFor(() => expect(dialog.onSaved).toHaveBeenCalled());
+    expect(posted()).toMatchObject({
+      field_type: "choice", mode: "editable", omop_table: "Observation", unit: "", concept: 4112853,
+      answers: [
+        { label: "Grade group 1", value: "1", concept: null },
+        { label: "Grade group 2", value: "", concept: 4112854 },
+      ],
+    });
+  });
+
+  it("says under the answer what the server refused about it", async () => {
+    mockPost.mockRejectedValue({ response: { status: 400, data: {
+      answers: [{}, { label: "'Grade group 1' is already an answer." }, { concept: "A-OLD is retired." }],
+    } } });
+    const dialog = props();
+    render(<ConceptAssignDialog {...dialog} />);
+    await fillBasics();
+    fireEvent.change(screen.getByLabelText("Answer 1 label"), { target: { value: "Grade group 1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add answer" }));
+    fireEvent.change(screen.getByLabelText("Answer 2 label"), { target: { value: "grade group 1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add answer" }));
+    fireEvent.change(screen.getByLabelText("Answer 3 label"), { target: { value: "Old" } });
+    fireEvent.click(addButton());
+
+    expect(await screen.findByText("'Grade group 1' is already an answer.")).toBeInTheDocument();
+    expect(screen.getByText("A-OLD is retired.")).toBeInTheDocument();
+    expect(dialog.onSaved).not.toHaveBeenCalled();
+    // Editing an answer clears the refusals; the rows are kept.
+    fireEvent.change(screen.getByLabelText("Answer 2 label"), { target: { value: "Grade group 2" } });
+    expect(screen.queryByText("'Grade group 1' is already an answer.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Answer 3 label")).toHaveValue("Old");
+  });
+
+  it("removes an answer, but keeps the last row", () => {
+    render(<ConceptAssignDialog {...props()} />);
+    fireEvent.change(screen.getByLabelText("Value type"), { target: { value: "choice" } });
+    expect(screen.getByRole("button", { name: "Remove answer 1" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Add answer" }));
+    fireEvent.change(screen.getByLabelText("Answer 2 label"), { target: { value: "B" } });
+    fireEvent.click(screen.getByRole("button", { name: "Remove answer 1" }));
+    expect(screen.getAllByTestId("new-answer")).toHaveLength(1);
+    expect(screen.getByLabelText("Answer 1 label")).toHaveValue("B");
+  });
+});

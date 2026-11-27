@@ -1879,6 +1879,18 @@ class CustomPatientFieldSerializer(serializers.ModelSerializer):
     # diseases in the context so this is not a query per row.
     diseases = serializers.SerializerMethodField()
     scope = serializers.SerializerMethodField()
+    # A dropdown's answers as a built-in select lists them (``{value, code,
+    # label?}``); none for any other type. A list view passes them in the context.
+    options = serializers.SerializerMethodField()
+
+    def get_options(self, obj) -> list[dict] | None:
+        if obj.field_type != 'choice':
+            return None
+        by_field = self.context.get('field_options')
+        if by_field is None:
+            from omop_core.services import custom_field_values
+            by_field = custom_field_values.options_for([obj.field_name])
+        return list(by_field.get(obj.field_name, []))
 
     def get_diseases(self, obj) -> list[str]:
         by_field = self.context.get('field_diseases')
@@ -1898,9 +1910,19 @@ class CustomPatientFieldSerializer(serializers.ModelSerializer):
             'id', 'field_name', 'display_name', 'tab', 'field_type',
             'mode', 'scope', 'diseases',
             'mapping_status', 'concept_id', 'concept_name', 'vocabulary_id',
-            'concept_code', 'omop_table', 'unit', 'created_at', 'updated_at',
+            'concept_code', 'omop_table', 'unit', 'options', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
+
+
+class CustomFieldAnswerSerializer(serializers.Serializer):
+    """One answer of a dropdown being created: the label, what is stored, its concept."""
+    label = serializers.CharField(max_length=200)
+    # What a save stores; the label when omitted, as for any answer (#1225).
+    value = serializers.CharField(max_length=200, required=False, allow_blank=True, default='')
+    # The standard concept the answer means, written as value_as_concept_id.
+    concept = serializers.PrimaryKeyRelatedField(
+        queryset=Concept.objects.all(), required=False, allow_null=True, default=None)
 
 
 class CustomPatientFieldCreateSerializer(serializers.Serializer):
@@ -1922,6 +1944,8 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
     diseases = serializers.ListField(
         child=serializers.CharField(max_length=30), required=False, default=list,
     )
+    # A dropdown's answers, in order; required for one and refused for any other type.
+    answers = CustomFieldAnswerSerializer(many=True, required=False, default=list)
 
     def validate_diseases(self, value):
         return _clean_field_diseases(value)
@@ -1955,7 +1979,70 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError('Select the OMOP table where this fact is stored.')
         return value
 
+    def _validate_answers(self, attrs):
+        """A dropdown needs answers that are distinct, stored distinctly, with usable concepts."""
+        from omop_core.services import custom_field_values, field_choices, field_value_mappings
+
+        answers = attrs.get('answers') or []
+        if attrs['field_type'] != 'choice':
+            if answers:
+                raise serializers.ValidationError(
+                    {'answers': 'Only a dropdown field has answers.'})
+            return attrs
+        if attrs['mode'] != 'editable':
+            raise serializers.ValidationError(
+                {'mode': 'A dropdown is chosen by a person; it cannot be computed.'})
+        if custom_field_values.target_for(attrs['omop_table']) not in custom_field_values.CHOICE_TABLES:
+            raise serializers.ValidationError(
+                {'omop_table': 'A dropdown is stored in Measurement or Observation, '
+                               'the tables that hold a coded answer.'})
+        if not answers:
+            raise serializers.ValidationError(
+                {'answers': 'A dropdown needs at least one answer.'})
+        errors: list[dict] = []
+        labels: dict[str, int] = {}
+        stored: dict[str, int] = {}
+        spellings: dict[str, int] = {}
+        concepts: dict[int, int] = {}
+        ctx = field_value_mappings.CheckContext()
+        for index, answer in enumerate(answers):
+            problems: dict[str, str] = {}
+            answer['label'] = ' '.join(answer['label'].split())
+            answer['value'] = answer['value'].strip()
+            shown = answer['value'] or answer['label']
+            if not answer['label']:
+                problems['label'] = 'An answer needs a label.'
+            elif field_choices.fold(answer['label']) in labels:
+                problems['label'] = f"{answer['label']!r} is already an answer."
+            if shown in stored:
+                problems['value'] = f'{shown!r} is already stored for another answer.'
+            # An answer's spelling (its label or its value) must name one answer.
+            for text in {answer['label'], shown}:
+                other = spellings.get(field_choices.fold(text))
+                if other is not None and other != index and 'label' not in problems and 'value' not in problems:
+                    problems['value'] = f'{text!r} already means another answer.'
+            concept = answer.get('concept')
+            if concept is not None:
+                reason = field_value_mappings.target_problem(
+                    concept, 'value_as_concept', attrs['field_name'], ctx=ctx)
+                if reason:
+                    problems['concept'] = reason
+                elif concept.pk in concepts:
+                    problems['concept'] = 'Another answer already has this concept.'
+            if not problems:
+                labels[field_choices.fold(answer['label'])] = index
+                stored[shown] = index
+                for text in {answer['label'], shown}:
+                    spellings[field_choices.fold(text)] = index
+                if concept is not None:
+                    concepts[concept.pk] = index
+            errors.append(problems)
+        if any(errors):
+            raise serializers.ValidationError({'answers': errors})
+        return attrs
+
     def validate(self, attrs):
+        attrs = self._validate_answers(attrs)
         if attrs['mode'] == 'computed':
             formula = attrs.get('formula', '').strip()
             if not formula:
@@ -1969,6 +2056,26 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             attrs.pop('formula', None)
         return attrs
 
+    @staticmethod
+    def _create_answers(field_name, answers, user):
+        """The dropdown's ``FieldChoice`` rows, each with its concept as an approved decision.
+
+        The same rows, ordering and decisions the answer editor writes, so the
+        field's answers are edited, scoped and mapped there afterwards.
+        The creator is an approver, so a concept is decided as it is chosen.
+        """
+        from omop_core.services import field_value_mappings
+
+        for index, answer in enumerate(answers):
+            choice = FieldChoice.objects.create(
+                field_name=field_name, display=answer['label'], sort_order=index,
+                value=answer['value'], value_type='text', created_by=user)
+            if answer.get('concept') is not None:
+                proposal = field_value_mappings.propose(
+                    choice, concept_id=answer['concept'].pk, user=user,
+                    rationale='Chosen when the field was created.')
+                field_value_mappings.approve(proposal, user=user)
+
     def create(self, validated_data):
         from django.db import transaction
 
@@ -1977,6 +2084,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         validated_data.pop('confirm_patient_record')
         formula = validated_data.pop('formula', None)
         diseases = validated_data.pop('diseases', [])
+        answers = validated_data.pop('answers', [])
         field_formula = None
         from omop_core.services.field_mapping_provenance import user_provenance
         with transaction.atomic():
@@ -1996,6 +2104,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
                     'number' if validated_data['field_type'] == 'number'
                     else 'boolean' if validated_data['field_type'] == 'boolean'
                     else 'date' if validated_data['field_type'] == 'date'
+                    else 'concept' if validated_data['field_type'] == 'choice'
                     else 'string'
                 ),
                 status='approved',
@@ -2014,6 +2123,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             from omop_core.services import disease_profiles
             disease_profiles.set_field_diseases(
                 custom_field.field_name, diseases, user=request.user)
+            self._create_answers(custom_field.field_name, answers, request.user)
             if custom_field.mode == 'computed':
                 field_formula = FieldFormula.objects.create(
                     field_name=custom_field.field_name,
@@ -2152,8 +2262,11 @@ class FieldChoiceSerializer(serializers.ModelSerializer):
             if getattr(f, 'concrete', False)
         }
         if value not in concrete_names:
+            # A dropdown created through Add Field keeps its answers here too.
+            if CustomPatientField.objects.filter(field_name=value, field_type='choice').exists():
+                return value
             raise serializers.ValidationError(
-                f"'{value}' is not a concrete PatientRecord field."
+                f"'{value}' is not a concrete PatientRecord field or a created dropdown."
             )
         return value
 

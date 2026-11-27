@@ -7,6 +7,14 @@ export interface User {
   is_staff?: boolean;
 }
 
+/** One answer of a dropdown: `value` is what a save stores, `label` what a person reads (only when it
+ *  differs), `code` the code of the answer's concept, when it has one. */
+export interface AnswerOption {
+  value: string;
+  code?: string | null;
+  label?: string;
+}
+
 export interface PatientInfo {
   id?: number;
   person?: number;
@@ -16,6 +24,9 @@ export interface PatientInfo {
   /** Fields shown from a proposed (unapproved) mapping, with the confidence percentage.
    *  Absent or empty when everything shown is approved. */
   provisional_fields?: Record<string, number>;
+  /** The values of the fields added through Add Field, by field name. A dropdown holds the stored
+   *  value of its answer; they are saved under `custom_fields` and tracked as `custom_fields.<name>`. */
+  custom_fields?: Record<string, unknown>;
   /** Of a list field holding approved and proposed items, the proposed ones. */
   provisional_items?: Record<string, unknown[]>;
   /** For a professional who may confirm the proposals (#2870), from the v1 record read only:

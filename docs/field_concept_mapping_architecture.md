@@ -505,6 +505,76 @@ fills a created field the record leaves empty, marked with its confidence in
 `provisional_fields["custom_fields.<name>"]`. A computed field is not proposed. The
 [plan](provisional_data_plan.md#created-fields-as-built-2857) has the rules.
 
+### Created dropdown fields
+
+A created field can be a **dropdown**: `CustomPatientField.field_type = 'choice'`
+(`FIELD_TYPE_CHOICES`, migration `0378`; the dialog calls it "Dropdown"). It reuses
+the answer machinery of the built-in coded fields and adds no second answer system.
+
+- **The answers are `FieldChoice` rows under the field's name** (`field_name` is a
+  string, not a column), so the identity, code, stored value, aliases, retirement and
+  `value_as_concept` decisions of [#1224](#scoped-choices-fieldchoice-identity-1224)
+  apply unchanged. `POST /api/v1/custom-patient-fields/` takes `answers`
+  (`[{label, value?, concept?}]`, in order) and creates, in the field's transaction, the
+  field, its approved mapping (`value_kind='concept'`), its scope and the answers. An
+  answer's concept becomes an **approved** `value_as_concept` decision
+  (`field_value_mappings.propose` then `approve`, so the same target checks apply: a
+  current standard concept outside the non-answer domains). The creator is an approver
+  (`_can_approve_mappings`: staff and org admins; an analyst or a doctor gets 403).
+  `FieldChoiceSerializer` accepts a created dropdown's name, so the Field Mappings answer
+  editor adds, renames, retires, scopes and maps answers afterwards; a created field of
+  another type takes none.
+- **What a dropdown needs.** At least one answer; distinct labels and distinct stored
+  values (a value left blank stores the label, and a rename freezes that, so a renamed
+  answer keeps saving its old stored value, #2901); one answer per concept (two answers
+  sharing a concept could not be read back); `mode='editable'` (a person chooses it);
+  and `omop_table` Measurement or Observation, the tables that carry a coded answer. A
+  refused answer is a per-index 400 (`answers: [{label?, value?, concept?}]`) and nothing
+  is created.
+- **Reads.** The definition list (`GET custom-patient-fields/`) and the writable-fields
+  descriptor carry `options: [{value, code, label?}]` as a built-in select's do: `value`
+  is what a save stores, `code` the code of the answer's concept (its approved decision,
+  else its primary code) or null, `label` only where it differs from the value. Retired
+  answers are not offered. The record read carries only the stored value under
+  `custom_fields`; the descriptor entry adds `multiple: false` and the projection's
+  `value_concept_map`.
+- **Writes.** The PATCH value must be the stored value of a live answer, else a 400 that
+  names the field and lists the answers (`custom_field_values.changed_values`); `null` or
+  `""` clears; a number is accepted for a numeric stored value (`2` is `"2"`). A value the
+  record already holds is not an edit and is not checked again, so a client echoing a
+  retired answer already stored is not refused. It lands on `custom_fields`, is pending as
+  `custom_fields.<name>`, and projects as for any created field.
+- **Projection.** The recipe is the `concept` value kind of `project_single_value` with
+  `value_concept_map` from `answer_concept_ids`: the row carries `value_as_string` = the
+  stored value always, and `value_as_concept_id` as well where the answer has a usable
+  approved concept (none, and plain text, for an answer with no concept, a
+  no-equivalent decision, or a target a reload retired). A retired decision is not
+  written; the value is still saved. The row is under the field's one concept and its
+  source key `custom:<name>`, in Observation or Measurement.
+- **Derive-back** (`custom_field_values.AnswerIndex`, used by
+  `patient_record_service.custom_field_answers`). A fact at the field's concept, entered
+  or imported, reads as the stored value of the answer its `value_as_string` stands for
+  (label, stored value or alias, case and spacing aside), else the answer its
+  `value_as_concept_id` stands for (`answer_values_by_concept`, the inverse of the
+  projection from the same decisions). A text or concept that two live answers share, or
+  that stands for no answer, reads as nothing and is **not written**: such a fact is
+  skipped before the latest fact is chosen, so it cannot hide an older fact that does
+  match. A retired answer still reads (stored data keeps its meaning); a live answer
+  speaks over a retired one.
+- **Provisional data.** A proposal-based row fills a dropdown through the same reader, so
+  only with one of its answers; the mark, the rejection by clearing and the approval by
+  PATCH are the scalar rules of [created fields](patient-record-first-writes.md#created-fields).
+- **Limits.** The field has **one concept**, as every created field does, and facts are
+  matched on it: an import that carries the answer as a *different* observation concept
+  (one concept per answer, the common FHIR pattern) is not read into the dropdown, which
+  needs a mapping to the field's one question concept with the answer as value. An answer
+  concept is read back only from `value_as_concept_id` of a fact at that question concept.
+  Dropdowns are single-choice (no multi-select) and text-valued: no integer, decimal or
+  boolean answer typing, and a dropdown cannot be changed to or from another type, nor
+  computed. Answer scope by disease (`FieldChoiceDisease`) is stored but, as for built-in
+  fields, does not yet narrow what the patient tab offers. A condition, drug or procedure
+  table cannot hold a coded answer, so a dropdown cannot be stored there.
+
 ### Whose record a field is part of: `FieldDiseaseMembership`
 
 A patient's record is a **profile**: the base record every patient has, plus

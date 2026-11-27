@@ -5220,6 +5220,9 @@ class CustomPatientField(models.Model):
         ('number', 'Number'),
         ('date', 'Date'),
         ('boolean', 'Boolean'),
+        # One of the field's curated answers (``FieldChoice`` rows under the
+        # field's name), stored as the answer's stored value.
+        ('choice', 'Dropdown'),
     ]
     MODE_CHOICES = [
         ('editable', 'Editable'),

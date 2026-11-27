@@ -17423,8 +17423,14 @@ def custom_patient_field_list(request):
         fields = CustomPatientField.objects.select_related('mapping__concept').filter(
             mapping__status='approved',
         )
+        from omop_core.services import custom_field_values
+        fields = list(fields)
+        choices = [f.field_name for f in fields if f.field_type == 'choice']
         return Response(CustomPatientFieldSerializer(
-            fields, many=True, context={'field_diseases': disease_profiles.memberships()},
+            fields, many=True, context={
+                'field_diseases': disease_profiles.memberships(),
+                'field_options': custom_field_values.options_for(choices) if choices else {},
+            },
         ).data)
 
     if not _can_approve_mappings(request.user):
