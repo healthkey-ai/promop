@@ -15431,7 +15431,9 @@ def code_mapping_group(request):
     from omop_core.services.source_retirement import mapping_source_retirement
 
     label = request.query_params.get('label')
-    if not label:
+    # Or one source code system's rows, for a section sorted by source system.
+    group_system = request.query_params.get('group_system')
+    if not label and not group_system:
         return Response({'detail': 'label is required.'}, status=status.HTTP_400_BAD_REQUEST)
     filters = section_filters(request.query_params)
     section = request.query_params.get('section', 'Unmapped')
@@ -15445,8 +15447,18 @@ def code_mapping_group(request):
     # counted the entry. Without this, an entry reading "3 codes" under a
     # provenance filter expands into all 2,557 -- including the rows the filter
     # existed to hide -- and a cross-tab search expands into one tab only.
+    members = visible_rows(mappings, request.query_params, section=section)
+    if group_system:
+        from omop_core.services import wearable_mapping_export as wearable_export
+        try:
+            (system,) = wearable_export.clean_sources(group_system)
+        except (wearable_export.FormatError, ValueError):
+            return Response({'detail': 'Unknown source code system.'}, status=status.HTTP_400_BAD_REQUEST)
+        members = members.filter(source_vocabulary_id=system)
+    else:
+        members = group_members(members, label)
     rows = list(with_destination_counts(
-        filters[section](group_members(visible_rows(mappings, request.query_params, section=section), label))
+        filters[section](members)
     ).order_by('-occurrence_count', 'source_code', 'id')[:MAX_GROUP_MEMBERS + 1])
     truncated = len(rows) > MAX_GROUP_MEMBERS
     rows = rows[:MAX_GROUP_MEMBERS]
@@ -15454,7 +15466,7 @@ def code_mapping_group(request):
     attach_source_samples(rows)
     metadata = mapping_source_retirement(rows)
     return Response({
-        'label': label,
+        'label': label or group_system,
         'section': section,
         'results': [_serialize_code_mapping_row(
             row.target_concept, row, metadata[row.pk], destination_count=row.destination_count)
@@ -15482,7 +15494,8 @@ def _group_job_rows(data):
     # A search deliberately reaches across tabs for browsing. A group decision
     # never does: Epic and Cerner albumin are two decisions.
     filters = {key: data.get(key) for key in (
-        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'auto_approved', 'queue_sections')}
+        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'auto_approved', 'queue_sections',
+        'source_systems')}
     filters['search'] = ''
     mappings = without_icd10_athena_duplicates(
         SourceCodeConceptMapping.objects.select_related('organization')
