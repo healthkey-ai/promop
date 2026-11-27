@@ -55,12 +55,48 @@ describe("Suggest", () => {
     render(<ConceptAssignDialog {...editProps} fieldName="genomics_t414" suggestQuery="t(4;14)" />);
     fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
-      "/v1/concepts/search/", { params: { q: "t(4;14)", limit: "50" } },
+      "/v1/concepts/search/", { params: { q: "t(4;14)", limit: "50", prefer_domain_id: "Measurement" } },
     ));
   });
 
   it("falls back to the field name without a suggest query", async () => {
     render(<ConceptAssignDialog {...editProps} fieldName="smoking_status" />);
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50", prefer_domain_id: "Measurement" } },
+    ));
+  });
+});
+
+describe("the concept search prefers the table's own domain", () => {
+  it.each([
+    ["measurement", "Measurement"],
+    ["observation", "Observation"],
+    ["condition_occurrence", "Condition"],
+    ["drug_exposure", "Drug"],
+    ["procedure_occurrence", "Procedure"],
+  ])("a %s field prefers %s", async (table, domain) => {
+    render(<ConceptAssignDialog {...editProps} initialOmopTable={table} suggestQuery="smoking status" />);
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50", prefer_domain_id: domain } },
+    ));
+  });
+
+  it("searches again with the new domain when the Source Table changes", async () => {
+    render(<ConceptAssignDialog {...editProps} initialOmopTable="measurement" suggestQuery="smoking status" />);
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50", prefer_domain_id: "Measurement" } },
+    ));
+    fireEvent.change(screen.getByRole("combobox", { name: "Source Table" }), { target: { value: "Observation" } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50", prefer_domain_id: "Observation" } },
+    ));
+  });
+
+  it("sends no hint for a table with no single domain", async () => {
+    render(<ConceptAssignDialog {...editProps} initialOmopTable="person" suggestQuery="smoking status" />);
     fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
       "/v1/concepts/search/", { params: { q: "smoking status", limit: "50" } },
@@ -566,7 +602,7 @@ describe("create mode", () => {
     fireEvent.change(screen.getByLabelText("Display name"), { target: { value: "Frailty Index" } });
     fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
-      "/v1/concepts/search/", { params: { q: "Frailty Index", limit: "50" } },
+      "/v1/concepts/search/", { params: { q: "Frailty Index", limit: "50", prefer_domain_id: "Measurement" } },
     ));
   });
 });
@@ -649,6 +685,10 @@ describe("create mode, dropdown", () => {
     fireEvent.change(screen.getAllByPlaceholderText("Search a concept (optional)")[1], { target: { value: "answer2" } });
     fireEvent.click(await screen.findByRole("button", { name: /Grade group 2.*SNOMED/ }));
     expect(screen.getByRole("button", { name: "Remove concept Grade group 2" })).toBeInTheDocument();
+    // An answer is a value concept, so its search ranks the Meas Value domain first.
+    expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "answer2", limit: "8", prefer_domain_id: "Meas Value" } },
+    );
     // A row with no label is not an answer.
     fireEvent.click(screen.getByRole("button", { name: "Add answer" }));
 

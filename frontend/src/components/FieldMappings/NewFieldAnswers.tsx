@@ -36,7 +36,10 @@ function ConceptPicker({ id, concept, disabled, onChange }: {
       (async () => {
         setSearching(true);
         try {
-          const response = await api.get("/v1/concepts/search/", { params: { q: query.trim(), limit: "8" } });
+          const response = await api.get("/v1/concepts/search/", {
+            // An answer is a value concept: rank the Meas Value domain first.
+            params: { q: query.trim(), limit: "8", prefer_domain_id: "Meas Value" },
+          });
           const body = response.data;
           if (current) setResults(Array.isArray(body) ? body : body?.results ?? []);
         } catch {

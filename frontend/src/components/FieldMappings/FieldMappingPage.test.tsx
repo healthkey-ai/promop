@@ -488,7 +488,7 @@ describe("FieldMappingPage", () => {
 
     await waitFor(() => {
       expect(mockGet).toHaveBeenCalledWith("/v1/concepts/search/", {
-        params: { q: "smoking status", limit: "50" },
+        params: { q: "smoking status", limit: "50", prefer_domain_id: "Measurement" },
       });
     });
   });
