@@ -358,12 +358,26 @@ def test_permanent_delete_is_refused_while_a_record_holds_a_value(staff, grade, 
 def test_permanent_delete_is_refused_while_facts_exist_under_the_fields_own_key(staff, grade, concepts):
     person_record = PatientRecordFactory()
     ObservationFactory(person=person_record.person, observation_concept=concepts['question'],
-                       observation_source_value=f'custom:{NAME}')
+                       observation_source_value=f'custom:{NAME}', value_as_number=1)
 
     response = staff.delete(url() + '?permanent=true')
 
     assert response.status_code == 409 and response.data['has_facts'] is True
     assert response.data['records_with_value'] == 0
+
+
+def test_a_cleared_value_leaves_an_empty_row_that_goes_with_the_field(staff, grade, concepts):
+    """Typing a value and clearing it leaves a row under the key with no answer: it holds nothing."""
+    person_record = PatientRecordFactory()
+    empty = ObservationFactory(person=person_record.person, observation_concept=concepts['question'],
+                               observation_source_value=f'custom:{NAME}',
+                               value_as_number=None, value_as_string=None)
+    assert staff.get(url()).data['can_delete'] is True
+
+    response = staff.delete(url() + '?permanent=true')
+
+    assert response.status_code == 200 and response.data['state'] == 'deleted'
+    assert not Observation.objects.filter(pk=empty.pk).exists()
 
 
 def test_a_lab_at_the_fields_concept_does_not_block_a_permanent_delete(staff, grade, concepts):
