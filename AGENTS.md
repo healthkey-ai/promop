@@ -73,6 +73,14 @@ document for interactive edits, and the rules below assume it.
   whole echoed object approves every proposal in it), and "Confirm my record" is blocked by
   a marked one only when its definition puts it on a patient tab the patient can edit
   ([created fields as built](docs/provisional_data_plan.md#created-fields-as-built-2857)).
+  A created field can be a **dropdown** (`field_type='choice'`): its answers are ordinary
+  `FieldChoice` rows under the field's name, entered in the Add Field dialog and edited
+  afterwards in the Field Mappings answer editor like a built-in field's. The value is the
+  answer's stored value (a write of any other is a 400), an answer with a concept projects as
+  `value_as_concept_id` beside `value_as_string`, one without as text only, and a fact at the
+  field's concept reads back as the answer its text or concept stands for; one that matches no
+  answer is not read, so a proposal can fill a dropdown only with one of its answers
+  ([created dropdowns](docs/field_concept_mapping_architecture.md#created-dropdown-fields)).
 - **Ingest goes the other way.** The ETL, FHIR sync and bulk OMOP endpoints
   write OMOP facts and derive the record from them. See
   [FHIR Upload Architecture](#fhir-upload-architecture) below.

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { CustomPatientFields } from "./CustomPatientFields";
@@ -161,5 +161,71 @@ describe("CustomPatientFields editing", () => {
       </ProvisionalContext.Provider>,
     );
     expect(screen.queryByText(/Provisional/)).not.toBeInTheDocument();
+  });
+});
+
+/** A dropdown: a select of its answers that shows the label and saves the stored value. */
+describe("CustomPatientFields dropdown", () => {
+  const GRADE = field(9, "gleason_grade_group", "disease", [], {
+    field_type: "choice",
+    options: [
+      { value: "1", code: "A-1", label: "Grade group 1" },
+      { value: "2", code: "A-2", label: "Grade group 2" },
+      { value: "other", code: null },
+    ],
+  });
+  const grade: FieldDescriptors = { gleason_grade_group: writable };
+
+  const open = async () => {
+    const trigger = screen.getByRole("combobox");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("listbox")).toBeInTheDocument());
+  };
+
+  it("shows the label of the stored value and offers the answers by label", async () => {
+    render(<CustomPatientFields fields={[GRADE]} tabs={["disease"]} diseases={[]}
+      formData={{ custom_fields: { gleason_grade_group: "2" } }} descriptors={grade} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toHaveTextContent("Grade group 2");
+    await open();
+    const shown = Array.from(screen.getByRole("listbox").querySelectorAll('[role="option"]'))
+      .map((option) => option.textContent?.trim());
+    expect(shown).toEqual(expect.arrayContaining(["Grade group 1", "Grade group 2", "other"]));
+  });
+
+  it("hands back the stored value of the answer chosen", async () => {
+    const onChange = vi.fn();
+    render(<CustomPatientFields fields={[GRADE]} tabs={["disease"]} diseases={[]}
+      formData={{}} descriptors={grade} onChange={onChange} />);
+    await open();
+    fireEvent.click(screen.getByRole("option", { name: "Grade group 1" }));
+    expect(onChange).toHaveBeenCalledWith("gleason_grade_group", "1");
+  });
+
+  it("takes the answers from the writable-fields answer when the definition has none", () => {
+    const bare = field(9, "gleason_grade_group", "disease", [], { field_type: "choice" });
+    const descriptors: FieldDescriptors = { gleason_grade_group: {
+      ...writable, options: [{ value: "1", label: "Grade group 1" }],
+    } };
+    render(<CustomPatientFields fields={[bare]} tabs={["disease"]} diseases={[]}
+      formData={{ custom_fields: { gleason_grade_group: "1" } }} descriptors={descriptors} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toHaveTextContent("Grade group 1");
+  });
+
+  it("still shows a value that is no longer one of the answers, as it is stored", () => {
+    render(<CustomPatientFields fields={[GRADE]} tabs={["disease"]} diseases={[]}
+      formData={{ custom_fields: { gleason_grade_group: "retired value" } }} descriptors={grade} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toHaveTextContent("retired value");
+  });
+
+  it("is disabled where the field is not writable for the caller, with the reason", () => {
+    const readOnly: FieldDescriptors = { gleason_grade_group: {
+      kind: "direct", writable: false, read_only_for_caller: true, reason: "You have read-only access.",
+    } };
+    render(<CustomPatientFields fields={[GRADE]} tabs={["disease"]} diseases={[]}
+      formData={{ custom_fields: { gleason_grade_group: "1" } }} descriptors={readOnly} onChange={vi.fn()} />);
+    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(screen.getByRole("combobox")).toHaveTextContent("Grade group 1");
+    expect(screen.getByTestId("reason-gleason_grade_group")).toHaveTextContent("read-only");
   });
 });

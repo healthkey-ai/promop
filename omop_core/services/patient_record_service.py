@@ -941,6 +941,9 @@ def custom_field_answers(snapshot: OmopSnapshot, person: Person = None) -> dict[
         mode='editable', mapping__status='approved',
     ).select_related('mapping__concept'))
     cleared = custom_field_values.cleared_days(person, fields) if person is not None else {}
+    # A dropdown reads only as one of its answers (a fact's text or concept); read once.
+    choice_names = [f.field_name for f in fields if f.field_type == 'choice']
+    answers = custom_field_values.AnswerIndex(choice_names) if choice_names else None
     for field in fields:
         mapping = field.mapping
         target = custom_field_values.target_for(mapping.omop_table)
@@ -964,11 +967,20 @@ def custom_field_answers(snapshot: OmopSnapshot, person: Person = None) -> dict[
             imported = [row for row in snapshot.drug_exposures if row.drug_concept_id == concept_id]
         elif target == 'procedure':
             imported = [row for row in snapshot.procedures if row.procedure_concept_id == concept_id]
+        if field.field_type == 'choice':
+            # A fact that matches no answer is not read, and does not hide an
+            # older one that does. A value the editor wrote reads as entered.
+            def reads(row, was_entered, name=field.field_name):
+                return custom_field_values.read_value(
+                    'choice', row, entered=was_entered, answers=answers, name=name) is not None
+            entered = [row for row in entered if reads(row, True)]
+            imported = [row for row in imported if reads(row, False)]
         row, was_entered = custom_field_values.latest_row(
             entered, imported, cleared.get((target, source)))
         if row is None:
             continue
-        value = custom_field_values.read_value(field.field_type, row, entered=was_entered)
+        value = custom_field_values.read_value(
+            field.field_type, row, entered=was_entered, answers=answers, name=field.field_name)
         if value is not None:
             values[field.field_name] = (value, row)
     return values

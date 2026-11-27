@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
 import type { FieldScoped } from "@/types/fieldScope";
+import type { AnswerOption } from "@/types/patient";
 
 /**
  * A field added through Field Concept Mapping (#721), as
@@ -12,9 +13,11 @@ export interface CustomPatientField extends FieldScoped {
   field_name: string;
   display_name: string;
   tab: string;
-  field_type: "text" | "number" | "date" | "boolean";
+  field_type: "text" | "number" | "date" | "boolean" | "choice";
   mode: "editable" | "computed";
   unit: string;
+  /** A dropdown's answers; null for any other type. */
+  options?: AnswerOption[] | null;
 }
 
 /**

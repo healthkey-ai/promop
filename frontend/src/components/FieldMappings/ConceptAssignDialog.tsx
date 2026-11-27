@@ -5,6 +5,8 @@ import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
 import type { DiseaseCategoryOption, FieldScope } from "@/types/fieldScope";
 import { FieldScopeControl } from "./FieldScopeControl";
+import { NewFieldAnswers } from "./NewFieldAnswers";
+import { answersPayload, blankAnswer, type AnswerDraft, type AnswerErrors } from "./answerDrafts";
 
 interface ConceptResult {
   concept_id: number;
@@ -89,7 +91,7 @@ interface Props {
   };
 }
 
-type ValueType = "text" | "number" | "date" | "boolean";
+type ValueType = "text" | "number" | "date" | "boolean" | "choice";
 type FieldMode = "editable" | "computed";
 
 /** A display name as the field name it suggests: lower_snake_case. */
@@ -98,6 +100,26 @@ const nameFromLabel = (label: string) => (
 );
 
 const NO_DISEASES: string[] = [];
+
+/** The tables a dropdown is stored in: the two that carry a coded answer. */
+const DROPDOWN_TABLES = ["Measurement", "Observation"];
+
+/** The server's per-answer refusals (`answers: [{label?, value?, concept?}, ...]`), by position. */
+function answerRefusals(data: unknown): Record<number, AnswerErrors> {
+  const answers = data && typeof data === "object" ? (data as { answers?: unknown }).answers : undefined;
+  const refused: Record<number, AnswerErrors> = {};
+  if (!Array.isArray(answers)) return refused;
+  answers.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+    const row: AnswerErrors = {};
+    for (const key of ["label", "value", "concept"] as const) {
+      const text = errorText((entry as Record<string, unknown>)[key]);
+      if (text) row[key] = text;
+    }
+    if (Object.keys(row).length) refused[index] = row;
+  });
+  return refused;
+}
 
 /** A DRF error for one key as text: a string, a list, or a list per index. */
 function errorText(value: unknown): string {
@@ -193,6 +215,9 @@ export function ConceptAssignDialog({
   const [valueType, setValueType] = useState<ValueType>("text");
   const [fieldMode, setFieldMode] = useState<FieldMode>("editable");
   const [formula, setFormula] = useState("");
+  const [answers, setAnswers] = useState<AnswerDraft[]>(() => [blankAnswer()]);
+  const [answerErrors, setAnswerErrors] = useState<Record<number, AnswerErrors>>({});
+  const dropdown = creating && valueType === "choice";
   const [tab, setTab] = useState(create?.tab ?? "");
   const [confirmed, setConfirmed] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -288,6 +313,7 @@ export function ConceptAssignDialog({
     !displayName.trim() && "a display name",
     !newFieldName.trim() && "a field name",
     fieldMode === "computed" && !formula.trim() && "a formula",
+    dropdown && answersPayload(answers).length === 0 && "at least one answer",
     !selected && "a concept",
     !confirmed && "the confirmation",
   ].filter(Boolean).join(", ");
@@ -304,6 +330,7 @@ export function ConceptAssignDialog({
     setSaving(true);
     setError("");
     setScopeError("");
+    setAnswerErrors({});
     try {
       if (creating) {
         // The definition, its approved mapping, its tab and its scope, in
@@ -318,9 +345,10 @@ export function ConceptAssignDialog({
           tab,
           concept: selected?.concept_id,
           omop_table: omopTable,
-          unit: effectiveUnit,
+          unit: dropdown ? "" : effectiveUnit,
           notes,
           diseases: scopedDiseases,
+          answers: dropdown ? answersPayload(answers) : undefined,
         });
         onSaved();
         return;
@@ -372,8 +400,11 @@ export function ConceptAssignDialog({
         setScopeError(errorText(refused) || "This scope was refused.");
         if (Object.keys(rest).length) setError(JSON.stringify(rest));
       } else if (creating && data && typeof data === "object" && !Array.isArray(data)) {
-        // A refused definition names the input it is about.
-        setError(Object.entries(data).map(([key, value]) => (
+        // A refused definition names the input it is about; an answer's refusal is said under it.
+        const refused = answerRefusals(data);
+        setAnswerErrors(refused);
+        const rest = Object.entries(data).filter(([key]) => key !== "answers" || Object.keys(refused).length === 0);
+        setError(rest.map(([key, value]) => (
           key === "detail" || key === "non_field_errors" ? errorText(value) : `${key}: ${errorText(value)}`
         )).join(" "));
       } else {
@@ -492,13 +523,23 @@ export function ConceptAssignDialog({
                   <select
                     id="new_field_type"
                     value={valueType}
-                    onChange={(e) => setValueType(e.target.value as ValueType)}
+                    onChange={(e) => {
+                      const next = e.target.value as ValueType;
+                      setValueType(next);
+                      if (next === "choice") {
+                        // A person chooses a dropdown's answer, and only two tables carry a coded one;
+                        // Observation is where a coded finding belongs, and can be changed to Measurement.
+                        setFieldMode("editable");
+                        setOmopTable("Observation");
+                      }
+                    }}
                     className={`${INPUT_CLASS} w-full`}
                   >
                     <option value="text">Text</option>
                     <option value="number">Number</option>
                     <option value="date">Date</option>
                     <option value="boolean">Boolean</option>
+                    <option value="choice">Dropdown (choose one answer)</option>
                   </select>
                 </Field>
                 <Field id="new_field_tab" label="Tab" tip={TIP.tab}>
@@ -521,7 +562,7 @@ export function ConceptAssignDialog({
                     className={`${INPUT_CLASS} w-full`}
                   >
                     <option value="editable">Editable</option>
-                    <option value="computed">Computed from a formula</option>
+                    <option value="computed" disabled={dropdown}>Computed from a formula</option>
                   </select>
                 </Field>
                 {fieldMode === "computed" && (
@@ -538,6 +579,19 @@ export function ConceptAssignDialog({
                 )}
               </div>
             </fieldset>
+          )}
+
+          {/* ── ANSWERS (a new dropdown) ───────────────────────────── */}
+          {dropdown && (
+            <NewFieldAnswers
+              answers={answers}
+              errors={answerErrors}
+              disabled={saving}
+              onChange={(next) => {
+                setAnswers(next);
+                setAnswerErrors({});
+              }}
+            />
           )}
 
           {/* ── SOURCE CONCEPT ─────────────────────────────────────── */}
@@ -698,14 +752,16 @@ export function ConceptAssignDialog({
                   className={`${INPUT_CLASS} w-full`}
                 >
                   {selectedTableOption === undefined && <option value={omopTable}>{omopTable}</option>}
-                  {OMOP_TABLES.map((table) => <option key={table} value={table}>{table}</option>)}
+                  {(dropdown || fieldType === "choice" ? DROPDOWN_TABLES : OMOP_TABLES).map((table) => (
+                    <option key={table} value={table}>{table}</option>
+                  ))}
                 </select>
               </Field>
             </div>
           </fieldset>
 
-          {/* Unit */}
-          <div className="mb-4">
+          {/* Unit: a dropdown's answer has none */}
+          {!dropdown && <div className="mb-4">
             <Field id="unit" label="Unit" tip={TIP.unit}>
               {selected?.suggested_unit && unit === selected.suggested_unit && (
                 <span className="text-[10px] text-slate-400">(suggested)</span>
@@ -745,7 +801,7 @@ export function ConceptAssignDialog({
                 />
               )}
             </Field>
-          </div>
+          </div>}
 
           {/* Notes */}
           <div className="mb-4">

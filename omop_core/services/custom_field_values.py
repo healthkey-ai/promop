@@ -18,6 +18,16 @@ architecture as an edit to a column (docs/patient-record-first-writes.md):
 Only an approved, non-computed field takes a value: a computed one is its
 formula's result. Whether a field belongs to the record's disease is not
 enforced here (#2333).
+
+A **dropdown** field (``field_type='choice'``) holds one of its answers: the
+curated ``FieldChoice`` rows under the field's name, the same rows and editor a
+built-in coded field uses. The value is the answer's *stored value* (its value,
+or its label while it has none, and what it was when the label is renamed), a
+write of anything else is refused, and OMOP gets the answer as ``value_as_string``
+plus, where the answer has an approved concept, ``value_as_concept_id``
+(the ``concept`` value kind of ``project_single_value``). A fact imported at the
+field's concept is read back as the answer its text or its concept stands for;
+one that matches no answer is not read (``AnswerIndex``).
 """
 import logging
 import math
@@ -44,7 +54,10 @@ _TARGETS = {
     'drug': 'drug_exposure', 'drugexposure': 'drug_exposure',
     'procedure': 'procedure', 'procedureoccurrence': 'procedure',
 }
-_VALUE_KINDS = {'text': 'string', 'number': 'number', 'date': 'date', 'boolean': 'boolean'}
+_VALUE_KINDS = {'text': 'string', 'number': 'number', 'date': 'date', 'boolean': 'boolean',
+                'choice': 'concept'}
+# The OMOP tables a dropdown can be stored in: the two that carry a coded answer.
+CHOICE_TABLES = ('measurement', 'observation')
 # Measurement and Observation hold a number to five decimal places, so a value
 # and its read-back agree to that precision and no further.
 _NUMBER_PLACES = 5
@@ -99,6 +112,121 @@ def definitions(names=None) -> dict:
     if names is not None:
         fields = fields.filter(field_name__in=list(names))
     return {field.field_name: field for field in fields}
+
+
+def _curated_choices(names, *, with_aliases=False):
+    """The answers (``FieldChoice`` rows) of the given created fields, live and retired.
+
+    A row holding decisions about a lookup's entries is not an answer.
+    """
+    from omop_core.models import FieldChoice
+
+    rows = (FieldChoice.objects.filter(field_name__in=list(names))
+            .exclude(context_key__startswith='lookup:')
+            .order_by('field_name', 'sort_order', 'display', 'pk'))
+    return rows.prefetch_related('aliases') if with_aliases else rows
+
+
+def answer_values(names) -> dict[str, dict[str, str]]:
+    """The values a write may carry, per dropdown: ``{name: {stored value: label}}``.
+
+    Live answers only: a retired answer is no longer offered, though data
+    already stored under it still reads (``AnswerIndex``).
+    """
+    result: dict[str, dict[str, str]] = {name: {} for name in names}
+    for choice in _curated_choices(names):
+        if choice.retired_at is None:
+            result[choice.field_name].setdefault(choice.stored_value, choice.display)
+    return result
+
+
+def options_for(names) -> dict[str, list[dict]]:
+    """The answers each dropdown offers, as built-in selects list theirs.
+
+    ``{name: [{value, code, label?}]}``: ``value`` is what a save stores,
+    ``code`` the code of the answer's concept (its approved ``value_as_concept``
+    decision, else its primary code) or ``None``, ``label`` only where it
+    differs from the value. Retired answers are left out.
+    """
+    from omop_core.models import FieldChoiceCode, FieldValueConceptMapping
+
+    choices = [c for c in _curated_choices(names) if c.retired_at is None]
+    codes: dict[int, str] = {}
+    if choices:
+        ids = [c.pk for c in choices]
+        for choice_id, code in (FieldChoiceCode.objects.filter(choice_id__in=ids, is_primary=True)
+                                .order_by('-pk').values_list('choice_id', 'code')):
+            codes[choice_id] = code
+        for choice_id, code in (FieldValueConceptMapping.objects
+                                .filter(choice_id__in=ids, role='value_as_concept',
+                                        status='approved', outcome='mapped')
+                                .values_list('choice_id', 'concept_code')):
+            codes[choice_id] = code
+    result: dict[str, list[dict]] = {name: [] for name in names}
+    seen: set[tuple[str, str]] = set()
+    for choice in choices:
+        stored = choice.stored_value
+        if (choice.field_name, stored) in seen:
+            continue
+        seen.add((choice.field_name, stored))
+        option = {'value': stored, 'code': codes.get(choice.pk)}
+        if choice.display != stored:
+            option['label'] = choice.display
+        result[choice.field_name].append(option)
+    return result
+
+
+class AnswerIndex:
+    """What a stored text or concept means as an answer, per dropdown.
+
+    The derive-back of a dropdown: ``value(name, text, concept_id)`` is the
+    stored value of the one answer a fact's text (its label, value or an alias,
+    case and spacing aside) or, failing that, its ``value_as_concept_id``
+    stands for, or ``None``. A spelling or a concept that two answers of the field
+    share is not guessed, and a live answer speaks over a retired one: stored data
+    still reads under an answer that has since been retired (``live_only`` leaves
+    those out, for a proposal, which is approved by saving its value).
+    """
+
+    def __init__(self, names):
+        from omop_core.services import field_choices
+        from omop_core.services.field_value_mappings import answer_values_by_concept
+
+        self._fold = field_choices.fold
+        live: dict[str, dict[str, set]] = {}
+        retired: dict[str, dict[str, set]] = {}
+        self._live_values: dict[str, set] = {name: set() for name in names}
+        self._stored: dict[str, set] = {name: set() for name in names}
+        for choice in _curated_choices(names, with_aliases=True):
+            tier = retired if choice.retired_at else live
+            self._stored[choice.field_name].add(choice.stored_value)
+            if not choice.retired_at:
+                self._live_values[choice.field_name].add(choice.stored_value)
+            spellings = {choice.display, choice.stored_value,
+                         *(alias.alias for alias in choice.aliases.all())}
+            for text in spellings:
+                tier.setdefault(choice.field_name, {}).setdefault(
+                    self._fold(text), set()).add(choice.stored_value)
+        self._text: dict[str, dict[str, str]] = {}
+        for name in names:
+            merged = {**retired.get(name, {}), **live.get(name, {})}
+            self._text[name] = {key: next(iter(values)) for key, values in merged.items()
+                                if len(values) == 1}
+        self._concept = answer_values_by_concept(list(names))
+
+    def value(self, name, text=None, concept_id=None, *, live_only=False):
+        found = None
+        if text and text in self._stored.get(name, ()):
+            # What a save stores is exact, whatever another answer's label spells.
+            found = text
+        elif text:
+            found = self._text.get(name, {}).get(self._fold(text))
+        if found is None and concept_id:
+            found = self._concept.get(name, {}).get(concept_id)
+        if found is not None and live_only and found not in self._live_values.get(name, ()):
+            # A proposal is approved by saving its value, and only a live answer can be saved.
+            return None
+        return found
 
 
 def coerce(field_type: str, raw):
@@ -165,6 +293,7 @@ def changed_values(record, payload, fields=None) -> dict:
     if fields is None:
         fields = definitions(payload) if payload else {}
     edits = {}
+    answers = None   # read once, and only when a dropdown is edited
     for name, raw in payload.items():
         field = fields.get(name)
         if field is None or not is_editable(field):
@@ -174,8 +303,19 @@ def changed_values(record, payload, fields=None) -> dict:
         except ValueError as error:
             raise CustomValueError(name, str(error)) from None
         if not values_match(field.field_type, stored.get(name), value):
+            if field.field_type == 'choice' and not is_empty(value):
+                if answers is None:
+                    answers = answer_values(
+                        [n for n, f in fields.items() if f.field_type == 'choice'])
+                if value not in answers.get(name, {}):
+                    raise CustomValueError(name, _not_an_answer(answers.get(name, {})))
             edits[name] = value
     return edits
+
+
+def _not_an_answer(offered: dict) -> str:
+    shown = ', '.join(sorted(offered)[:12]) + (', ...' if len(offered) > 12 else '')
+    return f'Choose one of the answers: {shown}.' if offered else 'This dropdown has no answers to choose.'
 
 
 def store(record, edits: dict) -> dict:
@@ -198,10 +338,13 @@ def store(record, edits: dict) -> dict:
     return previous
 
 
-def projection_for(field, unit_concept_ids=None) -> dict | None:
+def projection_for(field, unit_concept_ids=None, concept_maps=None) -> dict | None:
     """The OMOP recipe a created field's value is written with, or ``None``.
 
     The same shape ``project_single_value`` takes from the writable descriptor.
+    A dropdown's carries ``value_concept_map``, ``{spelling: concept id}`` from the
+    answers' approved decisions (``concept_maps`` when the caller read them for
+    several fields at once), and has no recipe in a table that holds no coded answer.
     ``None`` when the mapping's table has no writer, it has no concept, or its
     source key does not fit the table's source column: truncating the key
     would break the exact match derivation reads it back by.
@@ -227,7 +370,23 @@ def projection_for(field, unit_concept_ids=None) -> dict | None:
     if mapping.unit:
         projection['unit'] = mapping.unit
         projection['unit_concept_id'] = (unit_concept_ids or {}).get(mapping.unit)
+    if field.field_type == 'choice':
+        if target not in CHOICE_TABLES:
+            return None
+        projection['value_concept_map'] = dict(
+            (concept_maps if concept_maps is not None else _answer_concepts([field.field_name]))
+            .get(field.field_name, {}))
     return projection
+
+
+def _answer_concepts(names) -> dict:
+    from omop_core.services.field_value_mappings import answer_concept_ids
+
+    return answer_concept_ids(list(names)) if names else {}
+
+
+def _choice_names(fields) -> list[str]:
+    return [f.field_name for f in fields if f.field_type == 'choice']
 
 
 def _unit_concept_ids(fields) -> dict:
@@ -245,11 +404,13 @@ def project(person, edits: dict, fields: dict, **authorship) -> set[str]:
     """
     from omop_core.services.omop_projection import project_single_value
 
-    unit_ids = _unit_concept_ids([fields[name] for name in edits if name in fields])
+    edited = [fields[name] for name in edits if name in fields]
+    unit_ids = _unit_concept_ids(edited)
+    concept_maps = _answer_concepts(_choice_names(edited))
     projected = set()
     for name, value in edits.items():
         field = fields.get(name)
-        projection = projection_for(field, unit_ids) if field is not None else None
+        projection = projection_for(field, unit_ids, concept_maps) if field is not None else None
         if projection is None:
             continue
         answers = projection['omop_table'] in ('measurement', 'observation')
@@ -304,16 +465,31 @@ def restore_pending(derived: dict, pending: dict) -> tuple[dict, set[str]]:
     return values, keep
 
 
-def read_value(field_type: str, row, *, entered: bool):
+def read_value(field_type: str, row, *, entered: bool, answers=None, name=None):
     """A created field's value from the OMOP row that answers it.
 
     ``entered`` says the row was written by the record editor under the
     field's own source key, so it carries the answer in its value columns
     whatever the type. An imported row answers a boolean by existing and a
-    date by its own date. Values are JSON-ready: a number, an ISO date, text.
+    date by its own date. A dropdown reads as the stored value of the answer
+    the row's text or concept stands for (``answers``, an ``AnswerIndex``, and
+    the field's ``name``), and as nothing when it stands for none. Values are
+    JSON-ready: a number, an ISO date, text.
     """
     number = getattr(row, 'value_as_number', None)
     text = getattr(row, 'value_as_string', None)
+    if field_type == 'choice':
+        # Only an answer the field has: the row's text, else its answer concept. A row the
+        # editor wrote carried a live answer when it was saved; if the answer was deleted
+        # since, the text it stored is still what was entered, and shows as it is.
+        if answers is None:
+            return None
+        found = answers.value(
+            name, text, getattr(row, 'value_as_concept_id', None),
+            live_only=getattr(row, 'confidence', None) is not None)
+        if found is None and entered and text:
+            return text
+        return found
     if field_type == 'number':
         if number is None:
             return None
@@ -413,6 +589,9 @@ def descriptor_entries() -> dict:
     """
     fields = definitions()
     unit_ids = _unit_concept_ids(fields.values())
+    choice_names = _choice_names(fields.values())
+    concept_maps = _answer_concepts(choice_names)
+    options = options_for(choice_names) if choice_names else {}
     entries = {}
     for name, field in sorted(fields.items()):
         value_kind = _VALUE_KINDS.get(field.field_type, 'string')
@@ -436,7 +615,10 @@ def descriptor_entries() -> dict:
         }
         if field.mapping.unit:
             entry['unit'] = field.mapping.unit
-        projection = projection_for(field, unit_ids)
+        if field.field_type == 'choice':
+            entry['options'] = options.get(name, [])
+            entry['multiple'] = False
+        projection = projection_for(field, unit_ids, concept_maps)
         if projection is not None:
             entry['projection'] = {key: value for key, value in projection.items()
                                    if key != 'value_kind'}
