@@ -532,6 +532,23 @@ describe("CodeMappingPage", () => {
     }
   });
 
+  describe("a link to a wearable metric's source codes", () => {
+    it("opens the Wearables tab searching that metric", async () => {
+      renderPage().unmount();
+      mockGet.mockClear();
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward&metric=steps"]}><CodeMappingPage /></MemoryRouter>);
+
+      expect(await screen.findByDisplayValue("metric:steps")).toBeInTheDocument();
+      await waitFor(() => {
+        const browse = mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/");
+        expect(browse.length).toBeGreaterThan(0);
+        for (const [, config] of browse) {
+          expect(config?.params).toMatchObject({ source: "OpenWearables", search: "metric:steps" });
+        }
+      });
+    });
+  });
+
   describe("a link to one mapping (#2702)", () => {
     const openLinked = (entry: string) => {
       const view = renderPage();

@@ -118,7 +118,13 @@ SEARCH_FIELDS = {
     'concept_id': (),
     'organization': ('organization__name', 'organization__slug'),
     'org': ('organization__name', 'organization__slug'),
+    'metric': ('metric_key',),
+    'metric_key': ('metric_key',),
 }
+
+# Fields a ``field:value`` search matches whole, not as a substring: a metric
+# key is a short identifier, and ``hr`` is not ``resting_hr`` and ``walking_hr_avg``.
+EXACT_SEARCH_FIELDS = frozenset({'metric', 'metric_key'})
 
 ALL_SEARCH_FIELDS = (
     'source_code', 'source_vocabulary_id', 'source_code_description',
@@ -144,7 +150,9 @@ def parse_search(search):
 def search_filter(search):
     """The Q a stripped, non-empty search means, shared by every list path.
 
-    * ``field:value`` searches that field alone; ``concept_id:`` is exact.
+    * ``field:value`` searches that field alone; ``concept_id:`` and
+      ``metric:`` (a wearable metric key, as the Wearables tab links to it)
+      are exact.
     * An all-digit search is a source code and matches only ``source_code``:
       Epic vocabularies are OIDs, so the digits would otherwise match every
       row of a code system (#2376), and a concept id is ``concept_id:N``.
@@ -160,9 +168,10 @@ def search_filter(search):
         lookups = ('source_code',)
     else:
         lookups = ALL_SEARCH_FIELDS
+    match = 'iexact' if field in EXACT_SEARCH_FIELDS else 'icontains'
     query = Q()
     for lookup in lookups:
-        query |= Q(**{f'{lookup}__icontains': value})
+        query |= Q(**{f'{lookup}__{match}': value})
     return query
 
 
