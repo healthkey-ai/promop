@@ -323,7 +323,13 @@ def test_required_backend_gate_rejects_incomplete_matrix(
     assert gate['name'] == 'Backend tests'
     assert set(gate['needs']) == {'changes', 'backend_suites', 'athena_browser'}
     assert 'always()' in gate['if']
-    assert set(jobs['backend_suites']['strategy']['matrix']['suite']) == {'django', 'pytest'}
+    legs = jobs['backend_suites']['strategy']['matrix']['include']
+    assert {leg['suite'] for leg in legs} == {'django', 'pytest'}
+    # Every suite runs all of its shards: shard i of n for each i in 1..n, once.
+    for suite in ('django', 'pytest'):
+        mine = [leg for leg in legs if leg['suite'] == suite]
+        assert {leg['shards'] for leg in mine} == {len(mine)}
+        assert sorted(leg['shard'] for leg in mine) == list(range(1, len(mine) + 1))
     command = gate['steps'][0]['run']
     process = subprocess.run(['bash', '-c', command], env={
         **os.environ,
@@ -361,6 +367,7 @@ def test_backend_suites_are_bounded_and_do_not_migrate_twice():
         step['run'] for step in steps if step.get('name') == 'Run tests (Django runner)'
     )
     assert '--parallel auto' in django_command
+    assert '--testrunner promop.test_runner.ShardedDiscoverRunner' in django_command
     assert '--timing' in django_command
     assert all(step.get('name') != 'Verify deployed Athena browser runtime' for step in steps)
     setup_uv = next(step for step in steps if step.get('name') == 'Set up cached uv')
@@ -374,6 +381,8 @@ def test_backend_suites_are_bounded_and_do_not_migrate_twice():
     )
     assert '--dist loadfile' in pytest_command
     assert '--durations=20' in pytest_command
+    assert job['env']['TEST_SHARD_COUNT'] == '${{ matrix.shards }}'
+    assert job['env']['TEST_SHARD_INDEX'] == '${{ matrix.shard }}'
 
 
 def test_browser_runtime_is_a_separate_path_gated_job():
