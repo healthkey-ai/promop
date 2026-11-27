@@ -74,10 +74,34 @@ SAMPLE_BUNDLE = {
 }
 
 
+def _seed_sync_concepts():
+    """The concepts the sync needs from the seed migrations or an Athena load.
+
+    No stand-in is created by the sync any more (#2922): without them it answers 503.
+    """
+    from datetime import date
+    from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+    for concept_id, name, vocabulary_id, domain_id, class_id, code in (
+        (0, 'No matching concept', 'None', 'Metadata', 'Undefined', 'No matching concept'),
+        (32817, 'EHR', 'Type Concept', 'Type Concept', 'Type Concept', 'OMOP4976890'),
+    ):
+        Vocabulary.objects.get_or_create(
+            vocabulary_id=vocabulary_id, defaults={'vocabulary_name': vocabulary_id, 'vocabulary_concept_id': 0})
+        Domain.objects.get_or_create(
+            domain_id=domain_id, defaults={'domain_name': domain_id, 'domain_concept_id': 0})
+        ConceptClass.objects.get_or_create(
+            concept_class_id=class_id, defaults={'concept_class_name': class_id, 'concept_class_concept_id': 0})
+        Concept.objects.get_or_create(concept_id=concept_id, defaults=dict(
+            concept_name=name, domain_id=domain_id, vocabulary_id=vocabulary_id,
+            concept_class_id=class_id, standard_concept=None if concept_id == 0 else 'S',
+            concept_code=code, valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31)))
+
+
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.write')
 class FhirSyncTests(TestCase):
     def setUp(self):
         _ensure_pk_sequences()
+        _seed_sync_concepts()
         # POST /api/fhir/sync/ is privileged since the ScopedTokenPermission role
         # change (a5e0ac6): only service-token / staff / superuser may write —
         # plain patient identities get 403. The connector calls it with a service
@@ -886,6 +910,7 @@ class CuratedMappingResolutionTest(TestCase):
 
     def setUp(self):
         _ensure_pk_sequences()
+        _seed_sync_concepts()
         self.user = Identity.objects.create_user(
             email='curated_mapping@test.com', password='test', is_staff=True)
         self.client = APIClient()

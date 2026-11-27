@@ -303,9 +303,12 @@ local lab concept appears only when a curator mints one through
 `code-mappings/mint-destination/` (an existing HK-* vocabulary, a signed
 candidate review, an id at or above 2,000,000,000 from `next_pk`). The
 `HK-Labs` vocabulary row stays so that flow can use it. (The other HK-*
-vocabularies are unchanged; `hkl:fallback-<id>` rows, which stand in for a
-standard visit or type concept when Athena is not loaded, are not lab concepts
-and are left alone.)
+vocabularies are unchanged.) The `hkl:fallback-<id>` rows that the lab-results
+and FHIR syncs used to create as a stand-in for a standard visit or type concept
+when Athena was not loaded are gone too: those syncs now answer 503 ("Run
+`load_athena_vocabularies`") when the concept is missing, as the wearable
+import already did. Migration 0380 leaves any that exist on an instance
+alone (they are not lab concepts); they are harmless and can be deleted.
 
 Migration `0380_retire_hkl_duplicates` removed the existing ones. For each:
 

@@ -37,8 +37,6 @@ from patient_portal.api.permissions import (
 
 logger = logging.getLogger(__name__)
 
-HK_LABS_VOCAB_ID = 'HK-Labs'
-HK_LABS_CONCEPT_ID_START = 2000000000
 PATIENT_SELF_REPORT_CONCEPT_ID = 32865
 DOCUMENT_EXTRACTION_CONCEPT_ID = 32883
 OUTPATIENT_VISIT_CONCEPT_ID = 9202
@@ -51,60 +49,14 @@ def _normalize_slug(name):
     return f'hkl:{s}'
 
 
-def _ensure_hk_deps(domain_id, concept_class_id):
-    """Ensure the HK-Labs vocabulary, the given Domain, and ConceptClass exist."""
-    from omop_core.models import Domain, ConceptClass, Vocabulary
-    Vocabulary.objects.get_or_create(
-        vocabulary_id=HK_LABS_VOCAB_ID,
-        defaults={'vocabulary_name': 'HealthKey Labs', 'vocabulary_concept_id': 0},
-    )
-    Domain.objects.get_or_create(
-        domain_id=domain_id,
-        defaults={'domain_name': domain_id, 'domain_concept_id': 0},
-    )
-    ConceptClass.objects.get_or_create(
-        concept_class_id=concept_class_id,
-        defaults={'concept_class_name': concept_class_id, 'concept_class_concept_id': 0},
-    )
-
-
-_HK_FALLBACK_CONCEPTS = {
-    OUTPATIENT_VISIT_CONCEPT_ID: ('Outpatient Visit', 'Visit', 'Visit'),
-    PATIENT_SELF_REPORT_CONCEPT_ID: ('Patient self-report', 'Type Concept', 'Type Concept'),
-    DOCUMENT_EXTRACTION_CONCEPT_ID: ('Document extraction', 'Type Concept', 'Type Concept'),
-}
-
-
 def _ensure_concept(concept_id):
-    """Return a Concept by ID, auto-creating an HK-Labs fallback if Athena vocabularies are not loaded."""
-    concept = Concept.objects.filter(concept_id=concept_id).first()
-    if concept:
-        return concept
+    """Return a Concept by ID, or None when it is not loaded.
 
-    fallback = _HK_FALLBACK_CONCEPTS.get(concept_id)
-    if not fallback:
-        return None
-    name, domain_id, concept_class_id = fallback
-
-    _ensure_hk_deps(domain_id, concept_class_id)
-
-    logger.warning(
-        'OMOP concept %d (%s) missing — creating HK-Labs fallback. '
-        'Run load_athena_vocabularies for standard concepts.',
-        concept_id, name,
-    )
-    return Concept.objects.create(
-        concept_id=concept_id,
-        concept_name=name,
-        domain_id=domain_id,
-        vocabulary_id=HK_LABS_VOCAB_ID,
-        concept_class_id=concept_class_id,
-        standard_concept=None,
-        source='HealthKey',
-        concept_code=f'hkl:fallback-{concept_id}',
-        valid_start_date=date(1970, 1, 1),
-        valid_end_date=date(2099, 12, 31),
-    )
+    No stand-in is created (#2922): a locally-authored row under a standard
+    OMOP id is a shadow concept. A deployment gets these concepts from the seed
+    migrations or ``load_athena_vocabularies``; callers answer 503 without them.
+    """
+    return Concept.objects.filter(concept_id=concept_id).first()
 
 
 class MeasurementItemSerializer(serializers.Serializer):
