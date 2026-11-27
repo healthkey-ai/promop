@@ -348,7 +348,7 @@ python manage.py seed_wearable_device_mappings   # or wait for the next vocabula
 
 ### Downloading the tab
 
-The Wearables tab has "Download all wearable mappings", as a CSV or as a Word document with one
+The Wearables domain of the Concept to Code tab has "Download all wearable mappings", as a CSV or as a Word document with one
 table per category: every mapping on the tab, proposed and approved, without rejected rows,
 ordered so that the codes of one metric sit together. Anyone who can read the Code Mapping page
 can download it. The endpoint, the columns and what the file leaves out are in

@@ -3453,10 +3453,11 @@ algorithmic estimate from another, under different vendor codes.
 
 `GET /api/v1/code-mappings/wearables-export/?file_format=csv|docx` returns
 every mapping on the Wearables tab as one file, built on the server
-(`omop_core/services/wearable_mapping_export.py`). On the Wearables tab the page offers it as
-"Download all wearable mappings": CSV or Word document
-(`WearableMappingsDownload.tsx`); on the Concept to Code direction under the
-Wearables domain the same file sits in the From/To row (#2699, #2795). The section Download menus are a different
+(`omop_core/services/wearable_mapping_export.py`). The Source Code to Concept page no longer
+offers it: the Wearables tab's "All" line holds the Source Systems dropdown instead (see
+"Wearables tab: source system" below). It is offered as "Download all wearable mappings",
+CSV or Word document (`WearableMappingsDownload.tsx`), on the Concept to Code direction under the
+Wearables domain, in the From/To row (#2699, #2795). The section Download menus are a different
 thing and are unchanged: they write, in the browser, the rows a section has
 loaded.
 
@@ -3532,6 +3533,30 @@ loaded.
 Tests: `tests/test_wearable_mapping_export.py`,
 `WearableMappingsDownload.test.tsx` and
 `CodeMappingPage.wearablesDownload.test.tsx`.
+
+## Code Mapping — Wearables Tab: Source System
+
+The Wearables tab of Source Code to Concept (`CodeMappingPage.tsx`) has a Source
+System column first, a Source Systems dropdown on the "All" line and no
+download, loaded-rows Download menu or "auto-approved (Suggest)" checkbox there.
+
+- **The dropdown is a filter.** `source_systems=<ids>` (comma-separated, the ids of
+  `wearable_source_systems`; unknown is a 400 with fixed wording, via
+  `wearable_mapping_export.clean_sources`) narrows the browse, its section counts, the
+  group endpoint and a group job (`mapping_browse.apply_source_systems`, applied by
+  `visible_rows`). The page sends it on the Wearables tab only.
+- **Sorting by the first column groups it.** A section whose `order_N` is
+  `source_system` comes back with no rows and a `system_groups[section]` list, one entry
+  per system (`system_group_entries`: id, display label, members, seen, proposed),
+  ordered by display name, with `pages[section].total` still the code count. The page
+  shows each collapsed; opening one calls `GET code-mappings/group/?group_system=<id>`
+  (the same filters, at most `MAX_GROUP_MEMBERS` rows, ordered by Seen). A grouped-by-label
+  queue cannot sort by it (400; the page drops the sort).
+- **Auto-approved is not a Wearables filter.** The checkbox is global state on the other
+  tabs, so the page ignores it on the Wearables tab rather than narrow a list that shows
+  no sign of it.
+
+Tests: `tests/test_mapping_browse.py`, `CodeMappingPage.wearablesSystem.test.tsx`.
 
 ## Code Mapping — Public Voting on Wearable Proposals
 

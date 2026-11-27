@@ -3214,7 +3214,7 @@ describe("server mapping pages", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Wearables/ }));
     await waitFor(() => expect(browseCalls("OpenWearables")).not.toHaveLength(0));
     const table = await screen.findByRole("table", { name: "Proposed mappings" });
-    fireEvent.click(within(table).getByRole("button", { name: /^Source/ }));
+    fireEvent.click(within(table).getByRole("button", { name: /^Source$/ }));
     await waitFor(() => expect(browseCalls("OpenWearables").at(-1)?.order_1).toMatch(/source_code$/));
 
     mockGet.mockClear();
@@ -3243,7 +3243,7 @@ describe("server mapping pages", () => {
 
     selected = "EPIC";
     const table = await screen.findByRole("table", { name: "Proposed mappings" });
-    fireEvent.click(within(table).getByRole("button", { name: /^Source/ }));
+    fireEvent.click(within(table).getByRole("button", { name: /^Source$/ }));
     await waitFor(() => expect(lastBrowse()).toHaveProperty("rollup", 1));
     expect(lastBrowse().order_1).toBe("-occurrence_count");
   });
@@ -3430,27 +3430,29 @@ describe("server mapping pages", () => {
     const columnsSpanned = (row: Element) => Array.from(row.querySelectorAll("td"))
       .reduce((total, cell) => total + (cell as HTMLTableCellElement).colSpan, 0);
 
-    it("leads the Wearables tab with Category, then Metric", async () => {
+    it("leads the Wearables tab with Source System, then Category, then Metric", async () => {
       onWearables();
       const table = await screen.findByRole("table", { name: "Proposed mappings" });
-      await waitFor(() => expect(headerNames(table).slice(0, 3)).toEqual(["Category", "Metric", "Source"]));
-      expect(headerNames(table)).toHaveLength(10);
+      await waitFor(() => expect(headerNames(table).slice(0, 4)).toEqual(["Source System", "Category", "Metric", "Source"]));
+      expect(headerNames(table)).toHaveLength(11);
 
       const row = within(table).getByText("resting_heart_rate", { selector: "[data-testid=source-code]" }).closest("tr")!;
       const cells = within(row).getAllByRole("cell");
-      expect(columnsSpanned(row)).toBe(10);
-      // First cell: the category, and the measure class as its muted second line.
-      expect(cells[0]).toHaveAttribute("data-testid", "category");
-      expect(within(cells[0]).getByText("Heart & Cardiovascular")).toBeInTheDocument();
-      const measureClass = within(cells[0]).getByTestId("measure-class");
+      expect(columnsSpanned(row)).toBe(11);
+      // First cell: the source code system the row's code belongs to.
+      expect(cells[0]).toHaveAttribute("data-testid", "source-system");
+      // Second cell: the category, and the measure class as its muted second line.
+      expect(cells[1]).toHaveAttribute("data-testid", "category");
+      expect(within(cells[1]).getByText("Heart & Cardiovascular")).toBeInTheDocument();
+      const measureClass = within(cells[1]).getByTestId("measure-class");
       expect(measureClass).toHaveTextContent(/^Aggregate over interval$/);
       expect(measureClass.className).toMatch(/text-slate-500/);
-      expect(cells[0].firstElementChild).toHaveTextContent(/^Heart & Cardiovascular$/);
-      expect(cells[0].lastElementChild).toBe(measureClass);
-      // Second cell: the key, in the mono style the source code uses.
-      expect(cells[1]).toHaveAttribute("data-testid", "metric-key");
-      expect(cells[1]).toHaveTextContent(/^resting_hr$/);
-      expect(within(cells[1]).getByText("resting_hr").className).toMatch(/font-mono/);
+      expect(cells[1].firstElementChild).toHaveTextContent(/^Heart & Cardiovascular$/);
+      expect(cells[1].lastElementChild).toBe(measureClass);
+      // Third cell: the key, in the mono style the source code uses.
+      expect(cells[2]).toHaveAttribute("data-testid", "metric-key");
+      expect(cells[2]).toHaveTextContent(/^resting_hr$/);
+      expect(within(cells[2]).getByText("resting_hr").className).toMatch(/font-mono/);
       // The source code is still where it was, one column further along.
       expect(cellUnder(row, "Source")).toHaveTextContent("resting_heart_rate");
       // Measure Class has no column of its own.
@@ -3489,11 +3491,11 @@ describe("server mapping pages", () => {
       expect(empty).toHaveAttribute("colspan", "8");
     });
 
-    it("spans both extra columns in an empty section on the Wearables tab", async () => {
+    it("spans every column in an empty section on the Wearables tab", async () => {
       onWearables();
       await screen.findByTestId("category");
       const empty = within(screen.getByRole("table", { name: "Unmapped mappings" })).getByRole("cell");
-      expect(empty).toHaveAttribute("colspan", "10");
+      expect(empty).toHaveAttribute("colspan", "11");
     });
 
     it("sorts by Category and by Metric, and drops the sort on leaving the tab", async () => {
@@ -3616,12 +3618,12 @@ describe("server mapping pages", () => {
       fireEvent.click(screen.getByRole("button", { name: "Expand Resting heart rate" }));
       const member = (await screen.findByText("MEMBER-1", { selector: "[data-testid=source-code]" })).closest("tr")!;
       const group = screen.getByRole("button", { name: "Collapse Resting heart rate" }).closest("tr")!;
-      expect(columnsSpanned(member)).toBe(10);
-      expect(columnsSpanned(group)).toBe(10);
+      expect(columnsSpanned(member)).toBe(11);
+      expect(columnsSpanned(group)).toBe(11);
       expect(member.querySelectorAll("td")).toHaveLength(group.querySelectorAll("td").length);
       expect(within(member).getByTestId("category")).toHaveTextContent("Heart & CardiovascularAggregate over interval");
       expect(within(member).getByTestId("metric-key")).toHaveTextContent(/^resting_hr$/);
-      expect(member.querySelector("td")).toHaveAttribute("data-testid", "category");
+      expect(member.querySelector("td")).toHaveAttribute("data-testid", "source-system");
     });
 
     it("opens the dialog with the row's three fields and saves a changed category", async () => {

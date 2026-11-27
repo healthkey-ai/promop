@@ -1114,3 +1114,90 @@ def test_destination_units_cost_no_query_per_row(browse):
     with CaptureQueriesContext(connection) as none:
         assert browse(queue_sections='1', include_duplicates='0').status_code == 200
     assert len(none) == len(large)
+
+
+# The Wearables tab's source system control (the dropdown, the first column and
+# sorting by it).
+def wearable_row(code, vocabulary, **kwargs):
+    return row(code, source_vocabulary_id=vocabulary, **kwargs)
+
+
+@pytest.fixture
+def wearables():
+    wearable_row('steps', 'Apple', occurrence_count=5)
+    wearable_row('floors', 'Apple')
+    wearable_row('hr', 'Garmin', occurrence_count=2)
+    wearable_row('hrv', 'HL7-PHR')
+    wearable_row('oura_steps', 'Oura')
+
+
+def codes(rows):
+    return {item['source_code'] for item in rows}
+
+
+def test_source_systems_limit_what_the_wearables_tab_lists(browse, wearables):
+    everything = browse(source='OpenWearables', queue_sections='1')
+    assert codes(everything.data['results']) == {'steps', 'floors', 'hr', 'hrv', 'oura_steps'}
+
+    limited = browse(source='OpenWearables', queue_sections='1', source_systems='Garmin,Oura')
+    assert codes(limited.data['results']) == {'hr', 'oura_steps'}
+    # The section count follows the filter, as it does for a search.
+    assert limited.data['pages']['Unmapped']['total'] == 2
+
+
+def test_an_unknown_source_system_is_refused_without_echoing_it(browse, wearables):
+    response = browse(source='OpenWearables', source_systems='Nonsense-System')
+    assert response.status_code == 400
+    assert 'Nonsense-System' not in str(response.data)
+
+
+def test_a_section_sorted_by_source_system_is_one_collapsed_entry_per_system(browse, wearables):
+    response = browse(source='OpenWearables', queue_sections='1', order_0='source_system')
+    assert response.status_code == 200
+    assert response.data['results'] == []
+    entries = response.data['system_groups']['Unmapped']
+    # By display name, not by id: Apple is shown as HealthKit.
+    assert [(entry['label'], entry['members']) for entry in entries] == [
+        ('Garmin', 1), ('HealthKit', 2), ('HL7 PHR', 1), ('Oura Ring', 1)]
+    assert entries[1]['source_vocabulary_id'] == 'Apple'
+    # The section's own count still says how many codes it holds.
+    assert response.data['pages']['Unmapped']['total'] == 5
+
+    descending = browse(source='OpenWearables', queue_sections='1', order_0='-source_system')
+    assert [entry['label'] for entry in descending.data['system_groups']['Unmapped']] == [
+        'Oura Ring', 'HL7 PHR', 'HealthKit', 'Garmin']
+
+
+def test_other_sections_keep_their_rows_when_one_is_sorted_by_source_system(browse, wearables):
+    response = browse(source='OpenWearables', queue_sections='1', order_0='source_system', order_1='-occurrence_count')
+    assert set(response.data['system_groups']) == {'Unmapped'}
+
+
+def test_a_grouped_by_label_queue_cannot_sort_by_source_system(browse, wearables):
+    response = browse(source='OpenWearables', queue_sections='1', rollup='1', order_0='source_system')
+    assert response.status_code == 400
+
+
+def test_system_groups_follow_the_source_systems_filter(browse, wearables):
+    response = browse(source='OpenWearables', queue_sections='1', order_0='source_system', source_systems='Apple')
+    entries = response.data['system_groups']['Unmapped']
+    assert [entry['source_vocabulary_id'] for entry in entries] == ['Apple']
+
+
+def test_the_group_endpoint_returns_one_systems_rows(wearables):
+    from patient_portal.api.views import code_mapping_group
+    user = Identity.objects.create_user(email='group@example.test', is_staff=True)
+
+    def group(**params):
+        request = APIRequestFactory().get('/api/v1/code-mappings/group/', {
+            'section': 'Unmapped', 'queue_sections': '1', 'source': 'OpenWearables', **params})
+        force_authenticate(request, user=user)
+        return code_mapping_group(request)
+
+    response = group(group_system='Apple')
+    assert response.status_code == 200
+    assert codes(response.data['results']) == {'steps', 'floors'}
+    # The dropdown's limit still applies inside it.
+    assert group(group_system='Apple', source_systems='Garmin').data['results'] == []
+    assert group(group_system='Nope').status_code == 400
+    assert group().status_code == 400
