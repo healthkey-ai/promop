@@ -447,3 +447,74 @@ def test_an_answer_can_be_confirmed_from_a_proposal_through_the_patch(staff, rec
     refresh_patient_record(record.person)
     patch(staff, record, {'gleason_grade_group': '1'})
     assert PatientRecord.objects.get(pk=record.pk).custom_fields == {'gleason_grade_group': '1'}
+
+
+# ------------------------------------- the LOINC Gleason grade group shape (Measurement)
+
+
+@pytest.fixture
+def loinc_gleason():
+    """LOINC 94734-1 as a Measurement, its answers LOINC answer concepts in the Meas Value domain."""
+    loinc = VocabularyFactory(vocabulary_id='LOINC')
+    measurement = DomainFactory(domain_id='Measurement', domain_name='Measurement')
+    meas_value = DomainFactory(domain_id='Meas Value', domain_name='Meas Value')
+    question = ConceptFactory(concept_id=36660206, concept_code='94734-1', vocabulary=loinc,
+                              domain=measurement, concept_name='Gleason grade group')
+    answers = {
+        n: ConceptFactory(concept_id=cid, concept_code=code, vocabulary=loinc, domain=meas_value,
+                          concept_name=f'Grade Group {n}')
+        for n, cid, code in [(1, 36662377, 'LA30794-4'), (2, 36662565, 'LA30795-1'),
+                             (3, 36662476, 'LA30796-9'), (4, 36662300, 'LA30797-7')]
+    }
+    return question, answers
+
+
+@pytest.fixture
+def gleason(staff, loinc_gleason):
+    question, answers = loinc_gleason
+    response = staff.post(CUSTOM, {
+        'confirm_patient_record': True, 'field_name': 'gleason_grade_group',
+        'display_name': 'Gleason grade group', 'field_type': 'choice', 'tab': 'disease',
+        'concept': question.pk, 'omop_table': 'Measurement',
+        'answers': [
+            *({'label': f'Grade Group {n}', 'value': str(n), 'concept': answers[n].pk}
+              for n in (1, 2, 3, 4)),
+            # Grade group 5 has no standalone standard concept: an answer may have none.
+            {'label': 'Grade Group 5', 'value': '5'},
+        ],
+    }, format='json')
+    assert response.status_code == 201, response.data
+    return CustomPatientField.objects.get(field_name='gleason_grade_group')
+
+
+def test_a_measurement_fact_with_the_answer_concept_and_text_reads_back_as_the_answer(
+        record, gleason, loinc_gleason):
+    _, answers = loinc_gleason
+    MeasurementFactory(person=record.person, measurement_concept=gleason.mapping.concept,
+                       measurement_source_value='LOCAL-GLEASON', measurement_date='2024-03-01',
+                       value_as_concept=answers[3], value_as_string='Grade Group 3')
+    assert derived(record) == {'gleason_grade_group': '3'}
+
+
+def test_a_measurement_fact_with_only_the_concept_or_only_other_text_reads_by_the_concept(
+        record, gleason, loinc_gleason):
+    _, answers = loinc_gleason
+    MeasurementFactory(person=record.person, measurement_concept=gleason.mapping.concept,
+                       measurement_source_value='LOCAL-GLEASON', measurement_date='2024-03-01',
+                       value_as_concept=answers[4], value_as_string='GG IV (pathology report)')
+    assert derived(record) == {'gleason_grade_group': '4'}
+
+
+def test_saving_grade_groups_writes_the_measurement_with_and_without_a_concept(
+        staff, record, gleason, loinc_gleason):
+    from omop_core.models import Measurement
+    _, answers = loinc_gleason
+    patch(staff, record, {'gleason_grade_group': '2'})
+    row = Measurement.objects.get(person=record.person, measurement_source_value='custom:gleason_grade_group')
+    assert (row.measurement_concept_id, row.value_as_concept_id, row.value_as_string) == (
+        36660206, answers[2].pk, '2')
+    # Grade group 5 has no concept: text only, and it reads back.
+    patch(staff, record, {'gleason_grade_group': '5'})
+    row.refresh_from_db()
+    assert (row.value_as_concept_id, row.value_as_string) == (None, '5')
+    assert derived(record) == {'gleason_grade_group': '5'}
