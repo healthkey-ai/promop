@@ -19,7 +19,8 @@ The name stays taken: a field cannot be created again under a retired name, only
 restored, so the stored values are never silently adopted by a different definition.
 
 **Delete** (permanent). Only when ``usage`` finds nothing to lose: no record holds a
-value under the key and no OMOP fact exists under the field's own source key. Facts that
+value under the key and no OMOP fact holding an answer exists under the field's own source key
+(a row whose value was cleared holds none and is deleted with the field). Facts that
 only sit at its concept are the patients' own data and do not block (#2930). It removes
 the definition, its mapping, formula, scope, synonyms, answers (with their aliases,
 codes and concept decisions), and the record-level traces that carry the name but no
@@ -70,24 +71,77 @@ def _holders(name: str):
             .exclude(_held=Value(None, output_field=JSONField())))
 
 
-def _has_facts(field) -> bool:
-    """Whether any OMOP row was written under the field's own source key.
-
-    Rows that merely sit at the field's concept are the patients' own data (a PSA
-    result at LOINC 2857-1 exists whether or not anyone defined a field for it).
-    Deleting the field removes how the data is shown, never the rows, and a field
-    created again over that concept reads them again, so they do not block a delete.
-    Only rows written under the field's key are the field's own entries.
-    """
+def _own_facts(field):
+    """The OMOP rows written under the field's own source key, or ``None`` for a table that has none."""
     from django.apps import apps
 
     mapping = field.mapping
     target = custom_field_values.target_for(mapping.omop_table)
     if target is None:
-        return False
+        return None
     model_name, _concept_column, source_column = _FACT_TABLES[target]
     model = apps.get_model('omop_core', model_name)
-    return model.objects.filter(**{source_column: custom_field_values.source_key(field)}).exists()
+    return model.objects.filter(**{source_column: custom_field_values.source_key(field)}), target
+
+
+def _valueless(rows, target: str):
+    """The rows of ``rows`` that carry no answer: what clearing a value leaves behind.
+
+    Only a measurement or an observation can be empty; any other fact is its own answer.
+    """
+    from django.db.models import Q
+
+    if target not in ('measurement', 'observation'):
+        return rows.none()
+    return rows.filter(
+        Q(value_as_number__isnull=True),
+        Q(value_as_string__isnull=True) | Q(value_as_string=''),
+        Q(value_as_concept_id__isnull=True) | Q(value_as_concept_id=0),
+    )
+
+
+def _has_facts(field) -> bool:
+    """Whether any OMOP row holding an answer was written under the field's own source key.
+
+    Rows that merely sit at the field's concept are the patients' own data (a PSA
+    result at LOINC 2857-1 exists whether or not anyone defined a field for it).
+    Deleting the field removes how the data is shown, never the rows, and a field
+    created again over that concept reads them again, so they do not block a delete.
+    A row under the field's key whose value was cleared holds no answer either: it is
+    the field's own empty trace and goes with the field (``_drop_empty_facts``).
+    Only a row under the key that still holds an answer blocks.
+    """
+    found = _own_facts(field)
+    if found is None:
+        return False
+    rows, target = found
+    return rows.exclude(pk__in=_valueless(rows, target).values('pk')).exists()
+
+
+def _drop_empty_facts(field) -> None:
+    """Delete the emptied rows the field itself wrote, with the links that have no cascade."""
+    from django.contrib.contenttypes.models import ContentType
+
+    from omop_core.models import MeasurementOwnership, ProvenanceRecord
+    from omop_core.signals import suppress_patient_record_refresh
+
+    found = _own_facts(field)
+    if found is None:
+        return
+    rows, target = found
+    empty = _valueless(rows, target)
+    pk_name = rows.model._meta.pk.name
+    ids = list(empty.values_list(pk_name, flat=True))
+    if not ids:
+        return
+    # A GenericForeignKey has no cascade, and MeasurementOwnership holds a bare integer.
+    ProvenanceRecord.objects.filter(
+        content_type=ContentType.objects.get_for_model(rows.model), object_id__in=ids).delete()
+    if target == 'measurement':
+        MeasurementOwnership.objects.filter(measurement_id__in=ids).delete()
+    # The rows hold no value, so no record's derivation changes.
+    with suppress_patient_record_refresh():
+        rows.model.objects.filter(**{f'{pk_name}__in': ids}).delete()
 
 
 def usage(field) -> dict:
@@ -198,6 +252,7 @@ def delete(field) -> dict:
         if locked.retired_at is None or not found['can_delete']:
             raise _has_data(found)
         mapping_id = locked.mapping_id
+        _drop_empty_facts(locked)
         locked.delete()
         FieldConceptMapping.objects.filter(pk=mapping_id).delete()
         FieldFormula.objects.filter(field_name=name).delete()
