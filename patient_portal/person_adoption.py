@@ -108,6 +108,17 @@ def _carry_over(placeholder: Person, provisioned: Person) -> None:
             setattr(provisioned, field, value)
         provisioned.save(update_fields=list(updates))
 
+    # What the member answered and accepted while on the placeholder. The rows
+    # are append-only, so they are copied, not moved; the placeholder's go
+    # with it when it is dropped.
+    from patient_portal.models import ConsentEvent, DocumentAcceptance
+    for model in (ConsentEvent, DocumentAcceptance):
+        fields = [f.attname for f in model._meta.concrete_fields if f.attname not in ('id', 'person_id')]
+        model.objects.bulk_create([
+            model(person_id=provisioned.person_id, **{f: getattr(row, f) for f in fields})
+            for row in model.objects.filter(person=placeholder)
+        ])
+
     org_id = (
         PatientRecord.objects
         .filter(person=placeholder)

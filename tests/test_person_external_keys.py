@@ -225,3 +225,46 @@ def test_only_the_etl_credential_may_write_keys(django_user_model):
     assert APIClient().post(URL, body, format='json').status_code in (401, 403)
     assert _etl().post('/api/persons/external-keys/', body, format='json').status_code == 404
     assert not PersonExternalKey.objects.exists()
+
+
+def test_consents_given_on_the_stub_follow_the_login():
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from patient_portal import consent as svc
+    from patient_portal.models import (
+        ConsentEvent, ConsentPurpose, ConsentText, DocumentAcceptance, LegalDocument, LegalDocumentVersion,
+    )
+
+    earlier = timezone.now() - timedelta(days=1)
+    purpose = ConsentPurpose.objects.create(key='my_record', kind='permission')
+    ConsentText.objects.create(purpose=purpose, version='1', language='en', title='t', body='.', published_at=earlier)
+    terms = LegalDocument.objects.create(key='terms', name='Terms')
+    LegalDocumentVersion.objects.create(document=terms, version='1', language='en', title='t', body='.',
+                                        published_at=earlier)
+    identity = _login('uid-consent')
+    stub = resolve_or_create_person(identity, email='', email_verified=False)
+    svc.record_consent(stub, 'my_record', 'granted', version='1', recorded_at=earlier)
+    svc.accept_document(stub, 'terms', version='1')
+    imported = _imported()
+    PersonExternalKey.objects.create(person=imported, issuer=ISS, subject='uid-consent')
+
+    assert resolve_or_create_person(identity).person_id == imported.person_id
+    event = ConsentEvent.objects.get(person=imported)
+    assert (event.decision, event.recorded_at) == ('granted', earlier)
+    assert DocumentAcceptance.objects.filter(person=imported, version='1').count() == 1
+    assert not Person.objects.filter(person_id=stub.person_id).exists()
+
+
+def test_a_failed_move_leaves_the_login_where_it_was(monkeypatch):
+    from patient_portal import person_adoption
+    identity = _login('uid-fail')
+    stub = resolve_or_create_person(identity, email='', email_verified=False)
+    PersonExternalKey.objects.create(person=_imported(), issuer=ISS, subject='uid-fail')
+
+    def broken(*args, **kwargs):
+        raise RuntimeError('boom')
+    monkeypatch.setattr(person_adoption, '_adopt', broken)
+
+    assert resolve_or_create_person(identity).person_id == stub.person_id

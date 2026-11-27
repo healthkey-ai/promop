@@ -141,12 +141,17 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
     signed in. It needs a verified address, and an ambiguous one forks, so an
     import keyed on email loses the unverified and the duplicated.
     """
-    from patient_portal.person_adoption import adopt_keyed_person
+    from patient_portal.person_adoption import AdoptionOutcome, adopt_keyed_person
 
     pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
     # Steps 1 and 2. A login keyed to an imported Person gets it even when it
     # signed in before the key existed and was given an empty Person then.
-    outcome = adopt_keyed_person(identity, pu)
+    try:
+        outcome = adopt_keyed_person(identity, pu)
+    except Exception:  # noqa: BLE001
+        # This runs on every request: a failed move must not lock the member out.
+        logger.exception("keyed person adoption failed for identity %s", identity.pk)
+        outcome = AdoptionOutcome(person_id=pu.person_id if pu else None)
     if outcome.person_id is not None:
         if pu is not None and outcome.person_id == pu.person_id:
             return pu.person
