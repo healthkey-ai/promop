@@ -1,0 +1,22 @@
+{
+  "active_energy_per_day_30d": "active_energy",
+  "active_minutes_per_day_30d": "active_minutes",
+  "activity_trend_30d": "steps",
+  "basal_energy_per_day_30d": "basal_energy",
+  "body_mass_avg_30d": "body_mass",
+  "distance_km_per_day_30d": "distance",
+  "flights_climbed_per_day_30d": "flights_climbed",
+  "hrv_rmssd_avg_30d": "hrv_rmssd",
+  "hrv_sdnn_avg_30d": "hrv_sdnn",
+  "median_daily_steps_30d": "steps",
+  "oxygen_saturation_avg_30d": "spo2",
+  "oxygen_saturation_min_30d": "spo2",
+  "respiratory_rate_avg_30d": "respiratory_rate",
+  "resting_heart_rate_avg_30d": "resting_hr",
+  "sleep_duration_hours_avg_30d": "sleep_duration",
+  "vo2_max_avg_30d": "vo2_max",
+  "walking_double_support_pct_avg_30d": "walking_double_support_pct",
+  "walking_hr_avg_30d": "walking_hr_avg",
+  "walking_speed_avg_30d": "walking_speed",
+  "walking_step_length_avg_30d": "walking_step_length"
+}

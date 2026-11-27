@@ -36,6 +36,12 @@ interface Props {
    */
   onOpenOmopRows?: (focus: OmopFocus) => void;
   /**
+   * True for a reader who may open the mapping pages (staff, org admins and
+   * professional grants, outside patient mode): each 30-day value then links to
+   * the Code Mapping page's rows for the metric's source codes.
+   */
+  canOpenMappings?: boolean;
+  /**
    * True when the page is the signed-in person's own record. A file upload,
    * the upload history and its deletes all act on the caller's own record,
    * wherever they are used from, so they are offered nowhere else (#2819):
@@ -118,7 +124,7 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false, onOpenOmopRows }: Props) {
+export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = false, ownRecord = false, onOpenOmopRows, canOpenMappings = false }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -407,7 +413,7 @@ export default function WearableTab({ formData, onRefresh, canSyncOwnDevice = fa
   };
 
   return (
-    <WearableMetricProvider value={{ personId, onOpenOmopRows }}>
+    <WearableMetricProvider value={{ personId, onOpenOmopRows, canOpenMappings }}>
     <div
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}

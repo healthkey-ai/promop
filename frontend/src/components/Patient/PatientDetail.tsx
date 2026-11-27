@@ -43,7 +43,7 @@ import { addedFieldTabs, fieldDiseases, recordDiseaseCategories, recordDiseaseCa
 import { useAllDiseaseMappings, useCategoryObjects } from "@/hooks/useDiseaseCategories";
 import { useCustomPatientFields } from "@/hooks/useCustomPatientFields";
 import { ADDED_FIELDS, addedFieldNames, mergeAddedFields, pickAddedFields } from "@/utils/addedFieldEdits";
-import { isOwnRecord } from "@/utils/roles";
+import { canViewMappings, isOwnRecord } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -1365,7 +1365,7 @@ export default function PatientDetail({
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} canSyncOwnDevice={ownRecord} ownRecord={ownRecord} onOpenOmopRows={omopIdx >= 0 ? openOmopRows : undefined} canOpenMappings={!patientMode && canViewMappings(user)} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} focus={omopFocus?.personId === personId ? omopFocus : null} />}

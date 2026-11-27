@@ -1,5 +1,5 @@
 import { useContext, useEffect, useId, useRef, useState, type ComponentProps } from 'react';
-import { ChartLine, Database } from 'lucide-react';
+import { ChartLine, Database, ListTree } from 'lucide-react';
 import {
   CartesianGrid, Line, LineChart, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
@@ -7,6 +7,8 @@ import api from '@/api/axios';
 import ClinicalField from '../ClinicalField';
 import type { OmopFocus } from '@/components/Patient/omopRows';
 import { MetricContext } from './wearableMetricContext';
+import metricKeys from './wearableMetricKeys.json';
+import { wearableMetricMappingsUrl } from '@/components/CodeMappings/mappingLinks';
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui-labs/dialog';
@@ -271,9 +273,10 @@ function ChartDialog({
   );
 }
 
-/** The two buttons beside a 30-day value. */
+/** The buttons beside a 30-day value. */
 function MetricTools({ field, label, hasValue }: { field: string; label: string; hasValue: boolean }) {
-  const { personId, onOpenOmopRows } = useContext(MetricContext);
+  const { personId, onOpenOmopRows, canOpenMappings } = useContext(MetricContext);
+  const metricKey = (metricKeys as Record<string, string>)[field];
   const [chartOpen, setChartOpen] = useState(false);
   const [opening, setOpening] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -328,6 +331,18 @@ function MetricTools({ field, label, hasValue }: { field: string; label: string;
         >
           <Database aria-hidden="true" size={16} />
         </button>
+      )}
+      {canOpenMappings && metricKey && (
+        <a
+          href={wearableMetricMappingsUrl(metricKey)}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open the code mappings for ${label}`}
+          title="Open the code mappings for this metric's source codes (opens in a new tab)"
+          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1"
+        >
+          <ListTree aria-hidden="true" size={16} />
+        </a>
       )}
       <button
         type="button"

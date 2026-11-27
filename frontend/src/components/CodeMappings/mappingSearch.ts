@@ -13,7 +13,7 @@ import type { CodeMappingRow } from "./codeMappingTypes";
  * A prefix that is not a known field is ordinary text, so `urn:oid:1.2.840`
  * searches as a whole.
  */
-type Field = "source_code" | "description" | "vocabulary" | "concept" | "concept_code" | "concept_id" | "organization";
+type Field = "source_code" | "description" | "vocabulary" | "concept" | "concept_code" | "concept_id" | "organization" | "metric";
 
 const FIELD_ALIASES: Record<string, Field> = {
   source_code: "source_code", code: "source_code", source_code_value: "source_code",
@@ -23,6 +23,7 @@ const FIELD_ALIASES: Record<string, Field> = {
   concept_code: "concept_code",
   concept_id: "concept_id",
   organization: "organization", org: "organization",
+  metric: "metric", metric_key: "metric",
 };
 
 export const SEARCH_PLACEHOLDER = "Search text, or a number for a source code; one field: code:6784, concept:myeloma, concept_id:3004061, system:loinc";
@@ -46,6 +47,7 @@ function fieldValues(row: CodeMappingRow, field: Field): (string | undefined | n
     case "concept": return [row.destination_concept_name];
     case "concept_code": return [row.destination_concept_code];
     case "concept_id": return [];
+    case "metric": return [row.metric_key];
     case "organization": return [row.organization_name, row.organization_slug,
       row.source_system_context?.label, ...(row.source_system_context?.names || [])];
   }
@@ -57,6 +59,8 @@ export function rowMatchesSearch(row: CodeMappingRow, search: string): boolean {
   // The server's guard: at most ten ASCII digits, below the integer column's range.
   if (field === "concept_id") return /^\d{1,10}$/.test(value) && Number(value) < 2 ** 31 && row.destination_concept_id === Number(value);
   const q = value.toLowerCase();
+  // A metric key matches whole, as on the server.
+  if (field === "metric") return (row.metric_key || "").toLowerCase() === q;
   const values = field ? fieldValues(row, field)
     : /^\d+$/.test(value) ? [row.source_code]
     : [row.source_code, row.source_vocabulary_id, row.source_code_description,
