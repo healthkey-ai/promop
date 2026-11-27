@@ -255,10 +255,60 @@ def concept_usage_rank():
                 output_field=IntegerField())
 
 
-def ranked_concept_ordering(query, concept_id, hits=None):
-    """``concept_match_ordering`` plus synonym tiers, usage, specimen and code length."""
+# Words LOINC leaves out of a name when it means the usual case: "Testosterone [Mass/volume]
+# in Serum or Plasma" is the total testosterone, and only the exceptions say "Free" or
+# "bioavailable". When the text has one, the text without it is also searched, and the
+# concepts that match it closely rank behind an exact or prefix match of the full text and
+# ahead of a looser one.
+OPTIONAL_WORDS = frozenset({'total'})
+# The answers of a LOINC test are concepts of their own (class Answer); a match on one
+# also finds the question it is an answer of. At most this many questions are added.
+ANSWER_QUESTIONS = 50
+ANSWER_VOCABULARY = 'LOINC'
+QUESTION_DOMAIN = 'Measurement'
+
+
+def optional_word_text(query):
+    """The text without its optional words, or '' when it has none or nothing else of use."""
+    tokens = _tokens(query)
+    kept = [t for t in tokens if t.lower() not in OPTIONAL_WORDS]
+    if len(kept) == len(tokens) or not any(len(t) >= MIN_SYNONYM_TOKEN for t in kept):
+        return ''
+    return ' '.join(kept)
+
+
+def answer_questions(query, query_params):
+    """Ids of the LOINC questions whose answers' names match the typed text.
+
+    "Gleason grade group" is in no name of LOINC 94734-1, only in the names of its answers
+    (``ISUP Grade (Grade Group) 3 (Gleason score 4+3=7)``), which the concept table links
+    with ``Answer of``. One statement, bounded to ``ANSWER_QUESTIONS`` rows: the name filter
+    drives the trigram index, the class and vocabulary narrow it. Skipped when the caller's
+    filters exclude LOINC measurements.
+    """
+    from omop_core.models import Concept, ConceptRelationship
+
+    vocabulary = (query_params.get('vocabulary_id') or '').strip()
+    domain = (query_params.get('domain_id') or '').strip()
+    standard = (query_params.get('standard_concept') or '').strip()
+    if ((vocabulary and vocabulary != ANSWER_VOCABULARY) or (domain and domain != QUESTION_DOMAIN)
+            or (standard and standard != 'S')):
+        return set()
+    answers = Concept.objects.filter(
+        concept_name_search_filter(query), vocabulary_id=ANSWER_VOCABULARY,
+        concept_class_id='Answer', invalid_reason__isnull=True,
+    )
+    questions = ConceptRelationship.objects.filter(
+        concept_1__in=answers, relationship_id='Answer of', invalid_reason__isnull=True,
+    ).values_list('concept_2_id', flat=True).distinct()[:ANSWER_QUESTIONS]
+    return set(questions)
+
+
+def ranked_concept_ordering(query, concept_id, hits=None, prefer_domain=''):
+    """``concept_match_ordering`` plus synonym, optional-word and answer tiers, a preferred
+    domain, usage, specimen and code length."""
     if hits is None:
-        hits = {'exact': (), 'prefix': ()}
+        hits = {'exact': (), 'prefix': (), 'questions': ()}
     best = Q(concept_code__iexact=query)
     if concept_id is not None:
         best |= Q(concept_id=concept_id)
@@ -268,12 +318,21 @@ def ranked_concept_ordering(query, concept_id, hits=None):
         exact |= Q(concept_id__in=list(hits['exact']))
     if hits['prefix']:
         prefix |= Q(concept_id__in=list(hits['prefix']))
+    near = Q()
+    bare = optional_word_text(query)
+    if bare:
+        near |= Q(concept_name__iexact=bare) | Q(concept_name__istartswith=bare)
+    tiers = [When(best, then=0), When(exact, then=1), When(prefix, then=2)]
+    if near:
+        tiers.append(When(near, then=3))
     ordering = [
-        Case(When(best, then=0), When(exact, then=1), When(prefix, then=2), default=3,
-             output_field=IntegerField()),
+        Case(*tiers, default=4, output_field=IntegerField()),
         Case(When(standard_concept='S', then=0), default=1, output_field=IntegerField()),
-        concept_usage_rank(),
     ]
+    if prefer_domain:
+        ordering.append(Case(When(domain_id=prefer_domain, then=0), default=1,
+                             output_field=IntegerField()))
+    ordering.append(concept_usage_rank())
     if not SPECIMEN_WORDS.intersection(t.lower() for t in _tokens(query)):
         ordering.append(Case(When(concept_name__icontains=USUAL_SPECIMEN, then=0), default=1,
                              output_field=IntegerField()))
@@ -282,7 +341,7 @@ def ranked_concept_ordering(query, concept_id, hits=None):
 
 
 # Bump when the ranking changes: a cached response must not outlive the order it holds.
-RANKING_VERSION = 1
+RANKING_VERSION = 2
 
 
 def ranking_stamp():
@@ -316,13 +375,18 @@ def curator_search_queryset(query, query_params):
 
     search_filter, concept_id = concept_text_search(query)
     hits = synonym_hits(query, query_params)
-    if hits['any']:
-        search_filter |= Q(concept_id__in=list(hits['any']))
+    hits['questions'] = answer_questions(query, query_params)
+    if hits['any'] | hits['questions']:
+        search_filter |= Q(concept_id__in=list(hits['any'] | hits['questions']))
+    bare = optional_word_text(query)
+    if bare:
+        search_filter |= concept_name_search_filter(bare)
     queryset = apply_concept_filters(
         destination_concepts(Concept.objects.filter(search_filter), query_params),
         query_params,
     )
-    return queryset.order_by(*ranked_concept_ordering(query, concept_id, hits)), concept_id
+    return queryset.order_by(*ranked_concept_ordering(
+        query, concept_id, hits, (query_params.get('prefer_domain_id') or '').strip())), concept_id
 
 
 def serialize_concept_base(concept, versions=None):

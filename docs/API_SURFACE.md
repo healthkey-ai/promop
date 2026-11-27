@@ -819,6 +819,7 @@ Query params:
 | `include_non_standard` | no | `true` to also return non-standard concepts |
 | `page` | no | 1-based page number |
 | `page_size` | no | Defaults to 25; capped at 100 |
+| `prefer_domain_id` | no | Ranks concepts of this domain ahead of others that match equally well; a tie-break, never a filter. The Assign Concept dialog sends its table's domain, and an answer's search sends `Meas Value` (#2923) |
 | `limit` | no | An alias of `page_size` on this endpoint only (the dialogs send it); `page_size` wins when both are sent; an unusable value is ignored (#2923) |
 
 **Default scope (changed in #1465).** Only concepts usable as a mapping destination are
@@ -835,17 +836,32 @@ Results are ordered by match quality, best first (#1466, #2923). The order is a 
 this precedence, and is stable, so paging is safe:
 
 1. **Match tier**: exact code or OMOP id; exact name or an exactly equal synonym; name or
-   synonym starting with `q`; any other match.
+   synonym starting with `q`; a close match of `q` without its optional word (below); any
+   other match.
 2. Standard concepts before non-standard.
-3. **Use**: a concept an approved field mapping uses or a curator ranked on the Concept to
+3. **`prefer_domain_id`**, when sent: concepts of that domain first.
+4. **Use**: a concept an approved field mapping uses or a curator ranked on the Concept to
    Code tab, then one an approved code mapping reaches, then the rest. This reorders only
    concepts that match equally well; it never lifts a worse name match over a better one.
-4. **The usual specimen**: a name containing `Serum or Plasma` before one that does not,
+5. **The usual specimen**: a name containing `Serum or Plasma` before one that does not,
    skipped when `q` names a specimen itself (serum, urine, blood, CSF, ... see
    `SPECIMEN_WORDS`), since typing one is a choice.
-5. Shorter name, shorter code (in LOINC and SNOMED the older, more general concept; this
+6. Shorter name, shorter code (in LOINC and SNOMED the older, more general concept; this
    breaks a tie between names of equal length such as `[Measurement]` and `[Mass/volume]`),
    then `concept_id`.
+
+**Optional word.** LOINC's unqualified name is the usual case: `Testosterone [Mass/volume] in
+Serum or Plasma` is the total testosterone, and only the exceptions say "Free". When `q` has
+the word `total` (`OPTIONAL_WORDS`) and something else of three or more characters, the text
+without it is searched too, and the concepts whose name equals or starts with that text rank
+behind an exact or prefix match of the full text and ahead of a looser one.
+
+**Answers to their question.** `Gleason grade group` is in no name of LOINC 94734-1, only in
+those of its answers (`ISUP Grade (Grade Group) 3 (Gleason score 4+3=7)`), which the vocabulary
+links with `Answer of`. One more statement finds the questions of up to 50 LOINC answers whose
+name matches `q` and adds them to the list; they rank as any other match of the text, so
+`prefer_domain_id=Measurement` lifts them. Skipped when `vocabulary_id`, `domain_id` or
+`standard_concept` exclude LOINC measurements.
 
 **Synonyms.** LOINC names say "Ag" and "Ab" where a curator types "antigen" and "antibody",
 so a name match alone never reached them. The search also matches the synonyms in

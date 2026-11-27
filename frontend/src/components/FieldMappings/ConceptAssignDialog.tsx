@@ -232,6 +232,14 @@ export function ConceptAssignDialog({
   // These are the OMOP CDM clinical and reference tables implemented by this
   // application.  A mapping can be advisory for tables that are not currently
   // writable; limiting the curator UI to the write pipeline hid valid mappings.
+  // The OMOP domain a table's concepts belong to; tables with no single domain are left out.
+  const TABLE_DOMAIN: Record<string, string> = {
+    Measurement: "Measurement",
+    Observation: "Observation",
+    ConditionOccurrence: "Condition",
+    DrugExposure: "Drug",
+    ProcedureOccurrence: "Procedure",
+  };
   const OMOP_TABLES = [
     "Person", "Location", "CareSite", "Provider", "ObservationPeriod",
     "VisitOccurrence", "ConditionOccurrence", "DrugExposure",
@@ -246,6 +254,10 @@ export function ConceptAssignDialog({
     (table) => table.toLowerCase() === omopTable.trim().replace(/_/g, "").toLowerCase(),
   );
 
+  // The search ranks concepts of the table's own domain first (a tie-break, never a filter), so
+  // a Measurement field is offered the LOINC test before a SNOMED finding of the same words.
+  const preferDomain = selectedTableOption ? TABLE_DOMAIN[selectedTableOption] : undefined;
+
   const doSearch = useCallback(async (q: string) => {
     if (q.length < 3) {
       setResults([]);
@@ -255,6 +267,7 @@ export function ConceptAssignDialog({
     try {
       const params: Record<string, string> = { q, limit: "50" };
       if (vocabFilter) params.vocabulary_id = vocabFilter;
+      if (preferDomain) params.prefer_domain_id = preferDomain;
       const resp = await api.get("/v1/concepts/search/", { params });
       setResults(resp.data.results || resp.data || []);
     } catch (err: unknown) {
@@ -266,7 +279,7 @@ export function ConceptAssignDialog({
     } finally {
       setSearching(false);
     }
-  }, [vocabFilter]);
+  }, [vocabFilter, preferDomain]);
 
   const handleSuggest = () => {
     setSearchQuery(

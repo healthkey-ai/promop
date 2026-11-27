@@ -14,13 +14,16 @@ from rest_framework.test import APIClient, APIRequestFactory
 from omop_core.api.concepts import (
     ConceptPagination,
     ConceptSearchPagination,
+    optional_word_text,
     ranked_concept_ordering,
     search_queryset,
 )
 from omop_core.models import (
     Concept,
     ConceptMappingPriority,
+    ConceptRelationship,
     FieldConceptMapping,
+    Relationship,
     SourceCodeConceptMapping,
     SuggestSynonymTerm,
     VocabularyRelease,
@@ -53,12 +56,13 @@ def reference_rows(vocabulary_id, domain_id, concept_class_id):
     ConceptClassFactory(concept_class_id=concept_class_id, concept_class_name=concept_class_id)
 
 
-def make_concept(spec, vocabulary_id='LOINC', domain_id='Measurement', **extra):
+def make_concept(spec, vocabulary_id='LOINC', domain_id='Measurement', concept_class_id='Lab Test',
+                 **extra):
     concept_id, code, name = spec
-    reference_rows(vocabulary_id, domain_id, 'Lab Test')
+    reference_rows(vocabulary_id, domain_id, concept_class_id)
     return Concept.objects.create(
         concept_id=concept_id, concept_code=code, concept_name=name,
-        vocabulary_id=vocabulary_id, domain_id=domain_id, concept_class_id='Lab Test',
+        vocabulary_id=vocabulary_id, domain_id=domain_id, concept_class_id=concept_class_id,
         standard_concept='S', valid_start_date=date(1970, 1, 1),
         valid_end_date=date(2099, 12, 31), **extra,
     )
@@ -280,8 +284,10 @@ GRADE_ANSWERS = {
     3: (36662476, 'LA30796-9', 'ISUP Grade (Grade Group) 3 (Gleason score 4+3=7)'),
     4: (36662300, 'LA30797-7', 'ISUP Grade (Grade Group) 4 (Gleason score 8)'),
 }
-GLEASON_SNOMED = {n: (3655243 + n, f'86074{n + 1}00{n}', f'Gleason grade group {n}')
-                  for n in range(1, 5)}
+GLEASON_SNOMED = {
+    n: (3655243 + n, code, f'Gleason grade group {n}')
+    for n, code in {1: '860742008', 2: '860743003', 3: '860744009', 4: '860745005'}.items()
+}
 
 
 @pytest.fixture()
@@ -298,7 +304,7 @@ def plain_language(vocabulary):
     reference_rows('RxNorm', 'Drug', 'Ingredient')
     make_concept((9400002, '10379', 'testosterone'), vocabulary_id='RxNorm', domain_id='Drug')
     for spec in GRADE_ANSWERS.values():
-        make_concept(spec, domain_id='Meas Value')
+        make_concept(spec, domain_id='Meas Value', concept_class_id='Answer')
     for spec in GLEASON_SNOMED.values():
         make_concept(spec, vocabulary_id='SNOMED', domain_id='Observation')
 
@@ -319,6 +325,88 @@ def test_plain_language_finds_the_intended_concept_in_the_first_results(
         api, plain_language, query, code, rank):
     codes = search(api, query)
     assert code in codes[:rank], codes[:10]
+
+
+# ---- the three signals a name match cannot give ---------------------------------------
+
+@pytest.fixture()
+def answers_of_the_question(plain_language):
+    """LOINC 94734-1 links to its answers with ``Answer of``; none of its names say Gleason."""
+    question = make_concept(GRADE_GROUP_QUESTION)
+    Relationship.objects.get_or_create(relationship_id='Answer of', defaults=dict(
+        relationship_name='Answer of', is_hierarchical=0, defines_ancestry=0,
+        reverse_relationship_id='Has Answer', relationship_concept_id=0))
+    for spec in GRADE_ANSWERS.values():
+        ConceptRelationship.objects.create(
+            concept_1_id=spec[0], concept_2_id=question.concept_id, relationship_id='Answer of',
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31))
+    return question
+
+
+def test_a_matching_answer_finds_the_question_it_answers(api, answers_of_the_question):
+    codes = search(api, 'Gleason grade group')
+    assert '94734-1' in codes[:25]
+    # Behind every name match of the text, the SNOMED concepts that say it outright.
+    assert codes.index('94734-1') > max(codes.index(g[1]) for g in GLEASON_SNOMED.values())
+    assert len(codes) == len(set(codes))
+
+
+def test_the_question_is_not_added_when_the_filters_exclude_it(api, answers_of_the_question):
+    assert '94734-1' not in search(api, 'Gleason grade group', vocabulary_id='SNOMED')
+    assert '94734-1' not in search(api, 'Gleason grade group', domain_id='Observation')
+    assert '94734-1' not in search(api, 'Gleason grade group', standard_concept='C')
+
+
+def test_a_retired_link_does_not_add_the_question(api, answers_of_the_question):
+    ConceptRelationship.objects.update(invalid_reason='D')
+    assert '94734-1' not in search(api, 'Gleason grade group')
+
+
+def test_the_answer_lookup_is_one_bounded_statement(api, answers_of_the_question):
+    with CaptureQueriesContext(connection) as queries:
+        search(api, 'Gleason grade group')
+    lookups = [q['sql'] for q in queries.captured_queries if 'concept_relationship' in q['sql']]
+    assert len(lookups) == 1 and 'LIMIT 50' in lookups[0]
+
+
+def test_total_is_optional_when_no_concept_says_it(api, plain_language):
+    # LOINC's plain "Testosterone [Mass/volume] in Serum or Plasma" is the total.
+    assert search(api, 'total testosterone')[0] == '2986-8'
+
+
+def test_a_concept_that_really_says_total_stays_ahead_of_the_fallback(api, plain_language):
+    exact = make_concept((9600001, 'TT-1', 'Total testosterone'))
+    prefix = make_concept((9600002, 'TT-2', 'Total testosterone [Mass/volume] in Serum or Plasma'))
+    codes = search(api, 'total testosterone')
+    assert codes[:2] == ['TT-1', 'TT-2'] and codes.index('2986-8') == 2
+    assert exact.concept_code in codes and prefix.concept_code in codes
+
+
+def test_only_text_with_something_besides_the_optional_word_is_widened():
+    assert optional_word_text('total testosterone') == 'testosterone'
+    assert optional_word_text('testosterone free') == ''
+    assert optional_word_text('total') == ''
+    assert optional_word_text('total t') == ''
+
+
+def test_the_preferred_domain_ranks_after_the_match_and_before_use(api, answers_of_the_question):
+    # Without a hint the answer and the SNOMED concept tie on name; the hint decides.
+    base = search(api, 'grade group 3')
+    assert base.index('860744009') < base.index('LA30796-9')
+    value = search(api, 'grade group 3', prefer_domain_id='Meas Value')
+    assert value[0] == 'LA30796-9'
+    measurement = search(api, 'grade group 3', prefer_domain_id='Measurement')
+    assert measurement[0] == '94734-1'
+    # A better name match is still ahead of a preferred domain.
+    exact = make_concept((9700001, 'GG-3', 'Grade group 3'), vocabulary_id='SNOMED',
+                         domain_id='Observation')
+    assert search(api, 'grade group 3', prefer_domain_id='Meas Value')[0] == exact.concept_code
+    # Use never beats it: a curated concept in another domain stays behind.
+    FieldConceptMapping.objects.create(
+        field_name='gleason_snomed', concept_id=GLEASON_SNOMED[3][0], status='approved',
+        omop_table='observation')
+    assert search(api, 'grade group 3', prefer_domain_id='Meas Value').index('LA30796-9') < \
+        search(api, 'grade group 3', prefer_domain_id='Meas Value').index('860744009')
 
 
 # ---- the result limit ---------------------------------------------------------------
