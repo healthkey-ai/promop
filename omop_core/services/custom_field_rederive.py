@@ -88,24 +88,26 @@ def _qualifies(state: tuple) -> bool:
     return status == 'approved' and bool(concept_id) and bool(table)
 
 
-def mapping_pre_save(sender, instance, **kwargs) -> None:
-    """Remember what the mapping said before the save, so only a real change queues work."""
-    before = None
-    if instance.pk:
-        row = (type(instance).objects.filter(pk=instance.pk)
-               .values_list('status', 'concept_id', 'omop_table', 'source_value').first())
-        if row is not None:
-            status, concept_id, table, source = row
-            before = (status, concept_id, (table or '').strip().lower(), source or '')
-    instance._rederive_before = before
+def mapping_post_init(sender, instance, **kwargs) -> None:
+    """Remember what the mapping said when it was loaded, so only a real change queues work.
+
+    Taken from the loaded instance, with no query: mapping saves are made in bulk (e.g.
+    ``resolve_field_concept_mappings``) and a read per save would show. A row loaded with
+    those columns deferred, or a new one, has no snapshot and counts as changed.
+    """
+    fields = ('status', 'concept_id', 'omop_table', 'source_value')
+    if instance.pk and all(name in instance.__dict__ for name in fields):
+        instance._rederive_before = mapping_state(instance)
+    else:
+        instance._rederive_before = None
 
 
 def mapping_saved(sender, instance, **kwargs) -> None:
     """Queue the derivation when a created field's mapping became (or changed while) approved."""
     now = mapping_state(instance)
-    if not _qualifies(now):
-        return
-    if getattr(instance, '_rederive_before', None) == now:
+    before = getattr(instance, '_rederive_before', None)
+    instance._rederive_before = now
+    if not _qualifies(now) or before == now:
         return
     queue(instance.pk)
 

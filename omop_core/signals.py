@@ -23,7 +23,7 @@ import threading
 from contextlib import contextmanager
 
 from django.conf import settings
-from django.db.models.signals import post_save, post_delete, pre_save
+from django.db.models.signals import post_init, post_save, post_delete, pre_save
 from django.dispatch import receiver
 
 from .models import (
@@ -209,11 +209,11 @@ def field_concept_mapping_saved(sender, instance, **kwargs):
         _project_field_sync(mapping_pk)
 
 
-@receiver(pre_save, sender=FieldConceptMapping)
-def field_concept_mapping_pre_save(sender, instance, **kwargs):
-    """Remember what a created field's mapping said before the save (#2941)."""
-    from omop_core.services.custom_field_rederive import mapping_pre_save
-    mapping_pre_save(sender, instance, **kwargs)
+@receiver(post_init, sender=FieldConceptMapping)
+def field_concept_mapping_loaded(sender, instance, **kwargs):
+    """Remember what a created field's mapping said when it was loaded (#2941)."""
+    from omop_core.services.custom_field_rederive import mapping_post_init
+    mapping_post_init(sender, instance, **kwargs)
 
 
 @receiver(post_save, sender=FieldConceptMapping)
