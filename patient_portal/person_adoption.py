@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from omop_core.models import PatientRecord, Person, PersonMergeCandidate
 from patient_portal.models import PatientUser
@@ -63,6 +63,28 @@ def person_has_own_data(person_id: int) -> bool:
         if table.model.objects.filter(**{table.lookup: person_id}).exists():
             return True
     return False
+
+
+_SIGNUP_DEFAULTS = {
+    'year_of_birth': (None, 1900), 'month_of_birth': (None,), 'day_of_birth': (None,),
+    'gender_source_value': (None, '', 'unknown'), 'race_source_value': (None, '', 'unknown'),
+    'ethnicity_source_value': (None, '', 'unknown'), 'location_id': (None,),
+    'phone_number': (None, ''),
+}
+
+
+def _member_entered_data(person: Person) -> bool:
+    """Whether the member typed anything into this Person or its record.
+
+    Stricter than ``person_has_own_data`` on purpose. Keyed adoption runs at
+    any later sign-in, not right after signup, so a stub may by then hold
+    profile values or record edits that live on Person and PatientRecord only
+    (PatientRecord-first writes), which dropping it would lose.
+    """
+    if any(getattr(person, field) not in blank for field, blank in _SIGNUP_DEFAULTS.items()):
+        return True
+    return PatientRecord.objects.filter(person=person).exclude(
+        user_edited_fields__isnull=True).exclude(user_edited_fields={}).exclude(user_edited_fields=[]).exists()
 
 
 def _provisioned_candidate(email: str, exclude_person_id: int | None) -> Person | None:
@@ -108,6 +130,18 @@ def _carry_over(placeholder: Person, provisioned: Person) -> None:
             setattr(provisioned, field, value)
         provisioned.save(update_fields=list(updates))
 
+    # What the member answered and accepted while on the placeholder. The rows
+    # are append-only, so they are copied, not moved; the placeholder's go
+    # with it when it is dropped.
+    from patient_portal.models import ConsentEvent, DocumentAcceptance
+    for model in (ConsentEvent, DocumentAcceptance):
+        fields = [f.attname for f in model._meta.concrete_fields if f.attname not in ('id', 'person_id')]
+        model.objects.bulk_create([
+            model(person_id=provisioned.person_id, **{f: getattr(row, f) for f in fields})
+            # Oldest first, so the copies' ids keep the order that decides the latest.
+            for row in model.objects.filter(person=placeholder).order_by('id')
+        ])
+
     org_id = (
         PatientRecord.objects
         .filter(person=placeholder)
@@ -127,8 +161,6 @@ def adopt_provisioned_person(identity) -> AdoptionOutcome:
     unless the address is verified, exactly one unclaimed Person holds it, and
     the account's own Person is empty.
     """
-    from omop_core.services.patient_transfer import PatientCopyError, delete_patient
-
     email = (identity.email or '').strip()
     if not email or not identity.has_verified_email:
         return AdoptionOutcome()
@@ -137,6 +169,62 @@ def adopt_provisioned_person(identity) -> AdoptionOutcome:
     candidate = _provisioned_candidate(email, link.person_id if link else None)
     if candidate is None:
         return AdoptionOutcome(person_id=link.person_id if link else None)
+    return _adopt(identity, link, candidate, email)
+
+
+def keyed_person(identity) -> Person | None:
+    """The Person an importer named for this login's (issuer, sub), if any.
+
+    ``Person.actor_iss/actor_sub`` is what the ETL stamped before #1547;
+    ``PersonExternalKey`` is what it asserts since. Both are exact: the login's
+    issuer and subject come from a verified token.
+    """
+    from patient_portal.models import PersonExternalKey
+
+    issuer, sub = getattr(identity, 'issuer', ''), getattr(identity, 'sub', '')
+    if not issuer or not sub:
+        return None
+    person = Person.objects.filter(actor_iss=issuer, actor_sub=sub).first()
+    if person is not None:
+        return person
+    key = (
+        PersonExternalKey.objects
+        .filter(issuer=issuer, subject=sub)
+        .select_related('person')
+        .first()
+    )
+    return key.person if key else None
+
+
+def adopt_keyed_person(identity, link=None) -> AdoptionOutcome:
+    """Link a login to the Person an importer keyed to it.
+
+    A login that arrived before its key did was given an empty Person of its
+    own; this moves it to the keyed one, as email adoption does, so the account
+    heals on its next sign-in. A keyed Person another account holds is left
+    alone.
+    """
+    unchanged = AdoptionOutcome(person_id=link.person_id if link else None)
+    candidate = keyed_person(identity)
+    if candidate is None or (link is not None and link.person_id == candidate.person_id):
+        return unchanged
+    # This runs on every authenticated request, so a case already settled
+    # returns before taking a row lock or scanning the patient tables.
+    if PatientUser.objects.filter(person=candidate).exists():
+        return unchanged
+    if link is not None and PersonMergeCandidate.objects.filter(
+        claimed_id=link.person_id, provisioned=candidate,
+    ).exists():
+        return unchanged
+    return _adopt(identity, link, candidate, (identity.email or '').strip(), strict=True)
+
+
+def _adopt(identity, link, candidate, email, strict=False) -> AdoptionOutcome:
+    """Give *identity* the unclaimed *candidate*, dropping its own empty Person.
+
+    ``strict`` also keeps a Person the member typed into (``_member_entered_data``).
+    """
+    from omop_core.services.patient_transfer import PatientCopyError, delete_patient
 
     with transaction.atomic():
         # Hold the row while re-reading the claim: two accounts verifying the
@@ -147,14 +235,23 @@ def adopt_provisioned_person(identity) -> AdoptionOutcome:
                 "person %s was claimed before identity %s could adopt it",
                 provisioned.person_id, identity.pk,
             )
-            return AdoptionOutcome(person_id=link.person_id if link else None)
+            # Re-read: a parallel request of this login may be the one that
+            # claimed it, and has dropped the Person `link` named.
+            current = PatientUser.objects.filter(identity=identity).first()
+            return AdoptionOutcome(person_id=current.person_id if current else None)
 
         if link is None:
-            PatientUser.objects.create(identity=identity, person=provisioned)
+            try:
+                with transaction.atomic():
+                    PatientUser.objects.create(identity=identity, person=provisioned)
+            except IntegrityError:
+                # A parallel first request of this login linked it already.
+                link = PatientUser.objects.filter(identity=identity).first()
+                return AdoptionOutcome(person_id=link.person_id if link else None)
             return AdoptionOutcome(person_id=provisioned.person_id, adopted=True)
 
         placeholder = link.person
-        if person_has_own_data(placeholder.person_id):
+        if person_has_own_data(placeholder.person_id) or (strict and _member_entered_data(placeholder)):
             PersonMergeCandidate.objects.get_or_create(
                 claimed=placeholder, provisioned=provisioned,
                 defaults={'email': email},
