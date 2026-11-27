@@ -335,6 +335,15 @@ def _resolve_row(
             if not fks[name].null:
                 return None
         values[fks[name].attname] = concept_id
+        # A removed HK-Labs duplicate resolved to the standard concept: its text
+        # twins say so too (hkl_duplicates.TWIN_COLUMNS), not 'HK-Labs' / 'hkl:psa'.
+        alias = hkl_duplicates.alias_for(*ref) if ref is not None else None
+        twin = hkl_duplicates.TWIN_COLUMNS.get((fks[name].model._meta.label, name))
+        if alias and twin and concept_id is not None and Concept.objects.filter(
+                pk=concept_id, vocabulary_id=alias[0]).exists():
+            values[twin[0]] = alias[0]
+            if twin[1]:
+                values[twin[1]] = alias[1]
     return values
 
 
@@ -382,13 +391,15 @@ def _apply_local_concepts(data: LocalConcepts, stats: TransferStats) -> None:
         present = set(model.objects.filter(pk__in=[r[pk] for r in data[part]]).values_list('pk', flat=True))
         model.objects.bulk_create([model(**r) for r in data[part] if r[pk] not in present])
 
-    # Never re-create a retired HK-Labs duplicate of a standard test (hkl_duplicates):
-    # references to it resolve to the standard concept instead (local_concept_ids).
+    # Never re-create an auto-created HK-Labs concept (hkl_duplicates, #2922): a
+    # curator mints a local concept through the mint endpoint. A reference to a
+    # removed duplicate of a standard test resolves to that test (local_concept_ids).
     rows = [r for r in data['concepts']
-            if not hkl_duplicates.is_retired_code(r['vocabulary_id'], r['concept_code'])]
+            if not hkl_duplicates.is_removed_hkl_concept(r['vocabulary_id'], r['concept_code'])]
     if len(rows) < len(data['concepts']):
-        stats.warn(f'{len(data["concepts"]) - len(rows)} HK-Labs concept(s) that duplicate a standard '
-                   'LOINC test were not copied; their references use the standard concept.')
+        stats.warn(f'{len(data["concepts"]) - len(rows)} auto-created HK-Labs (hkl:) concept(s) were '
+                   'not copied; a curator mints a local concept, and a duplicate of a standard '
+                   'test resolves to that test.')
     refs = [(r['vocabulary_id'], r['concept_code']) for r in rows]
     existing = local_concept_ids(refs)
     missing = [r for r, ref in zip(rows, refs) if ref not in existing]

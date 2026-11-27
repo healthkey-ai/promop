@@ -1,44 +1,48 @@
-"""Retire the HK-Labs concepts that duplicate a standard serum/plasma LOINC test.
+"""Remove the auto-created HK-Labs (``hkl:``) concepts (#2922).
 
-HealthKey minted ``hkl:<slug>`` concepts (vocabulary HK-Labs, non-standard) for
-lab names it had no LOINC match for. Eighteen of them name a test LOINC does
-have (``hkl:psa`` and LOINC 2857-1, ...), and they sat ahead of the standard
-concept in concept search. This migration, for each of them present:
+HealthKey created ``hkl:<slug>`` concepts (vocabulary HK-Labs, non-standard)
+for lab names it had no LOINC match for. They sat ahead of the standard concept
+in concept search and invited wrong mappings, and a concept with no standard
+equivalent is minted by a curator through ``code-mappings/mint-destination/``,
+not created by an importer. So none is kept. For each one present, this
+migration:
 
-1. finds the standard concept by (vocabulary_id, concept_code), never by id;
-2. repoints every reference to it, in every table that has one (found by
-   looking at the models), and the text columns that carry its vocabulary and
-   code beside a foreign key;
+1. repoints every reference to the standard LOINC concept when it duplicates one
+   of eighteen serum/plasma tests (``hkl:psa`` and LOINC 2857-1, ...), or is a
+   LOINC code filed under HK-Labs whose standard concept is loaded. The
+   standard concept is found by (vocabulary_id, concept_code), never by id;
+2. otherwise clears the reference and guesses nothing: a measurement's source
+   concept becomes 0, a mapping loses its destination and returns to the
+   curators' queue, and an approved mapping is demoted to proposed with a note;
 3. deletes the concept and the rows that exist only for it (synonyms,
    relationships, ancestry, embeddings, search terms, curator priority, done,
-   lock and decline rows; a curator's note moves to the standard concept when
-   it has none).
+   lock and decline rows, candidate destinations; a curator's note moves to the
+   standard concept when there is one and it has none). The HK-Labs vocabulary
+   row stays, so the mint flow can still use it.
 
-It keeps a concept, and logs why at WARNING, when
+References are found by looking at the models, in every table that has one.
+Every cleared reference, and every approved mapping demoted, is logged at
+WARNING. A referencing row of a listed duplicate that says it is urine, a 24 hour
+collection, saliva or a per-mass figure such as ng/mg is not serum or plasma, so
+a serum code would be wrong for it: that row is cleared, not repointed, and the
+serum rows are repointed. A concept is kept, and logged why, only when a listed
+duplicate's standard concept is missing, inactive or not standard here, or when
+something refuses to be cleared (a field answer mapped to it). Each concept is handled in a savepoint of its own, so a failure
+on one leaves that concept as it was.
 
-* the standard concept is not loaded here, is inactive or not standard;
-* a referencing row says it is urine, a 24 hour collection, saliva or a
-  per-mass figure such as ng/mg (a serum code would be wrong for it): that row
-  stays on the local concept, the rows that are serum or plasma are repointed,
-  and the concept is kept because it is still referenced;
-* a reference exists that it does not rewrite (a field answer coded as the
-  hkl: code).
-
-Each concept is handled in a savepoint of its own, so a failure on one leaves
-that concept exactly as it was. The migration is idempotent: a second run finds
-nothing. On a database with no hkl: concepts (a fresh install, CI) it does
-nothing. Read what it will do first with
+Idempotent: a second run finds nothing. On a database with no hkl: concepts (a
+fresh install, CI) it does nothing. Read what it will do first with
 ``manage.py audit_hkl_duplicates`` (read-only, exits 1 when a concept would be
 kept).
 
-The reverse is a no-op: deleted concepts, their synonyms and their ancestry
-cannot be restored, and rows repointed to the standard concept are not
-repointed back. Patient records whose rows were repointed are marked for
-re-derivation (``backfill_patient_records``).
+The reverse is a no-op: deleted concepts, their synonyms and ancestry cannot be
+restored, and repointed or cleared references are not put back. Patient records
+whose rows changed are marked for re-derivation (``backfill_patient_records``).
 
 The cleanup lives in ``omop_core/services/hkl_duplicates.py`` so the audit and
 this migration cannot disagree; it takes this migration's own ``apps`` and
-imports no model.
+imports no model. It depends on omop_oncology because that app's tables have
+foreign keys to Concept too, and the migration's ``apps`` must contain them.
 """
 import logging
 
@@ -49,25 +53,26 @@ from omop_core.services import hkl_duplicates
 logger = logging.getLogger(__name__)
 
 
-def retire_hkl_duplicates(apps, schema_editor):
+def remove_hkl_concepts(apps, schema_editor):
     using = schema_editor.connection.alias
     plans = hkl_duplicates.build_plan(apps, using=using)
     if not plans:
         return
     summary = hkl_duplicates.apply_plan(apps, plans, using=using)
     logger.warning(
-        'HK-Labs cleanup: removed %d of %d duplicate concept(s), kept %d; %d row(s) repointed, '
+        'HK-Labs cleanup (#2922): removed %d of %d concept(s), kept %d; %d reference(s) repointed '
+        'to a standard concept, %d cleared, %d approved mapping(s) demoted to proposed, '
         '%d dependent row(s) deleted, %d note(s) moved. Run backfill_patient_records for the '
-        'patients whose rows were repointed.',
+        'patients whose rows changed.',
         summary.deleted, len(plans), summary.skipped, summary.rows_repointed,
-        summary.rows_deleted, summary.notes_moved,
+        summary.rows_cleared, summary.demoted, summary.rows_deleted, summary.notes_moved,
     )
 
 
 def reverse_noop(apps, schema_editor):
     # Deleted concepts (and their synonyms, relationships and ancestry) cannot be
-    # restored, and repointed rows are not pointed back. Rolling back leaves the
-    # data as it is.
+    # restored, and repointed or cleared references are not put back. Rolling
+    # back leaves the data as it is.
     pass
 
 
@@ -75,8 +80,9 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('omop_core', '0378_custom_field_dropdown_type'),
+        ('omop_oncology', '0012_therapy_line_response_assessed'),
     ]
 
     operations = [
-        migrations.RunPython(retire_hkl_duplicates, reverse_noop),
+        migrations.RunPython(remove_hkl_concepts, reverse_noop),
     ]

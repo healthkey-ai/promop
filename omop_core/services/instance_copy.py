@@ -81,19 +81,16 @@ def local_concept_ids(refs: Iterable[ConceptRef]) -> dict[ConceptRef, int]:
     Matched by code, never by id: Athena ids agree across instances, but
     HealthKey-minted ids are numbered per instance.
 
-    A retired HK-Labs duplicate of a standard test (``hkl:psa``, see
-    hkl_duplicates) that is no longer here resolves to the standard concept it
+    A removed HK-Labs concept that duplicated a standard test (``hkl:psa``, see
+    hkl_duplicates) and is no longer here resolves to the standard concept it
     duplicated, so a mapping or row copied from an instance that still has it
-    lands on LOINC instead of losing its concept. One that is still here
-    resolves to itself.
+    lands on LOINC instead of losing its concept. Any other removed ``hkl:``
+    concept is simply not found here. One that is still here resolves to itself.
     """
     wanted = set(refs)
     if not wanted:
         return {}
-    aliases = {
-        ref: (hkl_duplicates.STANDARD_VOCABULARY, hkl_duplicates.RETIRED_HKL_DUPLICATES[ref[1]])
-        for ref in wanted if hkl_duplicates.is_retired_code(*ref)
-    }
+    aliases = {ref: alias for ref in wanted if (alias := hkl_duplicates.alias_for(*ref))}
     lookup = wanted | set(aliases.values())
     found = {
         (vocabulary_id, code): concept_id

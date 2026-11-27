@@ -223,18 +223,9 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
     if vocabulary_id == HK_LABS_VOCAB_ID:
-        # Never mint a local lab concept beside a standard one: a retired
-        # duplicate's code, an active LOINC with this code, or the same name
-        # resolves to the standard concept (see hkl_duplicates).
-        from omop_core.services.hkl_duplicates import (
-            find_standard_duplicate, retired_standard_concept,
-        )
-        standard = (
-            retired_standard_concept(concept_code)
-            or find_standard_duplicate(name=concept_name, code=concept_code, domain_id=domain_id)
-        )
-        if standard is not None:
-            return standard
+        # No importer creates a local lab concept: a curator mints one through
+        # code-mappings/mint-destination/ (#2922).
+        raise ValueError('HK-Labs concepts are minted only through the curator mint endpoint.')
 
     concept = Concept.objects.filter(
         vocabulary_id=vocabulary_id, concept_code=concept_code,

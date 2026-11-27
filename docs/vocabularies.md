@@ -288,56 +288,75 @@ These are **not** from Athena. Rows should carry `source='HealthKey'`, live in a
 
 | Vocabulary | Concepts | Code format | What it holds |
 |---|---|---|---|
-| **HK-Labs** | 60 on staging (78 before the cleanup below) | `hkl:<slug>`, e.g. `hkl:indican` | Lab test names extracted from source data with no LOINC match. Quarantined so they do not pollute LOINC. A name that has a standard LOINC concept is not minted here (see below). |
+| **HK-Labs** | 0 by design (78 on staging before #2922) | `hkl:<slug>`, minted by a curator only | Local lab concepts with no LOINC match. Never created by an importer; see "HK-Labs is empty by design" below. |
 | **HK-Regimen** | 7 | `hkr:<slug>`, e.g. `hkr:t-dm1` | Treatment regimens with no HemOnc match. |
 | **HK-Wearable** | 5 | `HK-WEAR-<METRIC>`, e.g. `HK-WEAR-STEP-LENGTH` | Wearable metrics with no LOINC equivalent — walking step length, double-support percentage, walking heart rate, basal energy expenditure. |
 
-### HK-Labs concepts that duplicate a standard test
+### HK-Labs is empty by design (#2922)
 
-An `hkl:` concept exists only for a lab name with no LOINC match. Eighteen
-turned out to name a test LOINC has (`hkl:psa` and LOINC 2857-1 "Prostate
-specific Ag [Mass/volume] in Serum or Plasma", `hkl:cortisol` and 2143-6, and so
-on), so they sat ahead of the standard concept in concept search and invited
-mappings to the wrong one. Migration `0380_retire_hkl_duplicates` repoints every
-reference to the standard concept and deletes them; the table of the eighteen is
-`RETIRED_HKL_DUPLICATES` in `omop_core/services/hkl_duplicates.py`.
+`HK-Labs` used to hold `hkl:<slug>` concepts that were created automatically
+for a lab name with no LOINC match. They polluted concept search (`hkl:psa`
+ahead of LOINC 2857-1), eighteen of them duplicated a standard serum/plasma
+LOINC test, and a concept with no standard equivalent is a curator's decision,
+not an importer's. So **no importer creates an HK-Labs concept any more**: a
+local lab concept appears only when a curator mints one through
+`code-mappings/mint-destination/` (an existing HK-* vocabulary, a signed
+candidate review, an id at or above 2,000,000,000 from `next_pk`). The
+`HK-Labs` vocabulary row stays so that flow can use it. (The other HK-*
+vocabularies are unchanged; `hkl:fallback-<id>` rows, which stand in for a
+standard visit or type concept when Athena is not loaded, are not lab concepts
+and are left alone.)
 
-- **What it repoints.** Every foreign key to `Concept` on every model (found by
-  introspection, so a new one is covered), the text columns that carry a
-  concept's vocabulary and code beside such a key, and the concept ids held as
-  plain integers. Rows that exist only for the concept (synonyms, relationships,
-  ancestry, embeddings, search terms, curator priority, done, lock and decline
-  rows) are deleted; a curator's note moves to the standard concept when it has
-  none. Patient records whose rows were repointed are marked for re-derivation
-  (`backfill_patient_records`).
-- **What it leaves alone, and logs at WARNING.** A concept whose standard LOINC
-  concept is not loaded, inactive or not standard on that instance; a concept
-  any referencing row of which says urine, a 24 hour collection, saliva or a
-  per-mass unit such as ng/mg (the serum code would be wrong for it: that row is
-  left on the local concept, the rows that are serum or plasma move, and the
-  concept stays because it is still referenced; each row's own text is read,
-  e.g. a measurement's unit and source value or a mapping's description, notes
-  and source metadata); and a concept still named by `(HK-Labs, hkl:...)` in a
-  field answer's codes.
-  The urine/24 h panels, the two codes that are LOINC codes themselves
-  (`hkl:85319-5`, `hkl:lp95826-0`) and the genuinely local concepts are not in
-  the table and are not touched.
+Migration `0380_retire_hkl_duplicates` removed the existing ones. For each:
+
+- **Repoint.** A concept that duplicates a standard serum/plasma test (the
+  eighteen of `RETIRED_HKL_DUPLICATES` in `omop_core/services/hkl_duplicates.py`:
+  `hkl:psa` and LOINC 2857-1, `hkl:cortisol` and 2143-6, ...), or that is a LOINC
+  code filed under HK-Labs whose standard concept is loaded (`hkl:85319-5`), has
+  every reference repointed to the standard concept, found by `(vocabulary_id,
+  concept_code)`. A reference whose own text says urine, a 24 hour collection,
+  saliva or a per-mass unit such as ng/mg is not serum or plasma: that row stays
+  on the local concept, the serum rows move, and the concept stays because it is
+  still referenced. A listed duplicate whose standard concept is missing,
+  inactive or not standard on an instance is kept and reported.
+- **Clear, never guess.** Any other concept (the urine and 24 hour panels, the
+  timed cortisol series, the estrogen-metabolite balances, "Gain 1q21 or
+  amp1q21", ...) has its references cleared: a measurement's source concept
+  becomes 0 (the source value and unit stay), a mapping loses its destination and
+  returns to the curators' queue, an approved mapping is demoted to proposed with
+  a note, and a field mapping loses its concept. A curator then picks a standard
+  concept or mints one.
+- **Delete.** The concept goes, with the rows that exist only for it (synonyms,
+  relationships, ancestry, embeddings, search terms, curator priority, done,
+  lock and decline rows, candidate destinations; a curator's note moves to the
+  standard concept when there is one and it has none). Every reference is found
+  by looking at the models (each foreign key to `Concept`), not from a list.
+  Patient records whose rows changed are marked for re-derivation
+  (`backfill_patient_records`); mappings that changed are stamped `updated_at` so
+  the code-mapping API's delta reads them.
 - **Read it first.** `manage.py audit_hkl_duplicates` (read-only; `--json`)
   lists, per concept present, every reference with the kind of data it is, the
-  standard concept it would move to and whether that exists and is active, and
-  what the migration will refuse. It exits 1 when a concept will be kept.
+  standard concept it would move to and whether that exists and is active, the
+  approved mappings it would demote, and anything the migration will refuse
+  (exit 1 when a concept would be kept). It runs the migration's own planner.
 - **It cannot be undone.** Deleted concepts and their synonyms cannot be
   restored; the migration's reverse is a no-op.
-- **No new duplicate is minted.** The Mint dialog (`code-mappings/mint-destination/`)
-  answers 409 `standard_concept_exists` for an HK-Labs concept whose name (case
-  and spacing aside) or code (a LOINC code behind an `hkl:` prefix) an active
-  standard concept already has, naming that concept; the quarantine minter the
-  code-mapping lookup uses and the lab sync's source concepts reuse the standard
-  concept instead of creating one, and a retired code is never minted again
-  while its standard concept is loaded. `copy_reference_data` does not copy a
-  retired concept from an instance that still has it, and a reference to it
-  resolves to the standard concept. Matching is by the standard concept's own
-  name only, never a synonym or a fuzzy match: a near match is a curator's call.
+
+How a new one is kept out:
+
+- The code-mapping resolver (`resolve_source_code`, the lookup API, FHIR sync)
+  no longer mints for a lab: a code nothing maps is queued with no destination
+  and its rows wait at concept 0. The lab-results sync does the same for a test
+  name with no LOINC code: it uses an approved mapping's concept if there is one
+  and otherwise queues the name, with no source concept.
+- The quarantine minter raises for HK-Labs, and the Mint dialog answers 409
+  `standard_concept_exists` for an HK-Labs concept whose name (case and spacing
+  aside) or LOINC code an active standard concept already has, naming that
+  concept. Matching is by the standard concept's own name only, never a synonym
+  or a fuzzy match: a near match is a curator's call.
+- `copy_reference_data` does not copy an `hkl:` concept from an instance that
+  still has one, and a reference to a removed duplicate of a standard test
+  resolves to that test (with its vocabulary and code text), not to nothing.
 
 ### Non-conforming local vocabularies
 

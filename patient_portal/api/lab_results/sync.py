@@ -29,7 +29,6 @@ from omop_core.models import (
     CareSite, Concept, Measurement, MeasurementOwnership,
     Person, ProvenanceRecord, VisitOccurrence,
 )
-from omop_core.services.hkl_duplicates import find_standard_duplicate, retired_standard_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from patient_portal.api.permissions import (
     LabSyncPermission, get_request_org, is_service_token, is_machine_request,
@@ -363,64 +362,35 @@ class SyncView(APIView):
         ProvenanceRecord.objects.bulk_create(records, ignore_conflicts=True)
 
     def _preload_hk_concepts(self, items, loinc_cache):
-        """Pre-fetch or create HK-Labs concepts for LOINC-unmatched tests."""
-        names_needing_hk = set()
-        for item in items:
-            loinc_code = item.get('loinc_code')
-            if not loinc_code or loinc_code not in loinc_cache:
-                names_needing_hk.add(item['test_name'])
+        """Source concepts for tests with no LOINC match: an approved mapping's, else none.
 
-        if not names_needing_hk:
-            return {}
+        No local concept is created here (#2922): a test name nothing maps is
+        queued for a curator (a standard concept, or a mint through
+        code-mappings/mint-destination/) and its row keeps no source concept,
+        waiting at concept 0.
+        """
+        from omop_core.mapping.code_resolution import _record_proposal
 
-        slugs = {_normalize_slug(name): name for name in names_needing_hk}
-        existing = Concept.objects.filter(
-            vocabulary_id=HK_LABS_VOCAB_ID,
-            concept_code__in=list(slugs.keys()),
-        )
         cache = {}
-        for c in existing:
-            for slug, name in list(slugs.items()):
-                if slug == c.concept_code:
-                    cache[name] = c.concept_id
-
-        missing = names_needing_hk - set(cache.keys())
-        # A name that is a retired HK-Labs duplicate of a standard test, or that
-        # a standard concept already carries, resolves to that concept instead
-        # of minting a new hkl: concept beside it (see hkl_duplicates).
-        for name in sorted(missing):
-            standard = (
-                retired_standard_concept(_normalize_slug(name))
-                or find_standard_duplicate(name=name, domain_id='Measurement')
-            )
-            if standard is not None:
-                cache[name] = standard.concept_id
-        missing = names_needing_hk - set(cache.keys())
-        if missing:
-            _ensure_hk_deps('Measurement', 'Lab Test')
-            new_ids = next_pk_batch(Concept, 'concept_id', len(missing))
-            new_concepts = []
-            for concept_id, name in zip(new_ids, missing):
-                code = _normalize_slug(name)
-                new_concepts.append(Concept(
-                    concept_id=concept_id,
-                    concept_name=name[:255],
-                    domain_id='Measurement',
-                    vocabulary_id=HK_LABS_VOCAB_ID,
-                    concept_class_id='Lab Test',
-                    standard_concept=None,
-                    # Every HK-* row is HealthKey-authored; concept_fixtures
-                    # asserts that invariant and this path was breaking it,
-                    # leaving locally minted labs indistinguishable from
-                    # licensed vocabulary content.
-                    source='HealthKey',
-                    concept_code=code[:50],
-                    valid_start_date=date(1970, 1, 1),
-                    valid_end_date=date(2099, 12, 31),
-                ))
-                cache[name] = concept_id
-            Concept.objects.bulk_create(new_concepts)
-
+        names = {
+            item['test_name'] for item in items
+            if not item.get('loinc_code') or item['loinc_code'] not in loinc_cache
+        }
+        for name in sorted(names):
+            if not name.strip():
+                continue
+            try:
+                mapping = _record_proposal(
+                    source_vocabulary_id='', source_code=name[:100], source_text=name,
+                    concept=None, omop_table='measurement', source_system='lab-results-sync',
+                    organization=None,
+                )
+            except Exception:
+                # Queueing is a courtesy: never fail a patient's sync for it.
+                logger.warning('Could not queue an unmapped lab name for review.', exc_info=True)
+                continue
+            if mapping is not None and mapping.status == 'approved' and mapping.target_concept_id:
+                cache[name] = mapping.target_concept_id
         return cache
 
     def _get_or_create_care_site(self, lab_name):

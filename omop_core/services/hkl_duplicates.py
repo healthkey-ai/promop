@@ -1,23 +1,29 @@
-"""Retire the HK-Labs concepts that duplicate a standard serum/plasma LOINC test.
+"""Remove the auto-created HK-Labs (``hkl:``) concepts (#2922).
 
-``hkl:<slug>`` concepts are local, non-standard concepts HealthKey minted for a
-lab name that had no LOINC match (see docs/vocabularies.md). Eighteen of them
-turned out to name a test LOINC does have, so they sat beside the standard
-concept in concept search (``hkl:psa`` ahead of LOINC 2857-1) and invited
-mappings to the wrong one. This module holds
+``hkl:<slug>`` concepts are local, non-standard concepts that were created
+automatically for a lab name with no LOINC match (see docs/vocabularies.md).
+They polluted concept search (``hkl:psa`` ahead of LOINC 2857-1) and invited
+mappings to the wrong concept. A concept that has no standard equivalent is
+minted by a curator through ``code-mappings/mint-destination/``, never created
+by an importer, so none of them is kept. This module holds
 
-* the table of those eighteen (:data:`RETIRED_HKL_DUPLICATES`),
+* the table of the eighteen that duplicate a standard serum/plasma LOINC test
+  (:data:`RETIRED_HKL_DUPLICATES`); a reference to one of those is repointed;
 * the cleanup itself (:func:`build_plan`, :func:`apply_plan`), shared by the
   read-only ``audit_hkl_duplicates`` command and migration 0380 so the audit
-  cannot disagree with what the migration does, and
-* the guard that stops a new duplicate being minted
-  (:func:`find_standard_duplicate`, :func:`retired_standard_concept`).
+  cannot disagree with what the migration does. A reference to any other
+  concept is cleared, never guessed: a measurement's source concept becomes 0,
+  a mapping loses its destination and returns to the curators' queue (an
+  approved mapping is demoted to proposed, with a note);
+* the guards that stop one being created again
+  (:func:`is_removed_hkl_concept`, :func:`retired_standard_concept`,
+  :func:`find_standard_duplicate`).
 
 The cleanup functions take a model registry (``django.apps.apps`` or a
 migration's ``apps``) and import no model themselves: a migration must run
 against the schema of its own point in history. They use no other promop code.
 A later change to this module does not re-run the migration on a database that
-already applied it, and on a fresh database there is nothing to retire.
+already applied it, and on a fresh database there is nothing to remove.
 
 What counts as a reference is found by looking at the models, not listed: every
 foreign key to ``Concept`` on every model. Columns that hold a concept id or a
@@ -32,18 +38,28 @@ import logging
 import re
 from dataclasses import dataclass, field
 
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, connections, transaction
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
 HK_LABS_VOCABULARY = 'HK-Labs'
 STANDARD_VOCABULARY = 'LOINC'
+HKL_PREFIX = 'hkl:'
+# ``hkl:fallback-<id>`` concepts stand in for a standard visit or type concept
+# when Athena is not loaded (lab_results/sync.py, fhir/sync.py): not lab concepts.
+HKL_FALLBACK_PREFIX = 'hkl:fallback-'
+# The OHDSI range for local concepts; Athena never allocates there.
+LOCAL_CONCEPT_MIN_ID = 2_000_000_000
+# A LOINC code filed under HK-Labs (``hkl:85319-5``): matched to the standard
+# concept with that code when one is loaded.
+_LOINC_CODE_TAIL = re.compile(r'^hkl:(\d{1,7}-\d)$')
 
 # hkl: concept_code -> LOINC code of the standard concept it duplicates.
 # Every target is a serum/plasma test (or a calculation or a presence test with
 # no specimen in its name) that was checked to exist, active and standard, on
-# staging. The urine/24 h panels, the two codes that are LOINC codes themselves
-# and the genuinely local ones were left out on purpose.
+# staging. The urine/24 h panels and the genuinely local concepts are not here:
+# their references are cleared, not guessed at.
 RETIRED_HKL_DUPLICATES: dict[str, str] = {
     'hkl:psa': '2857-1',
     'hkl:testosterone': '2986-8',
@@ -80,11 +96,27 @@ DEPENDENT_COLUMNS: frozenset[tuple[str, str]] = frozenset({
     ('omop_core.ConceptMappingDone', 'concept'),
     ('omop_core.ConceptMappingLock', 'concept'),
     ('omop_core.ReverseSuggestDecline', 'concept'),
+    # A candidate destination for a mapping: with the concept gone it is no candidate.
+    ('omop_core.MappingDestinationCandidate', 'target_concept'),
 })
 
 # One row per concept: it moves to the standard concept when that has none.
 MOVE_OR_DROP_COLUMNS: frozenset[tuple[str, str]] = frozenset({
     ('omop_core.ConceptMappingNote', 'concept'),
+})
+
+# A reference to a concept with no standard equivalent is cleared. These two are
+# mappings: they lose the destination and go back to the curators' queue, and an
+# approved one is demoted to proposed with a note.
+CLEAR_AS_MAPPING: frozenset[tuple[str, str]] = frozenset({
+    ('omop_core.SourceCodeConceptMapping', 'target_concept'),
+    ('omop_core.FieldConceptMapping', 'concept'),
+})
+# A field answer mapped to the concept has no equivalent state to be cleared to
+# (outcome 'mapped' needs its target): it stops the concept being removed.
+CLEAR_BLOCKED: frozenset[tuple[str, str]] = frozenset({
+    ('omop_core.FieldValueConceptMapping', 'target_concept'),
+    ('omop_core.FieldValueConceptMapping', 'question_concept'),
 })
 
 # A foreign key's text twins, written beside it and updated with it.
@@ -95,8 +127,6 @@ TWIN_COLUMNS: dict[tuple[str, str], tuple[str, str]] = {
     ('omop_core.FieldValueConceptMapping', 'question_concept'): (
         'question_vocabulary_id', 'question_concept_code'),
     ('omop_core.SourceCodeConceptMapping', 'target_concept'): ('destination_vocabulary_id', ''),
-    ('omop_core.MappingDestinationCandidate', 'target_concept'): (
-        'target_vocabulary_id', 'target_concept_code'),
     ('omop_core.SourceToConceptMap', 'target_concept'): ('target_vocabulary_id', ''),
 }
 
@@ -132,7 +162,6 @@ INFORMATIONAL_ID_COLUMNS: tuple[tuple[str, str], ...] = (
 # afresh. Reported only.
 INFORMATIONAL_CODE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ('omop_core.SourceCodeConceptMapping', 'source_vocabulary_id', 'source_code'),
-    ('omop_core.PatientSourceCode', 'source_vocabulary_id', 'source_value'),
 )
 
 # --- what is not serum or plasma ---------------------------------------------
@@ -169,17 +198,29 @@ def _label(model) -> str:
     return model._meta.label
 
 
-def concept_fk_columns(registry) -> list[tuple[object, object]]:
-    """Every foreign key to Concept on every model: ``[(model, field)]``."""
+def concept_fk_columns(registry, using: str = 'default') -> list[tuple[object, object]]:
+    """Every foreign key to Concept on every model whose table exists: ``[(model, field)]``.
+
+    A model with no table here is skipped: ``ConceptEmbedding`` has none on a
+    server without pgvector.
+    """
+    from django.db import connections
+    tables = set(connections[using].introspection.table_names())
     found = []
     for model in registry.get_models():
-        if model._meta.proxy or not model._meta.managed:
+        if model._meta.proxy or not model._meta.managed or model._meta.db_table not in tables:
             continue
         for fld in model._meta.concrete_fields:
             if fld.is_relation and fld.related_model is not None \
                     and _label(fld.related_model) == 'omop_core.Concept':
                 found.append((model, fld))
     return sorted(found, key=lambda pair: (_label(pair[0]), pair[1].name))
+
+
+def _class_of(cache: dict[str, str], label: str) -> str:
+    if label not in cache:
+        cache[label] = _instance_class(label)
+    return cache[label]
 
 
 def _instance_class(label: str) -> str:
@@ -221,12 +262,16 @@ class ConceptPlan:
     target_id: int | None
     target_name: str
     target_state: str      # ok | missing | inactive | not_standard
+    action: str = 'clear'  # repoint | clear
+    kind: str = ''         # table (a listed duplicate) | same_code | '' (no standard equivalent)
+    zero_exists: bool = True   # concept 0 is here, so a source concept can be cleared to it
+    demotions: list[str] = field(default_factory=list)   # approved mappings that lose their target
     references: list[Reference] = field(default_factory=list)
     non_serum: list[str] = field(default_factory=list)   # 'Model pk=1: urine', at most 20
     non_serum_total: int = 0
     skip: dict = field(default_factory=dict)   # (model label, column) -> pks left alone
     blockers: list[str] = field(default_factory=list)    # references the cleanup does not rewrite
-    outcome: str = ''      # delete | partial_non_serum | skip_target | skip_unhandled | failed
+    outcome: str = ''      # delete | skip_target | skip_unhandled | failed
     detail: str = ''
 
     @property
@@ -267,32 +312,52 @@ def _text_columns(model) -> list[str]:
     return names
 
 
+def standard_target_code(hkl_code: str) -> tuple[str, str]:
+    """``(LOINC code, kind)`` an hkl: concept is repointed to, or ``('', '')`` to clear it.
+
+    ``table`` is one of :data:`RETIRED_HKL_DUPLICATES`; ``same_code`` is a LOINC
+    code filed under HK-Labs (``hkl:85319-5``), which means the standard concept
+    with that code once it is loaded.
+    """
+    if hkl_code in RETIRED_HKL_DUPLICATES:
+        return RETIRED_HKL_DUPLICATES[hkl_code], 'table'
+    match = _LOINC_CODE_TAIL.match(hkl_code)
+    return (match.group(1), 'same_code') if match else ('', '')
+
+
 def build_plan(registry, using: str = 'default') -> list[ConceptPlan]:
-    """One :class:`ConceptPlan` per retired concept present on this database."""
+    """One :class:`ConceptPlan` per auto-created HK-Labs concept present on this database."""
     Concept = registry.get_model('omop_core', 'Concept')
     present = {
         c.concept_code: c for c in Concept.objects.using(using).filter(
-            vocabulary_id=HK_LABS_VOCABULARY, concept_code__in=list(RETIRED_HKL_DUPLICATES),
-        )
+            vocabulary_id=HK_LABS_VOCABULARY, concept_code__startswith=HKL_PREFIX,
+            concept_id__gte=LOCAL_CONCEPT_MIN_ID,
+        ).exclude(concept_code__startswith=HKL_FALLBACK_PREFIX)
     }
     if not present:
         return []
+    wanted = {standard_target_code(code)[0] for code in present} - {''}
     targets = {
         c.concept_code: c for c in Concept.objects.using(using).filter(
-            vocabulary_id=STANDARD_VOCABULARY,
-            concept_code__in=set(RETIRED_HKL_DUPLICATES.values()),
-        )
+            vocabulary_id=STANDARD_VOCABULARY, concept_code__in=wanted)
     }
+    zero_exists = Concept.objects.using(using).filter(concept_id=0).exists()
     plans = {}
     for hkl_code in sorted(present):
         concept = present[hkl_code]
-        target_code = RETIRED_HKL_DUPLICATES[hkl_code]
+        target_code, kind = standard_target_code(hkl_code)
         target = targets.get(target_code)
-        plans[concept.concept_id] = ConceptPlan(
+        state = target_state(target) if target_code else ''
+        plan = ConceptPlan(
             hkl_code=hkl_code, concept_id=concept.concept_id, concept_name=concept.concept_name,
             target_code=target_code, target_id=target.concept_id if target else None,
-            target_name=target.concept_name if target else '', target_state=target_state(target),
+            target_name=target.concept_name if target else '', target_state=state,
+            kind=kind, zero_exists=zero_exists,
         )
+        # A listed duplicate whose standard concept is unusable here is kept, and
+        # reported. A LOINC code with no usable standard concept is cleared.
+        plan.action = 'repoint' if (kind and state == 'ok') or kind == 'table' else 'clear'
+        plans[concept.concept_id] = plan
     _collect_references(registry, using, plans)
     for plan in plans.values():
         _decide(plan)
@@ -308,17 +373,37 @@ def _grouped_counts(qs, column: str) -> dict[int, int]:
 def _collect_references(registry, using, plans: dict[int, ConceptPlan]) -> None:
     """Fill each plan's references, one query per column for every concept at once."""
     ids = list(plans)
-    for model, fld in concept_fk_columns(registry):
+    classes: dict[str, str] = {}   # instance_data's class per model, read once
+    for model, fld in concept_fk_columns(registry, using):
         label = _label(model)
         qs = model._default_manager.using(using).filter(**{f'{fld.attname}__in': ids})
         counts = _grouped_counts(qs, fld.attname)
         for cid, count in counts.items():
             key = (label, fld.name)
-            action = ('delete' if key in DEPENDENT_COLUMNS
-                      else 'move_or_drop' if key in MOVE_OR_DROP_COLUMNS else 'repoint')
             plan = plans[cid]
-            plan.references.append(Reference(label, fld.name, count, action, _instance_class(label), 'fk'))
-            if action == 'repoint':
+            instance_class = _class_of(classes, label)
+            if key in DEPENDENT_COLUMNS:
+                action = 'delete'
+            elif key in MOVE_OR_DROP_COLUMNS:
+                action = 'move_or_drop' if plan.action == 'repoint' else 'delete'
+            elif plan.action == 'repoint':
+                action = 'repoint'
+            elif key in CLEAR_BLOCKED:
+                action = 'blocks'
+                plan.blockers.append(f'{label}.{fld.name}={count} cannot be cleared: a curator must map it')
+            elif key in CLEAR_AS_MAPPING:
+                action = 'clear_mapping'
+                _note_demotions(plan, qs.filter(**{fld.attname: cid}), label)
+            elif _clears_to_zero(fld) and not plan.zero_exists:
+                action = 'blocks'
+                plan.blockers.append(f'{label}.{fld.name}={count} needs concept 0, which is not here')
+            elif fld.null or instance_class == 'patient':
+                action = 'clear'
+            else:
+                action = 'blocks'
+                plan.blockers.append(f'{label}.{fld.name}={count} cannot be cleared')
+            plan.references.append(Reference(label, fld.name, count, action, instance_class, 'fk'))
+            if action == 'repoint' and plan.kind == 'table':
                 _check_specimen(plan, model, key, qs.filter(**{fld.attname: cid}))
     for label, column in ID_COLUMNS + INFORMATIONAL_ID_COLUMNS:
         model = registry.get_model(*label.split('.'))
@@ -326,10 +411,12 @@ def _collect_references(registry, using, plans: dict[int, ConceptPlan]) -> None:
         informational = (label, column) in INFORMATIONAL_ID_COLUMNS
         for cid, count in _grouped_counts(qs, column).items():
             plan = plans[cid]
+            # A snapshot id is kept as it is when the concept is cleared, not repointed.
+            keep = informational or plan.action != 'repoint'
             plan.references.append(Reference(
-                label, column, count, 'info' if informational else 'repoint',
-                _instance_class(label), 'id'))
-            if not informational:
+                label, column, count, 'info' if keep else 'repoint',
+                _class_of(classes, label), 'id'))
+            if not keep and plan.kind == 'table':
                 _check_specimen(plan, model, (label, column), qs.filter(**{column: cid}))
     for label, column in JSON_ID_LISTS:
         model = registry.get_model(*label.split('.'))
@@ -353,6 +440,21 @@ def _collect_references(registry, using, plans: dict[int, ConceptPlan]) -> None:
                 plan.blockers.append(f'{label}.{code_col}={count} names the code and is not rewritten')
 
 
+def _clears_to_zero(fld) -> bool:
+    """Whether a reference in this column is cleared to concept 0 rather than NULL."""
+    return (not fld.null) or fld.attname.endswith('source_concept_id')
+
+
+def _note_demotions(plan, qs, label: str) -> None:
+    """Name the approved mappings that lose their destination."""
+    if label == 'omop_core.SourceCodeConceptMapping':
+        rows = qs.filter(status='approved').values_list('pk', 'source_vocabulary_id', 'source_code')
+        plan.demotions += [f'SourceCodeConceptMapping {pk}: {vocab} {code}' for pk, vocab, code in rows]
+    else:
+        rows = qs.filter(status='approved').values_list('pk', 'field_name')
+        plan.demotions += [f'FieldConceptMapping {pk}: {name}' for pk, name in rows]
+
+
 def _check_specimen(plan, model, key, qs, limit: int = 20) -> None:
     """Note each referencing row whose own text says it is not serum or plasma."""
     pk_name = model._meta.pk.name
@@ -369,7 +471,7 @@ def _check_specimen(plan, model, key, qs, limit: int = 20) -> None:
 
 
 def _decide(plan: ConceptPlan) -> None:
-    if plan.target_state != 'ok':
+    if plan.kind == 'table' and plan.target_state != 'ok':
         plan.outcome = 'skip_target'
         plan.detail = (f'standard LOINC {plan.target_code} is {plan.target_state.replace("_", " ")} '
                        'on this instance')
@@ -377,11 +479,11 @@ def _decide(plan: ConceptPlan) -> None:
         plan.outcome = 'skip_unhandled'
         plan.detail = '; '.join(plan.blockers)
     elif plan.non_serum_total:
-        # The rows that are serum or plasma move; the others stay on the local
-        # concept, which therefore stays.
-        plan.outcome = 'partial_non_serum'
+        # Not serum or plasma, so not what the standard concept means: those rows
+        # are cleared, not repointed, and the concept goes all the same.
+        plan.outcome = 'delete'
         plan.detail = (f'{plan.non_serum_total} referencing row(s) look like urine/24 h/saliva/'
-                       'per-mass and are left alone: ' + '; '.join(plan.non_serum[:5]))
+                       'per-mass and are cleared, not repointed: ' + '; '.join(plan.non_serum[:5]))
     else:
         plan.outcome = 'delete'
 
@@ -390,8 +492,9 @@ def _decide(plan: ConceptPlan) -> None:
 
 @dataclass
 class Summary:
-    deleted: int = 0
-    partial: int = 0
+    deleted: int = 0          # concepts removed
+    rows_cleared: int = 0
+    demoted: int = 0          # approved mappings sent back to proposed
     skipped: int = 0
     rows_repointed: int = 0
     rows_deleted: int = 0
@@ -399,65 +502,133 @@ class Summary:
 
 
 def apply_plan(registry, plans: list[ConceptPlan], using: str = 'default') -> Summary:
-    """Repoint every reference of each concept, then delete the ones nothing is left on.
+    """Repoint or clear every reference of each concept, then delete the ones nothing is left on.
 
     A concept is handled in a savepoint of its own: whatever goes wrong with one
     leaves it, and its references, exactly as they were, and the rest go on.
-    A concept with non-serum references has only its serum references repointed
-    and is kept. Every concept kept is logged at WARNING with the reason.
+    A listed duplicate's non-serum references are cleared, not repointed. Every concept kept is logged at WARNING with the
+    reason, and so is every approved mapping that loses its destination.
     """
     summary = Summary()
     priorities_removed = False
     for plan in plans:
-        if plan.outcome not in ('delete', 'partial_non_serum'):
+        if plan.outcome != 'delete':
             summary.skipped += 1
             logger.warning('HK-Labs cleanup: kept %s (%s): %s', plan.hkl_code, plan.outcome, plan.detail)
             continue
-        partial = plan.outcome == 'partial_non_serum'
         try:
             with transaction.atomic(using=using):
-                stats = _apply_one(registry, using, plan, partial=partial)
-        except (IntegrityError, RuntimeError) as exc:
+                stats = _apply_one(registry, using, plan)
+                # Deferred foreign keys are checked at COMMIT, past every handler
+                # here: check now, so a reference this plan did not see undoes
+                # only this concept.
+                with connections[using].cursor() as cursor:
+                    cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+                    cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+        except (DatabaseError, RuntimeError) as exc:
             plan.outcome, plan.detail = 'failed', f'{type(exc).__name__}: {exc}'.splitlines()[0]
             summary.skipped += 1
             logger.warning('HK-Labs cleanup: kept %s (failed, rolled back): %s', plan.hkl_code, plan.detail)
             continue
         summary.rows_repointed += stats['repointed']
+        summary.rows_cleared += stats['cleared']
         summary.rows_deleted += stats['deleted']
         summary.notes_moved += stats['notes_moved']
+        summary.demoted += stats['demoted']
         priorities_removed = priorities_removed or stats['priority_deleted']
-        if partial:
-            summary.partial += 1
-            logger.warning('HK-Labs cleanup: kept %s (%s): %d row(s) repointed to LOINC %s; %s',
-                           plan.hkl_code, plan.outcome, stats['repointed'], plan.target_code, plan.detail)
+        for line in plan.demotions:
+            logger.warning('HK-Labs cleanup: approved mapping demoted to proposed, destination %s '
+                           'removed: %s', plan.hkl_code, line)
+        summary.deleted += 1
+        if plan.action == 'repoint':
+            logger.info('HK-Labs cleanup: removed %s -> LOINC %s (%d row(s) repointed, %d cleared)',
+                        plan.hkl_code, plan.target_code, stats['repointed'], stats['cleared'])
+            if plan.non_serum_total:
+                logger.warning('HK-Labs cleanup: %s: %s', plan.hkl_code, plan.detail)
         else:
-            summary.deleted += 1
-            logger.info('HK-Labs cleanup: removed %s -> LOINC %s (%d row(s) repointed)',
-                        plan.hkl_code, plan.target_code, stats['repointed'])
+            logger.warning('HK-Labs cleanup: removed %s with no standard equivalent: %d '
+                           'reference(s) cleared', plan.hkl_code, stats['cleared'])
     if priorities_removed:
-        _renumber_priorities(registry, using)
+        try:
+            with transaction.atomic(using=using):
+                _renumber_priorities(registry, using)
+        except DatabaseError:
+            logger.warning('HK-Labs cleanup: could not renumber curator priority positions', exc_info=True)
     return summary
 
 
-def _apply_one(registry, using, plan, partial: bool = False) -> dict:
+def _timestamp_update(model, update: dict) -> dict:
+    """Add ``updated_at`` where the model has one: ``update()`` skips ``auto_now``.
+
+    The code-mapping API's ``updated_since`` delta reads it, so a change it did
+    not stamp would never reach the ETL.
+    """
+    if _has_field(model, 'updated_at'):
+        update = {**update, 'updated_at': timezone.now()}
+    return update
+
+
+def _demote(model, qs, plan, label: str) -> int:
+    """Clear a mapping's destination and demote an approved one to proposed, with a note."""
+    note = (f'HK-Labs concept {plan.hkl_code} "{plan.concept_name}" was removed (#2922). '
+            'The destination was cleared and the code is back in the queue for a standard '
+            'concept or a curator mint.')
+    cleared = {
+        'omop_core.SourceCodeConceptMapping': {
+            'target_concept': None, 'destination_vocabulary_id': '', 'destination_unit_concept': None,
+            'reviewer': None, 'reviewed_at': None, 'proposed_by': None, 'origin_system': '',
+            'suggested_action': '', 'suggestion_confidence': None, 'decision_confidence': None,
+            'locked_by': None, 'locked_at': None,
+        },
+        'omop_core.FieldConceptMapping': {
+            'concept': None, 'vocabulary_id': '', 'concept_code': '', 'reviewer': None,
+            'reviewed_at': None,
+        },
+    }[label]
+    demoted = 0
+    for row in list(qs):
+        values = {name: value for name, value in cleared.items() if _has_field(model, name)}
+        if getattr(row, 'status', '') == 'approved':
+            demoted += 1
+            values['status'] = 'proposed'
+            values['notes'] = ((row.notes + '\n') if row.notes else '') + note
+        model._default_manager.using(qs.db).filter(pk=row.pk).update(**_timestamp_update(model, values))
+    return demoted
+
+
+def _clear_values(fld, key) -> dict:
+    """What a cleared reference becomes: concept 0 or NULL, and its text twins blank."""
+    values = {fld.attname: 0 if _clears_to_zero(fld) else None}
+    twin = TWIN_COLUMNS.get(key)
+    if twin:
+        values.update({col: '' for col in twin if col})
+    return values
+
+
+def _repoint_rows(model, fld, key, qs, plan, stats, using) -> None:
+    """Point the rows of *qs* at the standard concept, with their text twins."""
+    update = {fld.attname: plan.target_id}
+    twin = TWIN_COLUMNS.get(key)
+    if twin:
+        update[twin[0]] = STANDARD_VOCABULARY
+        if twin[1]:
+            update[twin[1]] = plan.target_code
+    stats['repointed'] += qs.update(**_timestamp_update(model, update))
+
+
+def _apply_one(registry, using, plan) -> dict:
     cid, tid = plan.concept_id, plan.target_id
     Concept = registry.get_model('omop_core', 'Concept')
-    stats = {'repointed': 0, 'deleted': 0, 'notes_moved': 0, 'priority_deleted': False}
-    person_ids: set[int] = set()
-    target_code = plan.target_code
+    stats = {'repointed': 0, 'cleared': 0, 'deleted': 0, 'notes_moved': 0, 'demoted': 0,
+             'priority_deleted': False}
+    repoint = plan.action == 'repoint'
 
     held = {(r.model_label, r.column) for r in plan.references if r.kind == 'fk'}
-    for model, fld in concept_fk_columns(registry):
+    for model, fld in concept_fk_columns(registry, using):
         key = (_label(model), fld.name)
         if key not in held:
             continue
         qs = model._default_manager.using(using).filter(**{fld.attname: cid})
-        if partial:
-            # The concept stays: only the serum references move, and nothing
-            # that exists for the concept is touched.
-            if key in DEPENDENT_COLUMNS or key in MOVE_OR_DROP_COLUMNS:
-                continue
-            qs = qs.exclude(pk__in=plan.skip.get(key, ()))
         if key in DEPENDENT_COLUMNS:
             n = qs.count()
             if n:
@@ -468,53 +639,62 @@ def _apply_one(registry, using, plan, partial: bool = False) -> dict:
                 stats['deleted'] += n
         elif key in MOVE_OR_DROP_COLUMNS:
             for row in list(qs):
-                taken = model._default_manager.using(using).filter(**{fld.attname: tid}).exists()
-                if taken:
-                    logger.warning('HK-Labs cleanup: %s: dropped a %s; the standard concept has one',
-                                   plan.hkl_code, key[0])
+                taken = tid is not None and model._default_manager.using(using).filter(
+                    **{fld.attname: tid}).exists()
+                if tid is None or taken:
+                    logger.warning('HK-Labs cleanup: %s: dropped a %s', plan.hkl_code, key[0])
                     row.delete()
                     stats['deleted'] += 1
                 else:
                     setattr(row, fld.attname, tid)
                     row.save(update_fields=[fld.attname])
                     stats['notes_moved'] += 1
+        elif key in CLEAR_AS_MAPPING and (not repoint or plan.skip.get(key)):
+            # No standard equivalent, or rows that are not what the standard concept
+            # means: those lose the destination; the rest are repointed below.
+            demote_qs = qs if not repoint else qs.filter(pk__in=plan.skip[key])
+            n = demote_qs.count()
+            stats['demoted'] += _demote(model, demote_qs, plan, key[0])
+            stats['cleared'] += n
+            if repoint:
+                _repoint_rows(model, fld, key, qs.exclude(pk__in=plan.skip[key]), plan, stats, using)
         else:
             if not qs.exists():
                 continue
             if _has_field(model, 'person'):
-                person_ids.update(qs.values_list('person_id', flat=True))
-            twin = TWIN_COLUMNS.get(key)
-            update = {fld.attname: tid}
-            if twin:
-                vocab_col, code_col = twin
-                update[vocab_col] = STANDARD_VOCABULARY
-                if code_col:
-                    update[code_col] = target_code
-            stats['repointed'] += qs.update(**update)
+                # Re-derived by `backfill_patient_records`, which selects on this.
+                # Before the update: afterwards the rows no longer match qs.
+                registry.get_model('omop_core', 'PatientRecord')._default_manager.using(using).filter(
+                    person_id__in=qs.values('person_id')).update(derivation_version=0)
+            if repoint:
+                skipped = plan.skip.get(key, ())
+                if skipped:
+                    # Not serum or plasma: cleared, never repointed to a serum code.
+                    stats['cleared'] += qs.filter(pk__in=skipped).update(**_timestamp_update(
+                        model, _clear_values(fld, key)))
+                    qs = qs.exclude(pk__in=skipped)
+                _repoint_rows(model, fld, key, qs, plan, stats, using)
+            else:
+                stats['cleared'] += qs.update(**_timestamp_update(model, _clear_values(fld, key)))
 
-    for label, column in ID_COLUMNS:
-        model = registry.get_model(*label.split('.'))
-        qs = model._default_manager.using(using).filter(**{column: cid})
-        if partial:
+    if repoint:
+        for label, column in ID_COLUMNS:
+            model = registry.get_model(*label.split('.'))
+            qs = model._default_manager.using(using).filter(**{column: cid})
+            # A snapshot id on a row that is not serum is left as it is.
             qs = qs.exclude(pk__in=plan.skip.get((label, column), ()))
-        stats['repointed'] += qs.update(**{column: tid})
-    for label, column in ([] if partial else JSON_ID_LISTS):
+            stats['repointed'] += qs.update(**_timestamp_update(model, {column: tid}))
+    for label, column in JSON_ID_LISTS:
         model = registry.get_model(*label.split('.'))
-        for row in model._default_manager.using(using).filter(**{f'{column}__contains': [cid]}):
+        manager = model._default_manager.using(using)
+        for row in manager.filter(**{f'{column}__contains': [cid]}).only(column):
             kept = [i for i in getattr(row, column) if i != cid]
-            model._default_manager.using(using).filter(pk=row.pk).update(**{column: kept})
+            manager.filter(pk=row.pk).update(**{column: kept})
 
-    if person_ids:
-        Record = registry.get_model('omop_core', 'PatientRecord')
-        # Re-derived by `backfill_patient_records`, which selects on this.
-        Record._default_manager.using(using).filter(person_id__in=person_ids).update(derivation_version=0)
-
-    if partial:
-        return stats
     # Only the columns that held a reference: discovery is complete, so these
     # are the ones that could still hold one.
     remaining = [
-        f'{_label(m)}.{f.name}' for m, f in concept_fk_columns(registry)
+        f'{_label(m)}.{f.name}' for m, f in concept_fk_columns(registry, using)
         if (_label(m), f.name) in held
         and m._default_manager.using(using).filter(**{f.attname: cid}).exists()
     ]
@@ -553,37 +733,31 @@ def _code_tail(code: str | None) -> str:
 
 def active_standard(queryset):
     """Active, standard concepts of a queryset."""
-    from django.db.models import Q
-    return queryset.filter(standard_concept='S').filter(
-        Q(invalid_reason__isnull=True) | Q(invalid_reason=''))
+    return queryset.filter(standard_concept='S', invalid_reason__isnull=True)
 
 
 def find_standard_duplicate(name: str | None = None, code: str | None = None,
                             domain_id: str = 'Measurement'):
-    """An active standard concept a new HK-Labs concept would duplicate, or None.
+    """An active standard LOINC concept a new HK-Labs concept would duplicate, or None.
 
-    Duplicate means the same name (case and spacing aside) in the domain, or
-    the same LOINC code once an ``hkl:`` prefix is taken off. A name is matched
-    on the standard concept's own name: no synonym or fuzzy match, because a
-    near match is a curator's call and a wrong merge is worse than a duplicate.
+    Duplicate means the same LOINC code once an ``hkl:`` prefix is taken off, or
+    the same name (case and spacing aside) in the domain. A name is matched on
+    the standard concept's own name: no synonym or fuzzy match, because a near
+    match is a curator's call and a wrong merge is worse than a duplicate.
     """
     from omop_core.models import Concept
 
-    base = active_standard(Concept.objects.all())
+    base = active_standard(Concept.objects.filter(vocabulary_id=STANDARD_VOCABULARY))
     tail = _code_tail(code)
     if tail:
-        hit = base.filter(vocabulary_id=STANDARD_VOCABULARY, concept_code=tail).first()
+        hit = base.filter(concept_code=tail).first()
         if hit is not None:
             return hit
     wanted = normalize_name(name)
     if len(wanted) >= 3:
-        for hit in base.filter(domain_id=domain_id, concept_name__iexact=(name or '').strip())[:20]:
+        spaced = re.sub(r'\s+', ' ', (name or '').strip())
+        for hit in base.filter(domain_id=domain_id, concept_name__iexact=spaced).order_by('concept_id')[:20]:
             if normalize_name(hit.concept_name) == wanted:
-                return hit
-        # Spacing differences the iexact above cannot see.
-        squeezed = re.sub(r'\s+', ' ', (name or '').strip())
-        if squeezed != (name or '').strip():
-            for hit in base.filter(domain_id=domain_id, concept_name__iexact=squeezed)[:20]:
                 return hit
     return None
 
@@ -603,5 +777,18 @@ def retired_standard_concept(concept_code: str | None):
         vocabulary_id=STANDARD_VOCABULARY, concept_code=target_code)).first()
 
 
-def is_retired_code(vocabulary_id: str | None, concept_code: str | None) -> bool:
-    return vocabulary_id == HK_LABS_VOCABULARY and (concept_code or '').strip().lower() in RETIRED_HKL_DUPLICATES
+def alias_for(vocabulary_id: str | None, concept_code: str | None) -> tuple[str, str] | None:
+    """``(vocabulary, code)`` of the standard concept a removed duplicate stood for, or None."""
+    if vocabulary_id == HK_LABS_VOCABULARY and (concept_code or '') in RETIRED_HKL_DUPLICATES:
+        return STANDARD_VOCABULARY, RETIRED_HKL_DUPLICATES[concept_code]
+    return None
+
+
+def is_removed_hkl_concept(vocabulary_id: str | None, concept_code: str | None) -> bool:
+    """Whether (vocabulary, code) names an auto-created HK-Labs concept this cleanup removes.
+
+    ``copy_reference_data`` skips these, so an older instance cannot bring one back.
+    """
+    code = (concept_code or '').strip().lower()
+    return (vocabulary_id == HK_LABS_VOCABULARY and code.startswith(HKL_PREFIX)
+            and not code.startswith(HKL_FALLBACK_PREFIX))
