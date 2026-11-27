@@ -589,6 +589,71 @@ the answer machinery of the built-in coded fields and adds no second answer syst
   fields, does not yet narrow what the patient tab offers. A condition, drug or procedure
   table cannot hold a coded answer, so a dropdown cannot be stored there.
 
+### Removing a created field: retire, restore, delete
+
+A created field is **global**: one `CustomPatientField`, one approved mapping, its
+answers and scope, shared by every organization on the instance. Removing it removes
+it for all of them, so it is an approval like creating one: `DELETE
+/api/v1/custom-patient-fields/<field_name>/` and `POST .../restore/` are for staff and
+org admins (`_can_approve_mappings`); an analyst, doctor or patient gets 403 on both,
+before the field is looked up. v1 only. Rules in `omop_core/services/custom_field_removal.py`.
+
+| Call | What it does |
+|---|---|
+| `GET .../<name>/` | the field with `records_with_value`, `has_facts`, `answers`, `can_delete`, `retired`: what a confirmation dialog shows |
+| `DELETE .../<name>/` | **retire** (the default, reversible) |
+| `DELETE .../<name>/?permanent=true` | **delete for good**, only when `can_delete`; else 409 `has_data` with the counts |
+| `POST .../<name>/restore/` | restore a retired field; 409 `not_retired`, or `mapping_conflict` when another approved mapping took its table and source value |
+| `GET /custom-patient-fields/?state=retired` | the removed fields (approvers only), with their scope |
+| `DELETE field-mappings/<id>/` of a created field's mapping | 409 `created_field` naming the action above (it was a 500: `CustomPatientField.mapping` is `PROTECT`) |
+
+- **Retire** sets `CustomPatientField.retired_at` (migration `0379`) and flips the
+  field's mapping to `rejected`, with `update()` so that neither an approval's OMOP
+  re-projection nor any record changes. Every reader of created fields asks for
+  `CustomPatientField.objects.active()` or for approved mappings, so the field leaves
+  the patient tabs (`GET custom-patient-fields/`), the writable-fields descriptor, the
+  Field Mappings lists and CSV (`created_field: true` marks a created field's
+  descriptor), the patient-visible and attestation rules, the derive and provisional
+  passes, the formulas, and the scope readers (`disease_profiles.memberships()`,
+  `extension_fields()` and `field_names()` skip a retired field; `include_retired`
+  reads them). An edit of it is ignored as a key with no definition always was, and
+  the answer editor refuses its answers. Idempotent.
+- **Nothing a record holds is touched.** `custom_fields.<name>` and the OMOP facts under
+  the field's source key stay. `refresh_patient_record` rebuilds `custom_fields` from the
+  active fields' facts, so it carries a retired field's stored value over unchanged
+  (`retired_values`); a key no field defines, retired or not, is still dropped. The
+  definition, mapping, answers (`FieldChoice` rows, aliases, codes and concept decisions),
+  formula and scope rows are all kept, so a restore returns the same field.
+  `user_edited_fields` pins (`custom_fields.<name>`) stay too, through derivations
+  (`retired_pins`): only a permanent delete clears them.
+- **The name stays taken.** Creating a field under a retired name is a 400 that points to
+  Restore, so stored values are never adopted by a different definition.
+- **Restore** approves the mapping again (with `update()`, so no re-projection) and clears
+  `retired_at`; the field, its scope, answers and every stored value are back at once.
+- **Delete for good** only when nothing depends on the field: no record holds a value
+  under the key (one `has_key` query; a JSON null is no value) and no OMOP fact is
+  written under the field's source key or sits at its concept in the mapping's table
+  (one existence query), i.e. no approved mapping imports data into it. Otherwise it is
+  refused and retire is the way. It then deletes, in one transaction, the definition,
+  mapping, formula, scope, synonyms, answers (with aliases, codes, disease scope and
+  concept decisions), and what records keep *about* the field with no value in it:
+  `user_edited_fields` pins (`custom_fields.<name>`, a pending clear), proposal rejections
+  and the key in the provisional picture. A retired field can be deleted later by the same
+  rule, from the Removed fields list.
+- **Copying between instances.** The curation payload (`dump_field_curation`,
+  `copy_reference_data`) carries `retired` on each created field, with the rejected
+  mapping; a payload without the key leaves the target's state alone.
+- **The page.** On a created field's row, staff and org admins get a Remove field action
+  (`RemoveFieldDialog.tsx`): it reads the usage, states how many records hold a value and
+  says that removing keeps them and is restorable, offers Delete permanently only when
+  `can_delete`, and reports what the server answered. The global Remove-mapping X is not
+  shown for a created field. **Removed fields** (`RemovedFieldsPanel.tsx`, approvers only)
+  lists them with Restore and Delete.
+- **Not done.** A retired field's `custom_fields` value is still in the raw JSON of the
+  record read (nothing renders it; a client that echoes the whole object sends it back, which
+  is a no-op); hiding it from the API would need the record serializer to filter by field
+  state. Removing a field does not re-derive records: nothing changes in them.
+
 ### Whose record a field is part of: `FieldDiseaseMembership`
 
 A patient's record is a **profile**: the base record every patient has, plus

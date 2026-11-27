@@ -937,7 +937,7 @@ def custom_field_answers(snapshot: OmopSnapshot, person: Person = None) -> dict[
     from omop_core.services import custom_field_values
 
     values: dict[str, tuple[object, object]] = {}
-    fields = list(CustomPatientField.objects.filter(
+    fields = list(CustomPatientField.objects.active().filter(
         mode='editable', mapping__status='approved',
     ).select_related('mapping__concept'))
     cleared = custom_field_values.cleared_days(person, fields) if person is not None else {}
@@ -1101,8 +1101,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 preserved[field] = getattr(patient_info, field)
         # Created fields have no column: their pending edits are named
         # ``custom_fields.<name>`` and held in the custom_fields object.
-        from omop_core.services import custom_field_values
+        from omop_core.services import custom_field_removal, custom_field_values
         pending_custom = custom_field_values.pending_values(patient_info)
+        previous_custom_fields = dict(patient_info.custom_fields or {})
+        previous_user_edited = list(patient_info.user_edited_fields or [])
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -1132,6 +1134,13 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # and is put back before any formula reads these values.
         patient_info.custom_fields, pending_custom_keys = custom_field_values.restore_pending(
             _get_custom_patient_field_data(snapshot, person), pending_custom)
+        # A retired created field has no reader, but its stored value is kept as it was
+        # so that restoring the field finds it (custom_field_removal).
+        retired_custom = custom_field_removal.retired_values(previous_custom_fields)
+        if retired_custom:
+            patient_info.custom_fields = {**(patient_info.custom_fields or {}), **retired_custom}
+        pending_custom_keys = set(pending_custom_keys) | custom_field_removal.retired_pins(
+            previous_user_edited)
         confirmed_inputs = set()
         for field, value in _curated_values(
             patient_info, snapshot, lab_derived_fields, confirmed_inputs,
@@ -5208,12 +5217,14 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
             setattr(patient_info, field, overrides[field])
     values = _formula_values(patient_info)
     custom_fields = dict(patient_info.custom_fields or {})
-    custom_field_names = set(CustomPatientField.objects.filter(
+    custom_field_names = set(CustomPatientField.objects.active().filter(
         mode='computed', mapping__status='approved',
     ).values_list('field_name', flat=True))
     changed_fields = set()
+    # A retired created field's formula does not run: its stored result is kept as it was.
+    retired_names = set(CustomPatientField.objects.retired().values_list('field_name', flat=True))
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
-        if field_formula.field_name in overrides:
+        if field_formula.field_name in overrides or field_formula.field_name in retired_names:
             continue
         try:
             value = evaluate_formula(field_formula.formula, values)
@@ -5239,7 +5250,7 @@ def recompute_formula_field(field_formula) -> int:
         return 0
     updated = 0
     from omop_core.models import CustomPatientField
-    custom_field_names = set(CustomPatientField.objects.values_list('field_name', flat=True))
+    custom_field_names = set(CustomPatientField.objects.active().values_list('field_name', flat=True))
     for patient_info in PatientRecord.objects.iterator(chunk_size=500):
         changed_fields = _apply_active_field_formulas(patient_info)
         if changed_fields:

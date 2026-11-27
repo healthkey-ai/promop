@@ -108,7 +108,7 @@ def definitions(names=None) -> dict:
     """Created fields by name, each with its mapping and concept loaded."""
     from omop_core.models import CustomPatientField
 
-    fields = CustomPatientField.objects.select_related('mapping__concept')
+    fields = CustomPatientField.objects.active().select_related('mapping__concept')
     if names is not None:
         fields = fields.filter(field_name__in=list(names))
     return {field.field_name: field for field in fields}
@@ -666,7 +666,7 @@ def shown_to_patient(names, disease) -> list[str]:
             if disease_tab is None:
                 disease_tab = bool(category) and (
                     category in visible.DISEASE_TYPE_CATEGORY.values()
-                    or CustomPatientField.objects.filter(
+                    or CustomPatientField.objects.active().filter(
                         tab='disease', mapping__status='approved',
                         field_name__in=[n for n, codes in scopes.items() if category in codes],
                     ).exists())

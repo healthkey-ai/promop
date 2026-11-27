@@ -5208,6 +5208,16 @@ class ConceptMappingNote(models.Model):
         return f'note: concept {self.concept_id}'
 
 
+class CustomPatientFieldQuerySet(models.QuerySet):
+    """``active()`` is what every reader of created fields uses; retired ones are kept apart."""
+
+    def active(self):
+        return self.filter(retired_at__isnull=True)
+
+    def retired(self):
+        return self.filter(retired_at__isnull=False)
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 
@@ -5241,8 +5251,17 @@ class CustomPatientField(models.Model):
         settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
         null=True, blank=True, related_name='+',
     )
+    # A removed field is retired, not deleted: it leaves every list, tab and pass but
+    # its definition, mapping, answers, scope and the values records hold stay, so it
+    # can be restored. See ``omop_core.services.custom_field_removal``.
+    retired_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text='When an administrator removed the field. Values already stored are kept.',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = CustomPatientFieldQuerySet.as_manager()
 
     class Meta:
         db_table = 'custom_patient_field'
@@ -5258,7 +5277,8 @@ class CustomPatientField(models.Model):
         }
         if self.field_name in concrete_names:
             raise ValidationError({'field_name': 'This name is already a PatientRecord field.'})
-        if self.mapping_id and self.mapping.status != 'approved':
+        # A retired field's mapping is rejected while it is retired (restoring approves it).
+        if self.mapping_id and self.retired_at is None and self.mapping.status != 'approved':
             raise ValidationError({'mapping': 'A custom PatientRecord field requires an approved mapping.'})
 
     def __str__(self):
