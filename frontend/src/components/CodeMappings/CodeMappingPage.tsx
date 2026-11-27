@@ -10,7 +10,7 @@ import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { linkedMappingId } from "./mappingLinks";
+import { linkedMappingId, linkedMetricKey } from "./mappingLinks";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
@@ -439,13 +439,17 @@ export default function CodeMappingPage() {
   // Evidence (#2702): open that mapping's Edit Mapping dialog. Held in state
   // and cleared once handled, like the linked concept.
   const [linkedMapping, setLinkedMapping] = useState<number | undefined>(() => linkedMappingId(searchParams));
+  // ?metric=<key>, from a 30-day value on a patient's Wearables tab: open the
+  // Wearables tab on that metric's source codes, every device's. Only the
+  // starting point: the search box is the curator's from then on.
+  const [linkedMetric] = useState(() => linkedMetricKey(searchParams));
   const [direction, setDirection] = useState<'forward' | 'reverse'>(
-    searchParams.get('direction') === 'forward' || linkedMapping !== undefined ? 'forward' : 'reverse');
+    searchParams.get('direction') === 'forward' || linkedMapping !== undefined || linkedMetric ? 'forward' : 'reverse');
   const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
   const loadSequence = useRef(0);
-  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState(linkedMetric ? `metric:${linkedMetric}` : "");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const referenceCache = useRef<Reference | null>(null);
@@ -461,10 +465,10 @@ export default function CodeMappingPage() {
   const [loading, setLoading] = useState(true);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [error, setError] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(linkedMetric ? `metric:${linkedMetric}` : "");
   // `null` means no choice has been made, so use the work-prioritized default.
   // The empty string is a real vocabulary ID: it represents the Uncoded tab.
-  const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
+  const [activeVocabulary, setActiveVocabulary] = useState<string | null>(linkedMetric ? WEARABLES_TAB : null);
   const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
   const [approvedCollapsed, setApprovedCollapsed] = useState(true);
   const [proposedCollapsed, setProposedCollapsed] = useState(false);

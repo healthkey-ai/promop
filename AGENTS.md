@@ -1303,6 +1303,19 @@ means. `omop_core/services/wearable_rows.py` holds what is the device's own;
   window the aggregate covers; `groups` (the OMOP tab's concept groups) only for an administrator.
   A new 30-day field needs an entry in `WEARABLE_METRIC_FIELDS`; the series reads
   it from there, and `tests/test_wearable_metric_series.py` holds the two.
+- **From a 30-day value to its mappings (#2943).** Beside each value on the
+  Wearables tab a list icon opens `/code-mappings?direction=forward&metric=<key>`
+  in a new tab: the Code Mapping page on the Wearables tab, searching
+  `metric:<key>`, which lists every device's code for that metric (Apple, Health
+  Connect, Garmin, Oura, ...) to review and approve. `metric:` / `metric_key:` is
+  a fielded search matched **whole** (`mapping_browse.EXACT_SEARCH_FIELDS`), so
+  `hr` is not `resting_hr`; the page mirrors it (`mappingSearch.ts`). The link is
+  offered only to a reader who may open the mapping pages (`canViewMappings`,
+  outside patient mode; `canOpenMappings` through `MetricContext`). The
+  field -> metric key map is `wearableMetricKeys.json`, held to
+  `WEARABLE_METRIC_FIELDS` by `tests/test_wearable_metric_keys_json.py`: a new
+  30-day field needs an entry there as well. The parameter only sets the page's
+  starting point; the search box is the curator's afterwards.
 - **Source Codes tab.** `wearable_rows.describe` adds a `wearable` block to
   each device code the patient's inventory lists (never to a code aggregated
   from the clinical tables, which has no vocabulary of its own) of
