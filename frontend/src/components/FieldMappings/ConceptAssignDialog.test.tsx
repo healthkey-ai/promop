@@ -83,6 +83,18 @@ describe("the concept search prefers the table's own domain", () => {
     ));
   });
 
+  it("searches again with the new domain when the Source Table changes", async () => {
+    render(<ConceptAssignDialog {...editProps} initialOmopTable="measurement" suggestQuery="smoking status" />);
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50", prefer_domain_id: "Measurement" } },
+    ));
+    fireEvent.change(screen.getByRole("combobox", { name: "Source Table" }), { target: { value: "Observation" } });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith(
+      "/v1/concepts/search/", { params: { q: "smoking status", limit: "50", prefer_domain_id: "Observation" } },
+    ));
+  });
+
   it("sends no hint for a table with no single domain", async () => {
     render(<ConceptAssignDialog {...editProps} initialOmopTable="person" suggestQuery="smoking status" />);
     fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
