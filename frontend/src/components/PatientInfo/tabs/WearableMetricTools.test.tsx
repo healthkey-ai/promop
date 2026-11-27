@@ -36,12 +36,15 @@ const series = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
-function renderField(value: unknown, onOpenOmopRows?: (focus: unknown) => void, personId: number | undefined = 7) {
+function renderField(
+  value: unknown, onOpenOmopRows?: (focus: unknown) => void, personId: number | undefined = 7,
+  canOpenMappings = false, name = 'median_daily_steps_30d',
+) {
   return render(
-    <WearableMetricProvider value={{ personId, onOpenOmopRows }}>
+    <WearableMetricProvider value={{ personId, onOpenOmopRows, canOpenMappings }}>
       <MetricField
         label="Median Daily Steps"
-        name="median_daily_steps_30d"
+        name={name}
         type="number"
         value={value}
         onChange={() => {}}
@@ -58,6 +61,28 @@ describe('30-day metric tools', () => {
     expect(screen.queryByRole('button', { name: /chart/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /omop rows/i })).toBeNull();
     expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('links a value to its metric\'s code mappings only for a reader of the mapping pages', () => {
+    const { unmount } = renderField(5500, vi.fn(), 7, false);
+    expect(screen.queryByRole('link', { name: /code mappings/i })).toBeNull();
+    unmount();
+
+    renderField(5500, vi.fn(), 7, true);
+    const link = screen.getByRole('link', { name: 'Open the code mappings for Median Daily Steps' });
+    expect(link).toHaveAttribute('href', '/code-mappings?direction=forward&metric=steps');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it('names the metric each field belongs to, and links no field it does not know', () => {
+    const { unmount } = renderField(52, undefined, 7, true, 'hrv_rmssd_avg_30d');
+    expect(screen.getByRole('link', { name: /code mappings/i }))
+      .toHaveAttribute('href', '/code-mappings?direction=forward&metric=hrv_rmssd');
+    unmount();
+    renderField(1, undefined, 7, true, 'not_a_wearable_field');
+    expect(screen.queryByRole('link', { name: /code mappings/i })).toBeNull();
   });
 
   it('reads nothing until a tool is used', () => {

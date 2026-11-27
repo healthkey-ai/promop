@@ -448,6 +448,30 @@ def test_fielded_search_restricts_to_one_field(browse, search, expected):
     assert {r['source_code'] for r in browse(source='__overall__', search=search).data['results']} == expected
 
 
+def test_metric_search_matches_a_wearable_metric_key_whole(browse):
+    """The Wearables tab links a 30-day value here with `metric:<key>` (every
+    device's code for the metric); a key is matched whole, so `hr` is not
+    `resting_hr` and `steps` is not a longer key that contains it."""
+    for code, vocab_id, key in (
+        ('HKQuantityTypeIdentifierStepCount', 'Apple', 'steps'),
+        ('steps', 'Garmin', 'steps'),
+        ('oura_steps', 'Oura', 'steps'),
+        ('oura_resting_hr', 'Oura', 'resting_hr'),
+        ('walking_hr_avg', 'Apple', 'walking_hr_avg'),
+        ('free text', 'LOINC', ''),
+    ):
+        row(code, source_vocabulary_id=vocab_id, metric_key=key)
+
+    def codes(search):
+        return {r['source_code'] for r in browse(source='__overall__', search=search).data['results']}
+
+    assert codes('metric:steps') == {'HKQuantityTypeIdentifierStepCount', 'steps', 'oura_steps'}
+    assert codes('Metric_Key: STEPS ') == {'HKQuantityTypeIdentifierStepCount', 'steps', 'oura_steps'}
+    assert codes('metric:resting_hr') == {'oura_resting_hr'}
+    assert codes('metric:hr') == set()
+    assert codes('metric:step') == set()
+
+
 def test_duplicates_include_off_page_and_rejected_members(browse):
     row('MATCH', occurrence_count=0)
     row(' match ', status='rejected')

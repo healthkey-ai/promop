@@ -444,7 +444,8 @@ def test_deleting_a_text_field_with_no_concept_facts(staff, concepts):
 
 
 def test_the_service_refuses_a_delete_it_finds_data_for(grade, record):
-    PatientRecord.objects.filter(pk=record.pk).update(custom_fields={NAME: '1'})
+    PatientRecord.objects.filter(pk=record.pk).update(
+        custom_fields={NAME: '1'}, user_edited_fields=[f'custom_fields.{NAME}'])
     with pytest.raises(custom_field_removal.RemovalError) as error:
         custom_field_removal.delete(grade)
     assert error.value.code == 'has_data' and error.value.extra['records_with_value'] == 1
@@ -505,7 +506,8 @@ def test_a_retired_fields_pending_pin_survives_a_derivation_and_a_restore(staff,
 def test_a_name_that_looks_like_a_lookup_is_counted_as_the_key_it_is(staff, concepts, name):
     make(staff, concepts, field_name=name, field_type='text', answers=[], diseases=[])
     record = PatientRecordFactory()
-    PatientRecord.objects.filter(pk=record.pk).update(custom_fields={name: 'x'})
+    PatientRecord.objects.filter(pk=record.pk).update(
+        custom_fields={name: 'x'}, user_edited_fields=[f'custom_fields.{name}'])
 
     data = staff.get(url(name)).data
 
@@ -532,7 +534,8 @@ def test_permanent_delete_retires_first_and_a_refusal_leaves_it_retired(staff, g
         result = original(field)
         if len(calls) == 1:
             # After the first check has passed, before the field is retired.
-            PatientRecord.objects.filter(pk=record.pk).update(custom_fields={NAME: '1'})
+            PatientRecord.objects.filter(pk=record.pk).update(
+                custom_fields={NAME: '1'}, user_edited_fields=[f'custom_fields.{NAME}'])
         return result
 
     monkeypatch.setattr(custom_field_removal, 'usage', racing)

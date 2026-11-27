@@ -152,6 +152,22 @@ def refresh_patient_record_task(person_id: int) -> dict[str, Any]:
     }
 
 
+@shared_task(name='omop_core.refresh_custom_field_records', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3, soft_time_limit=840)
+def refresh_custom_field_records_task(mapping_id: int, after: int = 0) -> dict[str, Any]:
+    """Derive one chunk of the people with a fact at a created field's concept, then queue the next (#2941).
+
+    The cursor (the last person id finished) travels in the arguments, so a task
+    killed at its time limit retries the same chunk, which is idempotent.
+    """
+    from omop_core.services.custom_field_rederive import run_chunk
+
+    result = run_chunk(mapping_id, after)
+    if result['next_after'] is not None:
+        refresh_custom_field_records_task.delay(mapping_id, result['next_after'])
+    return result
+
+
 @shared_task(name='omop_core.project_field_to_omop')
 def project_field_to_omop_task(mapping_pk: int) -> dict[str, Any]:
     """Project PatientRecord values into OMOP for one approved field mapping.
