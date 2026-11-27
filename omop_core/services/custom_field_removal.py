@@ -19,8 +19,8 @@ The name stays taken: a field cannot be created again under a retired name, only
 restored, so the stored values are never silently adopted by a different definition.
 
 **Delete** (permanent). Only when ``usage`` finds nothing to lose: no record holds a
-value under the key and no OMOP fact exists under the field's source key or at its
-concept (a field whose mapping imports data is not deleted, it is retired). It removes
+value under the key and no OMOP fact exists under the field's own source key. Facts that
+only sit at its concept are the patients' own data and do not block (#2930). It removes
 the definition, its mapping, formula, scope, synonyms, answers (with their aliases,
 codes and concept decisions), and the record-level traces that carry the name but no
 value: ``user_edited_fields`` pins (a pending clear), proposal rejections and
@@ -30,7 +30,6 @@ import json
 import logging
 
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 
 from omop_core.services import custom_field_values
@@ -72,19 +71,23 @@ def _holders(name: str):
 
 
 def _has_facts(field) -> bool:
-    """Whether any OMOP row was written under the field's key or sits at its concept."""
+    """Whether any OMOP row was written under the field's own source key.
+
+    Rows that merely sit at the field's concept are the patients' own data (a PSA
+    result at LOINC 2857-1 exists whether or not anyone defined a field for it).
+    Deleting the field removes how the data is shown, never the rows, and a field
+    created again over that concept reads them again, so they do not block a delete.
+    Only rows written under the field's key are the field's own entries.
+    """
     from django.apps import apps
 
     mapping = field.mapping
     target = custom_field_values.target_for(mapping.omop_table)
     if target is None:
         return False
-    model_name, concept_column, source_column = _FACT_TABLES[target]
+    model_name, _concept_column, source_column = _FACT_TABLES[target]
     model = apps.get_model('omop_core', model_name)
-    wanted = Q(**{source_column: custom_field_values.source_key(field)})
-    if mapping.concept_id and field.mode == 'editable':
-        wanted |= Q(**{concept_column: mapping.concept_id})
-    return model.objects.filter(wanted).exists()
+    return model.objects.filter(**{source_column: custom_field_values.source_key(field)}).exists()
 
 
 def usage(field) -> dict:

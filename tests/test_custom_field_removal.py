@@ -355,14 +355,29 @@ def test_permanent_delete_is_refused_while_a_record_holds_a_value(staff, grade, 
     assert stored(record) == {NAME: '1'}
 
 
-def test_permanent_delete_is_refused_while_facts_exist_even_with_no_record_value(staff, grade, concepts):
+def test_permanent_delete_is_refused_while_facts_exist_under_the_fields_own_key(staff, grade, concepts):
     person_record = PatientRecordFactory()
-    ObservationFactory(person=person_record.person, observation_concept=concepts['question'])
+    ObservationFactory(person=person_record.person, observation_concept=concepts['question'],
+                       observation_source_value=f'custom:{NAME}')
 
     response = staff.delete(url() + '?permanent=true')
 
     assert response.status_code == 409 and response.data['has_facts'] is True
     assert response.data['records_with_value'] == 0
+
+
+def test_a_lab_at_the_fields_concept_does_not_block_a_permanent_delete(staff, grade, concepts):
+    """A patient's own result at the concept exists with or without the field (#2930)."""
+    person_record = PatientRecordFactory()
+    fact = ObservationFactory(person=person_record.person, observation_concept=concepts['question'],
+                              observation_source_value='LOINC-CODE')
+    assert staff.get(url()).data['can_delete'] is True
+
+    response = staff.delete(url() + '?permanent=true')
+
+    assert response.status_code == 200 and response.data['state'] == 'deleted'
+    assert not CustomPatientField.objects.filter(field_name=NAME).exists()
+    assert Observation.objects.filter(pk=fact.pk).exists()
 
 
 def test_permanent_delete_of_an_unused_field_removes_it_and_everything_keyed_to_it(staff, grade, concepts):
@@ -372,7 +387,6 @@ def test_permanent_delete_of_an_unused_field_removes_it_and_everything_keyed_to_
         user_edited_fields=[f'custom_fields.{NAME}', 'disease'])
     ProposalRejection.objects.create(person=record.person, field_name=f'custom_fields.{NAME}', origins=[])
     mapping_id = grade.mapping_id
-    # Facts at the concept would block it, so the concept must have none.
     assert not Observation.objects.exists()
 
     response = staff.delete(url() + '?permanent=true')
