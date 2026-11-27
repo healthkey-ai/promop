@@ -509,6 +509,11 @@ def read_value(field_type: str, row, *, entered: bool, answers=None, name=None):
         return row_date.isoformat() if row_date else None
     if text:
         return text
+    if number is not None:
+        # A numeric result read by a text field is its number, not the name of the concept
+        # that measures it ("No matching concept" for an unmapped lab).
+        number = float(number)
+        return str(int(number)) if number.is_integer() else str(round(number, _NUMBER_PLACES))
     for concept in ('value_as_concept', 'measurement_concept', 'observation_concept',
                     'condition_concept', 'drug_concept', 'procedure_concept'):
         name = getattr(getattr(row, concept, None), 'concept_name', None)

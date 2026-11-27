@@ -209,6 +209,23 @@ def field_concept_mapping_saved(sender, instance, **kwargs):
         _project_field_sync(mapping_pk)
 
 
+@receiver(pre_save, sender=FieldConceptMapping)
+def field_concept_mapping_pre_save(sender, instance, **kwargs):
+    """Remember what a created field's mapping said before the save (#2941)."""
+    from omop_core.services.custom_field_rederive import mapping_pre_save
+    mapping_pre_save(sender, instance, **kwargs)
+
+
+@receiver(post_save, sender=FieldConceptMapping)
+def field_concept_mapping_rederive(sender, instance, **kwargs):
+    """A created field whose mapping now points at a concept: derive the records with facts there (#2941).
+
+    Off the request and only with a broker; see ``services/custom_field_rederive.py``.
+    """
+    from omop_core.services.custom_field_rederive import mapping_saved
+    mapping_saved(sender, instance, **kwargs)
+
+
 def _dispatch_projection(mapping_pk):
     """Send projection to Celery worker."""
     try:
