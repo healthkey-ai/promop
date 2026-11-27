@@ -252,7 +252,8 @@ def _jsonb_remove(model, column: str, key: str, *, array: bool) -> None:
     where = f'{col} @> %s::jsonb' if array else f'jsonb_exists({col}, %s)'
     probe = json.dumps([key]) if array else key
     with connection.cursor() as cursor:
-        cursor.execute(f'UPDATE {table} SET {col} = {col} - %s WHERE {where}', [key, probe])
+        # Identifiers are quoted model metadata, never request data; the key is a bound parameter.
+        cursor.execute(f'UPDATE {table} SET {col} = {col} - %s WHERE {where}', [key, probe])  # nosec B608
 
 
 def retired_values(stored: dict | None) -> dict:
