@@ -236,6 +236,35 @@ class PatientUser(models.Model):
         return f"{self.identity} - Person {self.person.person_id}"
 
 
+class PersonExternalKey(models.Model):
+    """A login (issuer, subject) an importer says an imported Person belongs to.
+
+    The ETL provisions Persons without actor claims (#1547) and keeps its own
+    source id to person id map, so before this nothing in PRomop tied such a
+    Person to its owner's login but an email address, which the warehouse may
+    not hold. A login whose verified (issuer, sub) matches a key is linked to
+    that Person (`resolve_or_create_person`). Written only by the ETL
+    credential, for an issuer in PERSON_EXTERNAL_KEY_ISSUERS.
+    """
+    person = models.ForeignKey(
+        'omop_core.Person', on_delete=models.CASCADE, related_name='external_keys',
+    )
+    issuer = models.CharField(max_length=255)
+    subject = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'person_external_key'
+        constraints = [
+            models.UniqueConstraint(fields=['issuer', 'subject'], name='person_external_key_unique'),
+            # One login per Person per issuer, so two accounts never compete for one.
+            models.UniqueConstraint(fields=['person', 'issuer'], name='person_external_key_one_per_issuer'),
+        ]
+
+    def __str__(self):
+        return f"PersonExternalKey({self.issuer}, person {self.person_id})"
+
+
 class StaffInvitation(models.Model):
     """An invitation for one person to become staff here, signing in through
     one of ``STAFF_SIGN_IN_PROVIDERS`` (patient_portal.staff_sign_in). The

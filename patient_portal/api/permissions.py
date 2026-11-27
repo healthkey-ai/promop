@@ -292,6 +292,17 @@ class EtlProvisionPermission(BasePermission):
         )
 
 
+class EtlImporterPermission(BasePermission):
+    """The ETL capability and nothing else, not even staff.
+
+    For assertions only the importer can make, such as which login an imported
+    Person belongs to: a staff session has no source to read that from.
+    """
+
+    def has_permission(self, request, view):
+        return _has_legacy_etl_write_grant(request)
+
+
 class LabSyncPermission(ScopedTokenPermission):
     """
     Permission for the lab result sync endpoint.
