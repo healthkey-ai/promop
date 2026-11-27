@@ -589,6 +589,24 @@ the answer machinery of the built-in coded fields and adds no second answer syst
   fields, does not yet narrow what the patient tab offers. A condition, drug or procedure
   table cannot hold a coded answer, so a dropdown cannot be stored there.
 
+### Filling a created field from existing facts (#2941)
+
+A created field reads imported OMOP facts at its mapping's concept whenever a record is
+derived, but creating it, restoring it or moving its approved mapping derives nothing.
+`omop_core/services/custom_field_rederive.py` queues that: when a created field's mapping
+becomes (or, while approved, changes) approved with a concept, table or source key
+(`FieldConceptMapping` pre/post-save, so every writer that saves is covered), and on
+restore (`update()` fires no signal), a Celery chain derives the people with a non-erroneous
+fact at the concept in the mapping's table, `CHUNK` (25) per task, each chunk queueing the
+next with its person-id cursor and stopping at a 10-minute budget. One pending chain per
+mapping is coalesced through the cache. Built-in field mappings queue nothing.
+
+With no `CELERY_BROKER_URL` nothing is queued (a derivation costs seconds per person and
+a lab concept can hold thousands): run `manage.py refresh_custom_field_records <name>`
+(`--dry-run`, `--limit`), Generate OMOP on a patient, or `backfill_patient_records`.
+A text field over a numeric result reads the number (`custom_field_values.read_value`),
+not the concept's name.
+
 ### Removing a created field: retire, restore, delete
 
 A created field is **global**: one `CustomPatientField`, one approved mapping, its
@@ -600,7 +618,7 @@ before the field is looked up. v1 only. Rules in `omop_core/services/custom_fiel
 
 | Call | What it does |
 |---|---|
-| `GET .../<name>/` | the field with `records_with_value`, `has_facts`, `answers`, `can_delete`, `retired`: what a confirmation dialog shows |
+| `GET .../<name>/` | the field with `records_with_value`, `records_with_entered_value`, `has_facts`, `answers`, `can_delete`, `retired`: what a confirmation dialog shows. Only an entered value (a pending edit) and facts under the field's own key block a delete: a value that merely mirrors facts at the field's concept is derived data, and leaves the records with the field (#2941) |
 | `DELETE .../<name>/` | **retire** (the default, reversible) |
 | `DELETE .../<name>/?permanent=true` | **delete for good**, only when `can_delete`; else 409 `has_data` with the counts |
 | `POST .../<name>/restore/` | restore a retired field; 409 `not_retired`, or `mapping_conflict` when another approved mapping took its table and source value |
@@ -634,7 +652,8 @@ before the field is looked up. v1 only. Rules in `omop_core/services/custom_fiel
   `retired_at`; the field, its scope, answers and every stored value are back at once.
 - **Delete for good** only when nothing depends on the field: no record holds a value
   under the key (one `has_key` query; a JSON null is no value) and no OMOP fact is
-  written under the field's own source key (one existence query). Rows that only sit at
+  written under the field's own source key and still holding an answer (one existence query; a
+  row whose value was cleared holds none and is deleted with the field). Rows that only sit at
   the field's concept are the patients' own data and do not block (#2930): deleting the
   field never touches them, and a field created again over that concept reads them again.
   Otherwise it is refused and retire is the way. It then deletes, in one transaction, the definition,

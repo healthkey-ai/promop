@@ -19,12 +19,15 @@ The name stays taken: a field cannot be created again under a retired name, only
 restored, so the stored values are never silently adopted by a different definition.
 
 **Delete** (permanent). Only when ``usage`` finds nothing to lose: no record holds a
-value under the key and no OMOP fact exists under the field's own source key. Facts that
-only sit at its concept are the patients' own data and do not block (#2930). It removes
+pending edit and no OMOP fact holding an answer exists under the field's own source key
+(a row whose value was cleared holds none and is deleted with the field). Facts that
+only sit at its concept are the patients' own data and do not block (#2930), and neither
+does a value that was only derived from them (#2941): it is removed from the records
+with the field. It removes
 the definition, its mapping, formula, scope, synonyms, answers (with their aliases,
 codes and concept decisions), and the record-level traces that carry the name but no
 value: ``user_edited_fields`` pins (a pending clear), proposal rejections and
-provisional entries. The record's values are not touched because there are none.
+provisional entries, and the derived value under the name.
 """
 import json
 import logging
@@ -70,45 +73,117 @@ def _holders(name: str):
             .exclude(_held=Value(None, output_field=JSONField())))
 
 
-def _has_facts(field) -> bool:
-    """Whether any OMOP row was written under the field's own source key.
-
-    Rows that merely sit at the field's concept are the patients' own data (a PSA
-    result at LOINC 2857-1 exists whether or not anyone defined a field for it).
-    Deleting the field removes how the data is shown, never the rows, and a field
-    created again over that concept reads them again, so they do not block a delete.
-    Only rows written under the field's key are the field's own entries.
-    """
+def _own_facts(field):
+    """The OMOP rows written under the field's own source key, or ``None`` for a table that has none."""
     from django.apps import apps
 
     mapping = field.mapping
     target = custom_field_values.target_for(mapping.omop_table)
     if target is None:
-        return False
+        return None
     model_name, _concept_column, source_column = _FACT_TABLES[target]
     model = apps.get_model('omop_core', model_name)
-    return model.objects.filter(**{source_column: custom_field_values.source_key(field)}).exists()
+    return model.objects.filter(**{source_column: custom_field_values.source_key(field)}), target
+
+
+def _valueless(rows, target: str):
+    """The rows of ``rows`` that carry no answer: what clearing a value leaves behind.
+
+    Only a measurement or an observation can be empty; any other fact is its own answer.
+    """
+    from django.db.models import Q
+
+    if target not in ('measurement', 'observation'):
+        return rows.none()
+    return rows.filter(
+        Q(value_as_number__isnull=True),
+        Q(value_as_string__isnull=True) | Q(value_as_string=''),
+        Q(value_as_concept_id__isnull=True) | Q(value_as_concept_id=0),
+    )
+
+
+def _has_facts(field) -> bool:
+    """Whether any OMOP row holding an answer was written under the field's own source key.
+
+    Rows that merely sit at the field's concept are the patients' own data (a PSA
+    result at LOINC 2857-1 exists whether or not anyone defined a field for it).
+    Deleting the field removes how the data is shown, never the rows, and a field
+    created again over that concept reads them again, so they do not block a delete.
+    A row under the field's key whose value was cleared holds no answer either: it is
+    the field's own empty trace and goes with the field (``_drop_empty_facts``).
+    Only a row under the key that still holds an answer blocks.
+    """
+    found = _own_facts(field)
+    if found is None:
+        return False
+    rows, target = found
+    return rows.exclude(pk__in=_valueless(rows, target).values('pk')).exists()
+
+
+def _drop_empty_facts(field) -> None:
+    """Delete the emptied rows the field itself wrote, with the links that have no cascade."""
+    from django.contrib.contenttypes.models import ContentType
+
+    from omop_core.models import MeasurementOwnership, ProvenanceRecord
+    from omop_core.signals import suppress_patient_record_refresh
+
+    found = _own_facts(field)
+    if found is None:
+        return
+    rows, target = found
+    empty = _valueless(rows, target)
+    pk_name = rows.model._meta.pk.name
+    ids = list(empty.values_list(pk_name, flat=True))
+    if not ids:
+        return
+    # A GenericForeignKey has no cascade, and MeasurementOwnership holds a bare integer.
+    ProvenanceRecord.objects.filter(
+        content_type=ContentType.objects.get_for_model(rows.model), object_id__in=ids).delete()
+    if target == 'measurement':
+        MeasurementOwnership.objects.filter(measurement_id__in=ids).delete()
+    # The rows hold no value, so no record's derivation changes.
+    with suppress_patient_record_refresh():
+        rows.model.objects.filter(**{f'{pk_name}__in': ids}).delete()
+
+
+def _entered_holders(name: str):
+    """Records whose value is an entry nobody has represented in OMOP yet: a pending edit.
+
+    A value on the record is otherwise derived: read back from an OMOP fact, either one the
+    editor wrote under the field's own key (``_has_facts``) or one that sits at the field's
+    concept. A derived value is the patients' own data shown through the field, not an entry
+    the field owns, and it reappears for a field created over that concept again (#2941).
+    """
+    return _holders(name).filter(
+        user_edited_fields__contains=[custom_field_values.pending_key(name)])
 
 
 def usage(field) -> dict:
     """What depends on a created field: the counts a confirmation shows, and whether it may be deleted.
 
-    ``records_with_value`` is one query; ``has_facts`` is one existence query on the
-    field's table. ``can_delete`` is true only when both are empty.
+    ``records_with_value`` counts every record that shows a value, derived ones included;
+    ``records_with_entered_value`` only those holding a pending edit, and ``has_facts`` says
+    whether OMOP facts are written under the field's own key. Only the last two block a
+    delete (``can_delete``): a value that merely mirrors facts at the field's concept is
+    derived data, so a field that mirrors labs can be deleted and its values leave the
+    records with it. Three cheap queries.
     """
     from omop_core.models import FieldChoice
 
-    records = _holders(field.field_name).count()
+    name = field.field_name
+    records = _holders(name).count()
+    entered = _entered_holders(name).count()
     facts = _has_facts(field)
-    answers = (FieldChoice.objects.filter(field_name=field.field_name)
+    answers = (FieldChoice.objects.filter(field_name=name)
                .exclude(context_key__startswith='lookup:').count())
     return {
-        'field_name': field.field_name,
+        'field_name': name,
         'retired': field.retired_at is not None,
         'records_with_value': records,
+        'records_with_entered_value': entered,
         'has_facts': facts,
         'answers': answers,
-        'can_delete': records == 0 and not facts,
+        'can_delete': entered == 0 and not facts,
     }
 
 
@@ -170,6 +245,10 @@ def restore(field) -> None:
         FieldConceptMapping.objects.filter(pk=mapping.pk).update(status='approved', updated_at=now)
         locked.retired_at = None
         locked.save(update_fields=['retired_at', 'updated_at'])
+        # ``update()`` fires no signal, so the records with facts at the field's concept
+        # (which a derivation while it was retired did not read) are queued here (#2941).
+        from omop_core.services import custom_field_rederive
+        custom_field_rederive.queue(mapping.pk)
     field.retired_at = None
 
 
@@ -198,6 +277,7 @@ def delete(field) -> dict:
         if locked.retired_at is None or not found['can_delete']:
             raise _has_data(found)
         mapping_id = locked.mapping_id
+        _drop_empty_facts(locked)
         locked.delete()
         FieldConceptMapping.objects.filter(pk=mapping_id).delete()
         FieldFormula.objects.filter(field_name=name).delete()
@@ -213,7 +293,7 @@ def delete(field) -> dict:
 def _has_data(found: dict) -> RemovalError:
     return RemovalError(
         'has_data',
-        'Records still hold values for this field, or OMOP facts are written under it. '
+        'Records hold an entry of their own for this field, or OMOP facts are written under it. '
         'Retire it instead: its values are kept and it can be restored.',
         **found)
 
@@ -221,7 +301,7 @@ def _has_data(found: dict) -> RemovalError:
 def _drop_record_traces(name: str) -> None:
     """Remove what records keep *about* a deleted field: pending-edit pins and rejections.
 
-    Only reached when no record holds a value, so no stored value is lost. A pin is
+    Only reached when no record holds an entry of its own, so no entered value is lost. A pin is
     ``custom_fields.<name>`` in ``user_edited_fields`` (a pending clear); a retired
     field keeps its pins, which a derivation carries over until it is restored.
     One statement, so a concurrent edit's other pins are not overwritten.
@@ -230,6 +310,9 @@ def _drop_record_traces(name: str) -> None:
 
     pin = custom_field_values.pending_key(name)
     _jsonb_remove(PatientRecord, 'user_edited_fields', pin, array=True)
+    # What is left under the name is derived from facts at the field's concept: it leaves
+    # with the field, as a derivation would drop it (the facts themselves stay).
+    _jsonb_remove(PatientRecord, 'custom_fields', name, array=False)
     ProposalRejection.objects.filter(field_name=pin).delete()
 
 
