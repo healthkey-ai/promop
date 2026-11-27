@@ -288,9 +288,56 @@ These are **not** from Athena. Rows should carry `source='HealthKey'`, live in a
 
 | Vocabulary | Concepts | Code format | What it holds |
 |---|---|---|---|
-| **HK-Labs** | 71 | `hkl:<slug>`, e.g. `hkl:sars-cov-2-naa` | Lab test names extracted from source data with no LOINC match. Quarantined so they do not pollute LOINC. |
+| **HK-Labs** | 60 on staging (78 before the cleanup below) | `hkl:<slug>`, e.g. `hkl:indican` | Lab test names extracted from source data with no LOINC match. Quarantined so they do not pollute LOINC. A name that has a standard LOINC concept is not minted here (see below). |
 | **HK-Regimen** | 7 | `hkr:<slug>`, e.g. `hkr:t-dm1` | Treatment regimens with no HemOnc match. |
 | **HK-Wearable** | 5 | `HK-WEAR-<METRIC>`, e.g. `HK-WEAR-STEP-LENGTH` | Wearable metrics with no LOINC equivalent — walking step length, double-support percentage, walking heart rate, basal energy expenditure. |
+
+### HK-Labs concepts that duplicate a standard test
+
+An `hkl:` concept exists only for a lab name with no LOINC match. Eighteen
+turned out to name a test LOINC has (`hkl:psa` and LOINC 2857-1 "Prostate
+specific Ag [Mass/volume] in Serum or Plasma", `hkl:cortisol` and 2143-6, and so
+on), so they sat ahead of the standard concept in concept search and invited
+mappings to the wrong one. Migration `0380_retire_hkl_duplicates` repoints every
+reference to the standard concept and deletes them; the table of the eighteen is
+`RETIRED_HKL_DUPLICATES` in `omop_core/services/hkl_duplicates.py`.
+
+- **What it repoints.** Every foreign key to `Concept` on every model (found by
+  introspection, so a new one is covered), the text columns that carry a
+  concept's vocabulary and code beside such a key, and the concept ids held as
+  plain integers. Rows that exist only for the concept (synonyms, relationships,
+  ancestry, embeddings, search terms, curator priority, done, lock and decline
+  rows) are deleted; a curator's note moves to the standard concept when it has
+  none. Patient records whose rows were repointed are marked for re-derivation
+  (`backfill_patient_records`).
+- **What it leaves alone, and logs at WARNING.** A concept whose standard LOINC
+  concept is not loaded, inactive or not standard on that instance; a concept
+  any referencing row of which says urine, a 24 hour collection, saliva or a
+  per-mass unit such as ng/mg (the serum code would be wrong for it: that row is
+  left on the local concept, the rows that are serum or plasma move, and the
+  concept stays because it is still referenced; each row's own text is read,
+  e.g. a measurement's unit and source value or a mapping's description, notes
+  and source metadata); and a concept still named by `(HK-Labs, hkl:...)` in a
+  field answer's codes.
+  The urine/24 h panels, the two codes that are LOINC codes themselves
+  (`hkl:85319-5`, `hkl:lp95826-0`) and the genuinely local concepts are not in
+  the table and are not touched.
+- **Read it first.** `manage.py audit_hkl_duplicates` (read-only; `--json`)
+  lists, per concept present, every reference with the kind of data it is, the
+  standard concept it would move to and whether that exists and is active, and
+  what the migration will refuse. It exits 1 when a concept will be kept.
+- **It cannot be undone.** Deleted concepts and their synonyms cannot be
+  restored; the migration's reverse is a no-op.
+- **No new duplicate is minted.** The Mint dialog (`code-mappings/mint-destination/`)
+  answers 409 `standard_concept_exists` for an HK-Labs concept whose name (case
+  and spacing aside) or code (a LOINC code behind an `hkl:` prefix) an active
+  standard concept already has, naming that concept; the quarantine minter the
+  code-mapping lookup uses and the lab sync's source concepts reuse the standard
+  concept instead of creating one, and a retired code is never minted again
+  while its standard concept is loaded. `copy_reference_data` does not copy a
+  retired concept from an instance that still has it, and a reference to it
+  resolves to the standard concept. Matching is by the standard concept's own
+  name only, never a synonym or a fuzzy match: a near match is a curator's call.
 
 ### Non-conforming local vocabularies
 

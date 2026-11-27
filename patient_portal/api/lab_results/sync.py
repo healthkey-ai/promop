@@ -29,6 +29,7 @@ from omop_core.models import (
     CareSite, Concept, Measurement, MeasurementOwnership,
     Person, ProvenanceRecord, VisitOccurrence,
 )
+from omop_core.services.hkl_duplicates import find_standard_duplicate, retired_standard_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from patient_portal.api.permissions import (
     LabSyncPermission, get_request_org, is_service_token, is_machine_request,
@@ -383,6 +384,17 @@ class SyncView(APIView):
                 if slug == c.concept_code:
                     cache[name] = c.concept_id
 
+        missing = names_needing_hk - set(cache.keys())
+        # A name that is a retired HK-Labs duplicate of a standard test, or that
+        # a standard concept already carries, resolves to that concept instead
+        # of minting a new hkl: concept beside it (see hkl_duplicates).
+        for name in sorted(missing):
+            standard = (
+                retired_standard_concept(_normalize_slug(name))
+                or find_standard_duplicate(name=name, domain_id='Measurement')
+            )
+            if standard is not None:
+                cache[name] = standard.concept_id
         missing = names_needing_hk - set(cache.keys())
         if missing:
             _ensure_hk_deps('Measurement', 'Lab Test')

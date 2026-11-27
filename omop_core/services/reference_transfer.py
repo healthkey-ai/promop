@@ -54,6 +54,7 @@ from omop_core.services.instance_copy import (
     local_concept_ids,
 )
 from omop_core.mapping.therapy import SOURCE_HEALTHKEY
+from omop_core.services import hkl_duplicates
 from omop_core.services.instance_data import lookup_models
 from omop_core.services.pk import next_pk_batch
 
@@ -381,7 +382,13 @@ def _apply_local_concepts(data: LocalConcepts, stats: TransferStats) -> None:
         present = set(model.objects.filter(pk__in=[r[pk] for r in data[part]]).values_list('pk', flat=True))
         model.objects.bulk_create([model(**r) for r in data[part] if r[pk] not in present])
 
-    rows = data['concepts']
+    # Never re-create a retired HK-Labs duplicate of a standard test (hkl_duplicates):
+    # references to it resolve to the standard concept instead (local_concept_ids).
+    rows = [r for r in data['concepts']
+            if not hkl_duplicates.is_retired_code(r['vocabulary_id'], r['concept_code'])]
+    if len(rows) < len(data['concepts']):
+        stats.warn(f'{len(data["concepts"]) - len(rows)} HK-Labs concept(s) that duplicate a standard '
+                   'LOINC test were not copied; their references use the standard concept.')
     refs = [(r['vocabulary_id'], r['concept_code']) for r in rows]
     existing = local_concept_ids(refs)
     missing = [r for r, ref in zip(rows, refs) if ref not in existing]
