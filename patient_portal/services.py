@@ -146,16 +146,21 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
     pu = PatientUser.objects.filter(identity=identity).select_related('person').first()
     # Steps 1 and 2. A login keyed to an imported Person gets it even when it
     # signed in before the key existed and was given an empty Person then.
-    try:
-        outcome = adopt_keyed_person(identity, pu)
-    except Exception:  # noqa: BLE001
-        # This runs on every request: a failed move must not lock the member out.
-        logger.exception("keyed person adoption failed for identity %s", identity.pk)
-        outcome = AdoptionOutcome(person_id=pu.person_id if pu else None)
+    # Not for a clinician's or staff login: those never get a patient link here.
+    outcome = AdoptionOutcome(person_id=pu.person_id if pu else None)
+    if allow_create and not getattr(identity, 'is_staff', False):
+        try:
+            with transaction.atomic():
+                outcome = adopt_keyed_person(identity, pu)
+        except Exception:  # noqa: BLE001
+            # This runs on every request: a failed move must not lock the member out.
+            logger.exception("keyed person adoption failed for identity %s", identity.pk)
     if outcome.person_id is not None:
         if pu is not None and outcome.person_id == pu.person_id:
             return pu.person
-        return Person.objects.get(person_id=outcome.person_id)
+        person = Person.objects.filter(person_id=outcome.person_id).first()
+        if person is not None:
+            return person
 
     if email_verified is None:
         # Was `is_local`, which treated every email/password account as verified --

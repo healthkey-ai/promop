@@ -65,6 +65,28 @@ def person_has_own_data(person_id: int) -> bool:
     return False
 
 
+_SIGNUP_DEFAULTS = {
+    'year_of_birth': (None, 1900), 'month_of_birth': (None,), 'day_of_birth': (None,),
+    'gender_source_value': (None, '', 'unknown'), 'race_source_value': (None, '', 'unknown'),
+    'ethnicity_source_value': (None, '', 'unknown'), 'location_id': (None,),
+    'phone_number': (None, ''),
+}
+
+
+def _member_entered_data(person: Person) -> bool:
+    """Whether the member typed anything into this Person or its record.
+
+    Stricter than ``person_has_own_data`` on purpose. Keyed adoption runs at
+    any later sign-in, not right after signup, so a stub may by then hold
+    profile values or record edits that live on Person and PatientRecord only
+    (PatientRecord-first writes), which dropping it would lose.
+    """
+    if any(getattr(person, field) not in blank for field, blank in _SIGNUP_DEFAULTS.items()):
+        return True
+    return PatientRecord.objects.filter(person=person).exclude(
+        user_edited_fields__isnull=True).exclude(user_edited_fields={}).exclude(user_edited_fields=[]).exists()
+
+
 def _provisioned_candidate(email: str, exclude_person_id: int | None) -> Person | None:
     """The one unclaimed Person holding *email*, or None when that is not one.
 
@@ -193,11 +215,14 @@ def adopt_keyed_person(identity, link=None) -> AdoptionOutcome:
         claimed_id=link.person_id, provisioned=candidate,
     ).exists():
         return unchanged
-    return _adopt(identity, link, candidate, (identity.email or '').strip())
+    return _adopt(identity, link, candidate, (identity.email or '').strip(), strict=True)
 
 
-def _adopt(identity, link, candidate, email) -> AdoptionOutcome:
-    """Give *identity* the unclaimed *candidate*, dropping its own empty Person."""
+def _adopt(identity, link, candidate, email, strict=False) -> AdoptionOutcome:
+    """Give *identity* the unclaimed *candidate*, dropping its own empty Person.
+
+    ``strict`` also keeps a Person the member typed into (``_member_entered_data``).
+    """
     from omop_core.services.patient_transfer import PatientCopyError, delete_patient
 
     with transaction.atomic():
@@ -209,7 +234,10 @@ def _adopt(identity, link, candidate, email) -> AdoptionOutcome:
                 "person %s was claimed before identity %s could adopt it",
                 provisioned.person_id, identity.pk,
             )
-            return AdoptionOutcome(person_id=link.person_id if link else None)
+            # Re-read: a parallel request of this login may be the one that
+            # claimed it, and has dropped the Person `link` named.
+            current = PatientUser.objects.filter(identity=identity).first()
+            return AdoptionOutcome(person_id=current.person_id if current else None)
 
         if link is None:
             try:
@@ -222,7 +250,7 @@ def _adopt(identity, link, candidate, email) -> AdoptionOutcome:
             return AdoptionOutcome(person_id=provisioned.person_id, adopted=True)
 
         placeholder = link.person
-        if person_has_own_data(placeholder.person_id):
+        if person_has_own_data(placeholder.person_id) or (strict and _member_entered_data(placeholder)):
             PersonMergeCandidate.objects.get_or_create(
                 claimed=placeholder, provisioned=provisioned,
                 defaults={'email': email},

@@ -204,6 +204,8 @@ def test_a_person_another_login_holds_is_not_keyed():
     {'keys': [{'person_id': '1', 'issuer': ISS, 'subject': 's'}]},
     {'keys': [{'person_id': 1, 'issuer': 'https://not-allowed.example', 'subject': 's'}]},
     {'keys': [{'person_id': 1, 'issuer': ISS, 'subject': ' s'}]},
+    {'keys': [{'person_id': 1, 'issuer': [ISS], 'subject': 's'}]},
+    {'keys': [{'person_id': 2 ** 40, 'issuer': ISS, 'subject': 's'}]},
     {'keys': [{'person_id': 1, 'issuer': ISS, 'subject': 's'},
               {'person_id': 2, 'issuer': ISS, 'subject': 's'}]},
 ])
@@ -268,3 +270,39 @@ def test_a_failed_move_leaves_the_login_where_it_was(monkeypatch):
     monkeypatch.setattr(person_adoption, '_adopt', broken)
 
     assert resolve_or_create_person(identity).person_id == stub.person_id
+
+
+def test_a_stub_the_member_typed_into_is_kept():
+    from omop_core.models import PersonMergeCandidate
+    identity = _login('uid-edit')
+    stub = resolve_or_create_person(identity, email='', email_verified=False)
+    PatientRecord.objects.filter(person=stub).update(user_edited_fields={'height': '2026-01-01'})
+    imported = _imported()
+    PersonExternalKey.objects.create(person=imported, issuer=ISS, subject='uid-edit')
+
+    assert resolve_or_create_person(identity).person_id == stub.person_id
+    assert PersonMergeCandidate.objects.filter(claimed=stub, provisioned=imported).exists()
+
+
+def test_a_staff_or_clinical_login_is_never_given_a_keyed_patient():
+    imported = _imported()
+    PersonExternalKey.objects.create(person=imported, issuer=ISS, subject='uid-staff')
+    staff = _login('uid-staff')
+    staff.is_staff = True
+    staff.save()
+
+    assert resolve_or_create_person(staff, allow_create=False) is None
+    assert not PatientUser.objects.filter(person=imported).exists()
+
+
+def test_one_person_is_never_keyed_to_two_logins():
+    person = _imported()
+    keyed = _imported(actor_iss=ISS, actor_sub='first-actor')
+
+    response = _etl().post(URL, {'keys': [
+        {'person_id': person.person_id, 'issuer': ISS, 'subject': 'first'},
+        {'person_id': person.person_id, 'issuer': ISS, 'subject': 'second'},
+        {'person_id': keyed.person_id, 'issuer': ISS, 'subject': 'other'},
+    ]}, format='json')
+
+    assert [r['status'] for r in response.data['results']] == ['created', 'person_keyed', 'person_keyed']

@@ -7847,6 +7847,8 @@ class PersonViewSet(viewsets.GenericViewSet):
             Person. A key is never moved.
           * ``claimed``: another login's account holds this Person, so the key
             could never link and is not stored.
+          * ``person_keyed``: this Person is already keyed to another login of
+            the same issuer. One Person is never given to two logins.
           * ``not_found``: no such Person.
         A malformed batch, or an issuer outside PERSON_EXTERNAL_KEY_ISSUERS,
         is a 400 that writes nothing.
@@ -7870,10 +7872,10 @@ class PersonViewSet(viewsets.GenericViewSet):
                 return Response({'detail': f'Entry {i}: must be an object.'},
                                 status=status.HTTP_400_BAD_REQUEST)
             pid, issuer, subject = key.get('person_id'), key.get('issuer'), key.get('subject')
-            if not isinstance(pid, int) or isinstance(pid, bool):
-                return Response({'detail': f'Entry {i}: person_id must be an integer.'},
+            if not isinstance(pid, int) or isinstance(pid, bool) or not 0 < pid < 2 ** 31:
+                return Response({'detail': f'Entry {i}: person_id must be a positive integer.'},
                                 status=status.HTTP_400_BAD_REQUEST)
-            if issuer not in allowed:
+            if not isinstance(issuer, str) or issuer not in allowed:
                 return Response({'detail': f'Entry {i}: issuer is not accepted here.',
                                  'accepted_issuers': sorted(allowed)},
                                 status=status.HTTP_400_BAD_REQUEST)
@@ -7900,6 +7902,16 @@ class PersonViewSet(viewsets.GenericViewSet):
                     actor_sub__in=subjects, actor_iss__in=allowed,
             ).values_list('actor_iss', 'actor_sub', 'person_id'):
                 held.setdefault((iss, sub), person_id)
+            # The login each Person is already keyed to, per issuer, so one
+            # Person is never given to two logins.
+            person_keys = {
+                (person_id, iss): sub for person_id, iss, sub in
+                PersonExternalKey.objects.filter(person_id__in=pids).values_list('person_id', 'issuer', 'subject')
+            }
+            for person_id, iss, sub in Person.objects.filter(
+                    person_id__in=pids, actor_iss__in=allowed, actor_sub__isnull=False,
+            ).values_list('person_id', 'actor_iss', 'actor_sub'):
+                person_keys.setdefault((person_id, iss), sub)
             holders = {
                 person_id: (iss, sub) for person_id, iss, sub in
                 PatientUser.objects.filter(person_id__in=pids)
@@ -7917,10 +7929,13 @@ class PersonViewSet(viewsets.GenericViewSet):
                     result.update(status='conflict', held_by=owner)
                 elif pid in holders and holders[pid] != (issuer, subject):
                     result['status'] = 'claimed'
+                elif person_keys.get((pid, issuer), subject) != subject:
+                    result['status'] = 'person_keyed'
                 else:
                     result['status'] = 'created'
                     new.append(PersonExternalKey(person_id=pid, issuer=issuer, subject=subject))
                     held[(issuer, subject)] = pid
+                    person_keys[(pid, issuer)] = subject
                 results.append(result)
             try:
                 with transaction.atomic():
