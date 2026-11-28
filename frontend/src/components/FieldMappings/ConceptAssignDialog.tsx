@@ -221,7 +221,9 @@ export function ConceptAssignDialog({
   // The definition of a field being created; unused when mapping one.
   const [displayName, setDisplayName] = useState("");
   const [newFieldName, setNewFieldName] = useState("");
-  const [valueType, setValueType] = useState<ValueType>("text");
+  // Most created fields hold a lab or other measurement, and a Text field over a
+  // numeric concept reads "No matching concept", so a number is the default.
+  const [valueType, setValueType] = useState<ValueType>("number");
   const [fieldMode, setFieldMode] = useState<FieldMode>("editable");
   const [formula, setFormula] = useState("");
   const [answers, setAnswers] = useState<AnswerDraft[]>(() => [blankAnswer()]);

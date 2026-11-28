@@ -446,6 +446,11 @@ describe("create mode", () => {
     mockGet.mockResolvedValue({ data: { results: [CONCEPT] } });
   });
 
+  it("starts the value type at Number", () => {
+    render(<ConceptAssignDialog {...createProps("labs")} />);
+    expect(screen.getByLabelText("Value type")).toHaveValue("number");
+  });
+
   it("creates the field on the tab it was opened for once a concept is chosen", async () => {
     const props = createProps("labs");
     render(<ConceptAssignDialog {...props} />);
